@@ -404,6 +404,8 @@ impl WidgetDefinition for BoxWidget {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {

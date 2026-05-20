@@ -87,6 +87,8 @@ pub(super) fn handle_patcher_pointer_down(
     local_col: f32,
     local_row: f32,
     modifiers: KeyModifiers,
+    cell_w: f32,
+    cell_h: f32,
 ) {
     let key = patcher_state_key(node);
     let mut state = get_patcher_interaction_state(key);
@@ -197,6 +199,8 @@ pub(super) fn handle_patcher_pointer_down(
         &output_counts,
         local_col,
         local_row,
+        cell_w,
+        cell_h,
     ) {
         let Some(node_rect) = patch_node_rects(&patch, node.rect, &pan_state)
             .get(&output.node_id)

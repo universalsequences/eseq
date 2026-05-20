@@ -105,10 +105,12 @@ impl WidgetDefinition for PatcherWidget {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         modifiers: KeyModifiers,
+        cell_w: f32,
+        cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                handle_patcher_pointer_down(node, local_col, local_row, modifiers);
+                handle_patcher_pointer_down(node, local_col, local_row, modifiers, cell_w, cell_h);
                 MouseEventOutcome::Consume
             }
             MouseEventKind::Drag(MouseButton::Left) => {

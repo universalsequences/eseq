@@ -22,7 +22,7 @@ use super::geometry::{
 };
 use super::load_patch_from_props;
 use super::metrics::{
-    CABLE_HANDLE_RADIUS_PX, CODE_NODE_FONT_SIZE, NODE_BORDER_INSET, NODE_CORNER_RADIUS_PX,
+    CABLE_HANDLE_RADIUS_PX, CODE_NODE_FONT_SIZE, NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX,
     NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
 };
 use super::model::{ArgValue, ConnectionKind, NodeKind, Patch, PatchNode};
@@ -90,12 +90,6 @@ pub(super) fn build_metal_primitives_for_patcher(
             pan_state.content_height = content_size.1.max(node.rect.height);
             set_patcher_pan_state(key, pan_state.clone());
             pan_state = get_patcher_pan_state(key);
-            push_grid(
-                &mut prims,
-                node.rect,
-                pan_state.offset_x,
-                pan_state.offset_y,
-            );
             draw_patch(
                 &mut prims,
                 &patch,
@@ -160,42 +154,6 @@ pub(super) fn build_metal_primitives_for_patcher(
         }
     }
     prims
-}
-
-#[cfg(target_os = "macos")]
-fn push_grid(prims: &mut Vec<MetalPrimitive>, rect: Rect, offset_x: f32, offset_y: f32) {
-    let minor = theme::PATCHER_GRID_MINOR();
-    let major = theme::PATCHER_GRID_MAJOR();
-    let col_spacing = 4.0;
-    let row_spacing = 2.5;
-    let col_phase = offset_x.rem_euclid(col_spacing);
-    let row_phase = offset_y.rem_euclid(row_spacing);
-    let mut col = rect.col - col_phase;
-    let mut idx = (offset_x / col_spacing).floor().max(0.0) as usize;
-    while col < rect.col + rect.width {
-        prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x: col,
-            y: rect.row,
-            width: 0.035,
-            height: rect.height,
-            color: if idx % 5 == 0 { major } else { minor },
-        }));
-        col += col_spacing;
-        idx += 1;
-    }
-    let mut row = rect.row - row_phase;
-    idx = (offset_y / row_spacing).floor().max(0.0) as usize;
-    while row < rect.row + rect.height {
-        prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x: rect.col,
-            y: row,
-            width: rect.width,
-            height: 0.035,
-            color: if idx % 5 == 0 { major } else { minor },
-        }));
-        row += row_spacing;
-        idx += 1;
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -280,7 +238,7 @@ fn push_back_button(
     } else {
         theme::PATCHER_BACK_BUTTON_BG()
     };
-    push_rounded_rect(prims, button_rect, border, viewport, 9.0, false);
+    push_rounded_rect(prims, button_rect, border, viewport, 18.0, false);
     push_rounded_rect(
         prims,
         Rect {
@@ -291,7 +249,7 @@ fn push_back_button(
         },
         bg,
         viewport,
-        7.0,
+        15.0,
         false,
     );
     prims.push(MetalPrimitive::ProportionalText(
@@ -570,20 +528,7 @@ fn push_node(
     if selected {
         border = theme::PATCHER_NODE_SELECTED_BORDER();
     }
-    push_rounded_rect(prims, rect, border, viewport, NODE_CORNER_RADIUS_PX, false);
-    push_rounded_rect(
-        prims,
-        Rect {
-            row: rect.row + NODE_BORDER_INSET,
-            col: rect.col + NODE_BORDER_INSET,
-            width: (rect.width - NODE_BORDER_INSET * 2.0).max(0.0),
-            height: (rect.height - NODE_BORDER_INSET * 2.0).max(0.0),
-        },
-        bg,
-        viewport,
-        (NODE_CORNER_RADIUS_PX - 3.0).max(0.0),
-        false,
-    );
+    push_node_chrome(prims, rect, bg, border, viewport);
     for (visible_index, &index) in input_indices.iter().enumerate() {
         push_port(
             prims,
@@ -591,6 +536,7 @@ fn push_node(
             true,
             bg,
             highlighted_inputs.contains(&index),
+            viewport,
         );
     }
     for index in 0..output_count {
@@ -600,10 +546,11 @@ fn push_node(
             false,
             bg,
             highlighted_outputs.contains(&index),
+            viewport,
         );
     }
     push_node_edit_selection(prims, rect, viewport, edit);
-    push_node_label(prims, node, rect, text);
+    push_node_label(prims, node, rect, text, edit, viewport);
     push_macro_drill_in(prims, node, rect, macro_drill_in_hovered);
     push_node_edit_cursor(prims, rect, viewport, edit);
     if let Some(diagnostic) = &node.diagnostic {
@@ -644,6 +591,38 @@ fn highlighted_outputs_for_node(drag: &Option<PatcherDragState>, node_id: &str) 
         }) if target.node_id == node_id => vec![target.output_index],
         _ => Vec::new(),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn push_node_chrome(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    bg: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+) {
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    prims.push(MetalPrimitive::WidgetInstance {
+        widget_type: "patcher-node".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [NODE_BORDER_WIDTH_PX, 0.0, 0.0, 0.0],
+            uniform_b: [0.0; 4],
+            color_a: border.to_rgba(),
+            color_b: bg.to_rgba(),
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX),
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+        },
+        is_background: false,
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -741,6 +720,8 @@ fn push_node_label(
     node: &PatchNode,
     rect: Rect,
     head_color: crate::backend::Color,
+    edit: Option<&PatcherTextEdit>,
+    viewport: WidgetViewport,
 ) {
     let font_size = if node.kind == NodeKind::CodeIsland {
         CODE_NODE_FONT_SIZE
@@ -753,8 +734,23 @@ fn push_node_label(
         rect.row + 0.36
     };
     let text_col = rect.col + NODE_TEXT_COL_OFFSET;
+    if let Some(edit) = edit {
+        prims.push(MetalPrimitive::ProportionalText(
+            MetalProportionalTextPrimitive {
+                row: baseline_row,
+                col: text_col,
+                align_width: rect.width - 1.84,
+                h_align: 0.0,
+                text: edit.text.clone(),
+                font_size,
+                fg: head_color,
+                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            },
+        ));
+        return;
+    }
     let label = node_display_label(node);
-    let (head, tail) = split_label_head_tail(&label);
+    let (head, tail, tail_start) = split_label_head_tail(&label);
     let bg = crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0);
     prims.push(MetalPrimitive::ProportionalText(
         MetalProportionalTextPrimitive {
@@ -769,7 +765,8 @@ fn push_node_label(
         },
     ));
     if !tail.is_empty() {
-        let tail_col = text_col + estimated_text_cells(head, font_size) + 0.72;
+        let tail_col =
+            text_col + cursor_x_from_char_cache(&label, font_size, tail_start, viewport.cell_w);
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: baseline_row,
@@ -786,21 +783,24 @@ fn push_node_label(
 }
 
 #[cfg(target_os = "macos")]
-fn split_label_head_tail(label: &str) -> (&str, &str) {
-    let trimmed = label.trim();
+fn split_label_head_tail(label: &str) -> (&str, &str, usize) {
+    let trimmed_start = label
+        .find(|ch: char| !ch.is_whitespace())
+        .unwrap_or(label.len());
+    let trimmed = label[trimmed_start..].trim_end();
     match trimmed.find(char::is_whitespace) {
         Some(idx) => {
-            let (head, tail) = trimmed.split_at(idx);
-            (head, tail.trim_start())
+            let tail_start = trimmed[idx..]
+                .find(|ch: char| !ch.is_whitespace())
+                .map(|tail_idx| idx + tail_idx)
+                .unwrap_or(trimmed.len());
+            let head = &trimmed[..idx];
+            let tail = &trimmed[tail_start..];
+            let tail_start = label[..trimmed_start + tail_start].chars().count();
+            (head, tail, tail_start)
         }
-        None => (trimmed, ""),
+        None => (trimmed, "", trimmed.chars().count()),
     }
-}
-
-#[cfg(target_os = "macos")]
-fn estimated_text_cells(text: &str, font_size: f32) -> f32 {
-    let width_per_char = (font_size / NODE_FONT_SIZE) * 1.03;
-    text.chars().count() as f32 * width_per_char
 }
 
 #[cfg(target_os = "macos")]
@@ -810,6 +810,7 @@ fn push_port(
     input: bool,
     node_bg: crate::backend::Color,
     highlighted: bool,
+    viewport: WidgetViewport,
 ) {
     let color = if highlighted {
         theme::PATCHER_NODE_SELECTED_BORDER()
@@ -818,23 +819,39 @@ fn push_port(
     } else {
         theme::PATCHER_PORT_OUTPUT()
     };
-    let visible_half = if input {
-        MetalCircleVisibleHalf::Bottom
-    } else {
-        MetalCircleVisibleHalf::Top
+    let outer_radius_px = PORT_OUTER_DIAMETER_PX * 0.5;
+    let rect = Rect {
+        row: center.1 - outer_radius_px / viewport.cell_h.max(1.0),
+        col: center.0 - outer_radius_px / viewport.cell_w.max(1.0),
+        width: (outer_radius_px * 2.0) / viewport.cell_w.max(1.0),
+        height: (outer_radius_px * 2.0) / viewport.cell_h.max(1.0),
     };
-    prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
-        center: [center.0, center.1],
-        radius_px: PORT_OUTER_DIAMETER_PX * 0.5,
-        color,
-        visible_half,
-    }));
-    prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
-        center: [center.0, center.1],
-        radius_px: PORT_INNER_DIAMETER_PX * 0.5,
-        color: node_bg,
-        visible_half,
-    }));
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let visible_half = if input { 1.0 } else { -1.0 };
+    prims.push(MetalPrimitive::WidgetInstance {
+        widget_type: "patcher-port".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: visible_half,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [
+                PORT_INNER_DIAMETER_PX / PORT_OUTER_DIAMETER_PX,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            uniform_b: [0.0; 4],
+            color_a: color.to_rgba(),
+            color_b: node_bg.to_rgba(),
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: 0.0,
+            pixel_aspect: 1.0,
+        },
+        is_background: false,
+    });
 }
 
 #[cfg(target_os = "macos")]

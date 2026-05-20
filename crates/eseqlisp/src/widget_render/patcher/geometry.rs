@@ -5,7 +5,7 @@ use crate::layout::Rect;
 use super::display::node_size;
 use super::metrics::{
     CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HIT_RADIUS_CELLS,
-    CABLE_TARGET_RADIUS_CELLS, PORT_EDGE_PADDING_CELLS, PORT_HIT_RADIUS_CELLS, VIEW_PADDING_X,
+    CABLE_TARGET_RADIUS_CELLS, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX, VIEW_PADDING_X,
     VIEW_PADDING_Y,
 };
 use super::model::{CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection};
@@ -128,15 +128,20 @@ pub(super) fn hit_patcher_output_port(
     output_counts: &HashMap<String, usize>,
     local_col: f32,
     local_row: f32,
+    cell_w: f32,
+    cell_h: f32,
 ) -> Option<OutputPortRef> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
-    let threshold = PORT_HIT_RADIUS_CELLS * PORT_HIT_RADIUS_CELLS;
+    let radius_px = PORT_OUTER_DIAMETER_PX * 0.5;
+    let threshold_px = radius_px * radius_px;
     patch.nodes.iter().rev().find_map(|node| {
         let node_rect = *node_rects.get(&node.id)?;
         let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
         (0..output_count).find_map(|output_index| {
             let center = port_center(node_rect, output_index, output_count, false);
-            (distance_squared(center, (local_col, local_row)) <= threshold).then(|| OutputPortRef {
+            let dx_px = (center.0 - local_col) * cell_w.max(1.0);
+            let dy_px = (center.1 - local_row) * cell_h.max(1.0);
+            (dx_px * dx_px + dy_px * dy_px <= threshold_px).then(|| OutputPortRef {
                 node_id: node.id.clone(),
                 output_index,
             })

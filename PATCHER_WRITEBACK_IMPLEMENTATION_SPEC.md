@@ -688,6 +688,18 @@ The user should not need to know or edit the source symbol used by
 `make-history`. As with generated bindings, history source names are an emission
 detail in V1.
 
+A visual `history` node is not equivalent to a single expression. It has three
+source roles:
+
+- Declaration role: `(make-history name)`
+- Read role: `(read-history name)` wherever the node's output is consumed
+- Write role: `(write-history name value)` when the node's write input is fed
+
+The emitter must never use a transient visual node id such as `created-6` as a
+history source name. Source-backed histories keep their source symbol. Created
+histories allocate a generated history name before any read or write form is
+emitted.
+
 Required identity model:
 
 ```rust
@@ -732,15 +744,29 @@ Emission rules:
 - Emit exactly one `(make-history name)` for each history node that survives.
 - Emit read uses as `(read-history name)` at each consumer argument where the
   history output is connected.
-- Emit write uses as top-level `(write-history name value)` forms.
+- Emit write uses as `(write-history name value)` forms in the same source
+  scope as the corresponding `make-history`.
 - Preserve the original history source name for imported histories.
 - Generate hidden history names only for newly created history nodes. Use the
   generated binding high-water policy with the `history` stem unless a more
   specific stem is introduced later.
+- Generated history names are scoped exactly like generated `def` bindings:
+  root histories use root counters, and macro-local histories use the owning
+  macro scope's counters.
+- A created history node must allocate one stable generated name and use that
+  same name for its make, read, and write forms.
 - Preserve original source order for existing make/read/write forms whenever
   possible.
 - For newly emitted write forms, place the write after the forms needed to
   compute its value and inside the same source scope as the `make-history`.
+- If a history write input is semantically present but disconnected, emit
+  `__patcher_missing_input__` only through the same explicit incomplete-save
+  path used for missing positional arguments.
+- If a history node is read but has no write, still emit its `make-history` and
+  reads. This represents the graph honestly, even if downstream validation later
+  warns that the history is never written.
+- If a history node is written but never read, still emit its `make-history` and
+  write. Dead-code pruning is not part of V1 write-back.
 
 Examples:
 
@@ -762,6 +788,30 @@ Feedback history:
 Both use the same visual model: the history output is a read value, and the
 history input is the value written for the next sample/block.
 
+Created feedforward history example:
+
+```lisp
+;; visual graph:
+;; delayed -> history write input
+;; history output -> consumer
+
+(make-history history1)
+(def delayed (delay node d_samples))
+(write-history history1 delayed)
+(- (read-history history1) (* g node))
+```
+
+Created macro-local histories are emitted inside the macro body and allocate
+from that macro's history counter:
+
+```lisp
+(defmacro ap (sig g d_samples)
+  (make-history history1)
+  (def delayed (delay sig d_samples))
+  (write-history history1 delayed)
+  (read-history history1))
+```
+
 V1 save scope:
 
 - Support imported histories with one `make-history` and at most one active
@@ -778,10 +828,21 @@ Open history decisions after V1:
 
 - Whether multiple writes are legal and how they are ordered.
 - Whether history source names should become user-editable.
-- Whether a disconnected history write input is allowed, removed, or represented
-  with `__patcher_missing_input__`.
 - Whether a history node with no reads or no writes should emit, warn, or be
   pruned.
+
+Non-negotiable V1 history tests:
+
+- Existing source history `h` round-trips as `h` for make, read, and write.
+- Created history emits `(make-history history1)`, never
+  `(make-history created-N)` or `(read-history created-N)`.
+- Created history reads and writes use the same generated history name.
+- Macro-local created histories allocate in the macro scope and emit inside
+  `defmacro`.
+- A history write cable emits a corresponding `write-history` form.
+- A disconnected history write input emits `__patcher_missing_input__` only in
+  incomplete-save mode.
+- Multiple active writes to one history block normal V1 save.
 
 ## Macro Subpatch Policy
 
@@ -1010,6 +1071,268 @@ Save blockers:
 - Compound owners whose emitter is not specified.
 - Histories with multiple active writes, cross-scope reads/writes, or
   unsupported source ownership.
+
+## Implementation Phases
+
+The write-back implementation should proceed in deliberately small slices. Each
+slice must be testable without relying on a real file save path.
+
+### Phase 0: Completed Foundation
+
+Status: implemented.
+
+This phase establishes source ownership metadata on the projected patch graph.
+
+Completed requirements:
+
+- `SourceScopeId::{Root, Macro { name }}` exists.
+- Source forms and source expressions are scoped.
+- Nodes and connections carry source metadata.
+- Root and macro scopes project separately.
+- Params, macro params, histories, code islands, attributes, and nested
+  expressions have source ownership tests.
+- Current patcher behavior ignores source metadata for rendering and
+  interaction.
+
+This phase does not emit durable Lisp.
+
+### Phase 1: Debug Preview Emitter
+
+Status: implemented as a diagnostic aid, not as save logic.
+
+The debug emitter prints a best-effort Lisp preview after semantic patcher
+edits when `ESEQ_PATCHER_DEBUG_LISP` is enabled.
+
+Completed requirements:
+
+- Print preview after node text edits, cable edits, and node deletion.
+- Gate preview behind an environment variable so release builds can opt in.
+- Emit macro subpatch previews as `defmacro` forms.
+- Map macro input nodes back to macro parameter names.
+- Avoid printing synthetic macro return `out` when the source return expression
+  is already emitted.
+
+Known limitations:
+
+- It is not complete-file write-back.
+- It is allowed to be approximate for unsupported source.
+- It does not allocate durable generated bindings.
+- It does not implement complete history make/read/write emission.
+- It must not become the save path by incremental patching.
+
+### Phase 2: In-Memory Normalized Write-Back Emitter
+
+Status: next implementation target.
+
+Goal: produce complete save-ready Lisp text from source text plus patcher edit
+state, but do not write files yet.
+
+Proposed module:
+
+```rust
+crates/eseqlisp/src/widget_render/patcher/writeback.rs
+```
+
+Initial API:
+
+```rust
+pub(super) fn emit_patch_writeback(
+    source: &str,
+    intent: PatcherIntent,
+    interaction_state: &PatcherInteractionState,
+) -> Result<String, WriteBackError>;
+```
+
+Responsibilities:
+
+- Parse the original source.
+- Re-project into the source-aware patch model.
+- Apply the current patcher interaction state.
+- Emit a complete normalized Lisp document.
+- Preserve unsupported/code-island source forms unchanged unless they intersect
+  a semantic edit.
+- Return structured save blockers instead of silently dropping unsupported
+  semantics.
+
+Non-goals:
+
+- No file writes.
+- No editor save command.
+- No `dsp.layout.json` writes.
+- No byte-span surgical patching.
+- No comment/trivia preservation beyond preserving untouched raw code islands
+  when possible.
+
+Phase 2 should start with exact-output tests for unchanged and simple edited
+source:
+
+- Unchanged root patch emits complete normalized Lisp.
+- Unchanged macro emits complete normalized `defmacro`.
+- Node text edit rewrites the owning expression.
+- Macro parameter inputs emit parameter names, not `(in N)`.
+- Synthetic macro return `out` does not appear in emitted Lisp.
+
+### Phase 3: History-Aware Write-Back
+
+Status: must be implemented before save wiring.
+
+Goal: make history a first-class normalized-emission entity.
+
+Responsibilities:
+
+- Resolve each source-backed visual history node to a stable history identity.
+- Allocate generated history names for created history nodes.
+- Emit exactly one `make-history` per live history node.
+- Emit `read-history` expressions at each consumer site.
+- Emit `write-history` forms for history write inputs.
+- Keep make/read/write names consistent.
+- Scope generated history names to root or the owning macro body.
+- Block normal save for multiple active writes to one history.
+- Block cross-scope history reads/writes.
+
+Tests:
+
+- Existing feedforward history round-trips:
+
+  ```lisp
+  (make-history h)
+  (def delta (- sig (read-history h)))
+  (write-history h sig)
+  ```
+
+- Existing feedback history round-trips:
+
+  ```lisp
+  (make-history h)
+  (write-history h (mix sig (read-history h) alpha))
+  ```
+
+- Created feedforward history emits:
+
+  ```lisp
+  (make-history history1)
+  ...
+  (write-history history1 value)
+  ...
+  (read-history history1)
+  ```
+
+- Macro-local created histories emit inside `defmacro`.
+- Visual ids such as `created-5` and `created-6` never appear as history names.
+- Missing write input uses `__patcher_missing_input__` only through incomplete
+  save.
+
+This phase should not be implemented as a debug emitter patch. It belongs in
+the real normalized write-back emitter because generated names and history
+ordering are durable semantics.
+
+### Phase 4: Generated Binding Allocation
+
+Goal: allocate deterministic source names for created or lifted value nodes.
+
+Responsibilities:
+
+- Scan existing root and macro-local names.
+- Build per-scope high-water counters by sanitized stem.
+- Allocate generated `def` bindings only when a node requires a source-level
+  name.
+- Store allocated names in the edit/write-back model for the duration of the
+  emit so repeated references use the same name.
+- Avoid collisions with params, macro params, histories, macro names, and
+  existing defs in the same scope.
+
+Tests:
+
+- Existing `phasor1` causes the next generated phasor binding to be `phasor2`.
+- Deleted generated names are not reused during the same session.
+- Macro-local generated names do not collide with root generated names.
+- Shared created node emits one generated `def` and multiple references.
+
+### Phase 5: Cable and Node Semantic Write-Back
+
+Goal: cover the core patch editing operations as saveable normalized output.
+
+Responsibilities:
+
+- Cable creation rewrites the destination semantic arg slot.
+- Cable deletion emits `__patcher_missing_input__` when the required input is
+  truly missing.
+- Source node deletion removes the owned top-level form or replaces the owned
+  nested expression with a missing sentinel where necessary.
+- Created node deletion removes the temporary edit.
+- Deleted nodes remove or rewrite incident connections deterministically.
+- Attributes remain inline and never become cable-addressable.
+
+Tests:
+
+- Cable create updates the intended semantic arg index.
+- Raw child indexes remain correct when attributes are present.
+- Cable delete in root emits the missing-input sentinel.
+- Cable delete in macro emits the missing-input sentinel inside `defmacro`.
+- Deleting a source-backed top-level node removes that form.
+- Deleting a nested producer preserves downstream source with an explicit
+  missing input or blocks save when no unambiguous representation exists.
+
+### Phase 6: Param and Macro Parameter Rename
+
+Goal: rename binding identities, not text occurrences.
+
+Responsibilities:
+
+- Param node text rename updates the declaration.
+- All resolved references to that binding emit the new name.
+- Unresolved same-text symbols are not rewritten.
+- Macro parameter rename updates the `defmacro` header and resolved references
+  inside the macro scope, if macro parameter rename is enabled.
+- Collisions block save.
+
+Tests:
+
+- Param rename updates all resolved root references.
+- Macro parameter rename updates header and macro-local references.
+- Unresolved symbols with the old text remain unchanged.
+- Code islands that may reference the old name produce a diagnostic or blocker.
+
+### Phase 7: File Save Wiring
+
+Goal: connect the normalized emitter to an explicit save operation.
+
+Prerequisites:
+
+- Phase 2 complete.
+- Phase 3 complete.
+- Save blockers return structured diagnostics.
+
+Responsibilities:
+
+- Add a save command/path that calls `emit_patch_writeback`.
+- Write the emitted Lisp to the source file only after successful emission.
+- Block normal save for compile-invalid sentinel output.
+- Add an explicit incomplete-save path if desired.
+- Keep debug preview separate from save behavior.
+
+Tests:
+
+- Save writes expected normalized source to a temp file.
+- Save refuses unresolved blockers.
+- Save does not modify file on error.
+
+### Phase 8: Layout Sidecar Persistence
+
+Goal: persist node positions only.
+
+Responsibilities:
+
+- Write `dsp.layout.json` with root and macro node positions.
+- Use semantic layout keys when available.
+- Migrate temporary created keys to emitted binding/history keys after save.
+- Ignore stale sidecar entries safely.
+
+Tests:
+
+- Root node positions persist and reload.
+- Macro node positions persist under the macro namespace.
+- Stale sidecar entries do not affect parsing or compile semantics.
 
 ## Open Questions To Continue
 

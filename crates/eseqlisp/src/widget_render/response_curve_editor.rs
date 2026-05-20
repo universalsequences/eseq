@@ -422,6 +422,8 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
         _drag_start: Option<(f32, f32)>,
         gesture: Option<&Value>,
         _modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {

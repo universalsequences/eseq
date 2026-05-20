@@ -729,6 +729,7 @@ impl Editor {
                     return true;
                 };
                 if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id) {
+                    let (cell_w, cell_h) = self.runtime.layout_cell_dims();
                     let widget_event = map_mouse_event(
                         &node,
                         mouse.kind,
@@ -737,6 +738,8 @@ impl Editor {
                         None,
                         None,
                         mouse.modifiers,
+                        cell_w,
+                        cell_h,
                     );
                     let output = match widget_event {
                         MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
@@ -1507,8 +1510,9 @@ impl Editor {
             .and_then(|gesture| gesture.gesture_data.as_ref())
             .or(explicit_gesture);
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let outcome = map_mouse_event(
-            node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers,
+            node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers, cell_w, cell_h,
         );
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         match outcome {

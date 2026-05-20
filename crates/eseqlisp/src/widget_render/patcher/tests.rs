@@ -1,6 +1,6 @@
 use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
-use super::super::text_input::TextInputState;
+use super::super::text_input::{TextInputState, cache_char_widths};
 use super::display::*;
 use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
 use super::geometry::*;
@@ -11,7 +11,7 @@ use super::project::dgenlisp_operator_names;
 use super::render::*;
 use super::state::*;
 use super::*;
-use crate::layout::{LayoutNode, Rect};
+use crate::layout::{LayoutNode, MeasureCtx, Rect, TextMeasurer};
 use crate::theme;
 use crate::vm::Value;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -33,6 +33,22 @@ fn source_expr(scope: SourceScopeId, form_index: usize, path: &[usize]) -> Sourc
                 .map(ExprPathSegment::ListItem)
                 .collect(),
         ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct FixedWidthTextMeasurer;
+
+#[cfg(target_os = "macos")]
+impl TextMeasurer for FixedWidthTextMeasurer {
+    fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+        text.chars()
+            .map(|ch| if ch.is_whitespace() { 5.0 } else { 10.0 })
+            .sum()
+    }
+
+    fn line_height_px(&self, _font_size: f32) -> f32 {
+        20.0
     }
 }
 
@@ -892,7 +908,16 @@ fn patcher_output_port_hit_testing_uses_rendered_port_positions() {
     let output_counts = patch_output_counts(&patch);
     let center = port_center(node_rect, 0, output_counts["pitch"], false);
 
-    let hit = hit_patcher_output_port(&patch, rect, &pan, &output_counts, center.0, center.1);
+    let hit = hit_patcher_output_port(
+        &patch,
+        rect,
+        &pan,
+        &output_counts,
+        center.0,
+        center.1,
+        10.0,
+        20.0,
+    );
     assert_eq!(
         hit,
         Some(OutputPortRef {
@@ -900,6 +925,52 @@ fn patcher_output_port_hit_testing_uses_rendered_port_positions() {
             output_index: 0,
         })
     );
+}
+
+#[test]
+fn patcher_output_port_hit_testing_matches_rendered_circle() {
+    let patch = parse("(def pitch (in 1 @name pitch))");
+    let pan = PatcherPanState::default();
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 80.0,
+        height: 30.0,
+    };
+    let node_rect = *patch_node_rects(&patch, rect, &pan).get("pitch").unwrap();
+    let output_counts = patch_output_counts(&patch);
+    let center = port_center(node_rect, 0, output_counts["pitch"], false);
+    let radius_rows = (PORT_OUTER_DIAMETER_PX * 0.5) / 20.0;
+
+    let inside_rendered_circle = hit_patcher_output_port(
+        &patch,
+        rect,
+        &pan,
+        &output_counts,
+        center.0,
+        center.1 - radius_rows + 0.01,
+        10.0,
+        20.0,
+    );
+    assert_eq!(
+        inside_rendered_circle,
+        Some(OutputPortRef {
+            node_id: "pitch".to_string(),
+            output_index: 0,
+        })
+    );
+
+    let inside_node_body_but_outside_port_circle = hit_patcher_output_port(
+        &patch,
+        rect,
+        &pan,
+        &output_counts,
+        center.0,
+        center.1 - radius_rows - 0.01,
+        10.0,
+        20.0,
+    );
+    assert_eq!(inside_node_body_but_outside_port_circle, None);
 }
 
 #[test]
@@ -1338,7 +1409,14 @@ fn dragging_selected_cable_endpoint_reconnects_and_keeps_cable_selected() {
     let gate_rect = node_rects.get("gate").unwrap();
     let gate_output = port_center(*gate_rect, 0, output_counts["gate"], false);
 
-    handle_patcher_pointer_down(&node, from_handle.0, from_handle.1, KeyModifiers::empty());
+    handle_patcher_pointer_down(
+        &node,
+        from_handle.0,
+        from_handle.1,
+        KeyModifiers::empty(),
+        10.0,
+        20.0,
+    );
     handle_patcher_pointer_drag(&node, gate_output.0, gate_output.1);
     handle_patcher_pointer_up(&node, gate_output.0, gate_output.1);
 
@@ -1549,7 +1627,7 @@ fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
     handle_patcher_pointer_moved(&node, 1.2, 0.8);
     assert!(get_patcher_interaction_state(key).hover_back_button);
 
-    handle_patcher_pointer_down(&node, 1.2, 0.8, KeyModifiers::empty());
+    handle_patcher_pointer_down(&node, 1.2, 0.8, KeyModifiers::empty(), 10.0, 20.0);
     assert_eq!(get_patcher_interaction_state(key).active_macro, None);
 
     let _ = std::fs::remove_file(path);
@@ -2332,5 +2410,143 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     assert_eq!(
         cursor_count, 1,
         "active patcher text edit should render exactly one foreground cursor"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_render_uses_single_text_run_for_active_node_edit_with_spaces() {
+    let mut state = PatcherInteractionState::default();
+    let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: created_id,
+        text: "in 3 4".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 6,
+            selection_anchor: None,
+            selecting: false,
+        },
+    });
+
+    let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &PatcherPanState::default(),
+        &state,
+    );
+
+    let label_runs: Vec<&str> = prims
+        .iter()
+        .filter_map(|prim| match prim {
+            MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        label_runs.contains(&"in 3 4"),
+        "active edit should render the complete edit buffer as one text run: {label_runs:?}"
+    );
+    assert!(
+        !label_runs.contains(&"in") && !label_runs.contains(&"3 4"),
+        "active edit text must not be split around whitespace because the cursor is measured against the unsplit buffer: {label_runs:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_render_places_committed_node_tail_after_measured_space_width() {
+    let label = "in 7 8".to_string();
+    let measurer = FixedWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    cache_char_widths(label, NODE_FONT_SIZE, &measure_ctx);
+
+    let patch = Patch {
+        nodes: vec![PatchNode {
+            id: "committed-space-node".to_string(),
+            op: "in".to_string(),
+            kind: NodeKind::Builtin,
+            label: "in".to_string(),
+            args: vec![
+                ArgValue::Literal("7".to_string()),
+                ArgValue::Literal("8".to_string()),
+            ],
+            outputs: vec!["out".to_string()],
+            position: (2.0, 2.0),
+            diagnostic: None,
+            source: None,
+        }],
+        connections: Vec::new(),
+        macros: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &PatcherPanState::default(),
+        &PatcherInteractionState::default(),
+    );
+
+    let head = prims.iter().find_map(|prim| match prim {
+        MetalPrimitive::ProportionalText(text) if text.text == "in" => Some(text.col),
+        _ => None,
+    });
+    let tail = prims.iter().find_map(|prim| match prim {
+        MetalPrimitive::ProportionalText(text) if text.text == "7 8" => Some(text.col),
+        _ => None,
+    });
+    let head = head.expect("committed in node should render head text");
+    let tail = tail.expect("committed in node should render tail text");
+
+    assert_eq!(
+        tail - head,
+        2.5,
+        "tail should start after the measured width of `in `, not after a fixed visual gap"
     );
 }

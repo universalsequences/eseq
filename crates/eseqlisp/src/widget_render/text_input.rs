@@ -773,6 +773,8 @@ impl WidgetDefinition for TextInputWidget {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         _modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
         let cursor_pos = closest_char_index_for_text_input(node, local_col, font_size, 10.0);
@@ -1127,6 +1129,8 @@ impl WidgetDefinition for TextboxWidget {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         _modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
         #[cfg(target_os = "macos")]

@@ -645,6 +645,8 @@ pub trait WidgetDefinition: Sync {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         _modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         MouseEventOutcome::Ignore
     }
@@ -929,6 +931,8 @@ fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
 #[cfg(target_os = "macos")]
 pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
     let mut shaders = Vec::new();
+    shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
+    shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
     for definition in WIDGET_DEFINITIONS {
         for &name in definition.names() {
             if let Some(fragment_shader) = definition.metal_fragment_shader(name) {
@@ -1123,6 +1127,8 @@ pub fn map_mouse_event(
     drag_start: Option<(f32, f32)>,
     gesture: Option<&Value>,
     modifiers: KeyModifiers,
+    cell_w: f32,
+    cell_h: f32,
 ) -> MouseEventOutcome {
     // SDF widgets handle their own mouse events
     if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
@@ -1131,7 +1137,8 @@ pub fn map_mouse_event(
     widget_definition(&node.widget_type)
         .map(|definition| {
             definition.mouse_event(
-                node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers,
+                node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers, cell_w,
+                cell_h,
             )
         })
         .unwrap_or(MouseEventOutcome::Ignore)
@@ -1302,6 +1309,97 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
+}
+"#;
+
+#[cfg(target_os = "macos")]
+pub const PATCHER_PORT_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 p = (in.uv - float2(0.5)) * 2.0;
+
+    if ((in.value_t > 0.0 && p.y < 0.0) || (in.value_t < 0.0 && p.y > 0.0)) {
+        discard_fragment();
+    }
+
+    float d = length(p);
+    float aa = max(fwidth(d), 0.001);
+    float outerMask = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, d);
+    if (outerMask < 0.002) {
+        discard_fragment();
+    }
+
+    float innerRadius = clamp(in.uniform_a.x, 0.0, 0.98);
+    float innerMask = 1.0 - smoothstep(innerRadius - aa, innerRadius + aa, d);
+    float4 col = mix(in.color_a, in.color_b, innerMask);
+    return float4(col.rgb, col.a * outerMask);
+}
+"#;
+
+#[cfg(target_os = "macos")]
+pub const PATCHER_NODE_SHADER: &str = r#"
+float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, float smin, float smax)
+{
+    return smoothstep(smin, smax, sdf_rounded_rect(pos, size, radius));
+}
+
+float3 patcher_node_normal(float2 pos, float2 size, float radius, float eps, float ratio)
+{
+    float smin = -0.005 * ratio;
+    float smax = 0.518;
+    float right = patcher_node_smooth_rounded_rect(pos + float2(eps, 0.0), size, radius, smin, smax);
+    float left = patcher_node_smooth_rounded_rect(pos - float2(eps, 0.0), size, radius, smin, smax);
+    float up = patcher_node_smooth_rounded_rect(pos + float2(0.0, eps), size, radius, smin, smax);
+    float down = patcher_node_smooth_rounded_rect(pos - float2(0.0, eps), size, radius, smin, smax);
+    return normalize(float3((right - left) / (2.0 * eps), (up - down) / (2.0 * eps), 1.0));
+}
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 localPos = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+    float2 sdfSize = float2(aspect, 1.0);
+    float cornerRadius = min(in.corner_radius, min(aspect, 1.0));
+
+    float nodeDist = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
+    float nodeDerivative = max(fwidth(nodeDist), 0.001);
+    float outerAlpha = smoothstep(nodeDerivative, -nodeDerivative, nodeDist);
+    if (outerAlpha <= 0.001) {
+        discard_fragment();
+    }
+
+    float borderThickness = max(in.uniform_a.x, 0.0) * nodeDerivative;
+    float2 innerSize = max(sdfSize - float2(borderThickness), float2(0.001));
+    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
+    float innerDerivative = max(fwidth(innerDist), 0.001);
+    float innerAlpha = smoothstep(innerDerivative, -innerDerivative, innerDist);
+    float borderMask = outerAlpha * (1.0 - innerAlpha);
+
+    float3 normal = patcher_node_normal(
+        localPos,
+        sdfSize,
+        cornerRadius,
+        0.01,
+        0.83 / max(min(aspect, 1.0), 0.001));
+    float3 viewDir = float3(0.0, 0.0, 1.0);
+    float3 lightDir = normalize(float3(-0.9, -0.9, 1.3));
+    float diffuse = max(0.0, dot(normal, lightDir));
+    float3 halfVector = normalize(lightDir + viewDir);
+    float specularRaw = pow(max(0.0, dot(normal, halfVector)), 48.0);
+    float specularFadeDistance = clamp(nodeDerivative * 2.5, 0.01, 0.06);
+    float specular = specularRaw * smoothstep(0.0, -specularFadeDistance, nodeDist);
+
+    float3 bg = in.color_b.rgb;
+    float3 border = in.color_a.rgb;
+    float3 litBg = bg * (0.82 + 0.18 * diffuse) + float3(0.20) * specular;
+    float3 litBorder = border * (0.76 + 0.24 * diffuse) + float3(0.55) * specular;
+
+    float edgeShade = smoothstep(0.18, 0.98, localPos.y * 0.5 + 0.5);
+    litBg *= mix(0.94, 1.04, edgeShade);
+    litBorder *= mix(0.88, 1.12, edgeShade);
+
+    float3 color = mix(litBg, litBorder, borderMask);
+    return float4(color, outerAlpha * max(in.color_a.a, in.color_b.a));
 }
 "#;
 
