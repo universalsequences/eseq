@@ -305,6 +305,40 @@ pub(super) fn delete_connection_edit_or_mark_deleted(
     changed
 }
 
+pub(super) fn delete_selected_nodes(state: &mut PatcherInteractionState, view_key: &str) -> bool {
+    if state.selected_nodes.is_empty() {
+        return false;
+    }
+
+    let selected_nodes = state.selected_nodes.clone();
+    for node_id in &selected_nodes {
+        let edit_key = node_edit_key(view_key, node_id);
+        let removed_created_node = state
+            .edit_state
+            .nodes
+            .get(&edit_key)
+            .is_some_and(|edit| matches!(edit.origin, PatcherNodeOrigin::Created { .. }));
+        if removed_created_node {
+            state.edit_state.nodes.remove(&edit_key);
+        } else {
+            state.edit_state.nodes.remove(&edit_key);
+            state.edit_state.deleted_nodes.insert(edit_key);
+        }
+    }
+
+    state.edit_state.connections.retain(|_, edit| {
+        edit.view_key != view_key
+            || !(selected_nodes.contains(&edit.from.node_id)
+                || selected_nodes.contains(&edit.to.node_id))
+    });
+
+    state.selected_nodes.clear();
+    state.selected_cable = None;
+    state.drag = None;
+    state.text_edit = None;
+    true
+}
+
 pub(super) fn ensure_source_node_edit(
     state: &mut PatcherInteractionState,
     view_key: &str,
@@ -405,6 +439,15 @@ pub(super) fn patch_with_interaction_state(
                 view_key,
                 &source_connection_id(connection),
             ))
+    });
+    let live_nodes = patch
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+    patch.connections.retain(|connection| {
+        live_nodes.contains(connection.from_node.as_str())
+            && live_nodes.contains(connection.to_node.as_str())
     });
     for node in &mut patch.nodes {
         let edit_key = node_edit_key(view_key, &node.id);

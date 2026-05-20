@@ -1127,6 +1127,90 @@ fn selected_created_cable_delete_removes_connection_edit() {
 }
 
 #[test]
+fn selected_source_node_delete_hides_node_and_incident_connections() {
+    let patch = parse(
+        r#"
+            (def pitch (in 1 @name pitch))
+            (def sig (phasor pitch))
+            "#,
+    );
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("pitch".to_string());
+
+    assert!(delete_selected_nodes(&mut state, "root"));
+
+    assert!(state.selected_nodes.is_empty());
+    assert!(
+        state
+            .edit_state
+            .deleted_nodes
+            .contains(&node_edit_key("root", "pitch"))
+    );
+    let patch = patch_with_interaction_state(patch, &state, "root");
+    assert!(!patch.nodes.iter().any(|node| node.id == "pitch"));
+    assert!(
+        patch
+            .connections
+            .iter()
+            .all(|connection| connection.from_node != "pitch" && connection.to_node != "pitch"),
+        "{:#?}",
+        patch.connections
+    );
+}
+
+#[test]
+fn selected_created_node_delete_removes_node_and_created_connections() {
+    let patch = parse(
+        r#"
+            (def sig (phasor))
+            "#,
+    );
+    let phasor_id = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "phasor")
+        .unwrap()
+        .id
+        .clone();
+    let mut state = PatcherInteractionState::default();
+    let created_id = allocate_created_node(&mut state, "root", (0.0, 0.0));
+    if let Some(edit) = state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &created_id))
+    {
+        edit.text = "param freq".to_string();
+    }
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: created_id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: phasor_id,
+            input_index: 0,
+        },
+    );
+    state.selected_nodes.insert(created_id.clone());
+
+    assert!(delete_selected_nodes(&mut state, "root"));
+
+    assert!(
+        !state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &created_id))
+    );
+    assert!(state.edit_state.deleted_nodes.is_empty());
+    assert!(state.edit_state.connections.is_empty());
+    let patch = patch_with_interaction_state(patch, &state, "root");
+    assert!(!patch.nodes.iter().any(|node| node.id == created_id));
+    assert!(patch.connections.is_empty());
+}
+
+#[test]
 fn selected_cable_handles_are_hit_near_rendered_edit_points() {
     let patch = parse(
         r#"
@@ -1745,6 +1829,76 @@ fn double_clicking_node_edits_display_text_in_memory() {
             .map(|edit| &edit.origin),
         Some(PatcherNodeOrigin::Source { source_node_id }) if source_node_id == "pitch"
     ));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn backspace_without_text_edit_deletes_selected_nodes() {
+    let source = r#"
+            (def pitch (in 1 @name pitch))
+            (def sig (phasor pitch))
+            "#;
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-node-delete-{}.lisp",
+        std::process::id()
+    ));
+    std::fs::write(&path, source).unwrap();
+    let root_patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let mut props = HashMap::new();
+    props.insert(
+        "path".to_string(),
+        Value::String(path.to_string_lossy().to_string()),
+    );
+    let node = LayoutNode {
+        widget_id: 556_677,
+        stable_widget_id: Some(556_677),
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "patcher".to_string(),
+        rect: Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 80.0,
+            height: 30.0,
+        },
+        props,
+        children: Vec::new(),
+        focusable: true,
+    };
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("pitch".to_string());
+    set_patcher_interaction_state(key, state);
+
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Backspace,
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some()
+    );
+    let state = get_patcher_interaction_state(key);
+    assert!(state.text_edit.is_none());
+    assert!(state.selected_nodes.is_empty());
+    assert!(
+        state
+            .edit_state
+            .deleted_nodes
+            .contains(&node_edit_key("root", "pitch"))
+    );
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    assert!(
+        !patch
+            .nodes
+            .iter()
+            .any(|patch_node| patch_node.id == "pitch")
+    );
 
     let _ = std::fs::remove_file(path);
 }

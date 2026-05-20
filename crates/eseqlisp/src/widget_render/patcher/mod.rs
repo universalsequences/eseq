@@ -35,8 +35,8 @@ use interaction::{
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
     active_patcher_patch, active_patcher_view_key, delete_connection_edit_or_mark_deleted,
-    get_patcher_interaction_state, patch_with_interaction_state, patcher_state_key,
-    patcher_state_key_from_parts, set_patcher_interaction_state,
+    delete_selected_nodes, get_patcher_interaction_state, patch_with_interaction_state,
+    patcher_state_key, patcher_state_key_from_parts, set_patcher_interaction_state,
 };
 use text::{cancel_patcher_text_edit, commit_patcher_text_edit};
 
@@ -211,6 +211,16 @@ impl WidgetDefinition for PatcherWidget {
                 } else {
                     None
                 }
+            }
+            KeyCode::Backspace | KeyCode::Delete
+                if state.text_edit.is_none() && !state.selected_nodes.is_empty() =>
+            {
+                let changed = delete_selected_nodes(&mut state, &view_key);
+                if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                    debug_log_patch_lisp(&view_key, &patch);
+                }
+                set_patcher_interaction_state(key, state);
+                Some(WidgetEvent::Custom(Value::Nil))
             }
             _ => {
                 let edit = state.text_edit.as_mut()?;
