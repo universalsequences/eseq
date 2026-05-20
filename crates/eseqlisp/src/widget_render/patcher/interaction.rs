@@ -14,8 +14,8 @@ use super::geometry::{
     rect_contains, rect_from_points, rects_intersect, screen_to_model,
 };
 use super::metrics::{
-    SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS, SEGMENTED_CABLE_DRAG_PADDING_CELLS,
-    WHEEL_PAN_STEP_CELLS,
+    PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET, SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS,
+    SEGMENTED_CABLE_DRAG_PADDING_CELLS, WHEEL_PAN_STEP_CELLS,
 };
 use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, OutputPortRef, Patch};
 use super::render::{patch_input_indices, patch_input_slot_counts, patch_output_counts};
@@ -106,8 +106,8 @@ pub(super) fn zoom_patcher_by_magnify(
     if (new_zoom - old_zoom).abs() < f32::EPSILON {
         return false;
     }
-    let origin_x = node.rect.col + 2.0;
-    let origin_y = node.rect.row + 2.4;
+    let origin_x = node.rect.col + PATCH_ORIGIN_COL_OFFSET;
+    let origin_y = node.rect.row + PATCH_ORIGIN_ROW_OFFSET;
     state.offset_x = origin_x + anchor_model.0 * new_zoom - local_col;
     state.offset_y = origin_y + anchor_model.1 * new_zoom - local_row;
     state.viewport_width = node.rect.width;

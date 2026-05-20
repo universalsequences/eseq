@@ -5,8 +5,9 @@ use crate::layout::Rect;
 use super::display::node_size;
 use super::metrics::{
     CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HIT_RADIUS_CELLS,
-    CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT, PORT_EDGE_PADDING_CELLS,
-    PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
+    CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT, PATCH_ORIGIN_COL_OFFSET,
+    PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
+    SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection};
 use super::state::{PatcherPanState, source_connection_id};
@@ -16,16 +17,16 @@ pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
     let mut max_row: f32 = VIEW_PADDING_Y * 2.0;
     for node in &patch.nodes {
         let (width, height) = node_size(node);
-        max_col = max_col.max(2.0 + node.position.0 + width + VIEW_PADDING_X);
-        max_row = max_row.max(2.4 + node.position.1 + height + VIEW_PADDING_Y);
+        max_col = max_col.max(PATCH_ORIGIN_COL_OFFSET + node.position.0 + width + VIEW_PADDING_X);
+        max_row = max_row.max(PATCH_ORIGIN_ROW_OFFSET + node.position.1 + height + VIEW_PADDING_Y);
     }
     (max_col, max_row)
 }
 
 pub(super) fn patcher_origin(rect: Rect, pan_state: &PatcherPanState) -> (f32, f32) {
     (
-        rect.col + 2.0 - pan_state.offset_x,
-        rect.row + 2.4 - pan_state.offset_y,
+        rect.col + PATCH_ORIGIN_COL_OFFSET - pan_state.offset_x,
+        rect.row + PATCH_ORIGIN_ROW_OFFSET - pan_state.offset_y,
     )
 }
 
