@@ -5,95 +5,180 @@ use crate::parser::{Expression, format_expression};
 
 use super::display::{node_size, preview};
 use super::lisp::{
-    attribute_value, call_input_args, connection_kind_for_op, default_outputs,
-    format_patch_literal, is_numeric_literal, is_unsupported_call_head, node_kind_for_op,
-    node_label, positional_args, symbol_at,
+    attribute_value, connection_kind_for_op, default_outputs, format_patch_literal,
+    is_numeric_literal, is_unsupported_call_head, node_kind_for_op, node_label, symbol_at,
 };
 use super::metrics::{LAYER_SPACING, NODE_COLUMN_GAP, VIEW_PADDING_X, VIEW_PADDING_Y};
 use super::model::{
-    ArgValue, ConnectionKind, MacroPatch, NodeKind, OperatorPortShape, Patch, PatchConnection,
-    PatchNode,
+    ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
+    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch, NodeKind, NodeSource,
+    OperatorPortShape, Patch, PatchConnection, PatchNode, SourceArgValue, SourceExprId,
+    SourceFormId, SourceOwner, SourceScopeId,
 };
 
 pub(super) struct Projector {
     patch: Patch,
     symbol_sources: HashMap<String, (String, usize)>,
+    symbol_bindings: HashMap<String, BindingId>,
     history_nodes: HashMap<String, String>,
     op_occurrences: HashMap<String, usize>,
     used_ids: HashSet<String>,
     known_ops: &'static HashSet<String>,
     known_macros: HashSet<String>,
+    scope: SourceScopeId,
 }
 
 impl Projector {
     pub(super) fn new(known_macros: HashSet<String>) -> Self {
+        Self::new_in_scope(known_macros, SourceScopeId::Root)
+    }
+
+    fn new_in_scope(known_macros: HashSet<String>, scope: SourceScopeId) -> Self {
         Self {
             patch: Patch::default(),
             symbol_sources: HashMap::new(),
+            symbol_bindings: HashMap::new(),
             history_nodes: HashMap::new(),
             op_occurrences: HashMap::new(),
             used_ids: HashSet::new(),
             known_ops: dgenlisp_operator_names(),
             known_macros,
+            scope,
         }
     }
 
     pub(super) fn project(mut self, exprs: &[Expression]) -> Patch {
-        for expr in exprs {
-            self.project_top_level(expr);
+        for (idx, expr) in exprs.iter().enumerate() {
+            let form_id = self.form_id(idx);
+            self.project_top_level(expr, form_id);
         }
         assign_layout(&mut self.patch);
         self.patch
     }
 
-    fn project_top_level(&mut self, expr: &Expression) {
-        let Expression::List(items) = expr else {
-            self.add_code_island(expr, "top-level atom is not visual patch syntax");
-            return;
-        };
-        let Some(head) = symbol_at(items, 0) else {
-            self.add_code_island(expr, "top-level form has no symbolic operator");
-            return;
-        };
-        match head {
-            "def" => self.project_def(items, expr),
-            "defmacro" => self.project_defmacro(items, expr),
-            "param" => self.project_param(items, expr),
-            "make-history" => self.project_make_history(items, expr),
-            "write-history" => {
-                let _ = self.project_write_history(items, expr);
-            }
-            "out" => {
-                let id = self.stable_id_for_call(items, None);
-                let _ = self.project_call(items, Some(id), None);
-            }
-            _ => self.add_code_island(expr, "top-level form is not a supported patch form"),
+    fn form_id(&self, index: usize) -> SourceFormId {
+        SourceFormId {
+            scope: self.scope.clone(),
+            index,
         }
     }
 
-    fn project_param(&mut self, items: &[Expression], original: &Expression) {
+    fn root_expr(&self, form_id: SourceFormId) -> SourceExprId {
+        SourceExprId {
+            form_id,
+            path: ExprPath::default(),
+        }
+    }
+
+    fn child_expr(&self, parent: &SourceExprId, item_index: usize) -> SourceExprId {
+        let mut path = parent.path.clone();
+        path.0.push(ExprPathSegment::ListItem(item_index));
+        SourceExprId {
+            form_id: parent.form_id.clone(),
+            path,
+        }
+    }
+
+    fn binding_id(&self, name: &str, kind: BindingKind) -> BindingId {
+        BindingId {
+            scope: self.scope.clone(),
+            name: name.to_string(),
+            kind,
+        }
+    }
+
+    fn project_top_level(&mut self, expr: &Expression, form_id: SourceFormId) {
+        let Expression::List(items) = expr else {
+            self.add_code_island(expr, "top-level atom is not visual patch syntax", form_id);
+            return;
+        };
+        let Some(head) = symbol_at(items, 0) else {
+            self.add_code_island(expr, "top-level form has no symbolic operator", form_id);
+            return;
+        };
+        let source_expr = self.root_expr(form_id.clone());
+        match head {
+            "def" => self.project_def(items, expr, source_expr),
+            "defmacro" => self.project_defmacro(items, expr, source_expr),
+            "param" => self.project_param(items, expr, source_expr),
+            "make-history" => self.project_make_history(items, expr, source_expr),
+            "write-history" => {
+                let _ = self.project_write_history(items, expr, source_expr);
+            }
+            "out" => {
+                let id = self.stable_id_for_call(items, None);
+                let _ = self.project_call(
+                    items,
+                    Some(id),
+                    None,
+                    source_expr.clone(),
+                    SourceOwner::TopLevelForm { form_id },
+                );
+            }
+            _ => self.add_code_island(
+                expr,
+                "top-level form is not a supported patch form",
+                form_id,
+            ),
+        }
+    }
+
+    fn project_param(
+        &mut self,
+        items: &[Expression],
+        original: &Expression,
+        source_expr: SourceExprId,
+    ) {
         let Some(name) = symbol_at(items, 1) else {
-            self.add_code_island(original, "`param` forms must provide a symbolic name");
+            self.add_code_island(
+                original,
+                "`param` forms must provide a symbolic name",
+                source_expr.form_id,
+            );
             return;
         };
         let id = self.stable_id_for_call(items, None);
-        let Some(node_id) = self.project_call(items, Some(id), None) else {
-            self.add_code_island(original, "`param` value could not be projected");
+        let binding = self.binding_id(name, BindingKind::Param);
+        let Some(node_id) = self.project_call(
+            items,
+            Some(id),
+            None,
+            source_expr.clone(),
+            SourceOwner::TopLevelForm {
+                form_id: source_expr.form_id.clone(),
+            },
+        ) else {
+            self.add_code_island(
+                original,
+                "`param` value could not be projected",
+                source_expr.form_id,
+            );
             return;
         };
         self.symbol_sources.insert(name.to_string(), (node_id, 0));
+        self.symbol_bindings.insert(name.to_string(), binding);
     }
 
-    fn project_make_history(&mut self, items: &[Expression], original: &Expression) {
+    fn project_make_history(
+        &mut self,
+        items: &[Expression],
+        original: &Expression,
+        source_expr: SourceExprId,
+    ) {
         let Some(name) = symbol_at(items, 1) else {
             self.add_code_island(
                 original,
                 "`make-history` forms must provide a symbolic name",
+                source_expr.form_id,
             );
             return;
         };
         if self.history_nodes.contains_key(name) {
-            self.add_code_island(original, "`make-history` declared the same history twice");
+            self.add_code_island(
+                original,
+                "`make-history` declared the same history twice",
+                source_expr.form_id,
+            );
             return;
         }
         let id = self.unique_id(name);
@@ -107,25 +192,58 @@ impl Projector {
             outputs: vec!["out".to_string()],
             position: (0.0, 0.0),
             diagnostic: None,
+            source: Some(NodeSource {
+                owner: SourceOwner::Compound {
+                    parts: vec![SourceOwner::TopLevelForm {
+                        form_id: source_expr.form_id.clone(),
+                    }],
+                },
+                expr: Some(source_expr.clone()),
+                call_shape: Some(self.call_source_shape(&source_expr, items)),
+            }),
         });
     }
 
-    fn project_def(&mut self, items: &[Expression], original: &Expression) {
+    fn project_def(
+        &mut self,
+        items: &[Expression],
+        original: &Expression,
+        source_expr: SourceExprId,
+    ) {
         if items.len() != 3 {
-            self.add_code_island(original, "`def` forms must have exactly a target and value");
+            self.add_code_island(
+                original,
+                "`def` forms must have exactly a target and value",
+                source_expr.form_id,
+            );
             return;
         }
 
         match &items[1] {
             Expression::Symbol(name) => {
-                let Some((node_id, output_idx)) =
-                    self.project_value(&items[2], Some(name.clone()), Some(name.clone()))
-                else {
-                    self.add_code_island(original, "`def` value could not be projected");
+                let binding = self.binding_id(name, BindingKind::Def);
+                let value_expr = self.child_expr(&source_expr, 2);
+                let Some((node_id, output_idx)) = self.project_value(
+                    &items[2],
+                    Some(name.clone()),
+                    Some(name.clone()),
+                    value_expr,
+                    SourceOwner::BindingValue {
+                        form_id: source_expr.form_id.clone(),
+                        binding: BindingTarget::Symbol(name.clone()),
+                        value_path: ExprPath(vec![ExprPathSegment::ListItem(2)]),
+                    },
+                ) else {
+                    self.add_code_island(
+                        original,
+                        "`def` value could not be projected",
+                        source_expr.form_id,
+                    );
                     return;
                 };
                 self.symbol_sources
                     .insert(name.clone(), (node_id, output_idx));
+                self.symbol_bindings.insert(name.clone(), binding);
             }
             Expression::List(outputs) => {
                 let names = outputs
@@ -139,14 +257,27 @@ impl Projector {
                     self.add_code_island(
                         original,
                         "destructuring `def` contains non-symbol outputs",
+                        source_expr.form_id,
                     );
                     return;
                 };
                 let stable = names.join("_");
-                let Some((node_id, _)) = self.project_value(&items[2], Some(stable), None) else {
+                let value_expr = self.child_expr(&source_expr, 2);
+                let Some((node_id, _)) = self.project_value(
+                    &items[2],
+                    Some(stable),
+                    None,
+                    value_expr,
+                    SourceOwner::BindingValue {
+                        form_id: source_expr.form_id.clone(),
+                        binding: BindingTarget::Destructuring(names.clone()),
+                        value_path: ExprPath(vec![ExprPathSegment::ListItem(2)]),
+                    },
+                ) else {
                     self.add_code_island(
                         original,
                         "destructuring `def` value could not be projected",
+                        source_expr.form_id,
                     );
                     return;
                 };
@@ -155,19 +286,31 @@ impl Projector {
                     node.label = format!("{} -> {}", node.op, names.join(" "));
                 }
                 for (idx, name) in names.into_iter().enumerate() {
+                    let binding = self.binding_id(&name, BindingKind::Def);
+                    self.symbol_bindings.insert(name.clone(), binding);
                     self.symbol_sources.insert(name, (node_id.clone(), idx));
                 }
             }
-            _ => self.add_code_island(original, "`def` target is not a symbol or symbol tuple"),
+            _ => self.add_code_island(
+                original,
+                "`def` target is not a symbol or symbol tuple",
+                source_expr.form_id,
+            ),
         }
     }
 
-    fn project_defmacro(&mut self, items: &[Expression], original: &Expression) {
+    fn project_defmacro(
+        &mut self,
+        items: &[Expression],
+        original: &Expression,
+        source_expr: SourceExprId,
+    ) {
         let (Some(name), Some(Expression::List(params))) = (symbol_at(items, 1), items.get(2))
         else {
             self.add_code_island(
                 original,
                 "`defmacro` must provide a name and parameter list",
+                source_expr.form_id,
             );
             return;
         };
@@ -179,17 +322,30 @@ impl Projector {
             })
             .collect::<Option<Vec<_>>>()
         else {
-            self.add_code_island(original, "`defmacro` parameters must be symbols");
+            self.add_code_island(
+                original,
+                "`defmacro` parameters must be symbols",
+                source_expr.form_id,
+            );
             return;
         };
 
         let body = if items.len() > 3 { &items[3..] } else { &[] };
-        let mut projector = Projector::new(HashSet::new());
+        let mut projector = Projector::new_in_scope(
+            HashSet::new(),
+            SourceScopeId::Macro {
+                name: name.to_string(),
+            },
+        );
         for (idx, param) in param_names.iter().enumerate() {
             let id = projector.unique_id(param);
+            let binding = projector.binding_id(param, BindingKind::MacroParam);
             projector
                 .symbol_sources
                 .insert(param.clone(), (id.clone(), 0));
+            projector
+                .symbol_bindings
+                .insert(param.clone(), binding.clone());
             projector.patch.nodes.push(PatchNode {
                 id,
                 op: "in".to_string(),
@@ -199,13 +355,22 @@ impl Projector {
                 outputs: vec![param.clone()],
                 position: (0.0, 0.0),
                 diagnostic: None,
+                source: Some(NodeSource {
+                    owner: SourceOwner::MacroParameter {
+                        binding,
+                        index: idx,
+                    },
+                    expr: None,
+                    call_shape: None,
+                }),
             });
         }
         for (idx, expr) in body.iter().enumerate() {
+            let form_id = projector.form_id(idx);
             if idx + 1 == body.len() {
-                projector.project_macro_return(expr);
+                projector.project_macro_return(expr, form_id);
             } else {
-                projector.project_top_level(expr);
+                projector.project_top_level(expr, form_id);
             }
         }
         let mut patch = projector.patch;
@@ -217,7 +382,7 @@ impl Projector {
         });
     }
 
-    fn project_macro_return(&mut self, expr: &Expression) {
+    fn project_macro_return(&mut self, expr: &Expression, form_id: SourceFormId) {
         if let Expression::List(items) = expr
             && symbol_at(items, 0).is_some_and(|head| {
                 matches!(
@@ -226,14 +391,25 @@ impl Projector {
                 )
             })
         {
-            self.project_top_level(expr);
+            self.project_top_level(expr, form_id);
             return;
         }
 
-        let Some((from_node, from_output)) =
-            self.project_value(expr, Some("return".to_string()), None)
-        else {
-            self.add_code_island(expr, "macro return value is not visual patch syntax");
+        let source_expr = self.root_expr(form_id.clone());
+        let Some((from_node, from_output)) = self.project_value(
+            expr,
+            Some("return".to_string()),
+            None,
+            source_expr,
+            SourceOwner::TopLevelForm {
+                form_id: form_id.clone(),
+            },
+        ) else {
+            self.add_code_island(
+                expr,
+                "macro return value is not visual patch syntax",
+                form_id,
+            );
             return;
         };
         let id = self.unique_id("out");
@@ -246,6 +422,13 @@ impl Projector {
             outputs: Vec::new(),
             position: (0.0, 0.0),
             diagnostic: None,
+            source: Some(NodeSource {
+                owner: SourceOwner::TopLevelForm {
+                    form_id: form_id.clone(),
+                },
+                expr: None,
+                call_shape: None,
+            }),
         });
         self.patch.connections.push(PatchConnection {
             from_node,
@@ -253,6 +436,7 @@ impl Projector {
             to_node: id,
             to_input: 0,
             kind: ConnectionKind::Forward,
+            source: None,
         });
     }
 
@@ -261,20 +445,42 @@ impl Projector {
         expr: &Expression,
         stable_id: Option<String>,
         def_name: Option<String>,
+        source_expr: SourceExprId,
+        owner: SourceOwner,
     ) -> Option<(String, usize)> {
         match expr {
             Expression::Symbol(name) => {
                 if let Some(source) = self.symbol_sources.get(name).cloned() {
                     Some(source)
                 } else if dgenlisp_constant_names().contains(name) {
-                    Some((self.add_constant_node(name), 0))
+                    Some((
+                        self.add_constant_node(
+                            name,
+                            Some(NodeSource {
+                                owner,
+                                expr: Some(source_expr),
+                                call_shape: None,
+                            }),
+                        ),
+                        0,
+                    ))
                 } else {
                     None
                 }
             }
-            Expression::Number(_) => Some((self.add_constant_node(&format_patch_literal(expr)), 0)),
+            Expression::Number(_) => Some((
+                self.add_constant_node(
+                    &format_patch_literal(expr),
+                    Some(NodeSource {
+                        owner,
+                        expr: Some(source_expr),
+                        call_shape: None,
+                    }),
+                ),
+                0,
+            )),
             Expression::List(items) => self
-                .project_call(items, stable_id, def_name)
+                .project_call(items, stable_id, def_name, source_expr, owner)
                 .map(|id| (id, 0)),
             _ => None,
         }
@@ -284,20 +490,29 @@ impl Projector {
         &mut self,
         items: &[Expression],
         original: &Expression,
+        source_expr: SourceExprId,
     ) -> Option<String> {
         let Some(name) = symbol_at(items, 1) else {
             self.add_code_island(
                 original,
                 "`read-history` forms must provide a symbolic history name",
+                source_expr.form_id,
             );
             return None;
         };
-        if let Some(node_id) = self.history_nodes.get(name) {
-            Some(node_id.clone())
+        if let Some(node_id) = self.history_nodes.get(name).cloned() {
+            self.append_history_owner(
+                &node_id,
+                SourceOwner::NestedExpr {
+                    expr: source_expr.clone(),
+                },
+            );
+            Some(node_id)
         } else {
             self.add_code_island(
                 original,
                 "`read-history` references a history with no `make-history`",
+                source_expr.form_id,
             );
             None
         }
@@ -307,11 +522,13 @@ impl Projector {
         &mut self,
         items: &[Expression],
         original: &Expression,
+        source_expr: SourceExprId,
     ) -> Option<(String, usize)> {
         let Some(name) = symbol_at(items, 1) else {
             self.add_code_island(
                 original,
                 "`write-history` forms must provide a symbolic history name",
+                source_expr.form_id,
             );
             return None;
         };
@@ -319,26 +536,62 @@ impl Projector {
             self.add_code_island(
                 original,
                 "`write-history` references a history with no `make-history`",
+                source_expr.form_id,
             );
             return None;
         };
-        let Some(value) = positional_args(items, 1).into_iter().nth(1) else {
+        let arg_sources = self.positional_arg_sources(&source_expr, items, 1);
+        let Some(value_arg) = arg_sources.get(1).cloned() else {
             self.add_code_island(
                 original,
                 "`write-history` forms must provide a value to store",
+                source_expr.form_id,
             );
             return None;
         };
-        let Some((from_node, from_output)) = self.project_value(value, None, None) else {
-            self.add_code_island(original, "`write-history` value could not be projected");
+        let Some(value) = items.get(value_arg.item_index) else {
+            self.add_code_island(
+                original,
+                "`write-history` value could not be projected",
+                source_expr.form_id,
+            );
             return None;
         };
+        let Some((from_node, from_output)) = self.project_value(
+            value,
+            None,
+            None,
+            value_arg.expr.clone(),
+            SourceOwner::ArgumentSlot {
+                call: source_expr.clone(),
+                arg: value_arg.clone(),
+            },
+        ) else {
+            self.add_code_island(
+                original,
+                "`write-history` value could not be projected",
+                source_expr.form_id,
+            );
+            return None;
+        };
+        self.append_history_owner(
+            &history_node,
+            SourceOwner::TopLevelForm {
+                form_id: source_expr.form_id.clone(),
+            },
+        );
         self.patch.connections.push(PatchConnection {
             from_node: from_node.clone(),
             from_output,
             to_node: history_node,
             to_input: 0,
             kind: ConnectionKind::Feedback,
+            source: Some(ConnectionSource {
+                from_expr: Some(value_arg.expr.clone()),
+                to_call: source_expr.clone(),
+                to_arg: value_arg.clone(),
+                previous_arg: self.source_arg_value(value, &value_arg),
+            }),
         });
         Some((from_node, from_output))
     }
@@ -348,6 +601,8 @@ impl Projector {
         items: &[Expression],
         stable_id: Option<String>,
         def_name: Option<String>,
+        source_expr: SourceExprId,
+        owner: SourceOwner,
     ) -> Option<String> {
         let op = symbol_at(items, 0)?.to_string();
         if is_unsupported_call_head(&op) {
@@ -355,21 +610,23 @@ impl Projector {
             self.add_code_island(
                 &expr,
                 "control-flow and binding forms are not visualized in V1",
+                source_expr.form_id,
             );
             return None;
         }
         let original = Expression::List(items.to_vec());
         if op == "read-history" {
-            return self.project_read_history(items, &original);
+            return self.project_read_history(items, &original, source_expr);
         }
         if op == "write-history" {
             return self
-                .project_write_history(items, &original)
+                .project_write_history(items, &original, source_expr)
                 .map(|(node_id, _)| node_id);
         }
 
         let kind = node_kind_for_op(&op, &self.known_macros);
         let id = stable_id.unwrap_or_else(|| self.stable_id_for_call(items, None));
+        let call_shape = self.call_source_shape(&source_expr, items);
         let mut node = PatchNode {
             id: self.unique_id(&id),
             op: op.clone(),
@@ -379,12 +636,21 @@ impl Projector {
             outputs: default_outputs(&op),
             position: (0.0, 0.0),
             diagnostic: self.operator_diagnostic(&op, kind),
+            source: Some(NodeSource {
+                owner,
+                expr: Some(source_expr.clone()),
+                call_shape: Some(call_shape.clone()),
+            }),
         };
 
-        let input_args = call_input_args(&op, items);
-        let mut arg_slots = vec![None; input_args.len()];
+        let input_arg_sources = self.call_input_arg_sources(&op, &source_expr, items);
+        let mut arg_slots = vec![None; input_arg_sources.len()];
         let mut pending_constants = Vec::new();
-        for (idx, arg) in input_args.into_iter().enumerate() {
+        for arg_source in input_arg_sources.iter().cloned() {
+            let idx = arg_source.semantic_index;
+            let Some(arg) = items.get(arg_source.item_index) else {
+                continue;
+            };
             match arg {
                 Expression::Symbol(name) => {
                     if let Some((from_node, from_output)) = self.symbol_sources.get(name).cloned() {
@@ -393,24 +659,41 @@ impl Projector {
                             &mut arg_slots,
                             &mut pending_constants,
                         );
+                        let resolved_binding = self.symbol_bindings.get(name).cloned();
                         self.patch.connections.push(PatchConnection {
                             from_node,
                             from_output,
                             to_node: node.id.clone(),
                             to_input: idx,
                             kind: connection_kind_for_op(&op),
+                            source: Some(ConnectionSource {
+                                from_expr: None,
+                                to_call: source_expr.clone(),
+                                to_arg: arg_source.clone(),
+                                previous_arg: SourceArgValue::SymbolReference {
+                                    expr: arg_source.expr.clone(),
+                                    symbol: name.clone(),
+                                    resolved_binding,
+                                },
+                            }),
                         });
                         arg_slots[idx] = Some(ArgValue::SymbolRef(name.clone()));
                     } else if dgenlisp_constant_names().contains(name) {
-                        pending_constants.push((idx, name.clone()));
+                        pending_constants.push((arg_source.clone(), name.clone()));
                     } else {
                         arg_slots[idx] = Some(ArgValue::Literal(name.clone()));
                     }
                 }
                 Expression::List(nested) => {
-                    if let Some((from_node, from_output)) =
-                        self.project_value(&Expression::List(nested.clone()), None, None)
-                    {
+                    if let Some((from_node, from_output)) = self.project_value(
+                        &Expression::List(nested.clone()),
+                        None,
+                        None,
+                        arg_source.expr.clone(),
+                        SourceOwner::NestedExpr {
+                            expr: arg_source.expr.clone(),
+                        },
+                    ) {
                         self.flush_pending_constant_args(
                             &mut node,
                             &mut arg_slots,
@@ -422,6 +705,14 @@ impl Projector {
                             to_node: node.id.clone(),
                             to_input: idx,
                             kind: connection_kind_for_op(&op),
+                            source: Some(ConnectionSource {
+                                from_expr: Some(arg_source.expr.clone()),
+                                to_call: source_expr.clone(),
+                                to_arg: arg_source.clone(),
+                                previous_arg: SourceArgValue::NestedExpression(
+                                    arg_source.expr.clone(),
+                                ),
+                            }),
                         });
                         arg_slots[idx] = Some(ArgValue::ConnectedExpr);
                     } else {
@@ -431,15 +722,15 @@ impl Projector {
                 other => {
                     let value = format_patch_literal(other);
                     if is_numeric_literal(&value) {
-                        pending_constants.push((idx, value));
+                        pending_constants.push((arg_source.clone(), value));
                     } else {
                         arg_slots[idx] = Some(ArgValue::Literal(value));
                     }
                 }
             }
         }
-        for (idx, value) in pending_constants {
-            arg_slots[idx] = Some(ArgValue::Literal(value));
+        for (arg_source, value) in pending_constants {
+            arg_slots[arg_source.semantic_index] = Some(ArgValue::Literal(value));
         }
         node.args = arg_slots
             .into_iter()
@@ -454,22 +745,43 @@ impl Projector {
         &mut self,
         node: &mut PatchNode,
         arg_slots: &mut [Option<ArgValue>],
-        pending_constants: &mut Vec<(usize, String)>,
+        pending_constants: &mut Vec<(ArgSource, String)>,
     ) {
-        for (idx, value) in pending_constants.drain(..) {
-            let constant_id = self.add_constant_node(&value);
+        for (arg_source, value) in pending_constants.drain(..) {
+            let to_call = node
+                .source
+                .as_ref()
+                .and_then(|source| source.expr.clone())
+                .expect("projected source node has a source expression");
+            let constant_id = self.add_constant_node(
+                &value,
+                Some(NodeSource {
+                    owner: SourceOwner::ArgumentSlot {
+                        call: to_call.clone(),
+                        arg: arg_source.clone(),
+                    },
+                    expr: Some(arg_source.expr.clone()),
+                    call_shape: None,
+                }),
+            );
             self.patch.connections.push(PatchConnection {
                 from_node: constant_id,
                 from_output: 0,
                 to_node: node.id.clone(),
-                to_input: idx,
+                to_input: arg_source.semantic_index,
                 kind: connection_kind_for_op(&node.op),
+                source: Some(ConnectionSource {
+                    from_expr: Some(arg_source.expr.clone()),
+                    to_call,
+                    to_arg: arg_source.clone(),
+                    previous_arg: SourceArgValue::Literal(arg_source.expr.clone()),
+                }),
             });
-            arg_slots[idx] = Some(ArgValue::ConnectedExpr);
+            arg_slots[arg_source.semantic_index] = Some(ArgValue::ConnectedExpr);
         }
     }
 
-    fn add_constant_node(&mut self, value: &str) -> String {
+    fn add_constant_node(&mut self, value: &str, source: Option<NodeSource>) -> String {
         let id = self.unique_id(value);
         self.patch.nodes.push(PatchNode {
             id: id.clone(),
@@ -480,8 +792,106 @@ impl Projector {
             outputs: vec!["out".to_string()],
             position: (0.0, 0.0),
             diagnostic: None,
+            source,
         });
         id
+    }
+
+    fn call_source_shape(&self, call: &SourceExprId, items: &[Expression]) -> CallSourceShape {
+        CallSourceShape {
+            call: call.clone(),
+            positional_args: self.positional_arg_sources(call, items, 1),
+            attributes: self.attribute_sources(call, items),
+        }
+    }
+
+    fn call_input_arg_sources(
+        &self,
+        op: &str,
+        call: &SourceExprId,
+        items: &[Expression],
+    ) -> Vec<ArgSource> {
+        let positional = self.positional_arg_sources(call, items, 1);
+        match op {
+            "in" => positional.into_iter().take(1).collect(),
+            "param" | "make-history" => Vec::new(),
+            "out" => positional.into_iter().take(2).collect(),
+            "write-history" => positional.into_iter().nth(1).into_iter().collect(),
+            _ => positional,
+        }
+    }
+
+    fn positional_arg_sources(
+        &self,
+        call: &SourceExprId,
+        items: &[Expression],
+        start: usize,
+    ) -> Vec<ArgSource> {
+        let mut args = Vec::new();
+        let mut item_index = start;
+        while item_index < items.len() {
+            if matches!(&items[item_index], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+                item_index += 2;
+                continue;
+            }
+            args.push(ArgSource {
+                semantic_index: args.len(),
+                item_index,
+                expr: self.child_expr(call, item_index),
+            });
+            item_index += 1;
+        }
+        args
+    }
+
+    fn attribute_sources(&self, call: &SourceExprId, items: &[Expression]) -> Vec<AttributeSource> {
+        let mut attributes = Vec::new();
+        let mut item_index = 1;
+        while item_index + 1 < items.len() {
+            if let Expression::Symbol(symbol) = &items[item_index]
+                && symbol.starts_with('@')
+            {
+                attributes.push(AttributeSource {
+                    key_item_index: item_index,
+                    value_item_index: item_index + 1,
+                    key: symbol.clone(),
+                    value: self.child_expr(call, item_index + 1),
+                });
+                item_index += 2;
+                continue;
+            }
+            item_index += 1;
+        }
+        attributes
+    }
+
+    fn source_arg_value(&self, expr: &Expression, arg: &ArgSource) -> SourceArgValue {
+        match expr {
+            Expression::Symbol(symbol) => SourceArgValue::SymbolReference {
+                expr: arg.expr.clone(),
+                symbol: symbol.clone(),
+                resolved_binding: self.symbol_bindings.get(symbol).cloned(),
+            },
+            Expression::List(_) => SourceArgValue::NestedExpression(arg.expr.clone()),
+            _ => SourceArgValue::Literal(arg.expr.clone()),
+        }
+    }
+
+    fn append_history_owner(&mut self, node_id: &str, owner: SourceOwner) {
+        let Some(node) = self.patch.nodes.iter_mut().find(|node| node.id == node_id) else {
+            return;
+        };
+        let Some(source) = node.source.as_mut() else {
+            return;
+        };
+        match &mut source.owner {
+            SourceOwner::Compound { parts } => parts.push(owner),
+            existing => {
+                source.owner = SourceOwner::Compound {
+                    parts: vec![existing.clone(), owner],
+                };
+            }
+        }
     }
 
     fn stable_id_for_call(&mut self, items: &[Expression], fallback: Option<&str>) -> String {
@@ -520,7 +930,7 @@ impl Projector {
         }
     }
 
-    fn add_code_island(&mut self, expr: &Expression, reason: &str) {
+    fn add_code_island(&mut self, expr: &Expression, reason: &str, form_id: SourceFormId) {
         let id = self.unique_id("code");
         self.patch.nodes.push(PatchNode {
             id,
@@ -531,6 +941,13 @@ impl Projector {
             outputs: Vec::new(),
             position: (0.0, 0.0),
             diagnostic: Some(reason.to_string()),
+            source: Some(NodeSource {
+                owner: SourceOwner::CodeIsland {
+                    form_id: form_id.clone(),
+                },
+                expr: Some(self.root_expr(form_id)),
+                call_shape: None,
+            }),
         });
         self.patch.diagnostics.push(reason.to_string());
     }

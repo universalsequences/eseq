@@ -18,8 +18,10 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 pub use lisp::parse_patch_source;
 pub use model::{
-    ArgValue, ConnectionKind, MacroPatch, NodeKind, Patch, PatchConnection, PatchNode,
-    PatcherIntent,
+    ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
+    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch, NodeKind, NodeSource,
+    Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId,
+    SourceOwner, SourceScopeId,
 };
 
 use display::node_display_label;

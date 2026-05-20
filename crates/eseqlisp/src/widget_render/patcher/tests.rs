@@ -20,6 +20,28 @@ fn parse(source: &str) -> Patch {
     parse_patch_source(source, PatcherIntent::Instrument).unwrap()
 }
 
+fn source_expr(scope: SourceScopeId, form_index: usize, path: &[usize]) -> SourceExprId {
+    SourceExprId {
+        form_id: SourceFormId {
+            scope,
+            index: form_index,
+        },
+        path: ExprPath(
+            path.iter()
+                .copied()
+                .map(ExprPathSegment::ListItem)
+                .collect(),
+        ),
+    }
+}
+
+fn node_expr(node: &PatchNode) -> SourceExprId {
+    node.source
+        .as_ref()
+        .and_then(|source| source.expr.clone())
+        .expect("node source expr")
+}
+
 #[test]
 fn projects_instrument_plumbing_and_nested_calls() {
     let patch = parse(
@@ -44,6 +66,121 @@ fn projects_instrument_plumbing_and_nested_calls() {
             .any(|node| node.kind == NodeKind::Out && node.id == "audio")
     );
     assert!(patch.connections.len() >= 3, "{:#?}", patch.connections);
+}
+
+#[test]
+fn source_metadata_tracks_nested_expression_paths() {
+    let patch = parse("(def result (phasor (* 25 (param freq @min 1 @max 100)) (rampToTrig xyz)))");
+
+    let phasor = patch.nodes.iter().find(|node| node.op == "phasor").unwrap();
+    let multiply = patch.nodes.iter().find(|node| node.op == "*").unwrap();
+    let constant = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Constant && node.op == "25")
+        .unwrap();
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap();
+    let ramp = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "rampToTrig")
+        .unwrap();
+
+    assert_eq!(node_expr(phasor), source_expr(SourceScopeId::Root, 0, &[2]));
+    assert_eq!(
+        node_expr(multiply),
+        source_expr(SourceScopeId::Root, 0, &[2, 1])
+    );
+    assert!(matches!(
+        &multiply.source.as_ref().unwrap().owner,
+        SourceOwner::NestedExpr { expr }
+            if expr == &source_expr(SourceScopeId::Root, 0, &[2, 1])
+    ));
+    assert_eq!(
+        node_expr(constant),
+        source_expr(SourceScopeId::Root, 0, &[2, 1, 1])
+    );
+    assert!(matches!(
+        &constant.source.as_ref().unwrap().owner,
+        SourceOwner::ArgumentSlot { call, arg }
+            if call == &source_expr(SourceScopeId::Root, 0, &[2, 1])
+                && arg.item_index == 1
+    ));
+    assert_eq!(
+        node_expr(param),
+        source_expr(SourceScopeId::Root, 0, &[2, 1, 2])
+    );
+    assert_eq!(
+        node_expr(ramp),
+        source_expr(SourceScopeId::Root, 0, &[2, 2])
+    );
+
+    let phasor_shape = phasor
+        .source
+        .as_ref()
+        .and_then(|source| source.call_shape.as_ref())
+        .unwrap();
+    assert_eq!(phasor_shape.positional_args.len(), 2);
+    assert_eq!(phasor_shape.positional_args[0].semantic_index, 0);
+    assert_eq!(phasor_shape.positional_args[0].item_index, 1);
+    assert_eq!(
+        phasor_shape.positional_args[0].expr,
+        source_expr(SourceScopeId::Root, 0, &[2, 1])
+    );
+    assert_eq!(phasor_shape.positional_args[1].semantic_index, 1);
+    assert_eq!(phasor_shape.positional_args[1].item_index, 2);
+    assert_eq!(
+        phasor_shape.positional_args[1].expr,
+        source_expr(SourceScopeId::Root, 0, &[2, 2])
+    );
+}
+
+#[test]
+fn source_metadata_separates_positional_args_from_attributes() {
+    let patch = parse("(param freq @min 1 @max 100)");
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap();
+    let shape = param
+        .source
+        .as_ref()
+        .and_then(|source| source.call_shape.as_ref())
+        .unwrap();
+
+    assert_eq!(shape.positional_args.len(), 1);
+    assert_eq!(shape.positional_args[0].semantic_index, 0);
+    assert_eq!(shape.positional_args[0].item_index, 1);
+    assert_eq!(
+        shape.positional_args[0].expr,
+        source_expr(SourceScopeId::Root, 0, &[1])
+    );
+
+    assert_eq!(
+        shape
+            .attributes
+            .iter()
+            .map(|attr| (
+                attr.key.as_str(),
+                attr.key_item_index,
+                attr.value_item_index
+            ))
+            .collect::<Vec<_>>(),
+        vec![("@min", 2, 3), ("@max", 4, 5)]
+    );
+    assert_eq!(
+        shape.attributes[0].value,
+        source_expr(SourceScopeId::Root, 0, &[3])
+    );
+    assert_eq!(
+        shape.attributes[1].value,
+        source_expr(SourceScopeId::Root, 0, &[5])
+    );
 }
 
 #[test]
@@ -95,6 +232,48 @@ fn param_references_project_as_connections_not_literal_args() {
         }),
         "{:#?}",
         patch.connections
+    );
+}
+
+#[test]
+fn source_metadata_resolves_param_references_by_binding_identity() {
+    let patch = parse(
+        r#"
+            (def unresolved (phasor freq))
+            (param freq @min 1 @max 100)
+            (def a (phasor freq))
+            (def b (+ freq a))
+            "#,
+    );
+    let param_binding = BindingId {
+        scope: SourceScopeId::Root,
+        name: "freq".to_string(),
+        kind: BindingKind::Param,
+    };
+    let resolved = patch
+        .connections
+        .iter()
+        .filter_map(|connection| connection.source.as_ref())
+        .filter_map(|source| match &source.previous_arg {
+            SourceArgValue::SymbolReference {
+                symbol,
+                resolved_binding,
+                ..
+            } if symbol == "freq" => resolved_binding.clone(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(resolved, vec![param_binding.clone(), param_binding]);
+    assert!(
+        patch
+            .nodes
+            .iter()
+            .find(|node| node.id == "unresolved")
+            .unwrap()
+            .args
+            .iter()
+            .any(|arg| matches!(arg, ArgValue::Literal(value) if value == "freq"))
     );
 }
 
@@ -153,6 +332,68 @@ fn collapses_history_read_and_write_into_make_history_node() {
 }
 
 #[test]
+fn source_metadata_tracks_history_compound_ownership_and_connections() {
+    let patch = parse(
+        r#"
+            (make-history h)
+            (def sig (noise))
+            (def delta (- (read-history h) sig))
+            (write-history h sig)
+            "#,
+    );
+    let history = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::History)
+        .expect("history node");
+    let source = history.source.as_ref().expect("history source");
+    let SourceOwner::Compound { parts } = &source.owner else {
+        panic!("history should have compound owner: {source:#?}");
+    };
+    assert!(
+        parts.iter().any(
+            |owner| matches!(owner, SourceOwner::TopLevelForm { form_id } if form_id.index == 0)
+        )
+    );
+    assert!(
+        parts
+            .iter()
+            .any(|owner| matches!(owner, SourceOwner::NestedExpr { expr } if expr == &source_expr(SourceScopeId::Root, 2, &[2, 1])))
+    );
+    assert!(
+        parts.iter().any(
+            |owner| matches!(owner, SourceOwner::TopLevelForm { form_id } if form_id.index == 3)
+        )
+    );
+
+    let feedback = patch
+        .connections
+        .iter()
+        .find(|connection| connection.kind == ConnectionKind::Feedback)
+        .unwrap();
+    let feedback_source = feedback.source.as_ref().expect("feedback source");
+    assert_eq!(
+        feedback_source.to_call,
+        source_expr(SourceScopeId::Root, 3, &[])
+    );
+    assert_eq!(feedback_source.to_arg.semantic_index, 1);
+    assert_eq!(feedback_source.to_arg.item_index, 2);
+
+    assert!(
+        patch
+            .connections
+            .iter()
+            .any(|connection| connection.from_node == history.id
+                && connection.kind == ConnectionKind::Forward
+                && connection.source.as_ref().is_some_and(|source| {
+                    source.to_call == source_expr(SourceScopeId::Root, 2, &[2])
+                        && source.to_arg.semantic_index == 0
+                        && source.to_arg.item_index == 1
+                }))
+    );
+}
+
+#[test]
 fn unsupported_forms_become_code_islands() {
     let patch = parse("(if gate (out 1 1 @name audio) (out 0 1 @name audio))");
     assert!(
@@ -162,6 +403,96 @@ fn unsupported_forms_become_code_islands() {
             .any(|node| node.kind == NodeKind::CodeIsland)
     );
     assert!(!patch.diagnostics.is_empty());
+}
+
+#[test]
+fn source_metadata_marks_code_island_owner() {
+    let patch = parse("(if gate (out 1 1 @name audio) (out 0 1 @name audio))");
+    let code = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::CodeIsland)
+        .unwrap();
+    let source = code.source.as_ref().expect("code island source");
+    assert_eq!(source.expr, Some(source_expr(SourceScopeId::Root, 0, &[])));
+    assert!(matches!(
+        &source.owner,
+        SourceOwner::CodeIsland { form_id }
+            if *form_id == SourceFormId {
+                scope: SourceScopeId::Root,
+                index: 0,
+            }
+    ));
+}
+
+#[test]
+fn source_metadata_scopes_macro_subpatches_separately() {
+    let patch = parse(
+        r#"
+            (def root (phasor 1))
+            (defmacro ap (sig g)
+              (def scaled (* sig g))
+              (phasor scaled))
+            "#,
+    );
+    let root_phasor = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "phasor")
+        .expect("root phasor");
+    assert_eq!(
+        node_expr(root_phasor),
+        source_expr(SourceScopeId::Root, 0, &[2])
+    );
+
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+    let scaled = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "*")
+        .expect("macro multiply");
+    let macro_scope = SourceScopeId::Macro {
+        name: "ap".to_string(),
+    };
+    assert_eq!(node_expr(scaled), source_expr(macro_scope.clone(), 0, &[2]));
+
+    let macro_phasor = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "phasor")
+        .expect("macro phasor");
+    assert_eq!(
+        node_expr(macro_phasor),
+        source_expr(macro_scope.clone(), 1, &[])
+    );
+
+    let sig_binding = BindingId {
+        scope: macro_scope.clone(),
+        name: "sig".to_string(),
+        kind: BindingKind::MacroParam,
+    };
+    assert!(
+        macro_patch
+            .patch
+            .connections
+            .iter()
+            .filter_map(|connection| connection.source.as_ref())
+            .any(|source| matches!(
+                &source.previous_arg,
+                SourceArgValue::SymbolReference {
+                    symbol,
+                    resolved_binding: Some(binding),
+                    ..
+                } if symbol == "sig" && binding == &sig_binding
+            ))
+    );
+    assert_ne!(node_expr(root_phasor).form_id.scope, macro_scope);
 }
 
 #[test]

@@ -458,6 +458,7 @@ pub(super) fn patch_with_interaction_state(
                 to_node: edit.to.node_id.clone(),
                 to_input: edit.to.input_index,
                 kind: edit.kind,
+                source: None,
             }),
     );
     patch
@@ -495,6 +496,7 @@ pub(super) fn node_from_editor_text(
             outputs: Vec::new(),
             position,
             diagnostic: None,
+            source: None,
         };
     }
 
@@ -559,5 +561,6 @@ pub(super) fn node_from_editor_text(
                 ))
             .then(|| format!("unknown DGenLisp operator `{op}`"))
         }),
+        source: None,
     }
 }
