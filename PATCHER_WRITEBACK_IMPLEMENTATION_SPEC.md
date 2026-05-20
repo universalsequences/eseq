@@ -1362,23 +1362,29 @@ Tests:
 
 ### Phase 6: Param and Macro Parameter Rename
 
+Status: first root-param slice implemented. Macro parameter rename remains
+pending.
+
 Goal: rename binding identities, not text occurrences.
 
 Responsibilities:
 
-- Param node text rename updates the declaration.
-- All resolved references to that binding emit the new name.
+- Root param node text rename updates the declaration.
+- All resolved references to that root param binding emit the new name.
 - Unresolved same-text symbols are not rewritten.
 - Macro parameter rename updates the `defmacro` header and resolved references
   inside the macro scope, if macro parameter rename is enabled.
 - Collisions block save.
+- Code islands in the renamed binding's scope block save because they may
+  contain references that source metadata cannot prove safe to rewrite.
 
 Tests:
 
 - Param rename updates all resolved root references.
-- Macro parameter rename updates header and macro-local references.
 - Unresolved symbols with the old text remain unchanged.
+- Param rename collision returns a blocker.
 - Code islands that may reference the old name produce a diagnostic or blocker.
+- Macro parameter rename updates header and macro-local references. Pending.
 
 ### Phase 7: File Save Wiring
 

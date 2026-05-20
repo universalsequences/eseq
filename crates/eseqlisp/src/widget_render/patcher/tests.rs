@@ -710,6 +710,87 @@ fn writeback_node_text_edit_rewrites_owning_root_expression() {
 }
 
 #[test]
+fn writeback_root_param_rename_updates_resolved_references_only() {
+    let source = r#"
+        (def unresolved (phasor freq))
+        (param freq @min 1 @max 100)
+        (def a (phasor freq))
+        (def b (+ freq a))
+    "#;
+    let patch = parse(source);
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text = "param cutoff @min 1 @max 100".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def unresolved (phasor freq))\n(param cutoff @min 1.0 @max 100.0)\n(def a (phasor cutoff))\n(def b (+ cutoff a))"
+    );
+}
+
+#[test]
+fn writeback_root_param_rename_collision_returns_blocker() {
+    let source = r#"
+        (param freq)
+        (param cutoff)
+        (def result (phasor freq))
+    "#;
+    let patch = parse(source);
+    let param = patch.nodes.iter().find(|node| node.id == "freq").unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text = "param cutoff".to_string();
+
+    assert!(matches!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state),
+        Err(WriteBackError::BindingRenameCollision { name, .. }) if name == "cutoff"
+    ));
+}
+
+#[test]
+fn writeback_root_param_rename_with_code_island_returns_blocker() {
+    let source = r#"
+        (if gate freq 0)
+        (param freq)
+        (def result (phasor freq))
+    "#;
+    let patch = parse(source);
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text = "param cutoff".to_string();
+
+    assert!(matches!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state),
+        Err(WriteBackError::BindingRenameBlockedByCodeIsland { name, .. }) if name == "freq"
+    ));
+}
+
+#[test]
 fn writeback_nested_node_text_edit_preserves_nested_structure() {
     let source = "(def result (phasor (* 25 freq) (mix xyz a b)))";
     let patch = parse(source);

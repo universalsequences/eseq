@@ -5,8 +5,9 @@ use crate::parser::{ASTParser, Expression, Parser, format_expression};
 use super::display::node_display_label;
 use super::lisp::{parse_patch_source, symbol_at};
 use super::model::{
-    BindingTarget, ExprPathSegment, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection,
-    PatchNode, PatcherIntent, SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
+    BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind, OutputPortRef,
+    Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId,
+    SourceOwner, SourceScopeId,
 };
 use super::project::dgenlisp_operator_names;
 use super::state::{
@@ -62,6 +63,16 @@ pub(super) enum WriteBackError {
         node_id: String,
         reason: String,
     },
+    BindingRenameCollision {
+        view_key: String,
+        node_id: String,
+        name: String,
+    },
+    BindingRenameBlockedByCodeIsland {
+        view_key: String,
+        node_id: String,
+        name: String,
+    },
     UnsupportedSourceOwner {
         view_key: String,
         node_id: String,
@@ -101,7 +112,13 @@ pub(super) fn emit_patch_writeback(
                 reason: "active text edit targets a missing source node".to_string(),
             })?;
         if text_edit.text.trim() != node_display_label(node).trim() {
-            apply_node_text_edit(&mut document, &active_view_key, node, &text_edit.text)?;
+            apply_node_text_edit(
+                &mut document,
+                &root_patch,
+                &active_view_key,
+                node,
+                &text_edit.text,
+            )?;
         }
     }
 
@@ -154,7 +171,13 @@ pub(super) fn emit_patch_writeback(
                     }
                 })?;
                 if edit.text.trim() != node_display_label(node).trim() {
-                    apply_node_text_edit(&mut document, &edit.view_key, node, &edit.text)?;
+                    apply_node_text_edit(
+                        &mut document,
+                        &root_patch,
+                        &edit.view_key,
+                        node,
+                        &edit.text,
+                    )?;
                 }
             }
         }
@@ -1569,6 +1592,7 @@ fn scope_for_view_key(view_key: &str) -> SourceScopeId {
 
 fn apply_node_text_edit(
     document: &mut SourceDocument,
+    root_patch: &Patch,
     view_key: &str,
     node: &PatchNode,
     text: &str,
@@ -1600,6 +1624,12 @@ fn apply_node_text_edit(
             node_id: node.id.clone(),
             operator: operator.to_string(),
         });
+    }
+
+    if node.kind == NodeKind::Param
+        && let SourceOwner::TopLevelForm { form_id } = &source.owner
+    {
+        return apply_param_text_edit(document, root_patch, view_key, node, form_id, replacement);
     }
 
     match &source.owner {
@@ -1636,6 +1666,112 @@ fn apply_node_text_edit(
             node_id: node.id.clone(),
             owner: format!("{other:?}"),
         }),
+    }
+}
+
+fn apply_param_text_edit(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    view_key: &str,
+    node: &PatchNode,
+    form_id: &SourceFormId,
+    replacement: Expression,
+) -> Result<(), WriteBackError> {
+    let old_name = document
+        .form_expr(&form_id.scope, form_id.index)
+        .and_then(param_name)
+        .ok_or_else(|| WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "param source has no symbolic name".to_string(),
+        })?
+        .to_string();
+    let new_name = param_name(&replacement)
+        .ok_or_else(|| WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "param edit must keep a symbolic parameter name".to_string(),
+        })?
+        .to_string();
+
+    if new_name != old_name {
+        let reserved = document.reserved_names(&form_id.scope);
+        if reserved.contains(&new_name) {
+            return Err(WriteBackError::BindingRenameCollision {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                name: new_name,
+            });
+        }
+        if patch_for_view(root_patch, view_key).is_some_and(|patch| {
+            patch
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::CodeIsland)
+        }) {
+            return Err(WriteBackError::BindingRenameBlockedByCodeIsland {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                name: old_name,
+            });
+        }
+    }
+
+    let expr_id = SourceExprId {
+        form_id: form_id.clone(),
+        path: Default::default(),
+    };
+    document.replace_expr(&expr_id, replacement)?;
+
+    if new_name == old_name {
+        return Ok(());
+    }
+
+    let binding = BindingId {
+        scope: form_id.scope.clone(),
+        name: old_name,
+        kind: BindingKind::Param,
+    };
+    let patch =
+        patch_for_view(root_patch, view_key).ok_or_else(|| WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "param rename targets a missing patch view".to_string(),
+        })?;
+    let mut refs = patch
+        .connections
+        .iter()
+        .filter_map(|connection| connection.source.as_ref())
+        .filter_map(|source| match &source.previous_arg {
+            SourceArgValue::SymbolReference {
+                expr,
+                resolved_binding: Some(resolved_binding),
+                ..
+            } if resolved_binding == &binding => Some(expr.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    refs.sort_by(|left, right| {
+        left.form_id
+            .index
+            .cmp(&right.form_id.index)
+            .then_with(|| expr_path_indexes(left).cmp(&expr_path_indexes(right)))
+    });
+    refs.dedup();
+    for expr in refs {
+        document.replace_expr(&expr, Expression::Symbol(new_name.clone()))?;
+    }
+    Ok(())
+}
+
+fn param_name(expr: &Expression) -> Option<&str> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if symbol_at(items, 0) == Some("param") {
+        symbol_at(items, 1)
+    } else {
+        None
     }
 }
 
