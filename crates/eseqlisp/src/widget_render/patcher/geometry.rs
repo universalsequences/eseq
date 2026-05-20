@@ -294,19 +294,17 @@ pub(super) fn hit_patcher_cable(
                 input_slot_counts,
                 output_counts,
             )?;
-            let distance = if connection
-                .segment
-                .is_some_and(|segment| segment.is_segmented)
-            {
-                super::super::cable::distance_to_segmented_cable_px(
-                    start,
-                    end,
-                    origin.1 + connection.segment.unwrap().segment_row,
-                    SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
-                    (local_col, local_row),
-                )
-            } else {
-                super::super::cable::distance_to_cable_px(start, end, (local_col, local_row))
+            let distance = match connection.segment {
+                Some(segment) if segment.is_segmented => {
+                    super::super::cable::distance_to_segmented_cable_px(
+                        start,
+                        end,
+                        origin.1 + segment.segment_row,
+                        SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+                        (local_col, local_row),
+                    )
+                }
+                _ => super::super::cable::distance_to_cable_px(start, end, (local_col, local_row)),
             };
             (distance <= CABLE_HIT_RADIUS_CELLS)
                 .then(|| (distance, source_connection_id(connection)))

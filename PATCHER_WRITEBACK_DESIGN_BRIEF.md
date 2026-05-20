@@ -27,8 +27,8 @@ Current behavior is mostly projection plus in-memory editing:
 - Never save or emit Lisp yet.
 
 The Lisp file must remain the semantic source of truth. A future layout sidecar
-may persist node positions and view state, but it must not become a second
-semantic patch format.
+may persist node positions, segmented cable presentation, and view state, but it
+must not become a second semantic patch format.
 
 ## The Core Problem
 
@@ -477,11 +477,16 @@ Layout should persist separately from Lisp:
 ```
 
 The sidecar must not be required for compile correctness. If it is missing,
-stale, or partially invalid, the patcher should fall back to auto-layout.
+stale, or partially invalid, the patcher should fall back to auto-layout and
+default cable slack. Cable entries are valid only when their stable endpoint
+keys resolve to an existing source-projected connection; they must never create,
+delete, or retarget graph connections.
 
 Open questions:
 
 - What stable node keys should the layout sidecar use?
+- What stable connection keys should segmented cable layout use for anonymous
+  expression nodes?
 - Should generated unsaved node IDs ever be written to sidecar?
 - Does pan/zoom persist globally or per macro view?
 

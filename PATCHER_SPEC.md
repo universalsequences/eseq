@@ -153,8 +153,8 @@ Recommended next phase:
 
 **Single source of truth:** the lisp text on disk. The patch graph in memory
 is a *projection* of that text. The sidecar `dsp.layout.json` carries only
-positional metadata (x, y per node, view state per subpatch); it is never
-required for compilation or correctness.
+presentation metadata (node positions, segmented cable routing, and view state
+per subpatch); it is never required for compilation or correctness.
 
 The widget owns:
 - Parse: lisp → graph (using existing dgenlisp parser).
@@ -192,7 +192,12 @@ Node
 Connection
 ├── from:            (NodeId, OutletIdx)
 ├── to:              (NodeId, InletIdx)
-└── kind:            Audio | Control | Feedback
+├── kind:            Audio | Control | Feedback
+└── segment:         Option<CableSegment>   // sidecar-only visual routing
+
+CableSegment
+├── enabled:         bool
+└── y:               f32                    // patch-local row for horizontal run
 
 MacroDefinition
 ├── name:            String
@@ -239,12 +244,18 @@ crates/sequencer/instruments/videogame-arp/
       "pitch_env":  { "x": 320.0, "y": 240.0 },
       "ap#0":       { "x": 480.0, "y": 120.0 }
     },
+    "cables": {
+      "amp_env:0->ap#0:1": { "segmented": true, "y": 210.0 }
+    },
     "scroll": { "x": 0.0, "y": 0.0 },
     "zoom":   1.0
   },
   "macros": {
     "ap": {
       "nodes": { "node": { "x": 200, "y": 100 }, "delayed": { "x": 400, "y": 100 } },
+      "cables": {
+        "node:0->delayed:0": { "segmented": true, "y": 120.0 }
+      },
       "inline_render": false,
       "scroll": { "x": 0.0, "y": 0.0 },
       "zoom":   1.0
@@ -253,9 +264,12 @@ crates/sequencer/instruments/videogame-arp/
 }
 ```
 
-**No semantic content in the layout file.** If it is deleted or corrupted, the
-patch still loads (with auto-layout). If a hand-edit to `dsp.lisp` removes a
-node, its entry in the layout file is silently dropped on the next save.
+**No semantic content in the layout file.** Cable entries describe only how an
+existing source connection is drawn; they must never create, delete, or retarget
+connections. If the sidecar is deleted or corrupted, the patch still loads
+(with auto-layout and default cable slack). If a hand-edit to `dsp.lisp` removes
+a node or connection, its entry in the layout file is silently dropped on the
+next save.
 
 ---
 

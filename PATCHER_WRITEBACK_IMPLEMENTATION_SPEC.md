@@ -944,11 +944,15 @@ required for compile correctness.
 Allowed V1 data:
 
 - Node positions.
+- Cable presentation state for existing connections:
+  - Whether the cable is segmented.
+  - The patch-local row of the segmented cable's horizontal run.
 
 Forbidden data:
 
 - Graph semantics.
-- Connections.
+- Connection topology or any information that creates, deletes, or retargets a
+  connection.
 - Node operators.
 - Node arguments.
 - Param values.
@@ -974,12 +978,24 @@ Sidecar shape:
     "nodes": {
       "binding:pitch": { "x": 12.0, "y": 4.0 },
       "expr:0/2/1": { "x": 24.0, "y": 8.0 }
+    },
+    "cables": {
+      "binding:pitch:0->binding:sig:0": {
+        "segmented": true,
+        "y": 6.5
+      }
     }
   },
   "macros": {
     "ap": {
       "nodes": {
         "binding:delayed": { "x": 20.0, "y": 8.0 }
+      },
+      "cables": {
+        "macro-param:input:0->binding:delayed:0": {
+          "segmented": true,
+          "y": 10.0
+        }
       }
     }
   }
@@ -998,6 +1014,17 @@ Layout node keys should prefer semantic stable keys when available:
 
 When a generated binding is emitted, its layout key should migrate from the
 temporary created key to the emitted binding key.
+
+Layout cable keys should identify source-projected endpoints using the same
+stable node keys and explicit outlet/inlet indexes:
+
+- `<from-node-key>:<outlet-index>-><to-node-key>:<inlet-index>`.
+- Cable entries whose endpoints no longer resolve are stale layout data and
+  must be ignored.
+- Cable entries are applied only after the Lisp source has projected a matching
+  connection. They must not synthesize missing connections.
+- `y` is patch-local, not viewport-local, so panning changes the rendered row by
+  the same amount as the connected nodes.
 
 ## Projection Requirements
 
@@ -1348,11 +1375,12 @@ Tests:
 
 ### Phase 8: Layout Sidecar Persistence
 
-Goal: persist node positions only.
+Goal: persist non-semantic layout state.
 
 Responsibilities:
 
 - Write `dsp.layout.json` with root and macro node positions.
+- Write segmented cable presentation state for root and macro connections.
 - Use semantic layout keys when available.
 - Migrate temporary created keys to emitted binding/history keys after save.
 - Ignore stale sidecar entries safely.
@@ -1361,6 +1389,8 @@ Tests:
 
 - Root node positions persist and reload.
 - Macro node positions persist under the macro namespace.
+- Segmented cable settings persist and reload under the correct scope.
+- Stale cable entries do not create, delete, or retarget connections.
 - Stale sidecar entries do not affect parsing or compile semantics.
 
 ## Open Questions To Continue
