@@ -523,6 +523,11 @@ pub enum MetalCircleVisibleHalf {
 #[derive(Clone)]
 pub enum MetalPrimitive {
     Rect(MetalRectPrimitive),
+    /// Rectangles that must render above foreground widget instances but below
+    /// proportional text. This is for widget-local editing overlays such as
+    /// text selections and cursors on widgets whose chassis intentionally masks
+    /// cables or other canvas geometry.
+    ForegroundRect(MetalRectPrimitive),
     Quad(MetalQuadPrimitive),
     GlyphRun(MetalGlyphRunPrimitive),
     ProportionalText(MetalProportionalTextPrimitive),
@@ -1080,6 +1085,7 @@ fn collect_metal_primitives_recursive(
 fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetViewport) {
     match prim {
         MetalPrimitive::Rect(r) => r.rect.row += dy,
+        MetalPrimitive::ForegroundRect(r) => r.rect.row += dy,
         MetalPrimitive::Quad(q) => q.y += dy,
         MetalPrimitive::GlyphRun(g) => g.row += dy,
         MetalPrimitive::ProportionalText(t) => t.row += dy,

@@ -5,16 +5,26 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
-use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, styled_cell};
+use super::text_input::{
+    TextEditOutcome, TextInputState, apply_text_entry_key, cache_char_widths,
+    selection_range as text_selection_range,
+};
+#[cfg(target_os = "macos")]
+use super::text_input::{closest_char_index_for_x, cursor_x_from_char_cache};
+use super::{
+    CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent, styled_cell,
+};
 #[cfg(target_os = "macos")]
 use super::{
     MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive, MetalPrimitive,
     MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance,
     WidgetViewport, ndc_bounds,
 };
-use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{
+    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_stable_widget_id,
+};
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 use crate::theme;
 use crate::vm::Value;
@@ -37,6 +47,7 @@ const NODE_BORDER_INSET: f32 = 0.14;
 const NODE_CORNER_RADIUS_PX: f32 = 18.0;
 const NODE_FONT_SIZE: f32 = 16.0;
 const CODE_NODE_FONT_SIZE: f32 = 11.0;
+const NODE_TEXT_COL_OFFSET: f32 = 0.92;
 const PORT_OUTER_DIAMETER_PX: f32 = 27.0;
 const PORT_INNER_DIAMETER_PX: f32 = 18.75;
 const PORT_EDGE_PADDING_CELLS: f32 = 1.65;
@@ -63,12 +74,19 @@ thread_local! {
 }
 
 fn patcher_state_key(node: &LayoutNode) -> u64 {
-    node.stable_widget_id.unwrap_or_else(|| {
+    patcher_state_key_from_parts(node.stable_widget_id, &node.props)
+}
+
+fn patcher_state_key_from_parts(
+    stable_widget_id: Option<u64>,
+    props: &HashMap<String, Value>,
+) -> u64 {
+    stable_widget_id.unwrap_or_else(|| {
         let mut hasher = DefaultHasher::new();
         "patcher".hash(&mut hasher);
-        prop_str(&node.props, "path").hash(&mut hasher);
-        prop_str(&node.props, "file").hash(&mut hasher);
-        prop_str(&node.props, "intent").hash(&mut hasher);
+        prop_str(props, "path").hash(&mut hasher);
+        prop_str(props, "file").hash(&mut hasher);
+        prop_str(props, "intent").hash(&mut hasher);
         hasher.finish()
     })
 }
@@ -104,10 +122,32 @@ fn clamp_patcher_pan_state(state: &mut PatcherPanState) {
 struct PatcherInteractionState {
     selected_nodes: HashSet<String>,
     hovered_node: Option<String>,
+    hovered_macro_drill_in: Option<String>,
     hover_back_button: bool,
     node_positions: HashMap<String, (f32, f32)>,
+    node_text_overrides: HashMap<String, String>,
+    draft_nodes: Vec<PatcherDraftNode>,
+    next_draft_node: u64,
+    text_edit: Option<PatcherTextEdit>,
     active_macro: Option<String>,
     drag: Option<PatcherDragState>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PatcherDraftNode {
+    view_key: String,
+    id: String,
+    text: String,
+    position: (f32, f32),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PatcherTextEdit {
+    node_id: String,
+    text: String,
+    original_text: String,
+    state: TextInputState,
+    is_new_node: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -163,6 +203,7 @@ pub enum NodeKind {
 pub enum ArgValue {
     Literal(String),
     SymbolRef(String),
+    ConnectedExpr,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +231,12 @@ pub struct PatchConnection {
     pub to_node: String,
     pub to_input: usize,
     pub kind: ConnectionKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OperatorPortShape {
+    input_count: usize,
+    output_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -592,8 +639,10 @@ impl Projector {
                             to_input: idx,
                             kind: connection_kind_for_op(&op),
                         });
+                        node.args.push(ArgValue::ConnectedExpr);
+                    } else {
+                        node.args.push(ArgValue::Literal("<expr>".to_string()));
                     }
-                    node.args.push(ArgValue::Literal("<expr>".to_string()));
                 }
                 other => node
                     .args
@@ -912,6 +961,58 @@ fn dgenlisp_operator_names() -> &'static HashSet<String> {
     })
 }
 
+fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, OperatorPortShape> {
+    static OPERATOR_PORT_SHAPES: OnceLock<HashMap<String, OperatorPortShape>> = OnceLock::new();
+    OPERATOR_PORT_SHAPES.get_or_init(|| {
+        let metadata: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../sequencer/tools/dgenlisp-operators.json"
+        ))
+        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let operators = metadata
+            .get("operators")
+            .and_then(serde_json::Value::as_array)
+            .expect("bundled dgenlisp-operators.json must contain an operators array");
+        let mut shapes = HashMap::new();
+        for operator in operators {
+            let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let shape = OperatorPortShape {
+                input_count: documented_port_count(operator, "inputs", "input_count"),
+                output_count: documented_port_count(operator, "outputs", "output_count"),
+            };
+            shapes.insert(name.to_string(), shape);
+            if let Some(aliases) = operator
+                .get("aliases")
+                .and_then(serde_json::Value::as_array)
+            {
+                for alias in aliases {
+                    if let Some(alias) = alias.as_str() {
+                        shapes.insert(alias.to_string(), shape);
+                    }
+                }
+            }
+        }
+        shapes
+    })
+}
+
+fn documented_port_count(operator: &serde_json::Value, array_key: &str, count_key: &str) -> usize {
+    let array_count = operator
+        .get(array_key)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if array_count > 0 {
+        return array_count;
+    }
+    operator
+        .get(count_key)
+        .and_then(|count| count.get("maximum").or_else(|| count.get("minimum")))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize
+}
+
 fn pan_patcher_by_wheel(node: &LayoutNode, mouse_kind: MouseEventKind) {
     let (delta_x, delta_y) = match mouse_kind {
         MouseEventKind::ScrollUp => (0.0, -WHEEL_PAN_STEP_CELLS),
@@ -942,7 +1043,7 @@ fn sync_patcher_pan_bounds(node: &LayoutNode, state: &mut PatcherPanState) {
         let interaction_state = get_patcher_interaction_state(patcher_state_key(node));
         let view_key = active_patcher_view_key(&interaction_state);
         let patch = active_patcher_patch(&patch, &interaction_state);
-        let patch = patch_with_interaction_positions(patch, &interaction_state, &view_key);
+        let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
         let content_size = patch_content_size(&patch);
         state.content_width = content_size.0.max(node.rect.width);
         state.content_height = content_size.1.max(node.rect.height);
@@ -971,7 +1072,7 @@ fn active_patcher_view_key(interaction_state: &PatcherInteractionState) -> Strin
         .unwrap_or_else(|| "root".to_string())
 }
 
-fn scoped_node_position_key(view_key: &str, node_id: &str) -> String {
+fn scoped_node_key(view_key: &str, node_id: &str) -> String {
     format!("{view_key}::{node_id}")
 }
 
@@ -1007,18 +1108,209 @@ fn patcher_back_label(interaction_state: &PatcherInteractionState) -> Option<&'s
     interaction_state.active_macro.as_ref().map(|_| "<")
 }
 
-fn patch_with_interaction_positions(
+fn patch_with_interaction_state(
     mut patch: Patch,
     interaction_state: &PatcherInteractionState,
     view_key: &str,
 ) -> Patch {
+    let macro_arities = patch
+        .macros
+        .iter()
+        .map(|macro_patch| (macro_patch.name.clone(), macro_patch.params.len()))
+        .collect::<HashMap<_, _>>();
     for node in &mut patch.nodes {
-        let position_key = scoped_node_position_key(view_key, &node.id);
+        let position_key = scoped_node_key(view_key, &node.id);
         if let Some(position) = interaction_state.node_positions.get(&position_key) {
             node.position = *position;
         }
+        let text_key = scoped_node_key(view_key, &node.id);
+        if let Some(text) = interaction_state.node_text_overrides.get(&text_key) {
+            apply_node_text_override(node, text, &macro_arities);
+        }
+        if let Some(edit) = interaction_state
+            .text_edit
+            .as_ref()
+            .filter(|edit| edit.node_id == node.id)
+        {
+            apply_node_text_override(node, &edit.text, &macro_arities);
+        }
+    }
+    for draft in interaction_state
+        .draft_nodes
+        .iter()
+        .filter(|draft| draft.view_key == view_key)
+    {
+        let position = interaction_state
+            .node_positions
+            .get(&scoped_node_key(view_key, &draft.id))
+            .copied()
+            .unwrap_or(draft.position);
+        let mut text = draft.text.clone();
+        if let Some(edit) = interaction_state
+            .text_edit
+            .as_ref()
+            .filter(|edit| edit.node_id == draft.id)
+        {
+            text = edit.text.clone();
+        }
+        patch.nodes.push(node_from_editor_text(
+            &draft.id,
+            &text,
+            position,
+            &macro_arities,
+            interaction_state
+                .text_edit
+                .as_ref()
+                .is_some_and(|edit| edit.node_id == draft.id),
+        ));
     }
     patch
+}
+
+fn apply_node_text_override(
+    node: &mut PatchNode,
+    text: &str,
+    macro_arities: &HashMap<String, usize>,
+) {
+    let edited = node_from_editor_text(&node.id, text, node.position, macro_arities, false);
+    node.op = edited.op;
+    node.kind = edited.kind;
+    node.label = edited.label;
+    node.args = edited.args;
+    node.outputs = edited.outputs;
+    node.diagnostic = edited.diagnostic;
+}
+
+fn node_from_editor_text(
+    id: &str,
+    text: &str,
+    position: (f32, f32),
+    macro_arities: &HashMap<String, usize>,
+    is_editing: bool,
+) -> PatchNode {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || is_editing {
+        return PatchNode {
+            id: id.to_string(),
+            op: trimmed.to_string(),
+            kind: NodeKind::Builtin,
+            label: trimmed.to_string(),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            position,
+            diagnostic: None,
+        };
+    }
+
+    let parsed = parse_editor_node_text(trimmed);
+    let (op, inline_args, parse_diagnostic) = match parsed {
+        Ok((op, inline_args)) => (op, inline_args, None),
+        Err(error) => (trimmed.to_string(), Vec::new(), Some(error)),
+    };
+    let known_macros = macro_arities.keys().cloned().collect::<HashSet<_>>();
+    let kind = node_kind_for_op(&op, &known_macros);
+    let shape = editor_node_port_shape(&op, kind, macro_arities);
+    let args = match kind {
+        NodeKind::In => inline_args
+            .into_iter()
+            .map(ArgValue::Literal)
+            .collect::<Vec<_>>(),
+        NodeKind::Param => Vec::new(),
+        _ => {
+            let input_count = shape.input_count.max(inline_args.len() + 1);
+            let mut args = vec![ArgValue::ConnectedExpr; input_count];
+            for (idx, value) in inline_args.into_iter().enumerate() {
+                let slot = idx + 1;
+                if slot >= args.len() {
+                    args.resize(slot + 1, ArgValue::ConnectedExpr);
+                }
+                args[slot] = if value == "?" {
+                    ArgValue::ConnectedExpr
+                } else {
+                    ArgValue::Literal(value)
+                };
+            }
+            args
+        }
+    };
+
+    PatchNode {
+        id: id.to_string(),
+        op: op.clone(),
+        kind,
+        label: trimmed.to_string(),
+        args,
+        outputs: (0..shape.output_count)
+            .map(|idx| {
+                if idx == 0 {
+                    "out".to_string()
+                } else {
+                    format!("out{}", idx + 1)
+                }
+            })
+            .collect(),
+        position,
+        diagnostic: parse_diagnostic.or_else(|| {
+            let known = dgenlisp_operator_names().contains(&op) || macro_arities.contains_key(&op);
+            (!known && !matches!(kind, NodeKind::In | NodeKind::Out | NodeKind::Param))
+                .then(|| format!("unknown DGenLisp operator `{op}`"))
+        }),
+    }
+}
+
+fn editor_node_port_shape(
+    op: &str,
+    kind: NodeKind,
+    macro_arities: &HashMap<String, usize>,
+) -> OperatorPortShape {
+    match kind {
+        NodeKind::In | NodeKind::Param => OperatorPortShape {
+            input_count: 0,
+            output_count: 1,
+        },
+        NodeKind::Out => OperatorPortShape {
+            input_count: 1,
+            output_count: 0,
+        },
+        NodeKind::History => OperatorPortShape {
+            input_count: 1,
+            output_count: 1,
+        },
+        NodeKind::MacroInstance => OperatorPortShape {
+            input_count: macro_arities.get(op).copied().unwrap_or(1),
+            output_count: 1,
+        },
+        _ => dgenlisp_operator_port_shapes()
+            .get(op)
+            .copied()
+            .unwrap_or(OperatorPortShape {
+                input_count: 1,
+                output_count: 1,
+            }),
+    }
+}
+
+fn parse_editor_node_text(text: &str) -> Result<(String, Vec<String>), String> {
+    let source = format!("({text})");
+    let tokens = Parser::new(source)
+        .parse()
+        .map_err(|error| format!("failed to tokenize node text: {error:?}"))?;
+    let exprs = ASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("failed to parse node text: {error:?}"))?;
+    let Some(Expression::List(items)) = exprs.first() else {
+        return Err("node text must start with an operator".to_string());
+    };
+    let Some(op) = symbol_at(items, 0) else {
+        return Err("node text must start with a symbolic operator".to_string());
+    };
+    Ok((
+        op.to_string(),
+        positional_args(items, 1)
+            .into_iter()
+            .map(format_patch_literal)
+            .collect(),
+    ))
 }
 
 fn patcher_origin(rect: Rect, pan_state: &PatcherPanState) -> (f32, f32) {
@@ -1091,13 +1383,125 @@ fn rect_from_points(start_col: f32, start_row: f32, current_col: f32, current_ro
     }
 }
 
+fn patcher_text_char_width_cells() -> f32 {
+    (NODE_FONT_SIZE * 0.55 / 10.0).max(0.25)
+}
+
+fn patcher_text_cursor_at_col(rect: Rect, text: &str, local_col: f32) -> usize {
+    patcher_text_cursor_at_col_with_cell_width(rect, text, local_col, 10.0)
+}
+
+fn patcher_text_cursor_at_col_with_cell_width(
+    rect: Rect,
+    text: &str,
+    local_col: f32,
+    cell_w: f32,
+) -> usize {
+    let target = (local_col - rect.col - NODE_TEXT_COL_OFFSET).max(0.0);
+    #[cfg(target_os = "macos")]
+    {
+        closest_char_index_for_x(text, NODE_FONT_SIZE, target, cell_w).min(text.chars().count())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ((target / patcher_text_char_width_cells()).round().max(0.0) as usize)
+            .min(text.chars().count())
+    }
+}
+
+fn begin_patcher_text_edit(
+    state: &mut PatcherInteractionState,
+    node_id: String,
+    text: String,
+    cursor_pos: usize,
+    is_new_node: bool,
+) {
+    state.selected_nodes.clear();
+    state.selected_nodes.insert(node_id.clone());
+    state.drag = None;
+    state.text_edit = Some(PatcherTextEdit {
+        node_id,
+        text: text.clone(),
+        original_text: text,
+        state: TextInputState {
+            cursor_pos,
+            selection_anchor: None,
+            selecting: false,
+        },
+        is_new_node,
+    });
+    state.hover_back_button = false;
+}
+
+fn commit_patcher_text_edit(state: &mut PatcherInteractionState, view_key: &str) {
+    let Some(edit) = state.text_edit.take() else {
+        return;
+    };
+    let committed_text = edit.text.trim().to_string();
+    if edit.is_new_node {
+        if let Some(draft) = state
+            .draft_nodes
+            .iter_mut()
+            .find(|draft| draft.id == edit.node_id && draft.view_key == view_key)
+        {
+            draft.text = committed_text.clone();
+        }
+        if !committed_text.is_empty() {
+            state
+                .node_text_overrides
+                .insert(scoped_node_key(view_key, &edit.node_id), committed_text);
+        }
+        state
+            .draft_nodes
+            .retain(|draft| !(draft.id == edit.node_id && draft.text.is_empty()));
+    } else if edit.text != edit.original_text {
+        state
+            .node_text_overrides
+            .insert(scoped_node_key(view_key, &edit.node_id), edit.text);
+    }
+}
+
+fn cancel_patcher_text_edit(state: &mut PatcherInteractionState, view_key: &str) {
+    let Some(edit) = state.text_edit.take() else {
+        return;
+    };
+    if edit.is_new_node {
+        state
+            .draft_nodes
+            .retain(|draft| !(draft.id == edit.node_id && draft.view_key == view_key));
+    }
+}
+
+fn update_patcher_text_edit_pointer(
+    edit: &mut PatcherTextEdit,
+    rect: Rect,
+    local_col: f32,
+    selecting: bool,
+    release: bool,
+) {
+    let cursor_pos = patcher_text_cursor_at_col(rect, &edit.text, local_col);
+    if selecting {
+        if edit.state.selection_anchor.is_none() {
+            edit.state.selection_anchor = Some(edit.state.cursor_pos);
+        }
+        edit.state.selecting = true;
+    }
+    edit.state.cursor_pos = cursor_pos;
+    if release {
+        edit.state.selecting = false;
+        if text_selection_range(&edit.state).is_none() {
+            edit.state.selection_anchor = None;
+        }
+    }
+}
+
 fn load_interactive_patch_for_node(node: &LayoutNode) -> Option<(Patch, PatcherPanState, String)> {
     let key = patcher_state_key(node);
     let interaction_state = get_patcher_interaction_state(key);
     let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
     let view_key = active_patcher_view_key(&interaction_state);
     let patch = active_patcher_patch(&root_patch, &interaction_state);
-    let patch = patch_with_interaction_positions(patch, &interaction_state, &view_key);
+    let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
     let mut pan_state = get_patcher_pan_state(key);
     sync_patcher_pan_bounds(node, &mut pan_state);
     Some((patch, pan_state, view_key))
@@ -1120,7 +1524,42 @@ fn handle_patcher_pointer_down(
     let Some((patch, pan_state, _view_key)) = load_interactive_patch_for_node(node) else {
         return;
     };
+    if let Ok((_, root_patch)) = load_patch_from_props(&node.props)
+        && let Some((_node_id, macro_name)) = hit_patcher_macro_drill_in(
+            &patch,
+            &root_patch,
+            node.rect,
+            &pan_state,
+            local_col,
+            local_row,
+        )
+    {
+        state.active_macro = Some(macro_name);
+        state.selected_nodes.clear();
+        state.hovered_node = None;
+        state.hovered_macro_drill_in = None;
+        state.drag = None;
+        state.text_edit = None;
+        set_patcher_interaction_state(key, state);
+        reset_patcher_pan(key);
+        return;
+    }
     let hit = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone()) {
+        if hit.as_deref() == Some(edit_node_id.as_str()) {
+            if let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
+                && let Some(edit) = &mut state.text_edit
+            {
+                update_patcher_text_edit_pointer(edit, *rect, local_col, false, false);
+                edit.state.selection_anchor = Some(edit.state.cursor_pos);
+                edit.state.selecting = true;
+            }
+            set_patcher_interaction_state(key, state);
+            return;
+        }
+        let view_key = active_patcher_view_key(&state);
+        commit_patcher_text_edit(&mut state, &view_key);
+    }
     state.hovered_node = hit.clone();
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     match hit {
@@ -1170,6 +1609,15 @@ fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, local_row: f32
         return;
     };
     let mut state = get_patcher_interaction_state(key);
+    if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone()) {
+        if let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
+            && let Some(edit) = &mut state.text_edit
+        {
+            update_patcher_text_edit_pointer(edit, *rect, local_col, true, false);
+        }
+        set_patcher_interaction_state(key, state);
+        return;
+    }
     match state.drag.clone() {
         Some(PatcherDragState::Nodes {
             start_col,
@@ -1178,7 +1626,7 @@ fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, local_row: f32
         }) => {
             let delta = (local_col - start_col, local_row - start_row);
             for (node_id, start_position) in start_positions {
-                let position_key = scoped_node_position_key(&view_key, &node_id);
+                let position_key = scoped_node_key(&view_key, &node_id);
                 state.node_positions.insert(
                     position_key,
                     (start_position.0 + delta.0, start_position.1 + delta.1),
@@ -1219,6 +1667,14 @@ fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local_row: f32) 
     let key = patcher_state_key(node);
     let mut state = get_patcher_interaction_state(key);
     if let Some((patch, pan_state, _view_key)) = load_interactive_patch_for_node(node) {
+        if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone())
+            && let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
+            && let Some(edit) = &mut state.text_edit
+        {
+            update_patcher_text_edit_pointer(edit, *rect, local_col, true, true);
+            set_patcher_interaction_state(key, state);
+            return;
+        }
         state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
     }
     state.drag = None;
@@ -1233,8 +1689,57 @@ fn handle_patcher_pointer_moved(node: &LayoutNode, local_col: f32, local_row: f3
     let mut state = get_patcher_interaction_state(key);
     state.hover_back_button = state.active_macro.is_some()
         && rect_contains(patcher_back_button_rect(node.rect), local_col, local_row);
+    state.hovered_macro_drill_in =
+        load_patch_from_props(&node.props)
+            .ok()
+            .and_then(|(_, root_patch)| {
+                hit_patcher_macro_drill_in(
+                    &patch,
+                    &root_patch,
+                    node.rect,
+                    &pan_state,
+                    local_col,
+                    local_row,
+                )
+                .map(|(node_id, _)| node_id)
+            });
     state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
     set_patcher_interaction_state(key, state);
+}
+
+fn open_selected_macro_node(node: &LayoutNode, state: &mut PatcherInteractionState) -> bool {
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return false;
+    };
+    let view_key = active_patcher_view_key(state);
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, &view_key);
+    let Some(macro_name) = state.selected_nodes.iter().find_map(|selected| {
+        patch
+            .nodes
+            .iter()
+            .find(|patch_node| {
+                patch_node.id == *selected && patch_node.kind == NodeKind::MacroInstance
+            })
+            .map(|patch_node| patch_node.op.clone())
+    }) else {
+        return false;
+    };
+    if !root_patch
+        .macros
+        .iter()
+        .any(|macro_patch| macro_patch.name == macro_name)
+    {
+        return false;
+    }
+    state.active_macro = Some(macro_name);
+    state.selected_nodes.clear();
+    state.hovered_node = None;
+    state.hovered_macro_drill_in = None;
+    state.hover_back_button = false;
+    state.drag = None;
+    state.text_edit = None;
+    true
 }
 
 fn handle_patcher_double_click(node: &LayoutNode, local_col: f32, local_row: f32) -> bool {
@@ -1252,34 +1757,39 @@ fn handle_patcher_double_click(node: &LayoutNode, local_col: f32, local_row: f32
 
     let view_key = active_patcher_view_key(&state);
     let patch = active_patcher_patch(&root_patch, &state);
-    let patch = patch_with_interaction_positions(patch, &state, &view_key);
+    let patch = patch_with_interaction_state(patch, &state, &view_key);
     let mut pan_state = get_patcher_pan_state(key);
     sync_patcher_pan_bounds(node, &mut pan_state);
-    let Some(node_id) = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row)
-    else {
-        return false;
-    };
-    let Some(macro_name) = patch
-        .nodes
-        .iter()
-        .find(|patch_node| patch_node.id == node_id && patch_node.kind == NodeKind::MacroInstance)
-        .map(|patch_node| patch_node.op.clone())
-    else {
-        return false;
-    };
-    if !root_patch
-        .macros
-        .iter()
-        .any(|macro_patch| macro_patch.name == macro_name)
-    {
-        return false;
+    if let Some(node_id) = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row) {
+        let node_rects = patch_node_rects(&patch, node.rect, &pan_state);
+        let Some(patch_node) = patch
+            .nodes
+            .iter()
+            .find(|patch_node| patch_node.id == node_id)
+        else {
+            return false;
+        };
+        let Some(rect) = node_rects.get(&node_id) else {
+            return false;
+        };
+        let text = node_display_label(patch_node);
+        let cursor_pos = patcher_text_cursor_at_col(*rect, &text, local_col);
+        begin_patcher_text_edit(&mut state, node_id, text, cursor_pos, false);
+        set_patcher_interaction_state(key, state);
+        return true;
     }
-    state.active_macro = Some(macro_name);
-    state.selected_nodes.clear();
-    state.hovered_node = None;
-    state.drag = None;
+
+    let origin = patcher_origin(node.rect, &pan_state);
+    let draft_id = format!("draft-{}", state.next_draft_node);
+    state.next_draft_node += 1;
+    state.draft_nodes.push(PatcherDraftNode {
+        view_key: view_key.clone(),
+        id: draft_id.clone(),
+        text: String::new(),
+        position: (local_col - origin.0, local_row - origin.1),
+    });
+    begin_patcher_text_edit(&mut state, draft_id, String::new(), 0, true);
     set_patcher_interaction_state(key, state);
-    reset_patcher_pan(key);
     true
 }
 
@@ -1287,6 +1797,7 @@ fn navigate_patcher_to_root(key: u64, state: &mut PatcherInteractionState) {
     state.active_macro = None;
     state.selected_nodes.clear();
     state.hovered_node = None;
+    state.hovered_macro_drill_in = None;
     state.hover_back_button = false;
     state.drag = None;
     set_patcher_interaction_state(key, state.clone());
@@ -1311,6 +1822,41 @@ fn patcher_back_button_rect(rect: Rect) -> Rect {
     }
 }
 
+fn patcher_macro_drill_in_rect(rect: Rect) -> Rect {
+    Rect {
+        row: rect.row + 0.22,
+        col: rect.col + rect.width - 1.35,
+        width: 1.05,
+        height: (rect.height - 0.44).max(0.1),
+    }
+}
+
+fn hit_patcher_macro_drill_in(
+    patch: &Patch,
+    root_patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    local_col: f32,
+    local_row: f32,
+) -> Option<(String, String)> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    patch.nodes.iter().rev().find_map(|node| {
+        if node.kind != NodeKind::MacroInstance {
+            return None;
+        }
+        if !root_patch
+            .macros
+            .iter()
+            .any(|macro_patch| macro_patch.name == node.op)
+        {
+            return None;
+        }
+        let node_rect = *node_rects.get(&node.id)?;
+        rect_contains(patcher_macro_drill_in_rect(node_rect), local_col, local_row)
+            .then(|| (node.id.clone(), node.op.clone()))
+    })
+}
+
 fn reset_patcher_pan(key: u64) {
     let mut pan = get_patcher_pan_state(key);
     pan.offset_x = 0.0;
@@ -1332,7 +1878,7 @@ impl WidgetDefinition for PatcherWidget {
         node: &Value,
         _children: &[Value],
         constraints: Constraints,
-        _ctx: &MeasureCtx<'_>,
+        ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let width = if matches!(prop_keyword(node, "width").as_deref(), Some("fill")) {
@@ -1350,6 +1896,7 @@ impl WidgetDefinition for PatcherWidget {
                 .map(f64_to_f32)
                 .unwrap_or(DEFAULT_HEIGHT)
         };
+        cache_patcher_text_widths(node, ctx);
         Some(Size {
             width: width.max(1.0),
             height: height.max(1.0),
@@ -1364,7 +1911,7 @@ impl WidgetDefinition for PatcherWidget {
                 buf.set(
                     row,
                     col,
-                    styled_cell(' ', theme::FG(), Some(theme::BLACK())),
+                    styled_cell(' ', theme::PATCHER_TEXT(), Some(theme::PATCHER_BG())),
                 );
             }
         }
@@ -1381,7 +1928,7 @@ impl WidgetDefinition for PatcherWidget {
             buf.set(
                 rect.row.round() as u16,
                 rect.col.round() as u16 + idx as u16,
-                styled_cell(ch, theme::GREEN(), Some(theme::BLACK())),
+                styled_cell(ch, theme::PATCHER_NODE_TEXT(), Some(theme::PATCHER_BG())),
             );
         }
     }
@@ -1465,11 +2012,52 @@ impl WidgetDefinition for PatcherWidget {
         }
     }
 
+    fn key_event(&self, node: &LayoutNode, key_event: WidgetKeyEvent) -> Option<WidgetEvent> {
+        let key = patcher_state_key(node);
+        let mut state = get_patcher_interaction_state(key);
+        let view_key = active_patcher_view_key(&state);
+        match key_event.code {
+            KeyCode::Enter if state.text_edit.is_some() => {
+                commit_patcher_text_edit(&mut state, &view_key);
+                set_patcher_interaction_state(key, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
+            KeyCode::Enter if open_selected_macro_node(node, &mut state) => {
+                set_patcher_interaction_state(key, state);
+                reset_patcher_pan(key);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
+            KeyCode::Esc if state.text_edit.is_some() => {
+                cancel_patcher_text_edit(&mut state, &view_key);
+                set_patcher_interaction_state(key, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
+            _ => {
+                let edit = state.text_edit.as_mut()?;
+                match apply_text_entry_key(&edit.text, &mut edit.state, key_event, false, None)? {
+                    TextEditOutcome::Changed(new_text) => {
+                        edit.text = new_text;
+                        set_patcher_interaction_state(key, state);
+                        Some(WidgetEvent::Custom(Value::Nil))
+                    }
+                    TextEditOutcome::StateOnly => {
+                        set_patcher_interaction_state(key, state);
+                        Some(WidgetEvent::Custom(Value::Nil))
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_event(&self, _node: &LayoutNode, event: WidgetEvent) -> Option<super::EventOutput> {
         match event {
             WidgetEvent::Custom(Value::Nil) => None,
             _ => None,
         }
+    }
+
+    fn renders_own_focus(&self) -> bool {
+        true
     }
 
     #[cfg(target_os = "macos")]
@@ -1482,7 +2070,7 @@ impl WidgetDefinition for PatcherWidget {
         let mut prims = Vec::new();
         prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: node.rect,
-            color: crate::backend::Color::from_hex(0x02, 0x02, 0x03),
+            color: theme::PATCHER_BG(),
         }));
         let key = patcher_state_key(node);
         let mut pan_state = get_patcher_pan_state(key);
@@ -1495,7 +2083,7 @@ impl WidgetDefinition for PatcherWidget {
                 let interaction_state = get_patcher_interaction_state(key);
                 let view_key = active_patcher_view_key(&interaction_state);
                 let patch = active_patcher_patch(&root_patch, &interaction_state);
-                let patch = patch_with_interaction_positions(patch, &interaction_state, &view_key);
+                let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
                 let content_size = patch_content_size(&patch);
                 pan_state.content_width = content_size.0.max(node.rect.width);
                 pan_state.content_height = content_size.1.max(node.rect.height);
@@ -1533,7 +2121,7 @@ impl WidgetDefinition for PatcherWidget {
                         h_align: 0.0,
                         text: format!("{}", patcher_breadcrumb(&path, &interaction_state)),
                         font_size: 12.0,
-                        fg: crate::backend::Color::from_hex(0xa8, 0xac, 0xb8),
+                        fg: theme::PATCHER_TEXT_MUTED(),
                         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                     },
                 ));
@@ -1549,7 +2137,7 @@ impl WidgetDefinition for PatcherWidget {
                                 patch.diagnostics.len()
                             ),
                             font_size: 11.0,
-                            fg: crate::backend::Color::from_hex(0xff, 0x6b, 0x73),
+                            fg: theme::PATCHER_ERROR(),
                             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                         },
                     ));
@@ -1564,7 +2152,7 @@ impl WidgetDefinition for PatcherWidget {
                         h_align: 0.0,
                         text: error,
                         font_size: 13.0,
-                        fg: crate::backend::Color::from_hex(0xff, 0x6b, 0x73),
+                        fg: theme::PATCHER_ERROR(),
                         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                     },
                 ));
@@ -1601,6 +2189,40 @@ fn load_patch_from_props(props: &HashMap<String, Value>) -> Result<(PathBuf, Pat
     Ok((path, patch))
 }
 
+fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
+    if ctx.text_measurer.is_none() {
+        return;
+    }
+    let Some(props) = owned_props_from_value(node) else {
+        return;
+    };
+    let key = patcher_state_key_from_parts(get_stable_widget_id(node), &props);
+    let interaction_state = get_patcher_interaction_state(key);
+    let Ok((_, root_patch)) = load_patch_from_props(&props) else {
+        return;
+    };
+    let view_key = active_patcher_view_key(&interaction_state);
+    let patch = active_patcher_patch(&root_patch, &interaction_state);
+    let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
+    for patch_node in &patch.nodes {
+        cache_char_widths(node_display_label(patch_node), NODE_FONT_SIZE, ctx);
+    }
+    if let Some(edit) = interaction_state.text_edit {
+        cache_char_widths(edit.text, NODE_FONT_SIZE, ctx);
+    }
+}
+
+fn owned_props_from_value(node: &Value) -> Option<HashMap<String, Value>> {
+    let Value::Map(map) = node else {
+        return None;
+    };
+    Some(
+        map.iter()
+            .map(|(key, value)| (key.clone(), value.borrow().clone()))
+            .collect(),
+    )
+}
+
 fn prop_str(props: &HashMap<String, Value>, key: &str) -> Option<String> {
     props.get(key).and_then(|value| match value {
         Value::String(value) | Value::Keyword(value) | Value::Symbol(value) => Some(value.clone()),
@@ -1610,8 +2232,8 @@ fn prop_str(props: &HashMap<String, Value>, key: &str) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn push_grid(prims: &mut Vec<MetalPrimitive>, rect: Rect, offset_x: f32, offset_y: f32) {
-    let minor = crate::backend::Color::rgba(0.13, 0.14, 0.16, 0.34);
-    let major = crate::backend::Color::rgba(0.22, 0.23, 0.27, 0.46);
+    let minor = theme::PATCHER_GRID_MINOR();
+    let major = theme::PATCHER_GRID_MAJOR();
     let col_spacing = 4.0;
     let row_spacing = 2.5;
     let col_phase = offset_x.rem_euclid(col_spacing);
@@ -1665,8 +2287,8 @@ fn push_marquee(
     if marquee.width < 0.05 || marquee.height < 0.05 {
         return;
     }
-    let fill = crate::backend::Color::rgba(0.22, 0.48, 1.0, 0.12);
-    let border = crate::backend::Color::rgba(0.38, 0.62, 1.0, 0.72);
+    let fill = theme::PATCHER_MARQUEE_FILL();
+    let border = theme::PATCHER_MARQUEE_BORDER();
     prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
         x: marquee.col,
         y: marquee.row,
@@ -1717,14 +2339,14 @@ fn push_back_button(
     };
     let button_rect = patcher_back_button_rect(rect);
     let border = if interaction_state.hover_back_button {
-        crate::backend::Color::from_hex(0x6d, 0xae, 0xff)
+        theme::PATCHER_BACK_BUTTON_HOVER_BORDER()
     } else {
-        crate::backend::Color::from_hex(0x44, 0x45, 0x50)
+        theme::PATCHER_BACK_BUTTON_BORDER()
     };
     let bg = if interaction_state.hover_back_button {
-        crate::backend::Color::from_hex(0x1e, 0x25, 0x36)
+        theme::PATCHER_BACK_BUTTON_HOVER_BG()
     } else {
-        crate::backend::Color::from_hex(0x14, 0x15, 0x1a)
+        theme::PATCHER_BACK_BUTTON_BG()
     };
     push_rounded_rect(prims, button_rect, border, viewport, 9.0, false);
     push_rounded_rect(
@@ -1749,9 +2371,9 @@ fn push_back_button(
             text: label.to_string(),
             font_size: 11.0,
             fg: if interaction_state.hover_back_button {
-                crate::backend::Color::from_hex(0xd7, 0xe6, 0xff)
+                theme::PATCHER_BACK_BUTTON_HOVER_TEXT()
             } else {
-                crate::backend::Color::from_hex(0xa8, 0xac, 0xb8)
+                theme::PATCHER_BACK_BUTTON_TEXT()
             },
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
         },
@@ -1769,6 +2391,7 @@ fn draw_patch(
 ) {
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let input_indices = patch_input_indices(patch);
+    let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
     let output_counts = patch_output_counts(patch);
 
     for connection in &patch.connections {
@@ -1787,18 +2410,13 @@ fn draw_patch(
                 .unwrap_or(1),
             false,
         );
-        let to_indices = input_indices.get(&connection.to_node);
-        let visible_input = to_indices
-            .and_then(|indices| {
-                indices
-                    .iter()
-                    .position(|input| *input == connection.to_input)
-            })
-            .unwrap_or(0);
         let end = port_center(
             *to,
-            visible_input,
-            to_indices.map(|indices| indices.len()).unwrap_or(1),
+            connection.to_input,
+            input_slot_counts
+                .get(&connection.to_node)
+                .copied()
+                .unwrap_or(connection.to_input + 1),
             true,
         );
         push_cable(prims, start, end, connection.kind);
@@ -1814,18 +2432,31 @@ fn draw_patch(
             rect,
             input_indices
                 .get(&node.id)
-                .map(|indices| indices.len())
-                .unwrap_or(0),
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+            input_slot_counts.get(&node.id).copied().unwrap_or(0),
             output_counts.get(&node.id).copied().unwrap_or(0),
             viewport,
             interaction_state.selected_nodes.contains(&node.id),
             interaction_state.hovered_node.as_deref() == Some(node.id.as_str()),
+            interaction_state
+                .text_edit
+                .as_ref()
+                .filter(|edit| edit.node_id == node.id),
+            interaction_state.hovered_macro_drill_in.as_deref() == Some(node.id.as_str()),
         );
     }
 }
 
 fn patch_input_indices(patch: &Patch) -> HashMap<String, Vec<usize>> {
     let mut indices: HashMap<String, Vec<usize>> = HashMap::new();
+    for node in &patch.nodes {
+        for (idx, arg) in node.args.iter().enumerate() {
+            if matches!(arg, ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr) {
+                indices.entry(node.id.clone()).or_default().push(idx);
+            }
+        }
+    }
     for connection in &patch.connections {
         let node_indices = indices.entry(connection.to_node.clone()).or_default();
         if !node_indices.contains(&connection.to_input) {
@@ -1834,8 +2465,28 @@ fn patch_input_indices(patch: &Patch) -> HashMap<String, Vec<usize>> {
     }
     for node_indices in indices.values_mut() {
         node_indices.sort_unstable();
+        node_indices.dedup();
     }
     indices
+}
+
+fn patch_input_slot_counts(
+    patch: &Patch,
+    input_indices: &HashMap<String, Vec<usize>>,
+) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for node in &patch.nodes {
+        let connected_count = input_indices
+            .get(&node.id)
+            .and_then(|indices| indices.iter().max().map(|idx| idx + 1))
+            .unwrap_or(0);
+        let arg_count = node.args.len();
+        let count = connected_count.max(arg_count);
+        if count > 0 {
+            counts.insert(node.id.clone(), count);
+        }
+    }
+    counts
 }
 
 fn node_display_label(node: &PatchNode) -> String {
@@ -1846,13 +2497,37 @@ fn node_display_label(node: &PatchNode) -> String {
         _ => node.label.as_str(),
     };
     let mut label = base.to_string();
-    for arg in &node.args {
-        if let ArgValue::Literal(value) = arg {
-            if value == "<expr>" {
-                continue;
+    let display_start = if matches!(
+        node.args.first(),
+        Some(ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr)
+    ) {
+        1
+    } else {
+        0
+    };
+    let last_literal = node
+        .args
+        .iter()
+        .enumerate()
+        .skip(display_start)
+        .filter_map(|(idx, arg)| match arg {
+            ArgValue::Literal(value) if value != "<expr>" => Some(idx),
+            _ => None,
+        })
+        .last();
+    let Some(last_literal) = last_literal else {
+        return label;
+    };
+    for arg in node.args.iter().take(last_literal + 1).skip(display_start) {
+        match arg {
+            ArgValue::Literal(value) if value != "<expr>" => {
+                label.push(' ');
+                label.push_str(value);
             }
-            label.push(' ');
-            label.push_str(value);
+            ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr => {
+                label.push_str(" ?");
+            }
+            _ => {}
         }
     }
     label
@@ -1926,8 +2601,8 @@ fn push_cable(
     kind: ConnectionKind,
 ) {
     let color = match kind {
-        ConnectionKind::Forward => crate::backend::Color::rgba(0.74, 0.75, 0.84, 0.92),
-        ConnectionKind::Feedback => crate::backend::Color::rgba(1.0, 0.59, 0.04, 0.88),
+        ConnectionKind::Forward => theme::PATCHER_CABLE(),
+        ConnectionKind::Feedback => theme::PATCHER_FEEDBACK_CABLE(),
     };
     let curve = super::cable::cable_curve(start, end);
     prims.push(MetalPrimitive::PatchCable(MetalPatchCablePrimitive {
@@ -1949,43 +2624,46 @@ fn push_node(
     prims: &mut Vec<MetalPrimitive>,
     node: &PatchNode,
     rect: Rect,
-    input_count: usize,
+    input_indices: &[usize],
+    input_slot_count: usize,
     output_count: usize,
     viewport: WidgetViewport,
     selected: bool,
     hovered: bool,
+    edit: Option<&PatcherTextEdit>,
+    macro_drill_in_hovered: bool,
 ) {
     let (bg, mut border, text) = match node.kind {
         NodeKind::In | NodeKind::Out => (
-            crate::backend::Color::from_hex(0x18, 0x19, 0x1e),
-            crate::backend::Color::from_hex(0x44, 0x45, 0x50),
-            crate::backend::Color::from_hex(0x4c, 0xe0, 0x72),
+            theme::PATCHER_IO_NODE_BG(),
+            theme::PATCHER_IO_NODE_BORDER(),
+            theme::PATCHER_IO_NODE_TEXT(),
         ),
         NodeKind::Param => (
-            crate::backend::Color::from_hex(0x19, 0x19, 0x22),
-            crate::backend::Color::from_hex(0x3b, 0x69, 0xb1),
-            crate::backend::Color::from_hex(0x6d, 0xae, 0xff),
+            theme::PATCHER_PARAM_NODE_BG(),
+            theme::PATCHER_PARAM_NODE_BORDER(),
+            theme::PATCHER_PARAM_NODE_TEXT(),
         ),
         NodeKind::CodeIsland => (
-            crate::backend::Color::from_hex(0x24, 0x16, 0x18),
-            crate::backend::Color::from_hex(0xff, 0x5a, 0x65),
-            crate::backend::Color::from_hex(0xff, 0x8a, 0x92),
+            theme::PATCHER_CODE_NODE_BG(),
+            theme::PATCHER_CODE_NODE_BORDER(),
+            theme::PATCHER_CODE_NODE_TEXT(),
         ),
         _ => (
-            crate::backend::Color::from_hex(0x16, 0x16, 0x1a),
+            theme::PATCHER_NODE_BG(),
             if node.diagnostic.is_some() {
-                crate::backend::Color::from_hex(0xff, 0x5a, 0x65)
+                theme::PATCHER_ERROR()
             } else {
-                crate::backend::Color::from_hex(0x40, 0x40, 0x4a)
+                theme::PATCHER_NODE_BORDER()
             },
-            crate::backend::Color::from_hex(0x4c, 0xe0, 0x72),
+            theme::PATCHER_NODE_TEXT(),
         ),
     };
     if hovered {
-        border = crate::backend::Color::from_hex(0x78, 0x7c, 0x8e);
+        border = theme::PATCHER_NODE_HOVER_BORDER();
     }
     if selected {
-        border = crate::backend::Color::from_hex(0x4a, 0x8d, 0xff);
+        border = theme::PATCHER_NODE_SELECTED_BORDER();
     }
     push_rounded_rect(prims, rect, border, viewport, NODE_CORNER_RADIUS_PX, false);
     push_rounded_rect(
@@ -2001,8 +2679,13 @@ fn push_node(
         (NODE_CORNER_RADIUS_PX - 3.0).max(0.0),
         false,
     );
-    for index in 0..input_count {
-        push_port(prims, port_center(rect, index, input_count, true), true, bg);
+    for &index in input_indices {
+        push_port(
+            prims,
+            port_center(rect, index, input_slot_count, true),
+            true,
+            bg,
+        );
     }
     for index in 0..output_count {
         push_port(
@@ -2012,7 +2695,10 @@ fn push_node(
             bg,
         );
     }
+    push_node_edit_selection(prims, rect, viewport, edit);
     push_node_label(prims, node, rect, text);
+    push_macro_drill_in(prims, node, rect, macro_drill_in_hovered);
+    push_node_edit_cursor(prims, rect, viewport, edit);
     if let Some(diagnostic) = &node.diagnostic {
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
@@ -2022,11 +2708,100 @@ fn push_node(
                 h_align: 0.0,
                 text: preview(diagnostic, 32),
                 font_size: 9.5,
-                fg: crate::backend::Color::from_hex(0xff, 0xa3, 0xa8),
+                fg: theme::PATCHER_ERROR(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
         ));
     }
+}
+
+#[cfg(target_os = "macos")]
+fn push_node_edit_selection(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    viewport: WidgetViewport,
+    edit: Option<&PatcherTextEdit>,
+) {
+    let Some(edit) = edit else {
+        return;
+    };
+    let Some((start, end)) = text_selection_range(&edit.state) else {
+        return;
+    };
+    let x = rect.col
+        + NODE_TEXT_COL_OFFSET
+        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, start, viewport.cell_w);
+    let end_x = rect.col
+        + NODE_TEXT_COL_OFFSET
+        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, end, viewport.cell_w);
+    let width = end_x - x;
+    if width <= 0.0 {
+        return;
+    }
+    prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+        rect: Rect {
+            row: rect.row + 0.18,
+            col: x,
+            width,
+            height: (rect.height - 0.36).max(0.1),
+        },
+        color: theme::PATCHER_EDIT_SELECTION(),
+    }));
+}
+
+#[cfg(target_os = "macos")]
+fn push_node_edit_cursor(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    viewport: WidgetViewport,
+    edit: Option<&PatcherTextEdit>,
+) {
+    let Some(edit) = edit else {
+        return;
+    };
+    let cursor_pos = edit.state.cursor_pos.min(edit.text.chars().count());
+    let x = rect.col
+        + NODE_TEXT_COL_OFFSET
+        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, cursor_pos, viewport.cell_w);
+    prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+        rect: Rect {
+            row: rect.row + 0.23,
+            col: x,
+            width: 0.08,
+            height: (rect.height - 0.46).max(0.1),
+        },
+        color: theme::PATCHER_EDIT_CURSOR(),
+    }));
+}
+
+#[cfg(target_os = "macos")]
+fn push_macro_drill_in(
+    prims: &mut Vec<MetalPrimitive>,
+    node: &PatchNode,
+    rect: Rect,
+    hovered: bool,
+) {
+    if node.kind != NodeKind::MacroInstance {
+        return;
+    }
+    let button_rect = patcher_macro_drill_in_rect(rect);
+    let color = if hovered {
+        theme::PATCHER_BACK_BUTTON_HOVER_TEXT()
+    } else {
+        theme::PATCHER_TEXT_MUTED()
+    };
+    prims.push(MetalPrimitive::ProportionalText(
+        MetalProportionalTextPrimitive {
+            row: button_rect.row + 0.1,
+            col: button_rect.col + 0.34,
+            align_width: button_rect.width,
+            h_align: 0.0,
+            text: ">".to_string(),
+            font_size: 12.0,
+            fg: color,
+            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+        },
+    ));
 }
 
 #[cfg(target_os = "macos")]
@@ -2046,7 +2821,7 @@ fn push_node_label(
     } else {
         rect.row + 0.36
     };
-    let text_col = rect.col + 0.92;
+    let text_col = rect.col + NODE_TEXT_COL_OFFSET;
     let label = node_display_label(node);
     let (head, tail) = split_label_head_tail(&label);
     let bg = crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0);
@@ -2072,7 +2847,7 @@ fn push_node_label(
                 h_align: 0.0,
                 text: tail.to_string(),
                 font_size,
-                fg: crate::backend::Color::from_hex(0xf2, 0xf2, 0xf4),
+                fg: theme::PATCHER_NODE_TAIL_TEXT(),
                 bg,
             },
         ));
@@ -2105,9 +2880,9 @@ fn push_port(
     node_bg: crate::backend::Color,
 ) {
     let color = if input {
-        crate::backend::Color::from_hex(0xff, 0xee, 0x00)
+        theme::PATCHER_PORT_INPUT()
     } else {
-        crate::backend::Color::from_hex(0xff, 0x9f, 0x0a)
+        theme::PATCHER_PORT_OUTPUT()
     };
     let visible_half = if input {
         MetalCircleVisibleHalf::Bottom
@@ -2346,6 +3121,62 @@ mod tests {
     }
 
     #[test]
+    fn inline_args_keep_placeholders_for_connected_args_before_later_literals() {
+        let patch = parse(
+            r#"
+            (defmacro ap (sig g d) sig)
+            (def signal (in 1))
+            (def gain (in 2))
+            (def tapped (ap signal gain 0.6))
+            "#,
+        );
+        let ap = patch
+            .nodes
+            .iter()
+            .find(|node| node.op == "ap")
+            .expect("macro instance node");
+
+        assert_eq!(node_display_label(ap), "ap ? 0.6");
+
+        let input_indices = patch_input_indices(&patch);
+        assert_eq!(
+            input_indices.get(&ap.id).map(Vec::as_slice),
+            Some(&[0, 1][..])
+        );
+
+        let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+        assert_eq!(input_slot_counts.get(&ap.id).copied(), Some(3));
+    }
+
+    #[test]
+    fn inline_args_hide_their_inlet_without_collapsing_later_inlets() {
+        let patch = parse(
+            r#"
+            (defmacro ap (sig g d) sig)
+            (def signal (in 1))
+            (def delay (in 2))
+            (def tapped (ap signal 0.6 delay))
+            "#,
+        );
+        let ap = patch
+            .nodes
+            .iter()
+            .find(|node| node.op == "ap")
+            .expect("macro instance node");
+
+        assert_eq!(node_display_label(ap), "ap 0.6");
+
+        let input_indices = patch_input_indices(&patch);
+        assert_eq!(
+            input_indices.get(&ap.id).map(Vec::as_slice),
+            Some(&[0, 2][..])
+        );
+
+        let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+        assert_eq!(input_slot_counts.get(&ap.id).copied(), Some(3));
+    }
+
+    #[test]
     fn display_labels_omit_def_names_and_show_in_out_channels() {
         let patch = parse(
             r#"
@@ -2385,8 +3216,8 @@ mod tests {
         let mut state = PatcherInteractionState::default();
         state
             .node_positions
-            .insert(scoped_node_position_key("root", "pitch"), (22.0, 7.0));
-        let patch = patch_with_interaction_positions(patch, &state, "root");
+            .insert(scoped_node_key("root", "pitch"), (22.0, 7.0));
+        let patch = patch_with_interaction_state(patch, &state, "root");
         let pitch = patch.nodes.iter().find(|node| node.id == "pitch").unwrap();
         assert_eq!(pitch.position, (22.0, 7.0));
     }
@@ -2503,7 +3334,7 @@ mod tests {
     }
 
     #[test]
-    fn double_clicking_macro_instance_opens_macro_view_and_breadcrumb_returns_to_root() {
+    fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
         let source = r#"
             (defmacro ap (x)
               (def y (allpass x 100 0.5)))
@@ -2553,6 +3384,28 @@ mod tests {
             macro_rect.col + macro_rect.width * 0.5,
             macro_rect.row + macro_rect.height * 0.5
         ));
+        let state = get_patcher_interaction_state(key);
+        assert_eq!(state.active_macro, None);
+        assert_eq!(
+            state.text_edit.as_ref().map(|edit| edit.node_id.as_str()),
+            Some(macro_node.id.as_str())
+        );
+
+        let mut state = get_patcher_interaction_state(key);
+        state.text_edit = None;
+        state.selected_nodes.insert(macro_node.id.clone());
+        set_patcher_interaction_state(key, state);
+        assert!(
+            PATCHER_WIDGET
+                .key_event(
+                    &node,
+                    WidgetKeyEvent {
+                        code: KeyCode::Enter,
+                        modifiers: KeyModifiers::empty(),
+                    },
+                )
+                .is_some()
+        );
         assert_eq!(
             get_patcher_interaction_state(key).active_macro.as_deref(),
             Some("ap")
@@ -2566,6 +3419,247 @@ mod tests {
 
         handle_patcher_pointer_down(&node, 1.2, 0.8, KeyModifiers::empty());
         assert_eq!(get_patcher_interaction_state(key).active_macro, None);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn double_clicking_background_creates_editable_draft_node() {
+        let source = "(def pitch (in 1))";
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-patcher-draft-node-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(&path, source).unwrap();
+        let mut props = HashMap::new();
+        props.insert(
+            "path".to_string(),
+            Value::String(path.to_string_lossy().to_string()),
+        );
+        let node = LayoutNode {
+            widget_id: 223_344,
+            stable_widget_id: Some(223_344),
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "patcher".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 80.0,
+                height: 30.0,
+            },
+            props,
+            children: Vec::new(),
+            focusable: true,
+        };
+        let key = patcher_state_key(&node);
+        set_patcher_interaction_state(key, PatcherInteractionState::default());
+
+        assert!(handle_patcher_double_click(&node, 40.0, 20.0));
+        assert!(get_patcher_interaction_state(key).text_edit.is_some());
+
+        assert!(
+            PATCHER_WIDGET
+                .key_event(
+                    &node,
+                    WidgetKeyEvent {
+                        code: KeyCode::Char('p'),
+                        modifiers: KeyModifiers::empty(),
+                    },
+                )
+                .is_some()
+        );
+        assert!(
+            PATCHER_WIDGET
+                .key_event(
+                    &node,
+                    WidgetKeyEvent {
+                        code: KeyCode::Char('h'),
+                        modifiers: KeyModifiers::empty(),
+                    },
+                )
+                .is_some()
+        );
+        assert!(
+            PATCHER_WIDGET
+                .key_event(
+                    &node,
+                    WidgetKeyEvent {
+                        code: KeyCode::Enter,
+                        modifiers: KeyModifiers::empty(),
+                    },
+                )
+                .is_some()
+        );
+
+        let state = get_patcher_interaction_state(key);
+        assert!(state.text_edit.is_none());
+        assert_eq!(state.draft_nodes.len(), 1);
+        assert_eq!(state.draft_nodes[0].text, "ph");
+        let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+        assert_eq!(patch.nodes.len(), 1);
+        assert_eq!(node_display_label(&patch.nodes[0]), "ph");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn committed_editor_nodes_project_ports_from_operator_metadata() {
+        let macro_arities = HashMap::new();
+        let phasor = node_from_editor_text("draft", "phasor", (0.0, 0.0), &macro_arities, false);
+        assert_eq!(node_display_label(&phasor), "phasor");
+        assert_eq!(phasor.outputs.len(), 1);
+
+        let patch = Patch {
+            nodes: vec![phasor],
+            connections: Vec::new(),
+            macros: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let input_indices = patch_input_indices(&patch);
+        assert_eq!(
+            input_indices.get("draft").map(Vec::as_slice),
+            Some(&[0][..])
+        );
+
+        let multiply = node_from_editor_text("mul", "* 3", (0.0, 0.0), &macro_arities, false);
+        assert_eq!(node_display_label(&multiply), "* 3");
+        let patch = Patch {
+            nodes: vec![multiply],
+            connections: Vec::new(),
+            macros: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let input_indices = patch_input_indices(&patch);
+        assert_eq!(input_indices.get("mul").map(Vec::as_slice), Some(&[0][..]));
+        let slot_counts = patch_input_slot_counts(&patch, &input_indices);
+        assert_eq!(slot_counts.get("mul").copied(), Some(2));
+    }
+
+    #[test]
+    fn actively_edited_draft_nodes_suppress_unknown_operator_diagnostics() {
+        let mut state = PatcherInteractionState::default();
+        state.draft_nodes.push(PatcherDraftNode {
+            view_key: "root".to_string(),
+            id: "draft-0".to_string(),
+            text: String::new(),
+            position: (0.0, 0.0),
+        });
+        state.text_edit = Some(PatcherTextEdit {
+            node_id: "draft-0".to_string(),
+            text: "p".to_string(),
+            original_text: String::new(),
+            state: TextInputState {
+                cursor_pos: 1,
+                selection_anchor: None,
+                selecting: false,
+            },
+            is_new_node: true,
+        });
+
+        let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+        assert_eq!(patch.nodes.len(), 1);
+        assert_eq!(node_display_label(&patch.nodes[0]), "p");
+        assert_eq!(patch.nodes[0].diagnostic, None);
+        assert!(patch_input_indices(&patch).get("draft-0").is_none());
+        assert_eq!(patch_output_counts(&patch).get("draft-0"), None);
+    }
+
+    #[test]
+    fn draft_node_positions_can_be_dragged_after_commit() {
+        let mut state = PatcherInteractionState::default();
+        state.draft_nodes.push(PatcherDraftNode {
+            view_key: "root".to_string(),
+            id: "draft-0".to_string(),
+            text: "phasor".to_string(),
+            position: (1.0, 2.0),
+        });
+        state
+            .node_positions
+            .insert(scoped_node_key("root", "draft-0"), (9.0, 8.0));
+
+        let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+        assert_eq!(patch.nodes[0].position, (9.0, 8.0));
+    }
+
+    #[test]
+    fn double_clicking_node_edits_display_text_in_memory() {
+        let source = "(def pitch (in 1))";
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-patcher-edit-node-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(&path, source).unwrap();
+        let root_patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+        let pitch = root_patch
+            .nodes
+            .iter()
+            .find(|node| node.id == "pitch")
+            .unwrap();
+        let mut props = HashMap::new();
+        props.insert(
+            "path".to_string(),
+            Value::String(path.to_string_lossy().to_string()),
+        );
+        let node = LayoutNode {
+            widget_id: 334_455,
+            stable_widget_id: Some(334_455),
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "patcher".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 80.0,
+                height: 30.0,
+            },
+            props,
+            children: Vec::new(),
+            focusable: true,
+        };
+        let key = patcher_state_key(&node);
+        set_patcher_interaction_state(key, PatcherInteractionState::default());
+
+        let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
+        let pitch_rect = rects.get(&pitch.id).unwrap();
+        assert!(handle_patcher_double_click(
+            &node,
+            pitch_rect.col + NODE_TEXT_COL_OFFSET,
+            pitch_rect.row + pitch_rect.height * 0.5,
+        ));
+        assert!(
+            PATCHER_WIDGET
+                .key_event(
+                    &node,
+                    WidgetKeyEvent {
+                        code: KeyCode::Char('x'),
+                        modifiers: KeyModifiers::empty(),
+                    },
+                )
+                .is_some()
+        );
+        assert!(
+            PATCHER_WIDGET
+                .key_event(
+                    &node,
+                    WidgetKeyEvent {
+                        code: KeyCode::Enter,
+                        modifiers: KeyModifiers::empty(),
+                    },
+                )
+                .is_some()
+        );
+
+        let state = get_patcher_interaction_state(key);
+        assert_eq!(
+            state
+                .node_text_overrides
+                .get(&scoped_node_key("root", "pitch"))
+                .map(String::as_str),
+            Some("xin 1")
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -2663,6 +3757,72 @@ mod tests {
         assert!(
             rect_count == 0,
             "patcher node chrome should use rounded widget instances, got {rect_count} rects"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_render_emits_edit_cursor_as_foreground_overlay() {
+        let mut state = PatcherInteractionState::default();
+        state.draft_nodes.push(PatcherDraftNode {
+            view_key: "root".to_string(),
+            id: "draft-0".to_string(),
+            text: String::new(),
+            position: (2.0, 2.0),
+        });
+        state.text_edit = Some(PatcherTextEdit {
+            node_id: "draft-0".to_string(),
+            text: "phasor".to_string(),
+            original_text: String::new(),
+            state: TextInputState {
+                cursor_pos: 6,
+                selection_anchor: None,
+                selecting: false,
+            },
+            is_new_node: true,
+        });
+
+        let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+        let mut prims = Vec::new();
+        draw_patch(
+            &mut prims,
+            &patch,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 100.0,
+                height: 40.0,
+            },
+            WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 20.0,
+                vp_w: 1000.0,
+                vp_h: 800.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                tile_content_rows: 40.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            },
+            &PatcherPanState::default(),
+            &state,
+        );
+
+        let cursor_count = prims
+            .iter()
+            .filter(|prim| {
+                matches!(
+                    prim,
+                    MetalPrimitive::ForegroundRect(rect)
+                        if rect.color == theme::PATCHER_EDIT_CURSOR()
+                )
+            })
+            .count();
+        assert_eq!(
+            cursor_count, 1,
+            "active patcher text edit should render exactly one foreground cursor"
         );
     }
 }

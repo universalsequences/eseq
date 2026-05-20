@@ -223,10 +223,13 @@ impl Editor {
         };
         // Space bar should only be consumed by text-entry widgets (for typing).
         // All other widgets let space fall through to keybindings.
-        let is_text_input = node.widget_type == "text-input" || node.widget_type == "textbox";
+        let is_text_input = node.widget_type == "text-input"
+            || node.widget_type == "textbox"
+            || node.widget_type == "patcher";
         if key.code == KeyCode::Char(' ') && !is_text_input {
             return false;
         }
+        let gen_before = crate::widget_render::widget_state_generation();
         let widget_event = map_key_event(
             &node,
             WidgetKeyEvent {
@@ -242,6 +245,10 @@ impl Editor {
             return false;
         }
         let _ = self.apply_widget_output(output);
+        if crate::widget_render::widget_state_generation() != gen_before {
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+        }
         true
     }
 

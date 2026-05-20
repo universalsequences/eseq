@@ -35,10 +35,10 @@ const TEXTBOX_APPROX_CHAR_WIDTH: f32 = 0.62;
 // ── Internal state ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TextInputState {
-    cursor_pos: usize,
-    selection_anchor: Option<usize>,
-    selecting: bool,
+pub(crate) struct TextInputState {
+    pub(crate) cursor_pos: usize,
+    pub(crate) selection_anchor: Option<usize>,
+    pub(crate) selecting: bool,
 }
 
 thread_local! {
@@ -51,7 +51,7 @@ fn get_state(widget_id: u64) -> TextInputState {
     STATES.with(|s| s.borrow().get(&widget_id).cloned().unwrap_or_default())
 }
 
-fn cache_char_widths(text: String, font_size: f32, ctx: &MeasureCtx<'_>) {
+pub(crate) fn cache_char_widths(text: String, font_size: f32, ctx: &MeasureCtx<'_>) {
     let Some(measurer) = ctx.text_measurer else {
         return;
     };
@@ -81,7 +81,7 @@ fn set_state(widget_id: u64, state: TextInputState) {
     }
 }
 
-fn selection_range(state: &TextInputState) -> Option<(usize, usize)> {
+pub(crate) fn selection_range(state: &TextInputState) -> Option<(usize, usize)> {
     let anchor = state.selection_anchor?;
     if anchor == state.cursor_pos {
         None
@@ -160,15 +160,19 @@ fn copy_selection_to_clipboard(text: &str, state: &TextInputState) {
     }
 }
 
-fn text_entry_key_event(
-    node: &LayoutNode,
+pub(crate) enum TextEditOutcome {
+    Changed(String),
+    StateOnly,
+}
+
+pub(crate) fn apply_text_entry_key(
+    text: &str,
+    state: &mut TextInputState,
     key: WidgetKeyEvent,
     allow_newline: bool,
     vertical_wrap_chars: Option<usize>,
-) -> Option<WidgetEvent> {
-    let text = get_text(&node.props);
+) -> Option<TextEditOutcome> {
     let char_count = text.chars().count();
-    let mut state = get_state(node.widget_id);
     state.cursor_pos = state.cursor_pos.min(char_count);
 
     match key.code {
@@ -176,23 +180,21 @@ fn text_entry_key_event(
             state.cursor_pos = char_count;
             state.selection_anchor = Some(0);
             state.selecting = false;
-            set_state(node.widget_id, state);
-            Some(WidgetEvent::Custom(Value::Nil))
+            Some(TextEditOutcome::StateOnly)
         }
         KeyCode::Char('c') | KeyCode::Char('C') if clipboard_modifier(key.modifiers) => {
-            copy_selection_to_clipboard(&text, &state);
-            Some(WidgetEvent::Custom(Value::Nil))
+            copy_selection_to_clipboard(text, state);
+            Some(TextEditOutcome::StateOnly)
         }
         KeyCode::Char('x') | KeyCode::Char('X') if clipboard_modifier(key.modifiers) => {
-            copy_selection_to_clipboard(&text, &state);
-            if let Some(range) = selection_range(&state) {
-                let new = replace_range(&text, range, "");
+            copy_selection_to_clipboard(text, state);
+            if let Some(range) = selection_range(state) {
+                let new = replace_range(text, range, "");
                 state.cursor_pos = range.0;
-                clear_selection(&mut state);
-                set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::String(new)))
+                clear_selection(state);
+                Some(TextEditOutcome::Changed(new))
             } else {
-                Some(WidgetEvent::Custom(Value::Nil))
+                Some(TextEditOutcome::StateOnly)
             }
         }
         KeyCode::Char('v') | KeyCode::Char('V') if clipboard_modifier(key.modifiers) => {
@@ -201,88 +203,97 @@ fn text_entry_key_event(
                     if !allow_newline {
                         paste = paste.replace("\r\n", " ").replace('\n', " ");
                     }
-                    let new = insert_text_edit(&text, &mut state, &paste);
-                    set_state(node.widget_id, state);
-                    Some(WidgetEvent::Custom(Value::String(new)))
+                    let new = insert_text_edit(text, state, &paste);
+                    Some(TextEditOutcome::Changed(new))
                 }
-                _ => Some(WidgetEvent::Custom(Value::Nil)),
+                _ => Some(TextEditOutcome::StateOnly),
             }
         }
         KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
-            let new = insert_text_edit(&text, &mut state, &c.to_string());
-            set_state(node.widget_id, state);
-            Some(WidgetEvent::Custom(Value::String(new)))
+            let new = insert_text_edit(text, state, &c.to_string());
+            Some(TextEditOutcome::Changed(new))
         }
         KeyCode::Enter if allow_newline => {
-            let new = insert_text_edit(&text, &mut state, "\n");
-            set_state(node.widget_id, state);
-            Some(WidgetEvent::Custom(Value::String(new)))
+            let new = insert_text_edit(text, state, "\n");
+            Some(TextEditOutcome::Changed(new))
         }
         KeyCode::Backspace => {
-            if let Some(new) = backspace_edit(&text, &mut state) {
-                set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::String(new)))
+            if let Some(new) = backspace_edit(text, state) {
+                Some(TextEditOutcome::Changed(new))
             } else {
-                Some(WidgetEvent::Custom(Value::Nil))
+                Some(TextEditOutcome::StateOnly)
             }
         }
         KeyCode::Delete => {
-            if let Some(new) = delete_edit(&text, &mut state) {
-                set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::String(new)))
+            if let Some(new) = delete_edit(text, state) {
+                Some(TextEditOutcome::Changed(new))
             } else {
-                Some(WidgetEvent::Custom(Value::Nil))
+                Some(TextEditOutcome::StateOnly)
             }
         }
         KeyCode::Left => {
             if state.cursor_pos > 0 {
                 state.cursor_pos -= 1;
             }
-            clear_selection(&mut state);
-            set_state(node.widget_id, state);
-            Some(WidgetEvent::Custom(Value::Nil))
+            clear_selection(state);
+            Some(TextEditOutcome::StateOnly)
         }
         KeyCode::Right => {
             if state.cursor_pos < char_count {
                 state.cursor_pos += 1;
             }
-            clear_selection(&mut state);
-            set_state(node.widget_id, state);
-            Some(WidgetEvent::Custom(Value::Nil))
+            clear_selection(state);
+            Some(TextEditOutcome::StateOnly)
         }
         KeyCode::Up => {
             if let Some(max_chars) = vertical_wrap_chars {
-                state.cursor_pos = move_cursor_vertically(&text, state.cursor_pos, max_chars, -1);
-                clear_selection(&mut state);
-                set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::Nil))
+                state.cursor_pos = move_cursor_vertically(text, state.cursor_pos, max_chars, -1);
+                clear_selection(state);
+                Some(TextEditOutcome::StateOnly)
             } else {
                 None
             }
         }
         KeyCode::Down => {
             if let Some(max_chars) = vertical_wrap_chars {
-                state.cursor_pos = move_cursor_vertically(&text, state.cursor_pos, max_chars, 1);
-                clear_selection(&mut state);
-                set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::Nil))
+                state.cursor_pos = move_cursor_vertically(text, state.cursor_pos, max_chars, 1);
+                clear_selection(state);
+                Some(TextEditOutcome::StateOnly)
             } else {
                 None
             }
         }
         KeyCode::Home => {
             state.cursor_pos = 0;
-            clear_selection(&mut state);
-            set_state(node.widget_id, state);
-            Some(WidgetEvent::Custom(Value::Nil))
+            clear_selection(state);
+            Some(TextEditOutcome::StateOnly)
         }
         KeyCode::End => {
             state.cursor_pos = char_count;
-            clear_selection(&mut state);
+            clear_selection(state);
+            Some(TextEditOutcome::StateOnly)
+        }
+        _ => None,
+    }
+}
+
+fn text_entry_key_event(
+    node: &LayoutNode,
+    key: WidgetKeyEvent,
+    allow_newline: bool,
+    vertical_wrap_chars: Option<usize>,
+) -> Option<WidgetEvent> {
+    let text = get_text(&node.props);
+    let mut state = get_state(node.widget_id);
+    match apply_text_entry_key(&text, &mut state, key, allow_newline, vertical_wrap_chars)? {
+        TextEditOutcome::Changed(new) => {
+            set_state(node.widget_id, state);
+            Some(WidgetEvent::Custom(Value::String(new)))
+        }
+        TextEditOutcome::StateOnly => {
             set_state(node.widget_id, state);
             Some(WidgetEvent::Custom(Value::Nil))
         }
-        _ => None,
     }
 }
 
@@ -519,7 +530,12 @@ fn move_cursor_vertically(text: &str, cursor_pos: usize, max_chars: usize, delta
 
 /// Sum per-character widths up to cursor_pos from cache. Falls back to approximation.
 #[cfg(target_os = "macos")]
-fn cursor_x_from_char_cache(text: &str, font_size: f32, cursor_pos: usize, cell_w: f32) -> f32 {
+pub(crate) fn cursor_x_from_char_cache(
+    text: &str,
+    font_size: f32,
+    cursor_pos: usize,
+    cell_w: f32,
+) -> f32 {
     CHAR_WIDTH_CACHE.with(|c| {
         let key = (font_size.to_bits(), text.to_string());
         if let Some(widths) = c.borrow().get(&key) {
@@ -552,7 +568,12 @@ fn text_range_width_from_char_cache(
 }
 
 #[cfg(target_os = "macos")]
-fn closest_char_index_for_x(text: &str, font_size: f32, target_x: f32, cell_w: f32) -> usize {
+pub(crate) fn closest_char_index_for_x(
+    text: &str,
+    font_size: f32,
+    target_x: f32,
+    cell_w: f32,
+) -> usize {
     CHAR_WIDTH_CACHE.with(|cache| {
         let key = (font_size.to_bits(), text.to_string());
         let Some(widths) = cache.borrow().get(&key).cloned() else {

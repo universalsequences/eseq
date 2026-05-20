@@ -113,6 +113,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
         || widget_type == "number-picker"
         || widget_type == "dropdown"
         || widget_type == "knob-number"
+        || widget_type == "patcher"
     {
         map.entry("focusable".to_string())
             .or_insert_with(|| Rc::new(RefCell::new(Value::Bool(true))));

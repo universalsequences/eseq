@@ -1559,6 +1559,16 @@ fragment float4 waveform_frag(
                 draw_widget_instances(&enc, &self.device, wpipe, instances.as_slice());
             }
 
+            let foreground_rect_quads =
+                build_foreground_rect_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
+            draw_vertices(
+                &enc,
+                &self.device,
+                &pipeline,
+                &atlas_texture,
+                foreground_rect_quads.as_slice(),
+            );
+
             let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
             draw_vertices(
                 &enc,
@@ -2419,6 +2429,16 @@ fragment float4 waveform_frag(
                             }
                         }
 
+                        let foreground_rect_quads =
+                            build_foreground_rect_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
+                        draw_text_verts(
+                            &enc,
+                            &self.device,
+                            &pipeline,
+                            &atlas_texture,
+                            &foreground_rect_quads,
+                        );
+
                         let circle_quads =
                             build_circle_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
                         draw_text_verts(
@@ -2726,6 +2746,16 @@ fragment float4 waveform_frag(
                         );
                     }
                 }
+
+                let foreground_rect_quads =
+                    build_foreground_rect_quads(&global_overlay_prims, cell_w, cell_h, vp_w, vp_h);
+                draw_text_verts(
+                    &enc,
+                    &self.device,
+                    &pipeline,
+                    &atlas_texture,
+                    &foreground_rect_quads,
+                );
             }
 
             // ── Completion popup (no scissor — drawn on top of everything) ───
@@ -3747,6 +3777,16 @@ fragment float4 waveform_frag(
                 }
             }
 
+            let foreground_rect_quads =
+                build_foreground_rect_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
+            draw_vertices(
+                &enc,
+                &self.device,
+                &pipeline,
+                &atlas_texture,
+                foreground_rect_quads.as_slice(),
+            );
+
             let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
             draw_vertices(
                 &enc,
@@ -4466,6 +4506,7 @@ fragment float4 waveform_frag(
                         rect.rect, rect.color, cell_w, cell_h, vp_w, vp_h, &mut verts,
                     );
                 }
+                widget_render::MetalPrimitive::ForegroundRect(_) => {}
                 widget_render::MetalPrimitive::Quad(quad) => {
                     push_solid_quad_vertices(*quad, cell_w, cell_h, vp_w, vp_h, &mut verts);
                 }
@@ -4500,6 +4541,25 @@ fragment float4 waveform_frag(
                 widget_render::MetalPrimitive::PushClipRect(_)
                 | widget_render::MetalPrimitive::PopClipRect => {}
             }
+        }
+        verts
+    }
+
+    fn build_foreground_rect_quads(
+        primitives: &[widget_render::MetalPrimitive],
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<Vertex> {
+        let mut verts = Vec::new();
+        for primitive in primitives {
+            let widget_render::MetalPrimitive::ForegroundRect(rect) = primitive else {
+                continue;
+            };
+            push_solid_rect_vertices(
+                rect.rect, rect.color, cell_w, cell_h, vp_w, vp_h, &mut verts,
+            );
         }
         verts
     }
@@ -5877,6 +5937,12 @@ fragment float4 waveform_frag(
                 }
                 widget_render::MetalPrimitive::Rect(r)
             }
+            widget_render::MetalPrimitive::ForegroundRect(mut r) => {
+                if reaches_right(r.rect.col + r.rect.width) {
+                    r.rect.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::ForegroundRect(r)
+            }
             widget_render::MetalPrimitive::Quad(mut q) => {
                 if reaches_right(q.x + q.width) {
                     q.width += extra_cols;
@@ -5962,6 +6028,11 @@ fragment float4 waveform_frag(
                 r.rect.col += col_off;
                 r.rect.row += row_off;
                 widget_render::MetalPrimitive::Rect(r)
+            }
+            widget_render::MetalPrimitive::ForegroundRect(mut r) => {
+                r.rect.col += col_off;
+                r.rect.row += row_off;
+                widget_render::MetalPrimitive::ForegroundRect(r)
             }
             widget_render::MetalPrimitive::Quad(mut q) => {
                 q.x += col_off;
