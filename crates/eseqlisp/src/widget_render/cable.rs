@@ -60,6 +60,76 @@ pub fn cubic_bezier_point(curve: CableCurve, t: f32) -> (f32, f32) {
     )
 }
 
+pub fn cable_edit_points(
+    start: (f32, f32),
+    end: (f32, f32),
+    distance: f32,
+) -> ((f32, f32), (f32, f32)) {
+    let curve = cable_curve(start, end);
+    let start_t = find_t_for_fixed_distance(curve, 0.0, distance);
+    let end_t = find_t_for_fixed_distance_from_end(curve, distance);
+    (
+        cubic_bezier_point(curve, start_t),
+        cubic_bezier_point(curve, end_t),
+    )
+}
+
+fn find_t_for_fixed_distance(curve: CableCurve, start_t: f32, distance: f32) -> f32 {
+    let is_forward = distance > 0.0;
+    let target_distance = distance.abs();
+    let start_point = cubic_bezier_point(curve, start_t);
+    let mut min_t = start_t;
+    let mut max_t = if is_forward { 1.0 } else { 0.0 };
+
+    for _ in 0..20 {
+        let mid_t = (min_t + max_t) * 0.5;
+        let mid_point = cubic_bezier_point(curve, mid_t);
+        let current_distance = point_distance(start_point, mid_point);
+        if (current_distance - target_distance).abs() < 0.001 {
+            return mid_t;
+        }
+        if current_distance < target_distance {
+            if is_forward {
+                min_t = mid_t;
+            } else {
+                max_t = mid_t;
+            }
+        } else if is_forward {
+            max_t = mid_t;
+        } else {
+            min_t = mid_t;
+        }
+    }
+
+    (min_t + max_t) * 0.5
+}
+
+fn find_t_for_fixed_distance_from_end(curve: CableCurve, fixed_distance: f32) -> f32 {
+    let end_point = curve.p3;
+    let mut min_t = 0.0;
+    let mut max_t = 1.0;
+
+    for _ in 0..20 {
+        let mid_t = (min_t + max_t) * 0.5;
+        let mid_point = cubic_bezier_point(curve, mid_t);
+        let current_distance = point_distance(end_point, mid_point);
+        if (current_distance - fixed_distance).abs() < 0.001 {
+            return mid_t;
+        }
+        if current_distance < fixed_distance {
+            max_t = mid_t;
+        } else {
+            min_t = mid_t;
+        }
+    }
+
+    (min_t + max_t) * 0.5
+}
+
+fn point_distance(a: (f32, f32), b: (f32, f32)) -> f32 {
+    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+}
+
 pub fn distance_to_cable_px(start: (f32, f32), end: (f32, f32), point: (f32, f32)) -> f32 {
     let curve = cable_curve(start, end);
     let mut best = f32::MAX;
@@ -134,5 +204,16 @@ mod tests {
     fn distance_to_cable_is_small_near_endpoint() {
         let distance = distance_to_cable_px((10.0, 20.0), (100.0, 40.0), (10.5, 20.5));
         assert!(distance < 1.0, "{distance}");
+    }
+
+    #[test]
+    fn cable_edit_points_are_inside_curve_endpoints() {
+        let (start_handle, end_handle) = cable_edit_points((10.0, 20.0), (100.0, 40.0), 3.0);
+        assert!(start_handle.0 > 10.0, "{start_handle:?}");
+        assert!(start_handle.0 < 100.0, "{start_handle:?}");
+        assert!(end_handle.0 > 10.0, "{end_handle:?}");
+        assert!(end_handle.0 < 100.0, "{end_handle:?}");
+        assert!(point_distance((10.0, 20.0), start_handle) <= 3.1);
+        assert!(point_distance((100.0, 40.0), end_handle) <= 3.1);
     }
 }

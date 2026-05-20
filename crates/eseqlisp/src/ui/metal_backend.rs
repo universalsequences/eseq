@@ -311,9 +311,9 @@ float patch_cable_curve_distance(
     float2 p3)
 {
     float min_dist = 1.0e6;
-    for (int i = 0; i < 8; i++) {
-        float t1 = float(i) * 0.125;
-        float t2 = float(i + 1) * 0.125;
+    for (int i = 0; i < 24; i++) {
+        float t1 = float(i) / 24.0;
+        float t2 = float(i + 1) / 24.0;
         float2 seg_start = patch_cable_bezier(p0, p1, p2, p3, t1);
         float2 seg_end = patch_cable_bezier(p0, p1, p2, p3, t2);
         float2 seg_vec = seg_end - seg_start;
@@ -326,19 +326,33 @@ float patch_cable_curve_distance(
 
 fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
 {
-    float dist = patch_cable_curve_distance(
+    float min_dist_to_line = patch_cable_curve_distance(
         in.pixel_pos,
         in.start,
         in.control1,
         in.control2,
         in.end);
-    float sdf = dist - in.radius_px;
-    float derivative = max(fwidth(sdf), 0.75);
+
+    float sdf = min_dist_to_line - in.radius_px;
+    float derivative = max(fwidth(sdf), 0.0001);
     float alpha = smoothstep(derivative * 0.5, -derivative * 0.5, sdf);
-    if (alpha <= 0.001) {
+
+    if (alpha <= 0.0) {
         discard_fragment();
     }
-    return float4(in.color.rgb, in.color.a * alpha);
+
+    float core_radius = in.radius_px * 0.48;
+    float core_blend = 1.0 - smoothstep(
+        max(core_radius - derivative, 0.0),
+        core_radius + derivative,
+        min_dist_to_line);
+    float3 edge_color = in.color.rgb * 0.58;
+    float3 core_color = mix(in.color.rgb, float3(1.0, 1.0, 1.0), 0.78);
+    float3 cable_color = mix(edge_color, core_color, core_blend);
+    float edge_alpha_scale = 0.62;
+    float alpha_scale = mix(edge_alpha_scale, 1.0, core_blend);
+
+    return float4(cable_color, in.color.a * alpha * alpha_scale);
 }
 "#;
 
@@ -4647,7 +4661,7 @@ fragment float4 waveform_frag(
         let c1 = (cable.control1[0] * cell_w, cable.control1[1] * cell_h);
         let c2 = (cable.control2[0] * cell_w, cable.control2[1] * cell_h);
         let end = (cable.end[0] * cell_w, cable.end[1] * cell_h);
-        let padding = cable.radius_px + 12.0;
+        let padding = cable.radius_px + 16.0;
         let min_x = start.0.min(end.0).min(c1.0).min(c2.0) - padding;
         let max_x = start.0.max(end.0).max(c1.0).max(c2.0) + padding;
         let min_y = start.1.min(end.1).min(c1.1).min(c2.1) - padding;

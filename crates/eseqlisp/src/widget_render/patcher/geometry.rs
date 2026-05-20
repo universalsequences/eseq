@@ -1,0 +1,392 @@
+use std::collections::HashMap;
+
+use crate::layout::Rect;
+
+use super::display::node_size;
+use super::metrics::{
+    CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HIT_RADIUS_CELLS,
+    CABLE_TARGET_RADIUS_CELLS, PORT_EDGE_PADDING_CELLS, PORT_HIT_RADIUS_CELLS, VIEW_PADDING_X,
+    VIEW_PADDING_Y,
+};
+use super::model::{CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection};
+use super::state::{PatcherPanState, source_connection_id};
+
+pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
+    let mut max_col: f32 = VIEW_PADDING_X * 2.0;
+    let mut max_row: f32 = VIEW_PADDING_Y * 2.0;
+    for node in &patch.nodes {
+        let (width, height) = node_size(node);
+        max_col = max_col.max(2.0 + node.position.0 + width + VIEW_PADDING_X);
+        max_row = max_row.max(2.4 + node.position.1 + height + VIEW_PADDING_Y);
+    }
+    (max_col, max_row)
+}
+
+pub(super) fn patcher_origin(rect: Rect, pan_state: &PatcherPanState) -> (f32, f32) {
+    (
+        rect.col + 2.0 - pan_state.offset_x,
+        rect.row + 2.4 - pan_state.offset_y,
+    )
+}
+
+pub(super) fn patch_node_rects(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+) -> HashMap<String, Rect> {
+    let origin = patcher_origin(rect, pan_state);
+    patch
+        .nodes
+        .iter()
+        .map(|node| {
+            let size = node_size(node);
+            (
+                node.id.clone(),
+                Rect {
+                    col: origin.0 + node.position.0,
+                    row: origin.1 + node.position.1,
+                    width: size.0,
+                    height: size.1,
+                },
+            )
+        })
+        .collect()
+}
+
+pub(super) fn hit_patcher_node(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    local_col: f32,
+    local_row: f32,
+) -> Option<String> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    patch.nodes.iter().rev().find_map(|node| {
+        let node_rect = node_rects.get(&node.id)?;
+        rect_contains(*node_rect, local_col, local_row).then(|| node.id.clone())
+    })
+}
+
+pub(super) fn rect_contains(rect: Rect, col: f32, row: f32) -> bool {
+    col >= rect.col
+        && col <= rect.col + rect.width
+        && row >= rect.row
+        && row <= rect.row + rect.height
+}
+
+pub(super) fn rects_intersect(a: Rect, b: Rect) -> bool {
+    a.col <= b.col + b.width
+        && a.col + a.width >= b.col
+        && a.row <= b.row + b.height
+        && a.row + a.height >= b.row
+}
+
+pub(super) fn rect_from_points(
+    start_col: f32,
+    start_row: f32,
+    current_col: f32,
+    current_row: f32,
+) -> Rect {
+    let col = start_col.min(current_col);
+    let row = start_row.min(current_row);
+    Rect {
+        col,
+        row,
+        width: (start_col - current_col).abs(),
+        height: (start_row - current_row).abs(),
+    }
+}
+
+pub(super) fn port_center(rect: Rect, index: usize, count: usize, top: bool) -> (f32, f32) {
+    let count = count.max(1);
+    let usable = (rect.width - PORT_EDGE_PADDING_CELLS * 2.0).max(0.0);
+    let x = if count == 1 {
+        rect.col + PORT_EDGE_PADDING_CELLS.min(rect.width * 0.5)
+    } else {
+        rect.col
+            + PORT_EDGE_PADDING_CELLS
+            + usable * (index.min(count - 1) as f32) / ((count - 1) as f32)
+    };
+    let y = if top {
+        rect.row
+    } else {
+        rect.row + rect.height
+    };
+    (x, y)
+}
+
+pub(super) fn distance_squared(a: (f32, f32), b: (f32, f32)) -> f32 {
+    let dx = a.0 - b.0;
+    let dy = a.1 - b.1;
+    dx * dx + dy * dy
+}
+
+pub(super) fn hit_patcher_output_port(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    output_counts: &HashMap<String, usize>,
+    local_col: f32,
+    local_row: f32,
+) -> Option<OutputPortRef> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    let threshold = PORT_HIT_RADIUS_CELLS * PORT_HIT_RADIUS_CELLS;
+    patch.nodes.iter().rev().find_map(|node| {
+        let node_rect = *node_rects.get(&node.id)?;
+        let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
+        (0..output_count).find_map(|output_index| {
+            let center = port_center(node_rect, output_index, output_count, false);
+            (distance_squared(center, (local_col, local_row)) <= threshold).then(|| OutputPortRef {
+                node_id: node.id.clone(),
+                output_index,
+            })
+        })
+    })
+}
+
+pub(super) fn nearest_patcher_output_port(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    output_counts: &HashMap<String, usize>,
+    local_col: f32,
+    local_row: f32,
+) -> Option<OutputPortRef> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    let threshold = CABLE_TARGET_RADIUS_CELLS * CABLE_TARGET_RADIUS_CELLS;
+    patch
+        .nodes
+        .iter()
+        .flat_map(|node| {
+            let Some(node_rect) = node_rects.get(&node.id).copied() else {
+                return Vec::new();
+            };
+            let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
+            (0..output_count)
+                .filter_map(move |output_index| {
+                    let center = port_center(node_rect, output_index, output_count, false);
+                    let distance = distance_squared(center, (local_col, local_row));
+                    (distance <= threshold).then(|| {
+                        (
+                            distance,
+                            OutputPortRef {
+                                node_id: node.id.clone(),
+                                output_index,
+                            },
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .min_by(|(a, _), (b, _)| a.total_cmp(b))
+        .map(|(_, port)| port)
+}
+
+pub(super) fn nearest_patcher_input_port(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    input_indices: &HashMap<String, Vec<usize>>,
+    input_slot_counts: &HashMap<String, usize>,
+    source: &OutputPortRef,
+    local_col: f32,
+    local_row: f32,
+) -> Option<InputPortRef> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    let threshold = CABLE_TARGET_RADIUS_CELLS * CABLE_TARGET_RADIUS_CELLS;
+    patch
+        .nodes
+        .iter()
+        .filter(|node| node.id != source.node_id)
+        .flat_map(|node| {
+            let Some(node_rect) = node_rects.get(&node.id).copied() else {
+                return Vec::new();
+            };
+            let Some(input_indices) = input_indices.get(&node.id) else {
+                return Vec::new();
+            };
+            let slot_count = input_slot_counts.get(&node.id).copied().unwrap_or(0);
+            input_indices
+                .iter()
+                .enumerate()
+                .filter_map(move |(visible_index, input_index)| {
+                    let center = port_center(node_rect, visible_index, slot_count, true);
+                    let distance = distance_squared(center, (local_col, local_row));
+                    (distance <= threshold).then(|| {
+                        (
+                            distance,
+                            InputPortRef {
+                                node_id: node.id.clone(),
+                                input_index: *input_index,
+                            },
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .min_by(|(a, _), (b, _)| a.total_cmp(b))
+        .map(|(_, port)| port)
+}
+
+pub(super) fn connection_endpoints(
+    connection: &PatchConnection,
+    node_rects: &HashMap<String, Rect>,
+    input_indices: &HashMap<String, Vec<usize>>,
+    input_slot_counts: &HashMap<String, usize>,
+    output_counts: &HashMap<String, usize>,
+) -> Option<((f32, f32), (f32, f32))> {
+    let from = *node_rects.get(&connection.from_node)?;
+    let to = *node_rects.get(&connection.to_node)?;
+    let start = port_center(
+        from,
+        connection.from_output,
+        output_counts
+            .get(&connection.from_node)
+            .copied()
+            .unwrap_or(1),
+        false,
+    );
+    let to_input_indices = input_indices.get(&connection.to_node)?;
+    let visible_input = visible_input_slot(to_input_indices, connection.to_input)?;
+    let end = port_center(
+        to,
+        visible_input,
+        input_slot_counts
+            .get(&connection.to_node)
+            .copied()
+            .unwrap_or(to_input_indices.len()),
+        true,
+    );
+    Some((start, end))
+}
+
+fn visible_input_slot(input_indices: &[usize], semantic_input: usize) -> Option<usize> {
+    input_indices
+        .iter()
+        .position(|input_index| *input_index == semantic_input)
+}
+
+pub(super) fn hit_patcher_cable(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    input_indices: &HashMap<String, Vec<usize>>,
+    input_slot_counts: &HashMap<String, usize>,
+    output_counts: &HashMap<String, usize>,
+    local_col: f32,
+    local_row: f32,
+) -> Option<String> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    patch
+        .connections
+        .iter()
+        .filter_map(|connection| {
+            let (start, end) = connection_endpoints(
+                connection,
+                &node_rects,
+                input_indices,
+                input_slot_counts,
+                output_counts,
+            )?;
+            let distance =
+                super::super::cable::distance_to_cable_px(start, end, (local_col, local_row));
+            (distance <= CABLE_HIT_RADIUS_CELLS)
+                .then(|| (distance, source_connection_id(connection)))
+        })
+        .min_by(|(a, _), (b, _)| a.total_cmp(b))
+        .map(|(_, id)| id)
+}
+
+pub(super) fn cable_edit_points(start: (f32, f32), end: (f32, f32)) -> ((f32, f32), (f32, f32)) {
+    super::super::cable::cable_edit_points(start, end, CABLE_HANDLE_DISTANCE_CELLS)
+}
+
+pub(super) fn hit_patcher_cable_handle(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    input_indices: &HashMap<String, Vec<usize>>,
+    input_slot_counts: &HashMap<String, usize>,
+    output_counts: &HashMap<String, usize>,
+    selected_cable: Option<&str>,
+    local_col: f32,
+    local_row: f32,
+) -> Option<(String, CableEndpoint)> {
+    let selected_cable = selected_cable?;
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    let threshold = CABLE_HANDLE_HIT_RADIUS_CELLS * CABLE_HANDLE_HIT_RADIUS_CELLS;
+    patch.connections.iter().find_map(|connection| {
+        let cable_id = source_connection_id(connection);
+        if cable_id != selected_cable {
+            return None;
+        }
+        let (start, end) = connection_endpoints(
+            connection,
+            &node_rects,
+            input_indices,
+            input_slot_counts,
+            output_counts,
+        )?;
+        let (from_handle, to_handle) = cable_edit_points(start, end);
+        if distance_squared(from_handle, (local_col, local_row)) <= threshold {
+            Some((cable_id, CableEndpoint::From))
+        } else if distance_squared(to_handle, (local_col, local_row)) <= threshold {
+            Some((cable_id, CableEndpoint::To))
+        } else {
+            None
+        }
+    })
+}
+
+pub(super) fn patcher_breadcrumb_rect(rect: Rect) -> Rect {
+    Rect {
+        row: rect.row,
+        col: rect.col,
+        width: rect.width,
+        height: 2.0,
+    }
+}
+
+pub(super) fn patcher_back_button_rect(rect: Rect) -> Rect {
+    Rect {
+        row: rect.row + 0.45,
+        col: rect.col + 0.9,
+        width: 2.0,
+        height: 1.4,
+    }
+}
+
+pub(super) fn patcher_macro_drill_in_rect(rect: Rect) -> Rect {
+    Rect {
+        row: rect.row + 0.22,
+        col: rect.col + rect.width - 1.35,
+        width: 1.05,
+        height: (rect.height - 0.44).max(0.1),
+    }
+}
+
+pub(super) fn hit_patcher_macro_drill_in(
+    patch: &Patch,
+    root_patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    local_col: f32,
+    local_row: f32,
+) -> Option<(String, String)> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    patch.nodes.iter().rev().find_map(|node| {
+        if node.kind != NodeKind::MacroInstance {
+            return None;
+        }
+        if !root_patch
+            .macros
+            .iter()
+            .any(|macro_patch| macro_patch.name == node.op)
+        {
+            return None;
+        }
+        let node_rect = *node_rects.get(&node.id)?;
+        rect_contains(patcher_macro_drill_in_rect(node_rect), local_col, local_row)
+            .then(|| (node.id.clone(), node.op.clone()))
+    })
+}
