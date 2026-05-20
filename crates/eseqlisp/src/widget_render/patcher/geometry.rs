@@ -295,7 +295,10 @@ pub(super) fn hit_patcher_cable(
                 output_counts,
             )?;
             let distance = match connection.segment {
-                Some(segment) if segment.is_segmented => {
+                Some(segment)
+                    if segment.is_segmented
+                        && super::super::cable::should_render_segmented_cable(start, end) =>
+                {
                     super::super::cable::distance_to_segmented_cable_px(
                         start,
                         end,
@@ -325,6 +328,7 @@ pub(super) fn connection_cable_edit_points(
     if connection
         .segment
         .is_some_and(|segment| segment.is_segmented)
+        && super::super::cable::should_render_segmented_cable(start, end)
     {
         super::super::cable::segmented_cable_edit_points(start, end, CABLE_HANDLE_DISTANCE_CELLS)
     } else {
@@ -356,6 +360,9 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
             input_slot_counts,
             output_counts,
         )?;
+        if !super::super::cable::should_render_segmented_cable(start, end) {
+            return None;
+        }
         super::super::cable::segmented_horizontal_segment_hit(
             start,
             end,

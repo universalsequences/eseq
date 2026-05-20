@@ -459,6 +459,10 @@ fn push_cable(
         }
     };
     let curve = super::super::cable::cable_curve(start, end);
+    let is_segmented = connection
+        .segment
+        .is_some_and(|segment| segment.is_segmented)
+        && super::super::cable::should_render_segmented_cable(start, end);
     prims.push(MetalPrimitive::PatchCable(MetalPatchCablePrimitive {
         start: [curve.p0.0, curve.p0.1],
         control1: [curve.p1.0, curve.p1.1],
@@ -470,9 +474,7 @@ fn push_cable(
             4.4
         },
         color,
-        is_segmented: connection
-            .segment
-            .is_some_and(|segment| segment.is_segmented),
+        is_segmented,
         segment_row: connection
             .segment
             .map(|segment| origin_row + segment.segment_row)

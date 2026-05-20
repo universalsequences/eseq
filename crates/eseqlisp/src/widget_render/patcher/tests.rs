@@ -1551,6 +1551,14 @@ fn segmented_cable_hit_testing_uses_orthogonal_path() {
     let input_indices = patch_input_indices(&patch);
     let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
     let output_counts = patch_output_counts(&patch);
+    let to_node = patch.connections.first().unwrap().to_node.clone();
+    patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == to_node)
+        .unwrap()
+        .position
+        .0 += 12.0;
     let node_rects = patch_node_rects(&patch, rect, &pan);
     let (start, end) = connection_endpoints(
         patch.connections.first().unwrap(),
@@ -1603,6 +1611,14 @@ fn segmented_horizontal_segment_hit_is_used_for_dragging() {
     let input_indices = patch_input_indices(&patch);
     let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
     let output_counts = patch_output_counts(&patch);
+    let to_node = patch.connections.first().unwrap().to_node.clone();
+    patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == to_node)
+        .unwrap()
+        .position
+        .0 += 12.0;
     let node_rects = patch_node_rects(&patch, rect, &pan);
     let (start, end) = connection_endpoints(
         patch.connections.first().unwrap(),
@@ -1732,63 +1748,58 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
         (def pitch (in 1 @name pitch))
         (def sig (phasor pitch))
     "#;
-    let patch = parse(source);
-    let connection_id = source_connection_id(patch.connections.first().unwrap());
-    let mut state = PatcherInteractionState {
-        selected_cable: Some(connection_id.clone()),
-        ..Default::default()
+    let mut patch = parse(source);
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 80.0,
+        height: 30.0,
     };
-    let path = std::env::temp_dir().join(format!(
-        "eseqlisp-patcher-segment-pan-{}.lisp",
-        std::process::id()
-    ));
-    std::fs::write(&path, source).unwrap();
-    let mut props = HashMap::new();
-    props.insert(
-        "path".to_string(),
-        Value::String(path.to_string_lossy().to_string()),
-    );
-    let node = LayoutNode {
-        widget_id: 778_900,
-        stable_widget_id: Some(778_900),
-        subtree_root_id: None,
-        parent_subtree_root_id: None,
-        stable_key: None,
-        widget_type: "patcher".to_string(),
-        rect: Rect {
-            row: 0.0,
-            col: 0.0,
-            width: 80.0,
-            height: 30.0,
-        },
-        props,
-        children: Vec::new(),
-        focusable: true,
-    };
-    assert!(super::toggle_selected_cable_segmented(
-        &node, &mut state, "root"
-    ));
-    let patch = patch_with_interaction_state(patch, &state, "root");
-    let stored_segment_row = patch
-        .connections
-        .first()
-        .and_then(|connection| connection.segment)
+    let pan_for_layout = PatcherPanState::default();
+    let connection = patch.connections.first().unwrap().clone();
+    patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == connection.to_node)
         .unwrap()
-        .segment_row;
+        .position
+        .0 += 12.0;
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let node_rects = patch_node_rects(&patch, rect, &pan_for_layout);
+    let (start, end) = connection_endpoints(
+        &connection,
+        &node_rects,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+    )
+    .unwrap();
+    assert!(super::super::cable::should_render_segmented_cable(
+        start, end
+    ));
+    let origin = patcher_origin(rect, &pan_for_layout);
+    let stored_segment_row = ((start.1 + end.1) * 0.5) - origin.1;
+    patch.connections[0].segment = Some(CableSegmentInfo {
+        is_segmented: true,
+        segment_row: stored_segment_row,
+    });
+    let state = PatcherInteractionState::default();
 
     let mut pan = PatcherPanState {
-        viewport_width: node.rect.width,
-        viewport_height: node.rect.height,
+        viewport_width: rect.width,
+        viewport_height: rect.height,
         content_width: 200.0,
         content_height: 200.0,
         ..Default::default()
     };
-    let first_origin = patcher_origin(node.rect, &pan);
+    let first_origin = patcher_origin(rect, &pan);
     let mut prims = Vec::new();
     draw_patch(
         &mut prims,
         &patch,
-        node.rect,
+        rect,
         WidgetViewport {
             vp_w: 800.0,
             vp_h: 600.0,
@@ -1815,12 +1826,12 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
     assert_eq!(first_segment_row, first_origin.1 + stored_segment_row);
 
     pan.offset_y = 12.0;
-    let second_origin = patcher_origin(node.rect, &pan);
+    let second_origin = patcher_origin(rect, &pan);
     let mut prims = Vec::new();
     draw_patch(
         &mut prims,
         &patch,
-        node.rect,
+        rect,
         WidgetViewport {
             vp_w: 800.0,
             vp_h: 600.0,
@@ -1849,6 +1860,77 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
         second_segment_row - first_segment_row,
         second_origin.1 - first_origin.1
     );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn segmented_cable_rendering_collapses_aligned_ports_to_vertical_curve() {
+    let source = r#"
+        (def pitch (in 1 @name pitch))
+        (def sig (phasor pitch))
+    "#;
+    let mut patch = parse(source);
+    let pan = PatcherPanState::default();
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 80.0,
+        height: 30.0,
+    };
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let node_rects = patch_node_rects(&patch, rect, &pan);
+    let (start, end) = connection_endpoints(
+        patch.connections.first().unwrap(),
+        &node_rects,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+    )
+    .unwrap();
+    assert!(!super::super::cable::should_render_segmented_cable(
+        start, end
+    ));
+    let origin = patcher_origin(rect, &pan);
+    patch.connections[0].segment = Some(CableSegmentInfo {
+        is_segmented: true,
+        segment_row: ((start.1 + end.1) * 0.5) - origin.1,
+    });
+
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        rect,
+        WidgetViewport {
+            vp_w: 800.0,
+            vp_h: 600.0,
+            cell_w: 10.0,
+            cell_h: 20.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 30.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &pan,
+        &PatcherInteractionState::default(),
+    );
+
+    let cable = prims
+        .iter()
+        .find_map(|prim| match prim {
+            MetalPrimitive::PatchCable(cable) => Some(cable),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!cable.is_segmented);
+    assert_eq!(cable.start[0], cable.end[0]);
+    assert_eq!(cable.control1[0], cable.start[0]);
+    assert_eq!(cable.control2[0], cable.end[0]);
 }
 
 #[test]

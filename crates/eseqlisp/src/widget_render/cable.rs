@@ -12,6 +12,10 @@ const MAX_X_HANDLE: f32 = 4.8;
 const MIN_Y_HANDLE: f32 = 1.1;
 const MAX_Y_HANDLE: f32 = 2.4;
 
+pub fn should_render_segmented_cable(start: (f32, f32), end: (f32, f32)) -> bool {
+    (end.0 - start.0).abs() >= SAME_X_EPSILON
+}
+
 /// Generate the patch-editor cable Bezier used by the standalone Swift editor.
 ///
 /// The original Swift implementation works in a world coordinate system where
@@ -148,6 +152,9 @@ pub fn segmented_cable_edit_points(
     end: (f32, f32),
     distance: f32,
 ) -> ((f32, f32), (f32, f32)) {
+    if !should_render_segmented_cable(start, end) {
+        return cable_edit_points(start, end, distance);
+    }
     ((start.0, start.1 + distance), (end.0, end.1 - distance))
 }
 
@@ -180,6 +187,9 @@ pub fn distance_to_segmented_cable_px(
     corner_radius: f32,
     point: (f32, f32),
 ) -> f32 {
+    if !should_render_segmented_cable(start, end) {
+        return distance_to_cable_px(start, end, point);
+    }
     let start = (start.0, -start.1);
     let end = (end.0, -end.1);
     let point = (point.0, -point.1);
@@ -194,6 +204,9 @@ pub fn segmented_horizontal_segment_hit(
     corner_radius: f32,
     point: (f32, f32),
 ) -> bool {
+    if !should_render_segmented_cable(start, end) {
+        return false;
+    }
     let going_right = end.0 > start.0;
     let start_x = if going_right {
         start.0 + corner_radius
@@ -485,6 +498,25 @@ mod tests {
         let curve = cable_curve((10.0, 20.0), (10.12, 60.0));
         assert_eq!(curve.p1.0, curve.p0.0);
         assert_eq!(curve.p2.0, curve.p3.0);
+    }
+
+    #[test]
+    fn segmented_cable_collapses_to_vertical_curve_when_ports_align() {
+        let start = (10.0, 20.0);
+        let end = (10.0, 60.0);
+        let point = (10.0, 40.0);
+        assert!(!should_render_segmented_cable(start, end));
+        assert_eq!(
+            segmented_cable_edit_points(start, end, 3.0),
+            cable_edit_points(start, end, 3.0)
+        );
+        assert_eq!(
+            distance_to_segmented_cable_px(start, end, 34.0, 0.7, point),
+            distance_to_cable_px(start, end, point)
+        );
+        assert!(!segmented_horizontal_segment_hit(
+            start, end, 34.0, 0.7, point
+        ));
     }
 
     #[test]
