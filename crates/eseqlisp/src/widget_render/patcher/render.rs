@@ -18,7 +18,8 @@ use crate::vm::Value;
 use super::display::{node_display_label, preview};
 use super::geometry::{
     connection_cable_edit_points, connection_endpoints, patch_content_size, patch_node_rects,
-    patcher_back_button_rect, patcher_macro_drill_in_rect, port_center, rect_from_points,
+    patcher_back_button_rect, patcher_macro_drill_in_rect, patcher_zoom, port_center,
+    rect_from_points,
 };
 use super::load_patch_from_props;
 use super::metrics::{
@@ -87,8 +88,9 @@ pub(super) fn build_metal_primitives_for_patcher(
             let patch = active_patcher_patch(&root_patch, &interaction_state);
             let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
             let content_size = patch_content_size(&patch);
-            pan_state.content_width = content_size.0.max(node.rect.width);
-            pan_state.content_height = content_size.1.max(node.rect.height);
+            let zoom = patcher_zoom(&pan_state);
+            pan_state.content_width = (content_size.0 * zoom).max(node.rect.width);
+            pan_state.content_height = (content_size.1 * zoom).max(node.rect.height);
             set_patcher_pan_state(key, pan_state.clone());
             pan_state = get_patcher_pan_state(key);
             draw_patch(
@@ -117,6 +119,7 @@ pub(super) fn build_metal_primitives_for_patcher(
                     h_align: 0.0,
                     text: format!("{}", patcher_breadcrumb(&path, &interaction_state)),
                     font_size: 12.0,
+                    scale: 1.0,
                     fg: theme::PATCHER_TEXT_MUTED(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                 },
@@ -133,6 +136,7 @@ pub(super) fn build_metal_primitives_for_patcher(
                             patch.diagnostics.len()
                         ),
                         font_size: 11.0,
+                        scale: 1.0,
                         fg: theme::PATCHER_ERROR(),
                         bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                     },
@@ -148,6 +152,7 @@ pub(super) fn build_metal_primitives_for_patcher(
                     h_align: 0.0,
                     text: error,
                     font_size: 13.0,
+                    scale: 1.0,
                     fg: theme::PATCHER_ERROR(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                 },
@@ -261,6 +266,7 @@ fn push_back_button(
             h_align: 0.0,
             text: label.to_string(),
             font_size: 11.0,
+            scale: 1.0,
             fg: if interaction_state.hover_back_button {
                 theme::PATCHER_BACK_BUTTON_HOVER_TEXT()
             } else {
@@ -282,6 +288,7 @@ pub(super) fn draw_patch(
 ) {
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let origin = super::geometry::patcher_origin(rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
     let input_indices = patch_input_indices(patch);
     let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
     let output_counts = patch_output_counts(patch);
@@ -305,9 +312,9 @@ pub(super) fn draw_patch(
             continue;
         };
         let selected = interaction_state.selected_cable.as_deref() == Some(connection_id.as_str());
-        push_cable(prims, start, end, connection, origin.1, selected);
+        push_cable(prims, start, end, connection, origin.1, zoom, selected);
         if selected {
-            push_cable_handles(prims, connection, start, end);
+            push_cable_handles(prims, connection, start, end, zoom);
         }
     }
     if let Some(PatcherDragState::Cable {
@@ -323,6 +330,7 @@ pub(super) fn draw_patch(
             (*start_col, *start_row),
             (*current_col, *current_row),
             ConnectionKind::Forward,
+            zoom,
             false,
         );
     }
@@ -345,7 +353,7 @@ pub(super) fn draw_patch(
                 ((*start_col, *start_row), (*current_col, *current_row))
             }
         };
-        push_preview_cable(prims, start, end, ConnectionKind::Forward, true);
+        push_preview_cable(prims, start, end, ConnectionKind::Forward, zoom, true);
         let preview_connection = PatchConnection {
             from_node: String::new(),
             from_output: 0,
@@ -355,7 +363,7 @@ pub(super) fn draw_patch(
             segment: None,
             source: None,
         };
-        push_cable_handles(prims, &preview_connection, start, end);
+        push_cable_handles(prims, &preview_connection, start, end, zoom);
     }
 
     for node in &patch.nodes {
@@ -384,6 +392,7 @@ pub(super) fn draw_patch(
             interaction_state.hovered_macro_drill_in.as_deref() == Some(node.id.as_str()),
             &highlighted_inputs,
             &highlighted_outputs,
+            zoom,
         );
     }
 }
@@ -448,6 +457,7 @@ fn push_cable(
     end: (f32, f32),
     connection: &PatchConnection,
     origin_row: f32,
+    zoom: f32,
     selected: bool,
 ) {
     let color = if selected {
@@ -469,17 +479,17 @@ fn push_cable(
         control2: [curve.p2.0, curve.p2.1],
         end: [curve.p3.0, curve.p3.1],
         radius_px: if connection.kind == ConnectionKind::Feedback {
-            3.6
+            3.6 * zoom
         } else {
-            4.4
+            4.4 * zoom
         },
         color,
         is_segmented,
         segment_row: connection
             .segment
-            .map(|segment| origin_row + segment.segment_row)
+            .map(|segment| origin_row + segment.segment_row * zoom)
             .unwrap_or(0.0),
-        corner_radius_cells: SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+        corner_radius_cells: SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
     }));
 }
 
@@ -489,6 +499,7 @@ fn push_preview_cable(
     start: (f32, f32),
     end: (f32, f32),
     kind: ConnectionKind,
+    zoom: f32,
     selected: bool,
 ) {
     let connection = PatchConnection {
@@ -500,7 +511,7 @@ fn push_preview_cable(
         segment: None,
         source: None,
     };
-    push_cable(prims, start, end, &connection, 0.0, selected);
+    push_cable(prims, start, end, &connection, 0.0, zoom, selected);
 }
 
 #[cfg(target_os = "macos")]
@@ -509,18 +520,19 @@ fn push_cable_handles(
     connection: &PatchConnection,
     start: (f32, f32),
     end: (f32, f32),
+    zoom: f32,
 ) {
-    let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end);
+    let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end, zoom);
     for center in [from_handle, to_handle] {
         prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
             center: [center.0, center.1],
-            radius_px: CABLE_HANDLE_RADIUS_PX,
+            radius_px: CABLE_HANDLE_RADIUS_PX * zoom,
             color: theme::PATCHER_ERROR(),
             visible_half: MetalCircleVisibleHalf::Full,
         }));
         prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
             center: [center.0, center.1],
-            radius_px: CABLE_HANDLE_RADIUS_PX * 0.52,
+            radius_px: CABLE_HANDLE_RADIUS_PX * 0.52 * zoom,
             color: theme::PATCHER_BG(),
             visible_half: MetalCircleVisibleHalf::Full,
         }));
@@ -542,6 +554,7 @@ fn push_node(
     macro_drill_in_hovered: bool,
     highlighted_inputs: &[usize],
     highlighted_outputs: &[usize],
+    zoom: f32,
 ) {
     let (bg, mut border, text) = match node.kind {
         NodeKind::In | NodeKind::Out => (
@@ -575,7 +588,7 @@ fn push_node(
     if selected {
         border = theme::PATCHER_NODE_SELECTED_BORDER();
     }
-    push_node_chrome(prims, rect, bg, border, viewport);
+    push_node_chrome(prims, rect, bg, border, viewport, zoom);
     for (visible_index, &index) in input_indices.iter().enumerate() {
         push_port(
             prims,
@@ -584,6 +597,7 @@ fn push_node(
             bg,
             highlighted_inputs.contains(&index),
             viewport,
+            zoom,
         );
     }
     for index in 0..output_count {
@@ -594,21 +608,23 @@ fn push_node(
             bg,
             highlighted_outputs.contains(&index),
             viewport,
+            zoom,
         );
     }
-    push_node_edit_selection(prims, rect, viewport, edit);
-    push_node_label(prims, node, rect, text, edit, viewport);
-    push_macro_drill_in(prims, node, rect, macro_drill_in_hovered);
-    push_node_edit_cursor(prims, rect, viewport, edit);
+    push_node_edit_selection(prims, rect, viewport, edit, zoom);
+    push_node_label(prims, node, rect, text, edit, viewport, zoom);
+    push_macro_drill_in(prims, node, rect, macro_drill_in_hovered, zoom);
+    push_node_edit_cursor(prims, rect, viewport, edit, zoom);
     if let Some(diagnostic) = &node.diagnostic {
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
-                row: rect.row + 2.65,
-                col: rect.col + 1.0,
-                align_width: rect.width - 2.0,
+                row: rect.row + 2.65 * zoom,
+                col: rect.col + 1.0 * zoom,
+                align_width: rect.width - 2.0 * zoom,
                 h_align: 0.0,
                 text: preview(diagnostic, 32),
                 font_size: 9.5,
+                scale: zoom,
                 fg: theme::PATCHER_ERROR(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
@@ -647,6 +663,7 @@ fn push_node_chrome(
     bg: crate::backend::Color,
     border: crate::backend::Color,
     viewport: WidgetViewport,
+    zoom: f32,
 ) {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
@@ -659,13 +676,13 @@ fn push_node_chrome(
             value_t: 0.0,
             orientation: 0.0,
             itime: viewport.time_seconds,
-            uniform_a: [NODE_BORDER_WIDTH_PX, 0.0, 0.0, 0.0],
+            uniform_a: [NODE_BORDER_WIDTH_PX * zoom, 0.0, 0.0, 0.0],
             uniform_b: [0.0; 4],
             color_a: border.to_rgba(),
             color_b: bg.to_rgba(),
             color_c: [0.0; 4],
             color_d: [0.0; 4],
-            corner_radius: normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX),
+            corner_radius: normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom),
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background: false,
@@ -678,6 +695,7 @@ fn push_node_edit_selection(
     rect: Rect,
     viewport: WidgetViewport,
     edit: Option<&PatcherTextEdit>,
+    zoom: f32,
 ) {
     let Some(edit) = edit else {
         return;
@@ -686,21 +704,21 @@ fn push_node_edit_selection(
         return;
     };
     let x = rect.col
-        + NODE_TEXT_COL_OFFSET
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, start, viewport.cell_w);
+        + NODE_TEXT_COL_OFFSET * zoom
+        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, start, viewport.cell_w) * zoom;
     let end_x = rect.col
-        + NODE_TEXT_COL_OFFSET
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, end, viewport.cell_w);
+        + NODE_TEXT_COL_OFFSET * zoom
+        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, end, viewport.cell_w) * zoom;
     let width = end_x - x;
     if width <= 0.0 {
         return;
     }
     prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
         rect: Rect {
-            row: rect.row + 0.18,
+            row: rect.row + 0.18 * zoom,
             col: x,
             width,
-            height: (rect.height - 0.36).max(0.1),
+            height: (rect.height - 0.36 * zoom).max(0.1),
         },
         color: theme::PATCHER_EDIT_SELECTION(),
     }));
@@ -712,20 +730,21 @@ fn push_node_edit_cursor(
     rect: Rect,
     viewport: WidgetViewport,
     edit: Option<&PatcherTextEdit>,
+    zoom: f32,
 ) {
     let Some(edit) = edit else {
         return;
     };
     let cursor_pos = edit.state.cursor_pos.min(edit.text.chars().count());
     let x = rect.col
-        + NODE_TEXT_COL_OFFSET
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, cursor_pos, viewport.cell_w);
+        + NODE_TEXT_COL_OFFSET * zoom
+        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, cursor_pos, viewport.cell_w) * zoom;
     prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
         rect: Rect {
-            row: rect.row + 0.23,
+            row: rect.row + 0.23 * zoom,
             col: x,
-            width: 0.08,
-            height: (rect.height - 0.46).max(0.1),
+            width: 0.08 * zoom,
+            height: (rect.height - 0.46 * zoom).max(0.1),
         },
         color: theme::PATCHER_EDIT_CURSOR(),
     }));
@@ -737,6 +756,7 @@ fn push_macro_drill_in(
     node: &PatchNode,
     rect: Rect,
     hovered: bool,
+    zoom: f32,
 ) {
     if node.kind != NodeKind::MacroInstance {
         return;
@@ -750,11 +770,12 @@ fn push_macro_drill_in(
     prims.push(MetalPrimitive::ProportionalText(
         MetalProportionalTextPrimitive {
             row: button_rect.row + 0.1,
-            col: button_rect.col + 0.34,
+            col: button_rect.col + 0.34 * zoom,
             align_width: button_rect.width,
             h_align: 0.0,
             text: ">".to_string(),
             font_size: 12.0,
+            scale: zoom,
             fg: color,
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
         },
@@ -769,6 +790,7 @@ fn push_node_label(
     head_color: crate::backend::Color,
     edit: Option<&PatcherTextEdit>,
     viewport: WidgetViewport,
+    zoom: f32,
 ) {
     let font_size = if node.kind == NodeKind::CodeIsland {
         CODE_NODE_FONT_SIZE
@@ -776,20 +798,21 @@ fn push_node_label(
         NODE_FONT_SIZE
     };
     let baseline_row = if node.kind == NodeKind::CodeIsland {
-        rect.row + 0.55
+        rect.row + 0.55 * zoom
     } else {
-        rect.row + 0.36
+        rect.row + 0.36 * zoom
     };
-    let text_col = rect.col + NODE_TEXT_COL_OFFSET;
+    let text_col = rect.col + NODE_TEXT_COL_OFFSET * zoom;
     if let Some(edit) = edit {
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: baseline_row,
                 col: text_col,
-                align_width: rect.width - 1.84,
+                align_width: rect.width - 1.84 * zoom,
                 h_align: 0.0,
                 text: edit.text.clone(),
                 font_size,
+                scale: zoom,
                 fg: head_color,
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
@@ -803,25 +826,27 @@ fn push_node_label(
         MetalProportionalTextPrimitive {
             row: baseline_row,
             col: text_col,
-            align_width: rect.width - 1.84,
+            align_width: rect.width - 1.84 * zoom,
             h_align: 0.0,
             text: head.to_string(),
             font_size,
+            scale: zoom,
             fg: head_color,
             bg,
         },
     ));
     if !tail.is_empty() {
-        let tail_col =
-            text_col + cursor_x_from_char_cache(&label, font_size, tail_start, viewport.cell_w);
+        let tail_col = text_col
+            + cursor_x_from_char_cache(&label, font_size, tail_start, viewport.cell_w) * zoom;
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: baseline_row,
                 col: tail_col,
-                align_width: (rect.col + rect.width - tail_col - 0.92).max(0.0),
+                align_width: (rect.col + rect.width - tail_col - 0.92 * zoom).max(0.0),
                 h_align: 0.0,
                 text: tail.to_string(),
                 font_size,
+                scale: zoom,
                 fg: theme::PATCHER_NODE_TAIL_TEXT(),
                 bg,
             },
@@ -858,6 +883,7 @@ fn push_port(
     node_bg: crate::backend::Color,
     highlighted: bool,
     viewport: WidgetViewport,
+    zoom: f32,
 ) {
     let color = if highlighted {
         theme::PATCHER_NODE_SELECTED_BORDER()
@@ -866,7 +892,7 @@ fn push_port(
     } else {
         theme::PATCHER_PORT_OUTPUT()
     };
-    let outer_radius_px = PORT_OUTER_DIAMETER_PX * 0.5;
+    let outer_radius_px = PORT_OUTER_DIAMETER_PX * 0.5 * zoom;
     let rect = Rect {
         row: center.1 - outer_radius_px / viewport.cell_h.max(1.0),
         col: center.0 - outer_radius_px / viewport.cell_w.max(1.0),

@@ -97,6 +97,7 @@ impl WidgetDefinition for TransportClockWidget {
                     h_align: 0.0,
                     text,
                     font_size,
+                    scale: 1.0,
                     fg,
                     bg,
                 },

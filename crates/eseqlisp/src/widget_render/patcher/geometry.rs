@@ -5,8 +5,8 @@ use crate::layout::Rect;
 use super::display::node_size;
 use super::metrics::{
     CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HIT_RADIUS_CELLS,
-    CABLE_TARGET_RADIUS_CELLS, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
-    SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
+    CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT, PORT_EDGE_PADDING_CELLS,
+    PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection};
 use super::state::{PatcherPanState, source_connection_id};
@@ -29,12 +29,27 @@ pub(super) fn patcher_origin(rect: Rect, pan_state: &PatcherPanState) -> (f32, f
     )
 }
 
+pub(super) fn patcher_zoom(pan_state: &PatcherPanState) -> f32 {
+    pan_state.zoom.max(MIN_ZOOM)
+}
+
+pub(super) fn screen_to_model(
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    point: (f32, f32),
+) -> (f32, f32) {
+    let origin = patcher_origin(rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
+    ((point.0 - origin.0) / zoom, (point.1 - origin.1) / zoom)
+}
+
 pub(super) fn patch_node_rects(
     patch: &Patch,
     rect: Rect,
     pan_state: &PatcherPanState,
 ) -> HashMap<String, Rect> {
     let origin = patcher_origin(rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
     patch
         .nodes
         .iter()
@@ -43,10 +58,10 @@ pub(super) fn patch_node_rects(
             (
                 node.id.clone(),
                 Rect {
-                    col: origin.0 + node.position.0,
-                    row: origin.1 + node.position.1,
-                    width: size.0,
-                    height: size.1,
+                    col: origin.0 + node.position.0 * zoom,
+                    row: origin.1 + node.position.1 * zoom,
+                    width: size.0 * zoom,
+                    height: size.1 * zoom,
                 },
             )
         })
@@ -99,13 +114,13 @@ pub(super) fn rect_from_points(
 
 pub(super) fn port_center(rect: Rect, index: usize, count: usize, top: bool) -> (f32, f32) {
     let count = count.max(1);
-    let usable = (rect.width - PORT_EDGE_PADDING_CELLS * 2.0).max(0.0);
+    let zoom = (rect.height / NODE_HEIGHT).max(MIN_ZOOM);
+    let edge_padding = PORT_EDGE_PADDING_CELLS * zoom;
+    let usable = (rect.width - edge_padding * 2.0).max(0.0);
     let x = if count == 1 {
-        rect.col + PORT_EDGE_PADDING_CELLS.min(rect.width * 0.5)
+        rect.col + edge_padding.min(rect.width * 0.5)
     } else {
-        rect.col
-            + PORT_EDGE_PADDING_CELLS
-            + usable * (index.min(count - 1) as f32) / ((count - 1) as f32)
+        rect.col + edge_padding + usable * (index.min(count - 1) as f32) / ((count - 1) as f32)
     };
     let y = if top {
         rect.row
@@ -158,7 +173,8 @@ pub(super) fn nearest_patcher_output_port(
     local_row: f32,
 ) -> Option<OutputPortRef> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
-    let threshold = CABLE_TARGET_RADIUS_CELLS * CABLE_TARGET_RADIUS_CELLS;
+    let threshold_radius = CABLE_TARGET_RADIUS_CELLS * patcher_zoom(pan_state);
+    let threshold = threshold_radius * threshold_radius;
     patch
         .nodes
         .iter()
@@ -198,7 +214,8 @@ pub(super) fn nearest_patcher_input_port(
     local_row: f32,
 ) -> Option<InputPortRef> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
-    let threshold = CABLE_TARGET_RADIUS_CELLS * CABLE_TARGET_RADIUS_CELLS;
+    let threshold_radius = CABLE_TARGET_RADIUS_CELLS * patcher_zoom(pan_state);
+    let threshold = threshold_radius * threshold_radius;
     patch
         .nodes
         .iter()
@@ -283,6 +300,7 @@ pub(super) fn hit_patcher_cable(
 ) -> Option<String> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let origin = patcher_origin(rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
     patch
         .connections
         .iter()
@@ -302,37 +320,46 @@ pub(super) fn hit_patcher_cable(
                     super::super::cable::distance_to_segmented_cable_px(
                         start,
                         end,
-                        origin.1 + segment.segment_row,
-                        SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+                        origin.1 + segment.segment_row * zoom,
+                        SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
                         (local_col, local_row),
                     )
                 }
                 _ => super::super::cable::distance_to_cable_px(start, end, (local_col, local_row)),
             };
-            (distance <= CABLE_HIT_RADIUS_CELLS)
+            (distance <= CABLE_HIT_RADIUS_CELLS * zoom)
                 .then(|| (distance, source_connection_id(connection)))
         })
         .min_by(|(a, _), (b, _)| a.total_cmp(b))
         .map(|(_, id)| id)
 }
 
-pub(super) fn cable_edit_points(start: (f32, f32), end: (f32, f32)) -> ((f32, f32), (f32, f32)) {
-    super::super::cable::cable_edit_points(start, end, CABLE_HANDLE_DISTANCE_CELLS)
+pub(super) fn cable_edit_points(
+    start: (f32, f32),
+    end: (f32, f32),
+    zoom: f32,
+) -> ((f32, f32), (f32, f32)) {
+    super::super::cable::cable_edit_points(start, end, CABLE_HANDLE_DISTANCE_CELLS * zoom)
 }
 
 pub(super) fn connection_cable_edit_points(
     connection: &PatchConnection,
     start: (f32, f32),
     end: (f32, f32),
+    zoom: f32,
 ) -> ((f32, f32), (f32, f32)) {
     if connection
         .segment
         .is_some_and(|segment| segment.is_segmented)
         && super::super::cable::should_render_segmented_cable(start, end)
     {
-        super::super::cable::segmented_cable_edit_points(start, end, CABLE_HANDLE_DISTANCE_CELLS)
+        super::super::cable::segmented_cable_edit_points(
+            start,
+            end,
+            CABLE_HANDLE_DISTANCE_CELLS * zoom,
+        )
     } else {
-        cable_edit_points(start, end)
+        cable_edit_points(start, end, zoom)
     }
 }
 
@@ -348,6 +375,7 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
 ) -> Option<String> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let origin = patcher_origin(rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
     patch.connections.iter().find_map(|connection| {
         let segment = connection.segment?;
         if !segment.is_segmented {
@@ -366,8 +394,8 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
         super::super::cable::segmented_horizontal_segment_hit(
             start,
             end,
-            origin.1 + segment.segment_row,
-            SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+            origin.1 + segment.segment_row * zoom,
+            SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
             (local_col, local_row),
         )
         .then(|| source_connection_id(connection))
@@ -387,7 +415,9 @@ pub(super) fn hit_patcher_cable_handle(
 ) -> Option<(String, CableEndpoint)> {
     let selected_cable = selected_cable?;
     let node_rects = patch_node_rects(patch, rect, pan_state);
-    let threshold = CABLE_HANDLE_HIT_RADIUS_CELLS * CABLE_HANDLE_HIT_RADIUS_CELLS;
+    let zoom = patcher_zoom(pan_state);
+    let threshold_radius = CABLE_HANDLE_HIT_RADIUS_CELLS * zoom;
+    let threshold = threshold_radius * threshold_radius;
     patch.connections.iter().find_map(|connection| {
         let cable_id = source_connection_id(connection);
         if cable_id != selected_cable {
@@ -400,7 +430,7 @@ pub(super) fn hit_patcher_cable_handle(
             input_slot_counts,
             output_counts,
         )?;
-        let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end);
+        let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end, zoom);
         if distance_squared(from_handle, (local_col, local_row)) <= threshold {
             Some((cable_id, CableEndpoint::From))
         } else if distance_squared(to_handle, (local_col, local_row)) <= threshold {

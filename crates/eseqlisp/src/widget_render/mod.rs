@@ -442,6 +442,8 @@ pub struct MetalProportionalTextPrimitive {
     pub text: String,
     /// Font size in points.
     pub font_size: f32,
+    /// Additional geometry scale applied to glyph quads after rasterization.
+    pub scale: f32,
     pub fg: Color,
     pub bg: Color,
 }

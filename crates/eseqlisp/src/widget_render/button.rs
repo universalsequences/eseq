@@ -368,6 +368,7 @@ impl WidgetDefinition for ButtonWidget {
                     h_align: 0.5,
                     text,
                     font_size,
+                    scale: 1.0,
                     fg: variant_fg(&node.props),
                     bg,
                 },

@@ -366,6 +366,7 @@ impl WidgetDefinition for TabsWidget {
                     h_align: 0.0,
                     text: label.clone(),
                     font_size: DEFAULT_FONT_SIZE,
+                    scale: 1.0,
                     fg,
                     bg: theme::BG(),
                 },

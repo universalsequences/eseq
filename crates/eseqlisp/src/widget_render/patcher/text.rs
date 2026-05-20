@@ -3,7 +3,7 @@ use crate::layout::Rect;
 #[cfg(target_os = "macos")]
 use super::super::text_input::closest_char_index_for_x;
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
-use super::metrics::{NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
+use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
 use super::state::{PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, node_edit_key};
 
 fn patcher_text_char_width_cells() -> f32 {
@@ -11,7 +11,16 @@ fn patcher_text_char_width_cells() -> f32 {
 }
 
 pub(super) fn patcher_text_cursor_at_col(rect: Rect, text: &str, local_col: f32) -> usize {
-    patcher_text_cursor_at_col_with_cell_width(rect, text, local_col, 10.0)
+    patcher_text_cursor_at_col_with_cell_width(rect, text, local_col, 10.0, 1.0)
+}
+
+pub(super) fn patcher_text_cursor_at_col_with_zoom(
+    rect: Rect,
+    text: &str,
+    local_col: f32,
+    zoom: f32,
+) -> usize {
+    patcher_text_cursor_at_col_with_cell_width(rect, text, local_col, 10.0, zoom)
 }
 
 pub(super) fn patcher_text_cursor_at_col_with_cell_width(
@@ -19,15 +28,19 @@ pub(super) fn patcher_text_cursor_at_col_with_cell_width(
     text: &str,
     local_col: f32,
     cell_w: f32,
+    zoom: f32,
 ) -> usize {
-    let target = (local_col - rect.col - NODE_TEXT_COL_OFFSET).max(0.0);
+    let zoom = zoom.max(MIN_ZOOM);
+    let target = ((local_col - rect.col - NODE_TEXT_COL_OFFSET * zoom) / zoom).max(0.0);
     #[cfg(target_os = "macos")]
     {
         closest_char_index_for_x(text, NODE_FONT_SIZE, target, cell_w).min(text.chars().count())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        ((target / patcher_text_char_width_cells()).round().max(0.0) as usize)
+        ((target / (patcher_text_char_width_cells() * zoom))
+            .round()
+            .max(0.0) as usize)
             .min(text.chars().count())
     }
 }
@@ -95,10 +108,12 @@ pub(super) fn update_patcher_text_edit_pointer(
     edit: &mut PatcherTextEdit,
     rect: Rect,
     local_col: f32,
+    zoom: f32,
     selecting: bool,
     release: bool,
 ) {
-    let cursor_pos = patcher_text_cursor_at_col(rect, &edit.text, local_col);
+    let cursor_pos =
+        patcher_text_cursor_at_col_with_cell_width(rect, &edit.text, local_col, 10.0, zoom);
     if selecting {
         if edit.state.selection_anchor.is_none() {
             edit.state.selection_anchor = Some(edit.state.cursor_pos);

@@ -9,7 +9,9 @@ use crate::layout::LayoutNode;
 use crate::vm::Value;
 
 use super::lisp::{editor_node_port_shape, node_kind_for_op, parse_editor_node_text};
-use super::metrics::{PAN_OVERSCROLL_MIN_CELLS, PAN_OVERSCROLL_VIEWPORT_FACTOR};
+use super::metrics::{
+    DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS, PAN_OVERSCROLL_VIEWPORT_FACTOR,
+};
 use super::model::{
     ArgValue, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef, NodeKind,
     OutputPortRef, Patch, PatchConnection, PatchNode,
@@ -17,14 +19,29 @@ use super::model::{
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct PatcherPanState {
     pub(super) offset_x: f32,
     pub(super) offset_y: f32,
+    pub(super) zoom: f32,
     pub(super) content_width: f32,
     pub(super) content_height: f32,
     pub(super) viewport_width: f32,
     pub(super) viewport_height: f32,
+}
+
+impl Default for PatcherPanState {
+    fn default() -> Self {
+        Self {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            zoom: DEFAULT_ZOOM,
+            content_width: 0.0,
+            content_height: 0.0,
+            viewport_width: 0.0,
+            viewport_height: 0.0,
+        }
+    }
 }
 
 thread_local! {
@@ -69,6 +86,7 @@ pub(super) fn set_patcher_pan_state(key: u64, mut state: PatcherPanState) {
 }
 
 pub(super) fn clamp_patcher_pan_state(state: &mut PatcherPanState) {
+    state.zoom = state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     let max_x = (state.content_width - state.viewport_width).max(0.0);
     let max_y = (state.content_height - state.viewport_height).max(0.0);
     let overscroll_x =

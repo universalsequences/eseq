@@ -30,8 +30,7 @@ pub use model::{
 
 pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Result<String, String> {
     let state = state::PatcherInteractionState::default();
-    writeback::emit_patch_writeback(source, intent, &state)
-        .map_err(|error| format!("{error:?}"))
+    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -92,8 +91,7 @@ pub fn emit_patch_writeback_with_inserted_node_before_first_output(
         },
     );
 
-    writeback::emit_patch_writeback(source, intent, &state)
-        .map_err(|error| format!("{error:?}"))
+    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -200,7 +198,7 @@ use emit::debug_log_patch_lisp;
 use interaction::{
     handle_patcher_double_click, handle_patcher_pointer_down, handle_patcher_pointer_drag,
     handle_patcher_pointer_moved, handle_patcher_pointer_up, open_selected_macro_node,
-    pan_patcher_by_delta, pan_patcher_by_wheel, reset_patcher_pan,
+    pan_patcher_by_delta, pan_patcher_by_wheel, reset_patcher_pan, zoom_patcher_by_magnify,
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
@@ -321,6 +319,20 @@ impl WidgetDefinition for PatcherWidget {
             -delta_y * TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL,
         );
         Some(WidgetEvent::Custom(Value::Nil))
+    }
+
+    fn magnify_event(
+        &self,
+        node: &LayoutNode,
+        local_col: f32,
+        local_row: f32,
+        delta: f64,
+    ) -> Option<WidgetEvent> {
+        if zoom_patcher_by_magnify(node, local_col, local_row, delta) {
+            Some(WidgetEvent::Custom(Value::Nil))
+        } else {
+            None
+        }
     }
 
     fn captures_scroll_gesture(&self) -> bool {

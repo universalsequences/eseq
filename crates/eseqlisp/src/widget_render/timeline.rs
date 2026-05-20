@@ -572,6 +572,7 @@ fn build_metal_primitives(
                     h_align: 0.0,
                     text: label,
                     font_size: 10.5,
+                    scale: 1.0,
                     fg: theme::FG_MUTED(),
                     bg: theme::STATUS_BG(),
                 },
@@ -709,6 +710,7 @@ fn build_metal_primitives(
                         h_align: 0.0,
                         text: label.to_string(),
                         font_size: 10.5,
+                        scale: 1.0,
                         fg: label_fg,
                         bg: if view.sidebar_style == SidebarStyle::Piano {
                             theme::WHITE()
@@ -856,6 +858,7 @@ fn build_metal_primitives(
                         h_align: 0.0,
                         text: label.clone(),
                         font_size: 10.5,
+                        scale: 1.0,
                         fg: theme::BLACK(),
                         bg: item_color,
                     },

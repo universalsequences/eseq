@@ -1019,6 +1019,7 @@ impl WidgetDefinition for TreeWidget {
                     h_align: 0.0,
                     text: row.label.clone(),
                     font_size,
+                    scale: 1.0,
                     fg,
                     bg: transparent,
                 },

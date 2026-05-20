@@ -969,6 +969,7 @@ impl WidgetDefinition for KnobNumberWidget {
                     h_align: 0.0,
                     text: label.clone(),
                     font_size: label_size,
+                    scale: 1.0,
                     fg: label_color,
                     bg: Color {
                         r: 0.0,
@@ -1027,6 +1028,7 @@ impl WidgetDefinition for KnobNumberWidget {
                     h_align,
                     text: display_text.clone(),
                     font_size: value_font_size,
+                    scale: 1.0,
                     fg,
                     bg: Color {
                         r: 0.0,

@@ -297,6 +297,7 @@ impl WidgetDefinition for VerticalSliderWidget {
                             h_align: 0.0,
                             text: ch.to_string(),
                             font_size,
+                            scale: 1.0,
                             fg,
                             bg: theme::BG(),
                         },

@@ -529,6 +529,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
                     h_align: 0.0,
                     text: label,
                     font_size: ruler_font_size,
+                    scale: 1.0,
                     fg: ruler_fg,
                     bg: ruler_bg,
                 },

@@ -10,8 +10,8 @@ use super::geometry::{
     connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_macro_drill_in,
     hit_patcher_node, hit_patcher_output_port, hit_patcher_segmented_cable_horizontal_segment,
     nearest_patcher_input_port, nearest_patcher_output_port, patch_content_size, patch_node_rects,
-    patcher_back_button_rect, patcher_breadcrumb_rect, patcher_origin, port_center, rect_contains,
-    rect_from_points, rects_intersect,
+    patcher_back_button_rect, patcher_breadcrumb_rect, patcher_origin, patcher_zoom, port_center,
+    rect_contains, rect_from_points, rects_intersect, screen_to_model,
 };
 use super::metrics::{
     SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS, SEGMENTED_CABLE_DRAG_PADDING_CELLS,
@@ -28,7 +28,7 @@ use super::state::{
     set_patcher_interaction_state, set_patcher_pan_state, source_connection_id,
 };
 use super::text::{
-    begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col,
+    begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col_with_zoom,
     update_patcher_text_edit_pointer,
 };
 use super::{debug_patch_for_state, load_patch_from_props};
@@ -50,7 +50,10 @@ pub(super) fn pan_patcher_by_delta(node: &LayoutNode, delta_x: f32, delta_y: f32
     }
     let key = patcher_state_key(node);
     let mut state = get_patcher_pan_state(key);
-    sync_patcher_pan_bounds(node, &mut state);
+    state.viewport_width = node.rect.width;
+    state.viewport_height = node.rect.height;
+    state.content_width = state.content_width.max(node.rect.width);
+    state.content_height = state.content_height.max(node.rect.height);
     state.offset_x += delta_x;
     state.offset_y += delta_y;
     set_patcher_pan_state(key, state);
@@ -59,18 +62,60 @@ pub(super) fn pan_patcher_by_delta(node: &LayoutNode, delta_x: f32, delta_y: f32
 pub(super) fn sync_patcher_pan_bounds(node: &LayoutNode, state: &mut PatcherPanState) {
     state.viewport_width = node.rect.width;
     state.viewport_height = node.rect.height;
+    let zoom = patcher_zoom(state);
     if let Ok((_, patch)) = load_patch_from_props(&node.props) {
         let interaction_state = get_patcher_interaction_state(patcher_state_key(node));
         let view_key = active_patcher_view_key(&interaction_state);
         let patch = active_patcher_patch(&patch, &interaction_state);
         let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
         let content_size = patch_content_size(&patch);
-        state.content_width = content_size.0.max(node.rect.width);
-        state.content_height = content_size.1.max(node.rect.height);
+        state.content_width = (content_size.0 * zoom).max(node.rect.width);
+        state.content_height = (content_size.1 * zoom).max(node.rect.height);
     } else {
         state.content_width = node.rect.width;
         state.content_height = node.rect.height;
     }
+}
+
+pub(super) fn zoom_patcher_by_magnify(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+    delta: f64,
+) -> bool {
+    if delta.abs() < f64::EPSILON {
+        return false;
+    }
+    let key = patcher_state_key(node);
+    let mut state = get_patcher_pan_state(key);
+    let old_zoom = patcher_zoom(&state);
+    let anchor_model = screen_to_model(node.rect, &state, (local_col, local_row));
+    let content_model_width = if state.content_width > 0.0 {
+        state.content_width / old_zoom
+    } else {
+        node.rect.width / old_zoom
+    };
+    let content_model_height = if state.content_height > 0.0 {
+        state.content_height / old_zoom
+    } else {
+        node.rect.height / old_zoom
+    };
+    state.zoom = (old_zoom * 2.0_f32.powf(delta.clamp(-1.0, 1.0) as f32))
+        .clamp(super::metrics::MIN_ZOOM, super::metrics::MAX_ZOOM);
+    let new_zoom = patcher_zoom(&state);
+    if (new_zoom - old_zoom).abs() < f32::EPSILON {
+        return false;
+    }
+    let origin_x = node.rect.col + 2.0;
+    let origin_y = node.rect.row + 2.4;
+    state.offset_x = origin_x + anchor_model.0 * new_zoom - local_col;
+    state.offset_y = origin_y + anchor_model.1 * new_zoom - local_row;
+    state.viewport_width = node.rect.width;
+    state.viewport_height = node.rect.height;
+    state.content_width = (content_model_width * new_zoom).max(node.rect.width);
+    state.content_height = (content_model_height * new_zoom).max(node.rect.height);
+    set_patcher_pan_state(key, state);
+    true
 }
 
 fn load_interactive_patch_for_node(node: &LayoutNode) -> Option<(Patch, PatcherPanState, String)> {
@@ -131,7 +176,14 @@ pub(super) fn handle_patcher_pointer_down(
             if let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
                 && let Some(edit) = &mut state.text_edit
             {
-                update_patcher_text_edit_pointer(edit, *rect, local_col, false, false);
+                update_patcher_text_edit_pointer(
+                    edit,
+                    *rect,
+                    local_col,
+                    patcher_zoom(&pan_state),
+                    false,
+                    false,
+                );
                 edit.state.selection_anchor = Some(edit.state.cursor_pos);
                 edit.state.selecting = true;
             }
@@ -259,14 +311,15 @@ pub(super) fn handle_patcher_pointer_down(
         )
     {
         let origin = patcher_origin(node.rect, &pan_state);
+        let zoom = patcher_zoom(&pan_state);
         state.selected_nodes.clear();
         state.selected_cable = Some(cable_id.clone());
         state.drag = Some(PatcherDragState::CableSegment {
             cable_id,
             start_col: start.0,
-            start_row: start.1 - origin.1,
+            start_row: (start.1 - origin.1) / zoom,
             end_col: end.0,
-            end_row: end.1 - origin.1,
+            end_row: (end.1 - origin.1) / zoom,
         });
         set_patcher_interaction_state(key, state);
         return;
@@ -341,7 +394,14 @@ pub(super) fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, loc
         if let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
             && let Some(edit) = &mut state.text_edit
         {
-            update_patcher_text_edit_pointer(edit, *rect, local_col, true, false);
+            update_patcher_text_edit_pointer(
+                edit,
+                *rect,
+                local_col,
+                patcher_zoom(&pan_state),
+                true,
+                false,
+            );
         }
         set_patcher_interaction_state(key, state);
         return;
@@ -434,7 +494,11 @@ pub(super) fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, loc
             start_row,
             start_positions,
         }) => {
-            let delta = (local_col - start_col, local_row - start_row);
+            let zoom = patcher_zoom(&pan_state);
+            let delta = (
+                (local_col - start_col) / zoom,
+                (local_row - start_row) / zoom,
+            );
             for (node_id, start_position) in start_positions {
                 if let Some(patch_node) = patch.nodes.iter().find(|node| node.id == node_id) {
                     set_node_edit_position(
@@ -461,10 +525,11 @@ pub(super) fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, loc
                 .cloned()
             {
                 let origin = patcher_origin(node.rect, &pan_state);
+                let zoom = patcher_zoom(&pan_state);
                 let segment_row = super::super::cable::segment_row_for_drag(
                     (start_col, start_row),
                     (end_col, end_row),
-                    local_row - origin.1,
+                    (local_row - origin.1) / zoom,
                     SEGMENTED_CABLE_DRAG_PADDING_CELLS,
                     SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS,
                 );
@@ -525,7 +590,14 @@ pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local
             && let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
             && let Some(edit) = &mut state.text_edit
         {
-            update_patcher_text_edit_pointer(edit, *rect, local_col, true, true);
+            update_patcher_text_edit_pointer(
+                edit,
+                *rect,
+                local_col,
+                patcher_zoom(&pan_state),
+                true,
+                true,
+            );
             set_patcher_interaction_state(key, state);
             return false;
         }
@@ -679,19 +751,16 @@ pub(super) fn handle_patcher_double_click(
             return false;
         };
         let text = node_display_label(patch_node);
-        let cursor_pos = patcher_text_cursor_at_col(*rect, &text, local_col);
+        let cursor_pos =
+            patcher_text_cursor_at_col_with_zoom(*rect, &text, local_col, patcher_zoom(&pan_state));
         ensure_source_node_edit(&mut state, &view_key, patch_node, text.clone());
         begin_patcher_text_edit(&mut state, node_id, text, cursor_pos);
         set_patcher_interaction_state(key, state);
         return true;
     }
 
-    let origin = patcher_origin(node.rect, &pan_state);
-    let created_id = allocate_created_node(
-        &mut state,
-        &view_key,
-        (local_col - origin.0, local_row - origin.1),
-    );
+    let position = screen_to_model(node.rect, &pan_state, (local_col, local_row));
+    let created_id = allocate_created_node(&mut state, &view_key, position);
     begin_patcher_text_edit(&mut state, created_id, String::new(), 0);
     set_patcher_interaction_state(key, state);
     true

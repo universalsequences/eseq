@@ -1,6 +1,6 @@
-use super::super::text_input::{cache_char_widths, TextInputState};
 use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
+use super::super::text_input::{TextInputState, cache_char_widths};
 use super::display::*;
 use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
 use super::geometry::*;
@@ -2359,14 +2359,23 @@ fn writeback_preserves_integer_modulator_attribute_tokens() {
         (out (* gate (mod gain)) 1 @name audio)
     "#;
 
-    let emitted =
-        emit_patch_writeback(source, PatcherIntent::Instrument, &PatcherInteractionState::default())
-            .unwrap();
+    let emitted = emit_patch_writeback(
+        source,
+        PatcherIntent::Instrument,
+        &PatcherInteractionState::default(),
+    )
+    .unwrap();
 
     assert!(emitted.contains("@modulator 1)"), "{emitted}");
     assert!(!emitted.contains("@modulator 1.0"), "{emitted}");
-    assert!(emitted.contains("(def gate (in 1 @name gate))"), "{emitted}");
-    assert!(emitted.contains("(out (* gate (mod gain)) 1 @name audio)"), "{emitted}");
+    assert!(
+        emitted.contains("(def gate (in 1 @name gate))"),
+        "{emitted}"
+    );
+    assert!(
+        emitted.contains("(out (* gate (mod gain)) 1 @name audio)"),
+        "{emitted}"
+    );
     assert!(!emitted.contains("(in 1.0"), "{emitted}");
     assert!(!emitted.contains(" 1.0 @name audio"), "{emitted}");
 }
@@ -2416,7 +2425,14 @@ fn patcher_hit_testing_uses_node_rects_after_pan() {
         width: 80.0,
         height: 30.0,
     };
-    let hit = hit_patcher_node(&patch, rect, &pan, 7.0, 6.8);
+    let node_rect = *patch_node_rects(&patch, rect, &pan).get("pitch").unwrap();
+    let hit = hit_patcher_node(
+        &patch,
+        rect,
+        &pan,
+        node_rect.col + node_rect.width * 0.5,
+        node_rect.row + node_rect.height * 0.5,
+    );
     assert_eq!(hit.as_deref(), Some("pitch"));
 }
 
@@ -2693,8 +2709,9 @@ fn segmented_cable_hit_testing_uses_orthogonal_path() {
     )
     .unwrap();
     let origin = patcher_origin(rect, &pan);
+    let zoom = patcher_zoom(&pan);
     let rendered_segment_row = (start.1 + end.1) * 0.5;
-    let segment_row = rendered_segment_row - origin.1;
+    let segment_row = (rendered_segment_row - origin.1) / zoom;
     patch.connections[0].segment = Some(CableSegmentInfo {
         is_segmented: true,
         segment_row,
@@ -2753,8 +2770,9 @@ fn segmented_horizontal_segment_hit_is_used_for_dragging() {
     )
     .unwrap();
     let origin = patcher_origin(rect, &pan);
+    let zoom = patcher_zoom(&pan);
     let rendered_segment_row = (start.1 + end.1) * 0.5;
-    let segment_row = rendered_segment_row - origin.1;
+    let segment_row = (rendered_segment_row - origin.1) / zoom;
     patch.connections[0].segment = Some(CableSegmentInfo {
         is_segmented: true,
         segment_row,
@@ -2947,7 +2965,10 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(first_segment_row, first_origin.1 + stored_segment_row);
+    assert_eq!(
+        first_segment_row,
+        first_origin.1 + stored_segment_row * patcher_zoom(&pan)
+    );
 
     pan.offset_y = 12.0;
     let second_origin = patcher_origin(rect, &pan);
@@ -2979,7 +3000,10 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(second_segment_row, second_origin.1 + stored_segment_row);
+    assert_eq!(
+        second_segment_row,
+        second_origin.1 + stored_segment_row * patcher_zoom(&pan)
+    );
     assert_eq!(
         second_segment_row - first_segment_row,
         second_origin.1 - first_origin.1
@@ -3236,7 +3260,7 @@ fn selected_cable_handles_are_hit_near_rendered_edit_points() {
         &output_counts,
     )
     .expect("rendered connection endpoints");
-    let (from_handle, to_handle) = cable_edit_points(start, end);
+    let (from_handle, to_handle) = cable_edit_points(start, end, patcher_zoom(&pan));
 
     assert_eq!(
         hit_patcher_cable_handle(
@@ -3331,7 +3355,7 @@ fn dragging_selected_cable_endpoint_reconnects_and_keeps_cable_selected() {
         &output_counts,
     )
     .unwrap();
-    let (from_handle, _) = cable_edit_points(start, end);
+    let (from_handle, _) = cable_edit_points(start, end, patcher_zoom(&pan));
     let gate_rect = node_rects.get("gate").unwrap();
     let gate_output = port_center(*gate_rect, 0, output_counts["gate"], false);
 
@@ -3377,6 +3401,7 @@ fn pan_state_allows_overscroll_and_clamps_to_finite_canvas_bounds() {
     let mut state = PatcherPanState {
         offset_x: 100.0,
         offset_y: 100.0,
+        zoom: DEFAULT_ZOOM,
         content_width: 50.0,
         content_height: 30.0,
         viewport_width: 20.0,
@@ -3391,6 +3416,168 @@ fn pan_state_allows_overscroll_and_clamps_to_finite_canvas_bounds() {
     clamp_patcher_pan_state(&mut state);
     assert_eq!(state.offset_x, -48.0);
     assert_eq!(state.offset_y, -48.0);
+}
+
+#[test]
+fn default_patcher_zoom_is_thirty_percent_zoomed_out() {
+    assert!((PatcherPanState::default().zoom - 0.7).abs() < f32::EPSILON);
+}
+
+#[test]
+fn patcher_magnify_clamps_zoom() {
+    let node = LayoutNode {
+        widget_id: 987_656,
+        stable_widget_id: Some(987_656),
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "patcher".to_string(),
+        rect: Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 20.0,
+            height: 10.0,
+        },
+        props: HashMap::new(),
+        children: Vec::new(),
+        focusable: true,
+    };
+    let key = patcher_state_key(&node);
+
+    for _ in 0..12 {
+        PATCHER_WIDGET.magnify_event(&node, 10.0, 5.0, 1.0);
+    }
+    assert_eq!(get_patcher_pan_state(key).zoom, MAX_ZOOM);
+
+    for _ in 0..12 {
+        PATCHER_WIDGET.magnify_event(&node, 10.0, 5.0, -1.0);
+    }
+    assert_eq!(get_patcher_pan_state(key).zoom, MIN_ZOOM);
+}
+
+#[test]
+fn patcher_magnify_preserves_pointer_anchor_model_position() {
+    let node = LayoutNode {
+        widget_id: 987_657,
+        stable_widget_id: Some(987_657),
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "patcher".to_string(),
+        rect: Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 80.0,
+            height: 30.0,
+        },
+        props: HashMap::new(),
+        children: Vec::new(),
+        focusable: true,
+    };
+    let key = patcher_state_key(&node);
+    let before = screen_to_model(node.rect, &get_patcher_pan_state(key), (31.0, 14.0));
+
+    PATCHER_WIDGET.magnify_event(&node, 31.0, 14.0, 0.5);
+
+    let after = screen_to_model(node.rect, &get_patcher_pan_state(key), (31.0, 14.0));
+    assert!((before.0 - after.0).abs() < 0.001, "{before:?} {after:?}");
+    assert!((before.1 - after.1).abs() < 0.001, "{before:?} {after:?}");
+}
+
+#[test]
+fn patcher_hit_testing_uses_zoomed_node_rects() {
+    let patch = parse("(def pitch (in 1 @name pitch))");
+    let pan = PatcherPanState {
+        zoom: 1.6,
+        ..Default::default()
+    };
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 80.0,
+        height: 30.0,
+    };
+    let node_rect = *patch_node_rects(&patch, rect, &pan).get("pitch").unwrap();
+    let hit = hit_patcher_node(
+        &patch,
+        rect,
+        &pan,
+        node_rect.col + node_rect.width * 0.5,
+        node_rect.row + node_rect.height * 0.5,
+    );
+    assert_eq!(hit.as_deref(), Some("pitch"));
+}
+
+#[test]
+fn patcher_node_drag_converts_screen_delta_to_model_delta_after_zoom() {
+    let path = temp_patcher_source_path("patcher-zoom-drag");
+    fs::write(&path, "(def pitch (in 1 @name pitch))\n").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_pan_state(
+        key,
+        PatcherPanState {
+            zoom: 2.0,
+            ..Default::default()
+        },
+    );
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let start_position = root_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "pitch")
+        .unwrap()
+        .position;
+    let pan = get_patcher_pan_state(key);
+    let rect = *patch_node_rects(&root_patch, node.rect, &pan)
+        .get("pitch")
+        .unwrap();
+    let start = (rect.col + rect.width * 0.5, rect.row + rect.height * 0.5);
+
+    handle_patcher_pointer_down(&node, start.0, start.1, KeyModifiers::empty(), 10.0, 20.0);
+    handle_patcher_pointer_drag(&node, start.0 + 4.0, start.1 + 2.0);
+
+    let state = get_patcher_interaction_state(key);
+    let edited = patch_with_interaction_state(root_patch, &state, "root");
+    let moved = edited
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "pitch")
+        .unwrap()
+        .position;
+    assert!((moved.0 - (start_position.0 + 2.0)).abs() < 0.001);
+    assert!((moved.1 - (start_position.1 + 1.0)).abs() < 0.001);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_double_click_create_uses_model_position_after_zoom() {
+    let path = temp_patcher_source_path("patcher-zoom-create");
+    fs::write(&path, "\n").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let pan = PatcherPanState {
+        zoom: 2.0,
+        ..Default::default()
+    };
+    set_patcher_pan_state(key, pan.clone());
+    let local = (70.0, 50.0);
+    let expected = screen_to_model(node.rect, &pan, local);
+
+    assert!(handle_patcher_double_click(&node, local.0, local.1));
+
+    let state = get_patcher_interaction_state(key);
+    let created = state
+        .edit_state
+        .nodes
+        .values()
+        .find(|edit| matches!(edit.origin, PatcherNodeOrigin::Created { .. }))
+        .expect("created node edit");
+    assert!((created.position.0 - expected.0).abs() < 0.001);
+    assert!((created.position.1 - expected.1).abs() < 0.001);
+
+    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -3617,15 +3804,17 @@ fn double_clicking_background_creates_editable_draft_node() {
             )
             .is_some()
     );
-    assert!(PATCHER_WIDGET
-        .key_event(
-            &node,
-            WidgetKeyEvent {
-                code: KeyCode::Char(' '),
-                modifiers: KeyModifiers::empty(),
-            },
-        )
-        .is_some());
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Char(' '),
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some()
+    );
     assert_eq!(
         get_patcher_interaction_state(key)
             .text_edit
@@ -4117,7 +4306,7 @@ fn metal_render_emits_nodes_and_cables() {
     assert!(text_count >= patch.nodes.len(), "{text_count}");
     assert!(rounded_count >= patch.nodes.len() * 2, "{rounded_count}");
     assert!(cable_count >= patch.connections.len(), "{cable_count}");
-    assert!(min_cable_radius >= 4.4, "{min_cable_radius}");
+    assert!(min_cable_radius >= 4.4 * DEFAULT_ZOOM, "{min_cable_radius}");
     assert!(
         rect_count == 0,
         "patcher node chrome should use rounded widget instances, got {rect_count} rects"
@@ -4488,7 +4677,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
 
     assert_eq!(
         tail - head,
-        2.5,
+        2.5 * DEFAULT_ZOOM,
         "tail should start after the measured width of `in `, not after a fixed visual gap"
     );
 }

@@ -702,6 +702,7 @@ impl WidgetDefinition for NumberPickerWidget {
                     h_align: 0.0,
                     text: display_text.clone(),
                     font_size,
+                    scale: 1.0,
                     fg,
                     bg: transparent,
                 },

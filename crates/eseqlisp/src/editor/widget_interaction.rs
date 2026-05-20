@@ -1649,11 +1649,18 @@ impl Editor {
         };
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
+        let gen_before = widget_render::widget_state_generation();
         let Some(widget_event) = map_magnify_event(&node, scrolled_col, scrolled_row, delta) else {
             return;
         };
         let output = handle_event(&node, widget_event);
-        let _ = self.apply_widget_output(output);
+        if !self.apply_widget_output(output) {
+            self.mark_needs_redraw();
+        }
+        if widget_render::widget_state_generation() != gen_before {
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+        }
     }
 
     pub(super) fn handle_touchpad_scroll_impl(

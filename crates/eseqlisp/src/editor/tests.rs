@@ -5287,6 +5287,40 @@ fn timeline_touchpad_magnify_emits_zoom_view_action() {
 }
 
 #[test]
+fn widget_touchpad_magnify_internal_state_marks_redraw() {
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-magnify-redraw-{}.lisp",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, "(+ 1 2)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 12);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (patcher
+                    :height 10
+                    :path "{}"))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+    editor.clear_needs_redraw();
+
+    editor.handle_touchpad_magnify(1, 1, 10.0, 4.0, 0.2);
+
+    assert!(editor.needs_redraw());
+}
+
+#[test]
 fn timeline_scroll_content_horizontal_wheel_emits_time_scroll_action() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

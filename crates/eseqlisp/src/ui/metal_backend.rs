@@ -4250,6 +4250,7 @@ fragment float4 waveform_frag(
             };
 
             let size_tenths = (run.font_size * 10.0).round() as u16;
+            let scale = run.scale.max(0.001);
             let fg = run.fg.to_rgba();
             let bg = [0.0, 0.0, 0.0, 0.0]; // Transparent — alpha blending handles bg
 
@@ -4261,7 +4262,8 @@ fragment float4 waveform_frag(
                         .get_or_rasterize(ch, size_tenths)
                         .map(|entry| entry.advance)
                 })
-                .sum();
+                .sum::<f32>()
+                * scale;
             let align_extra_px = if run.align_width > 0.0 {
                 (run.align_width * mono_cell_w - text_width_px).max(0.0)
                     * run.h_align.clamp(0.0, 1.0)
@@ -4275,7 +4277,7 @@ fragment float4 waveform_frag(
             // Vertical centering: offset glyph bitmap so it's centered within
             // one mono cell height (widgets center text assuming 1.0 cell units).
             let line_h = prop_atlas.line_height(size_tenths);
-            let y_offset = (mono_cell_h - line_h) * 0.5;
+            let y_offset = (mono_cell_h - line_h) * 0.5 * scale;
 
             for ch in run.text.chars() {
                 let Some(entry) = prop_atlas.get_or_rasterize(ch, size_tenths) else {
@@ -4284,7 +4286,7 @@ fragment float4 waveform_frag(
                 let advance = entry.advance;
 
                 if entry.raster_w == 0 || entry.raster_h == 0 {
-                    pen_x += advance;
+                    pen_x += advance * scale;
                     continue;
                 }
 
@@ -4292,10 +4294,10 @@ fragment float4 waveform_frag(
                 let [u1, v1] = entry.uv_max;
 
                 // Glyph bitmap starts 2px before pen (padding), spans full line height.
-                let gx0 = pen_x - 2.0;
+                let gx0 = pen_x - 2.0 * scale;
                 let gy0 = base_y_px + y_offset;
-                let gx1 = gx0 + entry.raster_w as f32;
-                let gy1 = gy0 + entry.raster_h as f32;
+                let gx1 = gx0 + entry.raster_w as f32 * scale;
+                let gy1 = gy0 + entry.raster_h as f32 * scale;
 
                 let x0 = ndc_x(gx0);
                 let x1 = ndc_x(gx1);
@@ -4317,7 +4319,7 @@ fragment float4 waveform_frag(
                     gv(x1, y1, u1, v1),
                 ]);
 
-                pen_x += advance;
+                pen_x += advance * scale;
             }
         }
         verts
