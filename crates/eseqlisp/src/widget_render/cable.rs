@@ -6,7 +6,7 @@ pub struct CableCurve {
     pub p3: (f32, f32),
 }
 
-const SAME_X_EPSILON: f32 = 0.001;
+const SAME_X_EPSILON: f32 = 0.20;
 const MIN_X_HANDLE: f32 = 1.2;
 const MAX_X_HANDLE: f32 = 4.8;
 const MIN_Y_HANDLE: f32 = 1.1;
@@ -24,7 +24,11 @@ pub fn cable_curve(start: (f32, f32), end: (f32, f32)) -> CableCurve {
     let diff_x = (end.0 - start.0).abs();
 
     let (p1, p2) = if diff_x < SAME_X_EPSILON {
-        ((start.0, start.1 + y_a), (end.0, end.1 - y_b))
+        let y_direction = if end.1 >= start.1 { 1.0 } else { -1.0 };
+        (
+            (start.0, start.1 + y_a * y_direction),
+            (end.0, end.1 - y_b * y_direction),
+        )
     } else {
         let x_a = diff_x.clamp(MIN_X_HANDLE, MAX_X_HANDLE);
         let x_b = diff_x.clamp(MIN_X_HANDLE, MAX_X_HANDLE);
@@ -108,6 +112,22 @@ mod tests {
         assert_eq!(curve.p2.0, curve.p3.0);
         assert!(curve.p1.1 > curve.p0.1, "{curve:?}");
         assert!(curve.p2.1 < curve.p3.1, "{curve:?}");
+    }
+
+    #[test]
+    fn cable_curve_keeps_upward_vertical_cables_monotonic() {
+        let curve = cable_curve((10.0, 60.0), (10.0, 20.0));
+        assert_eq!(curve.p1.0, curve.p0.0);
+        assert_eq!(curve.p2.0, curve.p3.0);
+        assert!(curve.p1.1 < curve.p0.1, "{curve:?}");
+        assert!(curve.p2.1 > curve.p3.1, "{curve:?}");
+    }
+
+    #[test]
+    fn cable_curve_treats_nearly_aligned_ports_as_vertical() {
+        let curve = cable_curve((10.0, 20.0), (10.12, 60.0));
+        assert_eq!(curve.p1.0, curve.p0.0);
+        assert_eq!(curve.p2.0, curve.p3.0);
     }
 
     #[test]

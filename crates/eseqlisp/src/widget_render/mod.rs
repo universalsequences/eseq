@@ -508,6 +508,15 @@ pub struct MetalCirclePrimitive {
     pub center: [f32; 2],
     pub radius_px: f32,
     pub color: Color,
+    pub visible_half: MetalCircleVisibleHalf,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetalCircleVisibleHalf {
+    Full,
+    Top,
+    Bottom,
 }
 
 #[cfg(target_os = "macos")]

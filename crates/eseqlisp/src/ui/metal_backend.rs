@@ -4522,6 +4522,7 @@ fragment float4 waveform_frag(
                 circle.center[1] * cell_h,
                 circle.radius_px,
                 circle.color,
+                circle.visible_half,
                 vp_w,
                 vp_h,
             );
@@ -5330,13 +5331,18 @@ fragment float4 waveform_frag(
         cy: f32,
         radius: f32,
         color: Color,
+        visible_half: widget_render::MetalCircleVisibleHalf,
         vp_w: f32,
         vp_h: f32,
     ) {
         if radius <= 0.0 {
             return;
         }
-        let segments = 32usize;
+        let segments = match visible_half {
+            widget_render::MetalCircleVisibleHalf::Full => 32usize,
+            widget_render::MetalCircleVisibleHalf::Top
+            | widget_render::MetalCircleVisibleHalf::Bottom => 16usize,
+        };
         let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
         let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
         let rgba = color.to_rgba();
@@ -5347,8 +5353,15 @@ fragment float4 waveform_frag(
             bg: rgba,
         };
         for i in 0..segments {
-            let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+            let (start_angle, sweep) = match visible_half {
+                widget_render::MetalCircleVisibleHalf::Full => (0.0, std::f32::consts::TAU),
+                widget_render::MetalCircleVisibleHalf::Top => {
+                    (std::f32::consts::PI, std::f32::consts::PI)
+                }
+                widget_render::MetalCircleVisibleHalf::Bottom => (0.0, std::f32::consts::PI),
+            };
+            let a0 = start_angle + (i as f32 / segments as f32) * sweep;
+            let a1 = start_angle + ((i + 1) as f32 / segments as f32) * sweep;
             verts.extend_from_slice(&[
                 v(cx, cy),
                 v(cx + a0.cos() * radius, cy + a0.sin() * radius),

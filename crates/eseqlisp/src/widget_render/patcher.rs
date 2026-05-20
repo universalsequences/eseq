@@ -5,13 +5,14 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crossterm::event::MouseEventKind;
+use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, styled_cell};
 #[cfg(target_os = "macos")]
 use super::{
-    MetalCirclePrimitive, MetalPatchCablePrimitive, MetalPrimitive, MetalProportionalTextPrimitive,
-    MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
+    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive, MetalPrimitive,
+    MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance,
+    WidgetViewport, ndc_bounds,
 };
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
@@ -37,8 +38,8 @@ const NODE_CORNER_RADIUS_PX: f32 = 18.0;
 const NODE_FONT_SIZE: f32 = 16.0;
 const CODE_NODE_FONT_SIZE: f32 = 11.0;
 const PORT_OUTER_DIAMETER_PX: f32 = 27.0;
-const PORT_INNER_DIAMETER_PX: f32 = 16.0;
-const PORT_EDGE_PADDING_CELLS: f32 = 1.05;
+const PORT_INNER_DIAMETER_PX: f32 = 18.75;
+const PORT_EDGE_PADDING_CELLS: f32 = 1.65;
 const TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL: f32 = 0.05;
 const WHEEL_PAN_STEP_CELLS: f32 = 3.0;
 const PAN_OVERSCROLL_VIEWPORT_FACTOR: f32 = 1.0;
@@ -56,6 +57,8 @@ struct PatcherPanState {
 
 thread_local! {
     static PATCHER_PAN_STATES: RefCell<HashMap<u64, PatcherPanState>> =
+        RefCell::new(HashMap::new());
+    static PATCHER_INTERACTION_STATES: RefCell<HashMap<u64, PatcherInteractionState>> =
         RefCell::new(HashMap::new());
 }
 
@@ -95,6 +98,45 @@ fn clamp_patcher_pan_state(state: &mut PatcherPanState) {
         (state.viewport_height * PAN_OVERSCROLL_VIEWPORT_FACTOR).max(PAN_OVERSCROLL_MIN_CELLS);
     state.offset_x = state.offset_x.clamp(-overscroll_x, max_x + overscroll_x);
     state.offset_y = state.offset_y.clamp(-overscroll_y, max_y + overscroll_y);
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PatcherInteractionState {
+    selected_nodes: HashSet<String>,
+    hovered_node: Option<String>,
+    node_positions: HashMap<String, (f32, f32)>,
+    drag: Option<PatcherDragState>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum PatcherDragState {
+    Nodes {
+        start_col: f32,
+        start_row: f32,
+        start_positions: HashMap<String, (f32, f32)>,
+    },
+    Marquee {
+        start_col: f32,
+        start_row: f32,
+        current_col: f32,
+        current_row: f32,
+        base_selection: HashSet<String>,
+    },
+}
+
+fn get_patcher_interaction_state(key: u64) -> PatcherInteractionState {
+    PATCHER_INTERACTION_STATES.with(|states| states.borrow().get(&key).cloned().unwrap_or_default())
+}
+
+fn set_patcher_interaction_state(key: u64, state: PatcherInteractionState) {
+    let changed = PATCHER_INTERACTION_STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        let old = states.insert(key, state.clone());
+        old.as_ref() != Some(&state)
+    });
+    if changed {
+        super::bump_widget_state_generation();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,7 +293,7 @@ impl Projector {
             id,
             op: "make-history".to_string(),
             kind: NodeKind::History,
-            label: format!("history {name}"),
+            label: "history".to_string(),
             args: Vec::new(),
             outputs: vec!["out".to_string()],
             position: (0.0, 0.0),
@@ -359,17 +401,6 @@ impl Projector {
             name: name.to_string(),
             params: param_names,
             patch,
-        });
-        let id = self.unique_id(name);
-        self.patch.nodes.push(PatchNode {
-            id,
-            op: "defmacro".to_string(),
-            kind: NodeKind::MacroDefinition,
-            label: format!("defmacro {name}"),
-            args: Vec::new(),
-            outputs: Vec::new(),
-            position: (0.0, 0.0),
-            diagnostic: None,
         });
     }
 
@@ -695,7 +726,7 @@ fn node_label(op: &str, items: &[Expression], def_name: Option<&str>) -> String 
         "in" => attribute_value(items, "@name").unwrap_or_else(|| "in".to_string()),
         "out" => attribute_value(items, "@name").unwrap_or_else(|| "out".to_string()),
         "param" => param_label(items),
-        "make-history" => format!("history {}", symbol_at(items, 1).unwrap_or("?")),
+        "make-history" => "history".to_string(),
         _ => def_name
             .map(|name| format!("{op} {name}"))
             .unwrap_or_else(|| op.to_string()),
@@ -883,6 +914,223 @@ fn patch_content_size(patch: &Patch) -> (f32, f32) {
     (max_col, max_row)
 }
 
+fn patch_with_interaction_positions(
+    mut patch: Patch,
+    interaction_state: &PatcherInteractionState,
+) -> Patch {
+    for node in &mut patch.nodes {
+        if let Some(position) = interaction_state.node_positions.get(&node.id) {
+            node.position = *position;
+        }
+    }
+    patch
+}
+
+fn patcher_origin(rect: Rect, pan_state: &PatcherPanState) -> (f32, f32) {
+    (
+        rect.col + 2.0 - pan_state.offset_x,
+        rect.row + 2.4 - pan_state.offset_y,
+    )
+}
+
+fn patch_node_rects(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+) -> HashMap<String, Rect> {
+    let origin = patcher_origin(rect, pan_state);
+    patch
+        .nodes
+        .iter()
+        .map(|node| {
+            let size = node_size(node);
+            (
+                node.id.clone(),
+                Rect {
+                    col: origin.0 + node.position.0,
+                    row: origin.1 + node.position.1,
+                    width: size.0,
+                    height: size.1,
+                },
+            )
+        })
+        .collect()
+}
+
+fn hit_patcher_node(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    local_col: f32,
+    local_row: f32,
+) -> Option<String> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    patch.nodes.iter().rev().find_map(|node| {
+        let node_rect = node_rects.get(&node.id)?;
+        rect_contains(*node_rect, local_col, local_row).then(|| node.id.clone())
+    })
+}
+
+fn rect_contains(rect: Rect, col: f32, row: f32) -> bool {
+    col >= rect.col
+        && col <= rect.col + rect.width
+        && row >= rect.row
+        && row <= rect.row + rect.height
+}
+
+fn rects_intersect(a: Rect, b: Rect) -> bool {
+    a.col <= b.col + b.width
+        && a.col + a.width >= b.col
+        && a.row <= b.row + b.height
+        && a.row + a.height >= b.row
+}
+
+fn rect_from_points(start_col: f32, start_row: f32, current_col: f32, current_row: f32) -> Rect {
+    let col = start_col.min(current_col);
+    let row = start_row.min(current_row);
+    Rect {
+        col,
+        row,
+        width: (start_col - current_col).abs(),
+        height: (start_row - current_row).abs(),
+    }
+}
+
+fn load_interactive_patch_for_node(node: &LayoutNode) -> Option<(Patch, PatcherPanState)> {
+    let key = patcher_state_key(node);
+    let interaction_state = get_patcher_interaction_state(key);
+    let (_, patch) = load_patch_from_props(&node.props).ok()?;
+    let patch = patch_with_interaction_positions(patch, &interaction_state);
+    let mut pan_state = get_patcher_pan_state(key);
+    sync_patcher_pan_bounds(node, &mut pan_state);
+    Some((patch, pan_state))
+}
+
+fn handle_patcher_pointer_down(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+    modifiers: KeyModifiers,
+) {
+    let key = patcher_state_key(node);
+    let Some((patch, pan_state)) = load_interactive_patch_for_node(node) else {
+        return;
+    };
+    let hit = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    let mut state = get_patcher_interaction_state(key);
+    state.hovered_node = hit.clone();
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
+    match hit {
+        Some(node_id) => {
+            if shift {
+                if !state.selected_nodes.insert(node_id.clone()) {
+                    state.selected_nodes.remove(&node_id);
+                }
+            } else if !state.selected_nodes.contains(&node_id) {
+                state.selected_nodes.clear();
+                state.selected_nodes.insert(node_id);
+            }
+            let start_positions = patch
+                .nodes
+                .iter()
+                .filter(|node| state.selected_nodes.contains(&node.id))
+                .map(|node| (node.id.clone(), node.position))
+                .collect();
+            state.drag = Some(PatcherDragState::Nodes {
+                start_col: local_col,
+                start_row: local_row,
+                start_positions,
+            });
+        }
+        None => {
+            let base_selection = if shift {
+                state.selected_nodes.clone()
+            } else {
+                state.selected_nodes.clear();
+                HashSet::new()
+            };
+            state.drag = Some(PatcherDragState::Marquee {
+                start_col: local_col,
+                start_row: local_row,
+                current_col: local_col,
+                current_row: local_row,
+                base_selection,
+            });
+        }
+    }
+    set_patcher_interaction_state(key, state);
+}
+
+fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, local_row: f32) {
+    let key = patcher_state_key(node);
+    let Some((patch, pan_state)) = load_interactive_patch_for_node(node) else {
+        return;
+    };
+    let mut state = get_patcher_interaction_state(key);
+    match state.drag.clone() {
+        Some(PatcherDragState::Nodes {
+            start_col,
+            start_row,
+            start_positions,
+        }) => {
+            let delta = (local_col - start_col, local_row - start_row);
+            for (node_id, start_position) in start_positions {
+                state.node_positions.insert(
+                    node_id,
+                    (start_position.0 + delta.0, start_position.1 + delta.1),
+                );
+            }
+        }
+        Some(PatcherDragState::Marquee {
+            start_col,
+            start_row,
+            base_selection,
+            ..
+        }) => {
+            let marquee = rect_from_points(start_col, start_row, local_col, local_row);
+            let node_rects = patch_node_rects(&patch, node.rect, &pan_state);
+            state.selected_nodes = base_selection.clone();
+            for patch_node in &patch.nodes {
+                if let Some(node_rect) = node_rects.get(&patch_node.id)
+                    && rects_intersect(marquee, *node_rect)
+                {
+                    state.selected_nodes.insert(patch_node.id.clone());
+                }
+            }
+            state.drag = Some(PatcherDragState::Marquee {
+                start_col,
+                start_row,
+                current_col: local_col,
+                current_row: local_row,
+                base_selection,
+            });
+        }
+        None => {}
+    }
+    state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    set_patcher_interaction_state(key, state);
+}
+
+fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local_row: f32) {
+    let key = patcher_state_key(node);
+    let mut state = get_patcher_interaction_state(key);
+    if let Some((patch, pan_state)) = load_interactive_patch_for_node(node) {
+        state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    }
+    state.drag = None;
+    set_patcher_interaction_state(key, state);
+}
+
+fn handle_patcher_pointer_moved(node: &LayoutNode, local_col: f32, local_row: f32) {
+    let key = patcher_state_key(node);
+    let Some((patch, pan_state)) = load_interactive_patch_for_node(node) else {
+        return;
+    };
+    let mut state = get_patcher_interaction_state(key);
+    state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    set_patcher_interaction_state(key, state);
+}
+
 impl WidgetDefinition for PatcherWidget {
     fn names(&self) -> &'static [&'static str] {
         &["patcher"]
@@ -955,14 +1203,29 @@ impl WidgetDefinition for PatcherWidget {
         &self,
         node: &LayoutNode,
         mouse_kind: MouseEventKind,
-        _local_col: f32,
-        _local_row: f32,
+        local_col: f32,
+        local_row: f32,
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
-        _modifiers: crossterm::event::KeyModifiers,
+        modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         match mouse_kind {
-            MouseEventKind::Down(_) => MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Nil)),
+            MouseEventKind::Down(MouseButton::Left) => {
+                handle_patcher_pointer_down(node, local_col, local_row, modifiers);
+                MouseEventOutcome::Consume
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                handle_patcher_pointer_drag(node, local_col, local_row);
+                MouseEventOutcome::Consume
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                handle_patcher_pointer_up(node, local_col, local_row);
+                MouseEventOutcome::Consume
+            }
+            MouseEventKind::Moved => {
+                handle_patcher_pointer_moved(node, local_col, local_row);
+                MouseEventOutcome::Consume
+            }
             MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
@@ -994,6 +1257,14 @@ impl WidgetDefinition for PatcherWidget {
         true
     }
 
+    fn captures_drag(&self) -> bool {
+        true
+    }
+
+    fn unclamped_drag(&self) -> bool {
+        true
+    }
+
     fn handle_event(&self, _node: &LayoutNode, event: WidgetEvent) -> Option<super::EventOutput> {
         match event {
             WidgetEvent::Custom(Value::Nil) => None,
@@ -1021,6 +1292,8 @@ impl WidgetDefinition for PatcherWidget {
         let loaded = load_patch_from_props(&node.props);
         match loaded {
             Ok((path, patch)) => {
+                let interaction_state = get_patcher_interaction_state(key);
+                let patch = patch_with_interaction_positions(patch, &interaction_state);
                 let content_size = patch_content_size(&patch);
                 pan_state.content_width = content_size.0.max(node.rect.width);
                 pan_state.content_height = content_size.1.max(node.rect.height);
@@ -1032,7 +1305,15 @@ impl WidgetDefinition for PatcherWidget {
                     pan_state.offset_x,
                     pan_state.offset_y,
                 );
-                draw_patch(&mut prims, &patch, node.rect, viewport, &pan_state);
+                draw_patch(
+                    &mut prims,
+                    &patch,
+                    node.rect,
+                    viewport,
+                    &pan_state,
+                    &interaction_state,
+                );
+                push_marquee(&mut prims, node.rect, viewport, &interaction_state);
                 prims.push(MetalPrimitive::ProportionalText(
                     MetalProportionalTextPrimitive {
                         row: node.rect.row + 0.7,
@@ -1158,34 +1439,76 @@ fn push_grid(prims: &mut Vec<MetalPrimitive>, rect: Rect, offset_x: f32, offset_
 }
 
 #[cfg(target_os = "macos")]
+fn push_marquee(
+    prims: &mut Vec<MetalPrimitive>,
+    _rect: Rect,
+    _viewport: WidgetViewport,
+    interaction_state: &PatcherInteractionState,
+) {
+    let Some(PatcherDragState::Marquee {
+        start_col,
+        start_row,
+        current_col,
+        current_row,
+        ..
+    }) = &interaction_state.drag
+    else {
+        return;
+    };
+    let marquee = rect_from_points(*start_col, *start_row, *current_col, *current_row);
+    if marquee.width < 0.05 || marquee.height < 0.05 {
+        return;
+    }
+    let fill = crate::backend::Color::rgba(0.22, 0.48, 1.0, 0.12);
+    let border = crate::backend::Color::rgba(0.38, 0.62, 1.0, 0.72);
+    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        x: marquee.col,
+        y: marquee.row,
+        width: marquee.width,
+        height: marquee.height,
+        color: fill,
+    }));
+    let thickness = 0.08;
+    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        x: marquee.col,
+        y: marquee.row,
+        width: marquee.width,
+        height: thickness,
+        color: border,
+    }));
+    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        x: marquee.col,
+        y: marquee.row + marquee.height - thickness,
+        width: marquee.width,
+        height: thickness,
+        color: border,
+    }));
+    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        x: marquee.col,
+        y: marquee.row,
+        width: thickness,
+        height: marquee.height,
+        color: border,
+    }));
+    prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        x: marquee.col + marquee.width - thickness,
+        y: marquee.row,
+        width: thickness,
+        height: marquee.height,
+        color: border,
+    }));
+}
+
+#[cfg(target_os = "macos")]
 fn draw_patch(
     prims: &mut Vec<MetalPrimitive>,
     patch: &Patch,
     rect: Rect,
     viewport: WidgetViewport,
     pan_state: &PatcherPanState,
+    interaction_state: &PatcherInteractionState,
 ) {
-    let scale = 1.0;
-    let origin = (
-        rect.col + 2.0 - pan_state.offset_x,
-        rect.row + 2.4 - pan_state.offset_y,
-    );
-    let node_rects = patch
-        .nodes
-        .iter()
-        .map(|node| {
-            let size = node_size(node);
-            (
-                node.id.clone(),
-                Rect {
-                    col: origin.0 + node.position.0 * scale,
-                    row: origin.1 + node.position.1 * scale,
-                    width: size.0,
-                    height: size.1,
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
+    let node_rects = patch_node_rects(patch, rect, pan_state);
     let input_indices = patch_input_indices(patch);
     let output_counts = patch_output_counts(patch);
 
@@ -1236,6 +1559,8 @@ fn draw_patch(
                 .unwrap_or(0),
             output_counts.get(&node.id).copied().unwrap_or(0),
             viewport,
+            interaction_state.selected_nodes.contains(&node.id),
+            interaction_state.hovered_node.as_deref() == Some(node.id.as_str()),
         );
     }
 }
@@ -1368,8 +1693,10 @@ fn push_node(
     input_count: usize,
     output_count: usize,
     viewport: WidgetViewport,
+    selected: bool,
+    hovered: bool,
 ) {
-    let (bg, border, text) = match node.kind {
+    let (bg, mut border, text) = match node.kind {
         NodeKind::In | NodeKind::Out => (
             crate::backend::Color::from_hex(0x18, 0x19, 0x1e),
             crate::backend::Color::from_hex(0x44, 0x45, 0x50),
@@ -1395,6 +1722,12 @@ fn push_node(
             crate::backend::Color::from_hex(0x4c, 0xe0, 0x72),
         ),
     };
+    if hovered {
+        border = crate::backend::Color::from_hex(0x78, 0x7c, 0x8e);
+    }
+    if selected {
+        border = crate::backend::Color::from_hex(0x4a, 0x8d, 0xff);
+    }
     push_rounded_rect(prims, rect, border, viewport, NODE_CORNER_RADIUS_PX, false);
     push_rounded_rect(
         prims,
@@ -1410,10 +1743,15 @@ fn push_node(
         false,
     );
     for index in 0..input_count {
-        push_port(prims, port_center(rect, index, input_count, true), true);
+        push_port(prims, port_center(rect, index, input_count, true), true, bg);
     }
     for index in 0..output_count {
-        push_port(prims, port_center(rect, index, output_count, false), false);
+        push_port(
+            prims,
+            port_center(rect, index, output_count, false),
+            false,
+            bg,
+        );
     }
     push_node_label(prims, node, rect, text);
     if let Some(diagnostic) = &node.diagnostic {
@@ -1501,21 +1839,33 @@ fn estimated_text_cells(text: &str, font_size: f32) -> f32 {
 }
 
 #[cfg(target_os = "macos")]
-fn push_port(prims: &mut Vec<MetalPrimitive>, center: (f32, f32), input: bool) {
+fn push_port(
+    prims: &mut Vec<MetalPrimitive>,
+    center: (f32, f32),
+    input: bool,
+    node_bg: crate::backend::Color,
+) {
     let color = if input {
         crate::backend::Color::from_hex(0xff, 0xee, 0x00)
     } else {
         crate::backend::Color::from_hex(0xff, 0x9f, 0x0a)
     };
+    let visible_half = if input {
+        MetalCircleVisibleHalf::Bottom
+    } else {
+        MetalCircleVisibleHalf::Top
+    };
     prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
         center: [center.0, center.1],
         radius_px: PORT_OUTER_DIAMETER_PX * 0.5,
         color,
+        visible_half,
     }));
     prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
         center: [center.0, center.1],
         radius_px: PORT_INNER_DIAMETER_PX * 0.5,
-        color: crate::backend::Color::from_hex(0x02, 0x02, 0x03),
+        color: node_bg,
+        visible_half,
     }));
 }
 
@@ -1670,7 +2020,7 @@ mod tests {
             .iter()
             .find(|node| node.kind == NodeKind::History)
             .expect("history node");
-        assert_eq!(node_display_label(history), "history h");
+        assert_eq!(node_display_label(history), "history");
         assert_eq!(
             patch
                 .nodes
@@ -1763,6 +2113,40 @@ mod tests {
     }
 
     #[test]
+    fn interaction_positions_override_auto_layout_positions() {
+        let patch = parse(
+            r#"
+            (def pitch (in 1 @name pitch))
+            (def sig (phasor pitch))
+            "#,
+        );
+        let pitch = patch.nodes.iter().find(|node| node.id == "pitch").unwrap();
+        assert_ne!(pitch.position, (22.0, 7.0));
+
+        let mut state = PatcherInteractionState::default();
+        state
+            .node_positions
+            .insert("pitch".to_string(), (22.0, 7.0));
+        let patch = patch_with_interaction_positions(patch, &state);
+        let pitch = patch.nodes.iter().find(|node| node.id == "pitch").unwrap();
+        assert_eq!(pitch.position, (22.0, 7.0));
+    }
+
+    #[test]
+    fn patcher_hit_testing_uses_node_rects_after_pan() {
+        let patch = parse("(def pitch (in 1 @name pitch))");
+        let pan = PatcherPanState::default();
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 80.0,
+            height: 30.0,
+        };
+        let hit = hit_patcher_node(&patch, rect, &pan, 7.0, 6.8);
+        assert_eq!(hit.as_deref(), Some("pitch"));
+    }
+
+    #[test]
     fn pan_state_allows_overscroll_and_clamps_to_finite_canvas_bounds() {
         let mut state = PatcherPanState {
             offset_x: 100.0,
@@ -1831,6 +2215,14 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|node| node.kind == NodeKind::MacroInstance)
+        );
+        assert!(
+            !patch
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::MacroDefinition),
+            "{:#?}",
+            patch.nodes
         );
     }
 
@@ -1903,6 +2295,7 @@ mod tests {
                 inherited_hover: false,
             },
             &PatcherPanState::default(),
+            &PatcherInteractionState::default(),
         );
         let text_count = prims
             .iter()
