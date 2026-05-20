@@ -3,13 +3,41 @@ use std::env;
 
 use super::model::{
     ArgValue, BindingTarget, ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode,
-    SourceArgValue, SourceOwner,
+    SourceArgValue, SourceOwner, SourceScopeId,
 };
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
 const DEBUG_LISP_ENV: &str = "ESEQ_PATCHER_DEBUG_LISP";
 
 pub(super) fn emit_patch_debug_lisp(patch: &Patch) -> String {
+    emit_patch_debug_lisp_body(patch, EmitContext::Root)
+}
+
+pub(super) fn emit_patch_debug_lisp_for_view(view_key: &str, patch: &Patch) -> String {
+    let Some(macro_name) = view_key.strip_prefix("macro:") else {
+        return emit_patch_debug_lisp(patch);
+    };
+    emit_macro_debug_lisp(macro_name, patch)
+}
+
+fn emit_macro_debug_lisp(macro_name: &str, patch: &Patch) -> String {
+    let params = macro_params(patch, macro_name);
+    let body = emit_patch_debug_lisp_body(patch, EmitContext::Macro);
+    if body.starts_with(";; patcher debug emit:") {
+        return format!("(defmacro {macro_name} ({})\n  {body})", params.join(" "));
+    }
+    let indented_body = body
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "(defmacro {macro_name} ({})\n{indented_body})",
+        params.join(" ")
+    )
+}
+
+fn emit_patch_debug_lisp_body(patch: &Patch, context: EmitContext) -> String {
     let inbound = inbound_connections(patch);
     let nodes = patch
         .nodes
@@ -21,7 +49,7 @@ pub(super) fn emit_patch_debug_lisp(patch: &Patch) -> String {
     let mut top_level = patch.nodes.iter().collect::<Vec<_>>();
     top_level.sort_by_key(|node| source_order(node).unwrap_or((usize::MAX, usize::MAX)));
     for node in top_level {
-        if !should_emit_top_level(node) {
+        if !should_emit_top_level(node, context) {
             continue;
         }
         if emitted_node_ids.contains(node.id.as_str()) {
@@ -47,7 +75,7 @@ pub(super) fn debug_log_patch_lisp(view_key: &str, patch: &Patch) {
     }
     eprintln!(
         "[patcher writeback debug:{view_key}]\n{}\n[/patcher writeback debug]",
-        emit_patch_debug_lisp(patch)
+        emit_patch_debug_lisp_for_view(view_key, patch)
     );
 }
 
@@ -78,6 +106,34 @@ mod tests {
             );
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmitContext {
+    Root,
+    Macro,
+}
+
+fn macro_params(patch: &Patch, macro_name: &str) -> Vec<String> {
+    let macro_scope = SourceScopeId::Macro {
+        name: macro_name.to_string(),
+    };
+    let mut params = patch
+        .nodes
+        .iter()
+        .filter_map(
+            |node| match node.source.as_ref().map(|source| &source.owner) {
+                Some(SourceOwner::MacroParameter { binding, index })
+                    if binding.scope == macro_scope =>
+                {
+                    Some((*index, binding.name.clone()))
+                }
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    params.sort_by_key(|(index, _)| *index);
+    params.into_iter().map(|(_, name)| name).collect()
 }
 
 fn inbound_connections(patch: &Patch) -> HashMap<(String, usize), &PatchConnection> {
@@ -111,7 +167,10 @@ fn source_order(node: &PatchNode) -> Option<(usize, usize)> {
     Some((form_id.index, path_len))
 }
 
-fn should_emit_top_level(node: &PatchNode) -> bool {
+fn should_emit_top_level(node: &PatchNode, context: EmitContext) -> bool {
+    if context == EmitContext::Macro && node.kind == NodeKind::Out {
+        return false;
+    }
     let Some(source) = node.source.as_ref() else {
         return matches!(node.kind, NodeKind::Out);
     };

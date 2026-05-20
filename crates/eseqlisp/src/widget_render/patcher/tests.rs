@@ -2,7 +2,7 @@ use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
 use super::super::text_input::TextInputState;
 use super::display::*;
-use super::emit::emit_patch_debug_lisp;
+use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
 use super::geometry::*;
 use super::interaction::*;
 use super::metrics::*;
@@ -533,6 +533,27 @@ fn debug_emit_reflects_committed_node_text_edits_without_saving() {
     assert_eq!(
         emit_patch_debug_lisp(&patch),
         "(param freq)\n(def result (sine freq))"
+    );
+}
+
+#[test]
+fn debug_emit_wraps_macro_subpatches_as_defmacro() {
+    let patch = parse(
+        r#"
+            (defmacro ap (sig g)
+              (def node (+ (* sig 1) (* h g)))
+              (- node g))
+            "#,
+    );
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+
+    assert_eq!(
+        emit_patch_debug_lisp_for_view("macro:ap", &macro_patch.patch),
+        "(defmacro ap (sig g)\n  (def node (+ (* sig 1) (* h g)))\n  (- node g))"
     );
 }
 
