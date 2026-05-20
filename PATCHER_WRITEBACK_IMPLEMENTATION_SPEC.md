@@ -1122,7 +1122,7 @@ Known limitations:
 
 ### Phase 2: In-Memory Normalized Write-Back Emitter
 
-Status: next implementation target.
+Status: implemented.
 
 Goal: produce complete save-ready Lisp text from source text plus patcher edit
 state, but do not write files yet.
@@ -1172,9 +1172,24 @@ source:
 - Macro parameter inputs emit parameter names, not `(in N)`.
 - Synthetic macro return `out` does not appear in emitted Lisp.
 
+Completed requirements:
+
+- Added an in-memory normalized write-back emitter in
+  `crates/eseqlisp/src/widget_render/patcher/writeback.rs`.
+- The emitter parses the original source, re-projects source ownership metadata,
+  applies source-backed node text edits, and emits complete normalized Lisp.
+- Root and macro scopes are emitted from the parsed source tree rather than from
+  visual graph order.
+- Simple source-backed root, macro, and nested node text edits replace the owned
+  source subtree while preserving same-shape nested structure.
+- Unsupported Phase 3-5 semantics return structured blockers instead of
+  silently emitting approximate Lisp.
+- No file save path, layout sidecar write, generated binding allocation, or
+  durable history emission was added.
+
 ### Phase 3: History-Aware Write-Back
 
-Status: must be implemented before save wiring.
+Status: implemented.
 
 Goal: make history a first-class normalized-emission entity.
 
@@ -1225,6 +1240,20 @@ Tests:
 This phase should not be implemented as a debug emitter patch. It belongs in
 the real normalized write-back emitter because generated names and history
 ordering are durable semantics.
+
+Completed requirements:
+
+- Existing source-backed feedforward and feedback histories round-trip through
+  the real normalized write-back emitter.
+- Created root and macro-local history nodes allocate scoped generated names
+  such as `history1`, never visual ids such as `created-N`.
+- Created history read and write edges use the same generated history name for
+  `make-history`, `read-history`, and `write-history`.
+- Macro-local created histories emit inside the owning `defmacro`, with writes
+  inserted before the macro return expression.
+- Multiple active writes to the same history return a structured blocker.
+- History edits that would require generated value bindings remain blocked
+  until generated binding allocation is implemented.
 
 ### Phase 4: Generated Binding Allocation
 

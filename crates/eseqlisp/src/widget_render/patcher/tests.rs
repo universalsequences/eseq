@@ -10,6 +10,7 @@ use super::model::{CableEndpoint, InputPortRef, OutputPortRef};
 use super::project::dgenlisp_operator_names;
 use super::render::*;
 use super::state::*;
+use super::writeback::{WriteBackError, emit_patch_writeback};
 use super::*;
 use crate::layout::{LayoutNode, MeasureCtx, Rect, TextMeasurer};
 use crate::theme;
@@ -643,6 +644,405 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         emit_patch_debug_lisp_for_view("macro:ap", &macro_patch),
         "(defmacro ap (sig g)\n  (def node (+ (* sig 1) (* h g)))\n  node)"
     );
+}
+
+#[test]
+fn writeback_emits_unchanged_root_patch_as_complete_normalized_lisp() {
+    let source = r#"
+        (param freq)
+        (def result (phasor freq))
+        (out result 1)
+    "#;
+
+    assert_eq!(
+        emit_patch_writeback(
+            source,
+            PatcherIntent::Instrument,
+            &PatcherInteractionState::default()
+        )
+        .unwrap(),
+        "(param freq)\n(def result (phasor freq))\n(out result 1.0)"
+    );
+}
+
+#[test]
+fn writeback_emits_unchanged_macro_as_complete_normalized_defmacro() {
+    let source = r#"
+        (defmacro ap (sig g)
+          (def node (+ sig g))
+          node)
+    "#;
+
+    assert_eq!(
+        emit_patch_writeback(
+            source,
+            PatcherIntent::Instrument,
+            &PatcherInteractionState::default()
+        )
+        .unwrap(),
+        "(defmacro ap (sig g) (def node (+ sig g)) node)"
+    );
+}
+
+#[test]
+fn writeback_node_text_edit_rewrites_owning_root_expression() {
+    let source = r#"
+        (param freq)
+        (def result (phasor freq))
+    "#;
+    let patch = parse(source);
+    let phasor = patch.nodes.iter().find(|node| node.op == "phasor").unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", phasor, "phasor".to_string());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &phasor.id))
+        .unwrap()
+        .text = "sin".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param freq)\n(def result (sin freq))"
+    );
+}
+
+#[test]
+fn writeback_nested_node_text_edit_preserves_nested_structure() {
+    let source = "(def result (phasor (* 25 freq) (mix xyz a b)))";
+    let patch = parse(source);
+    let nested = patch.nodes.iter().find(|node| node.op == "mix").unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", nested, "mix".to_string());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &nested.id))
+        .unwrap()
+        .text = "+".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def result (phasor (* 25.0 freq) (+ xyz a b)))"
+    );
+}
+
+#[test]
+fn writeback_macro_node_text_edit_rewrites_inside_defmacro() {
+    let source = r#"
+        (defmacro ap (sig g)
+          (def node (+ sig g))
+          node)
+    "#;
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+    let plus = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "+")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "macro:ap", plus, "+".to_string());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:ap", &plus.id))
+        .unwrap()
+        .text = "mix".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro ap (sig g) (def node (mix sig g)) node)"
+    );
+}
+
+#[test]
+fn writeback_synthetic_macro_return_out_is_not_emitted() {
+    let source = "(defmacro passthrough (sig) sig)";
+
+    assert_eq!(
+        emit_patch_writeback(
+            source,
+            PatcherIntent::Instrument,
+            &PatcherInteractionState::default()
+        )
+        .unwrap(),
+        "(defmacro passthrough (sig) sig)"
+    );
+}
+
+#[test]
+fn writeback_untouched_code_island_emits_normalized_source() {
+    let source = r#"
+        (let ((x 1)) x)
+        (param freq)
+    "#;
+
+    assert_eq!(
+        emit_patch_writeback(
+            source,
+            PatcherIntent::Instrument,
+            &PatcherInteractionState::default()
+        )
+        .unwrap(),
+        "(let ((x 1.0)) x)\n(param freq)"
+    );
+}
+
+#[test]
+fn writeback_edited_code_island_returns_blocker() {
+    let source = "(let ((x 1)) x)";
+    let patch = parse(source);
+    let code = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::CodeIsland)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", code, node_display_label(code));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &code.id))
+        .unwrap()
+        .text = "code changed".to_string();
+
+    assert!(matches!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state),
+        Err(WriteBackError::EditedCodeIsland { .. })
+    ));
+}
+
+#[test]
+fn writeback_unknown_operator_edit_returns_blocker() {
+    let source = "(def result (phasor freq))";
+    let patch = parse(source);
+    let phasor = patch.nodes.iter().find(|node| node.op == "phasor").unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", phasor, "phasor".to_string());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &phasor.id))
+        .unwrap()
+        .text = "definitely-not-an-op".to_string();
+
+    assert!(matches!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state),
+        Err(WriteBackError::UnknownOperator { operator, .. })
+            if operator == "definitely-not-an-op"
+    ));
+}
+
+#[test]
+fn writeback_created_node_returns_phase_boundary_blocker() {
+    let source = "(def result (phasor freq))";
+    let mut state = PatcherInteractionState::default();
+    allocate_created_node(&mut state, "root", (1.0, 1.0));
+
+    assert!(matches!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state),
+        Err(WriteBackError::UnsupportedCreatedNode { .. })
+    ));
+}
+
+#[test]
+fn writeback_existing_feedforward_history_round_trips() {
+    let source = r#"
+        (make-history h)
+        (def sig (in 1))
+        (def delta (- sig (read-history h)))
+        (write-history h sig)
+    "#;
+
+    assert_eq!(
+        emit_patch_writeback(
+            source,
+            PatcherIntent::Instrument,
+            &PatcherInteractionState::default()
+        )
+        .unwrap(),
+        "(make-history h)\n(def sig (in 1.0))\n(def delta (- sig (read-history h)))\n(write-history h sig)"
+    );
+}
+
+#[test]
+fn writeback_existing_feedback_history_round_trips() {
+    let source = r#"
+        (make-history h)
+        (write-history h (mix sig (read-history h) alpha))
+    "#;
+
+    assert_eq!(
+        emit_patch_writeback(
+            source,
+            PatcherIntent::Instrument,
+            &PatcherInteractionState::default()
+        )
+        .unwrap(),
+        "(make-history h)\n(write-history h (mix sig (read-history h) alpha))"
+    );
+}
+
+#[test]
+fn writeback_created_history_uses_generated_name_for_make_read_and_write() {
+    let source = r#"
+        (def sig (in 1))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let history_id = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &history_id))
+        .unwrap()
+        .text = "history".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: sig.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: history_id.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: history_id,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(make-history history1)\n(def sig (in 1.0))\n(out (read-history history1) 1.0)\n(write-history history1 sig)"
+    );
+}
+
+#[test]
+fn writeback_created_macro_history_emits_inside_defmacro() {
+    let source = "(defmacro ap (sig) sig)";
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+    let sig = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.outputs == vec!["sig".to_string()])
+        .unwrap();
+    let out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = macro_patch
+        .patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let history_id = allocate_created_node(&mut state, "macro:ap", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:ap", &history_id))
+        .unwrap()
+        .text = "history".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "macro:ap",
+            &source_connection_id(sig_to_out),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "macro:ap",
+        OutputPortRef {
+            node_id: sig.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: history_id.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:ap",
+        OutputPortRef {
+            node_id: history_id,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro ap (sig) (make-history history1) (write-history history1 sig) (read-history history1))"
+    );
+}
+
+#[test]
+fn writeback_multiple_history_writes_return_blocker() {
+    let source = r#"
+        (make-history h)
+        (def sig (in 1))
+        (write-history h sig)
+        (write-history h 0)
+    "#;
+
+    assert!(matches!(
+        emit_patch_writeback(
+            source,
+            PatcherIntent::Instrument,
+            &PatcherInteractionState::default()
+        ),
+        Err(WriteBackError::MultipleHistoryWrites { history_id, .. }) if history_id == "h"
+    ));
 }
 
 #[test]

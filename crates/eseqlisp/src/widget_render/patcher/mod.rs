@@ -11,6 +11,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 mod text;
+mod writeback;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
