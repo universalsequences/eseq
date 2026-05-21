@@ -1871,6 +1871,285 @@ fn writeback_generated_binding_can_depend_on_created_phasor_and_literal() {
 }
 
 #[test]
+fn writeback_created_modulatable_param_uses_param_name_for_mod_accessor() {
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (def mod2 (in 6 @name mod2 @modulator 2))
+        (def mod3 (in 7 @name mod3 @modulator 3))
+        (def mod4 (in 8 @name mod4 @modulator 4))
+        (def mod5 (in 9 @name mod5 @modulator 5))
+        (def mod6 (in 10 @name mod6 @modulator 6))
+        (def ext1 (in 11 @name ext1 @modulator 7))
+        (def ext2 (in 12 @name ext2 @modulator 8))
+        (def ext3 (in 13 @name ext3 @modulator 9))
+        (def ext4 (in 14 @name ext4 @modulator 10))
+        (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+        (def phase (phasor pitch))
+        (out (* phase velocity (mod gain)) 1 @name audio)
+    "#;
+    let patch = parse(source);
+    let pitch = patch.nodes.iter().find(|node| node.id == "pitch").unwrap();
+    let phase = patch.nodes.iter().find(|node| node.id == "phase").unwrap();
+    let pitch_to_phase = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == pitch.id && connection.to_node == phase.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let param = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    let param_text = "param newparam @default 0.5 @min 0 @max 1 @mod true @mod-mode additive";
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param))
+        .unwrap()
+        .text = param_text.to_string();
+    let mod_node = allocate_created_node(&mut state, "root", (2.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &mod_node))
+        .unwrap()
+        .text = "mod".to_string();
+    let add = allocate_created_node(&mut state, "root", (3.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &add))
+        .unwrap()
+        .text = "+".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(pitch_to_phase),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: param,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: mod_node.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: mod_node,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: add.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: pitch.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: add.clone(),
+            input_index: 1,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: add,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: phase.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    assert!(
+        emitted.contains(
+            "(param newparam @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)"
+        )
+    );
+    assert!(emitted.contains("(def modulated1 (mod newparam))"));
+    assert!(emitted.contains("(def add1 (+ modulated1 pitch))"));
+    assert!(emitted.contains("(def phase (phasor add1))"));
+    assert!(!emitted.contains("(def param"));
+    assert!(!emitted.contains("(mod param"));
+    assert!(!emitted.contains("(def mod7"));
+    let ext4_index = emitted
+        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+        .expect("instrument modulator inputs should be present");
+    let modulated_index = emitted
+        .find("(def modulated1 (mod newparam))")
+        .expect("created mod accessor should be materialized");
+    let phase_index = emitted
+        .find("(def phase (phasor add1))")
+        .expect("source consumer should be rewritten");
+    assert!(ext4_index < modulated_index);
+    assert!(modulated_index < phase_index);
+}
+
+#[test]
+fn writeback_created_unconnected_modulatable_param_follows_modulator_inputs() {
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (def mod2 (in 6 @name mod2 @modulator 2))
+        (def mod3 (in 7 @name mod3 @modulator 3))
+        (def mod4 (in 8 @name mod4 @modulator 4))
+        (def mod5 (in 9 @name mod5 @modulator 5))
+        (def mod6 (in 10 @name mod6 @modulator 6))
+        (def ext1 (in 11 @name ext1 @modulator 7))
+        (def ext2 (in 12 @name ext2 @modulator 8))
+        (def ext3 (in 13 @name ext3 @modulator 9))
+        (def ext4 (in 14 @name ext4 @modulator 10))
+        (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+        (def phase (phasor pitch))
+        (out (* phase velocity (mod gain)) 1 @name audio)
+    "#;
+    let mut state = PatcherInteractionState::default();
+    let param = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param))
+        .unwrap()
+        .text = "param xyz @default 0 @min 0 @max 1 @mod true @mod-mode additive".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    let ext4_index = emitted
+        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+        .expect("instrument modulator inputs should be present");
+    let xyz_index = emitted
+        .find("(param xyz @default 0.0 @min 0.0 @max 1.0 @mod true @mod-mode additive)")
+        .expect("created modulatable param should be emitted");
+    let gain_index = emitted
+        .find("(param gain @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)")
+        .expect("existing gain param should remain present");
+    assert!(ext4_index < xyz_index);
+    assert!(xyz_index < gain_index);
+}
+
+#[test]
+fn writeback_created_node_depending_on_mod_accessor_follows_modulator_inputs() {
+    let source = r#"
+        (defmacro op (input depth) (* input depth))
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def op1 (op pitch 1))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (def mod2 (in 6 @name mod2 @modulator 2))
+        (def mod3 (in 7 @name mod3 @modulator 3))
+        (def mod4 (in 8 @name mod4 @modulator 4))
+        (def mod5 (in 9 @name mod5 @modulator 5))
+        (def mod6 (in 10 @name mod6 @modulator 6))
+        (def ext1 (in 11 @name ext1 @modulator 7))
+        (def ext2 (in 12 @name ext2 @modulator 8))
+        (def ext3 (in 13 @name ext3 @modulator 9))
+        (def ext4 (in 14 @name ext4 @modulator 10))
+        (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+        (out (* op1 velocity (mod gain)) 1 @name audio)
+    "#;
+    let mut state = PatcherInteractionState::default();
+    let param = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param))
+        .unwrap()
+        .text = "param mything @default 0.5 @min 0 @max 1 @mod true @mod-mode additive".to_string();
+    let mod_node = allocate_created_node(&mut state, "root", (2.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &mod_node))
+        .unwrap()
+        .text = "mod".to_string();
+    let op = allocate_created_node(&mut state, "root", (3.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &op))
+        .unwrap()
+        .text = "op".to_string();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: param,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: mod_node.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: "pitch".to_string(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: op.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: mod_node,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: op,
+            input_index: 1,
+        },
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    let ext4_index = emitted
+        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+        .expect("instrument modulator inputs should be present");
+    let param_index = emitted
+        .find("(param mything @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)")
+        .expect("created modulatable param should be emitted");
+    let modulated_index = emitted
+        .find("(def modulated1 (mod mything))")
+        .expect("created mod accessor should be emitted");
+    let op_index = emitted
+        .find("(def op2 (op pitch modulated1))")
+        .expect("created dependent macro call should be emitted");
+    assert!(ext4_index < param_index);
+    assert!(param_index < modulated_index);
+    assert!(modulated_index < op_index);
+}
+
+#[test]
 fn writeback_generated_binding_avoids_scope_name_collisions() {
     let source = r#"
         (param phasor1)

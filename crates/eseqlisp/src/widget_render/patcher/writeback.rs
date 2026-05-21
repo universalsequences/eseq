@@ -995,7 +995,7 @@ fn apply_generated_binding_writeback(
         }
     }
 
-    let mut pending_defs: Vec<(SourceScopeId, usize, usize, usize, Expression)> = Vec::new();
+    let mut pending_forms: Vec<(SourceScopeId, usize, usize, usize, Expression)> = Vec::new();
     let mut next_generated_def_order = 0usize;
     for view_key in views {
         let scope = scope_for_view_key(&view_key);
@@ -1013,6 +1013,45 @@ fn apply_generated_binding_writeback(
         created_nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
         let mut materialized_nodes = HashSet::new();
+        for edit in &created_nodes {
+            if !created_param_edit(edit) {
+                continue;
+            }
+            let generated_expr = created_node_expression(
+                document,
+                root_patch,
+                interaction_state,
+                &generated,
+                &view_key,
+                edit,
+            )?;
+            let name = created_param_name(&generated_expr, &view_key, &edit.id)?;
+            allocator.reserve(&scope, &name).map_err(|name| {
+                WriteBackError::BindingRenameCollision {
+                    view_key: view_key.clone(),
+                    node_id: edit.id.clone(),
+                    name,
+                }
+            })?;
+            generated.insert(&view_key, &edit.id, name);
+            materialized_nodes.insert(edit.id.clone());
+            let insertion_index = generated_def_insertion_index(
+                document,
+                root_patch,
+                interaction_state,
+                &generated,
+                &view_key,
+                edit,
+            )?;
+            pending_forms.push((
+                scope.clone(),
+                insertion_index,
+                0,
+                next_generated_def_order,
+                generated_expr,
+            ));
+            next_generated_def_order += 1;
+        }
         loop {
             let mut changed = false;
             for edit in &created_nodes {
@@ -1067,7 +1106,7 @@ fn apply_generated_binding_writeback(
             )?;
             let dependency_depth =
                 generated_binding_dependency_depth(interaction_state, &view_key, &edit.id);
-            pending_defs.push((
+            pending_forms.push((
                 scope.clone(),
                 insertion_index,
                 dependency_depth,
@@ -1097,7 +1136,7 @@ fn apply_generated_binding_writeback(
         )?;
     }
 
-    pending_defs.sort_by(
+    pending_forms.sort_by(
         |(scope_a, index_a, depth_a, order_a, _), (scope_b, index_b, depth_b, order_b, _)| {
             view_key_for_scope(scope_b)
                 .cmp(&view_key_for_scope(scope_a))
@@ -1106,7 +1145,7 @@ fn apply_generated_binding_writeback(
                 .then(order_b.cmp(order_a))
         },
     );
-    for (scope, index, _, _, expr) in pending_defs {
+    for (scope, index, _, _, expr) in pending_forms {
         document.insert_form(&scope, index, expr)?;
     }
     Ok(generated)
@@ -1204,6 +1243,60 @@ fn materialized_created_node_outputs_match_source(
 
 fn created_generated_binding_edit(edit: &super::state::PatcherNodeEdit) -> bool {
     created_value_edit(edit) && created_literal_expr(edit).is_none()
+}
+
+fn created_param_edit(edit: &super::state::PatcherNodeEdit) -> bool {
+    matches!(created_node_operator(edit).as_deref(), Ok("param"))
+}
+
+fn created_param_name(
+    expr: &Expression,
+    view_key: &str,
+    node_id: &str,
+) -> Result<String, WriteBackError> {
+    let Expression::List(items) = expr else {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node_id.to_string(),
+            reason: "created param must parse as a call".to_string(),
+        });
+    };
+    if symbol_at(items, 0) != Some("param") {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node_id.to_string(),
+            reason: "created param expression must start with `param`".to_string(),
+        });
+    }
+    let Some(name) = symbol_at(items, 1) else {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node_id.to_string(),
+            reason: "created param must provide a symbolic name".to_string(),
+        });
+    };
+    Ok(name.to_string())
+}
+
+fn created_node_requires_instrument_modulator_inputs(edit: &super::state::PatcherNodeEdit) -> bool {
+    let Ok(Expression::List(items)) = parse_created_node_text(edit) else {
+        return false;
+    };
+    match symbol_at(&items, 0) {
+        Some("mod") => true,
+        Some("param") => expression_has_true_attribute(&items, "@mod"),
+        _ => false,
+    }
+}
+
+fn expression_has_true_attribute(items: &[Expression], attr: &str) -> bool {
+    items.windows(2).any(|window| {
+        matches!(
+            window,
+            [Expression::Symbol(key), Expression::Symbol(value)]
+                if key == attr && value == "true"
+        )
+    })
 }
 
 fn created_node_operator(edit: &super::state::PatcherNodeEdit) -> Result<String, WriteBackError> {
@@ -1540,7 +1633,7 @@ fn generated_def_insertion_index(
     edit: &super::state::PatcherNodeEdit,
 ) -> Result<usize, WriteBackError> {
     let scope = scope_for_view_key(view_key);
-    let dependency_index =
+    let mut dependency_index =
         generated_node_dependencies(root_patch, interaction_state, view_key, edit)
             .into_iter()
             .filter_map(|node_id| {
@@ -1553,6 +1646,14 @@ fn generated_def_insertion_index(
             .max()
             .map(|index| index + 1)
             .unwrap_or(0);
+    if generated_node_requires_instrument_modulator_inputs(interaction_state, view_key, &edit.id) {
+        dependency_index = dependency_index.max(
+            document
+                .latest_instrument_modulator_input_index(&scope)
+                .map(|index| index + 1)
+                .unwrap_or(0),
+        );
+    }
     let consumer_index =
         generated_node_consumers(root_patch, interaction_state, view_key, edit, generated)
             .into_iter()
@@ -1602,6 +1703,51 @@ fn generated_node_dependencies(
         );
     }
     dependencies
+}
+
+fn generated_node_requires_instrument_modulator_inputs(
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    let mut visited = HashSet::new();
+    generated_node_requires_instrument_modulator_inputs_inner(
+        interaction_state,
+        view_key,
+        node_id,
+        &mut visited,
+    )
+}
+
+fn generated_node_requires_instrument_modulator_inputs_inner(
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+    visited: &mut HashSet<String>,
+) -> bool {
+    if !visited.insert(node_id.to_string()) {
+        return false;
+    }
+    if let Some(edit) = created_value_node(interaction_state, view_key, node_id) {
+        if created_node_requires_instrument_modulator_inputs(edit) {
+            return true;
+        }
+    } else {
+        return false;
+    }
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.to.node_id == node_id)
+        .any(|connection| {
+            generated_node_requires_instrument_modulator_inputs_inner(
+                interaction_state,
+                view_key,
+                &connection.from.node_id,
+                visited,
+            )
+        })
 }
 
 fn rewrite_created_literal_consumers(
@@ -2329,6 +2475,15 @@ impl GeneratedNameAllocator {
             }
         }
     }
+
+    fn reserve(&mut self, scope: &SourceScopeId, name: &str) -> Result<(), String> {
+        let used = self.used_by_scope.entry(scope.clone()).or_default();
+        if used.insert(name.to_string()) {
+            Ok(())
+        } else {
+            Err(name.to_string())
+        }
+    }
 }
 
 fn generated_binding_stem(operator: &str) -> String {
@@ -2337,6 +2492,7 @@ fn generated_binding_stem(operator: &str) -> String {
         "+" => "add",
         "-" => "sub",
         "/" => "div",
+        "mod" => "modulated",
         _ => operator,
     };
     let stem = mapped
@@ -3304,6 +3460,19 @@ impl SourceDocument {
         }
     }
 
+    fn latest_instrument_modulator_input_index(&self, scope: &SourceScopeId) -> Option<usize> {
+        match scope {
+            SourceScopeId::Root => self.forms.iter().filter_map(modulator_form_index).max(),
+            SourceScopeId::Macro { name } => self.macros.get(name).and_then(|macro_doc| {
+                macro_doc
+                    .body
+                    .iter()
+                    .filter_map(modulator_body_form_index)
+                    .max()
+            }),
+        }
+    }
+
     fn is_known_operator(&self, operator: &str) -> bool {
         matches!(
             operator,
@@ -3588,4 +3757,86 @@ fn collect_scope_binding_names(expr: &Expression, names: &mut HashSet<String>) {
         }
         _ => {}
     }
+}
+
+fn modulator_form_index(form: &DocumentForm) -> Option<usize> {
+    let SourceForm::Expr(expr) = &form.form else {
+        return None;
+    };
+    instrument_modulator_def_name(expr)?;
+    form.original_index
+}
+
+fn modulator_body_form_index(form: &MacroBodyForm) -> Option<usize> {
+    instrument_modulator_def_name(&form.expr)?;
+    form.original_index
+}
+
+fn instrument_modulator_def_name(expr: &Expression) -> Option<&str> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if symbol_at(items, 0) != Some("def") {
+        return None;
+    }
+    let name = symbol_at(items, 1)?;
+    expected_instrument_modulator_slot(name)
+        .is_some_and(|slot| {
+            items
+                .get(2)
+                .and_then(instrument_input_signature)
+                .is_some_and(|(channel, input_name, modulator)| {
+                    channel == slot + 4 && input_name == name && modulator == slot
+                })
+        })
+        .then_some(name)
+}
+
+fn expected_instrument_modulator_slot(name: &str) -> Option<usize> {
+    match name {
+        "mod1" => Some(1),
+        "mod2" => Some(2),
+        "mod3" => Some(3),
+        "mod4" => Some(4),
+        "mod5" => Some(5),
+        "mod6" => Some(6),
+        "ext1" => Some(7),
+        "ext2" => Some(8),
+        "ext3" => Some(9),
+        "ext4" => Some(10),
+        _ => None,
+    }
+}
+
+fn instrument_input_signature(expr: &Expression) -> Option<(usize, &str, usize)> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if symbol_at(items, 0) != Some("in") {
+        return None;
+    }
+    let channel = match items.get(1) {
+        Some(Expression::Number(value)) if value.fract() == 0.0 && *value > 0.0 => *value as usize,
+        _ => return None,
+    };
+    let name = items
+        .windows(2)
+        .find_map(|pair| match (&pair[0], &pair[1]) {
+            (Expression::Symbol(key), Expression::Symbol(value)) if key == "@name" => {
+                Some(value.as_str())
+            }
+            _ => None,
+        })?;
+    let modulator = match items
+        .windows(2)
+        .find_map(|pair| match (&pair[0], &pair[1]) {
+            (Expression::Symbol(key), Expression::Number(value)) if key == "@modulator" => {
+                Some(*value)
+            }
+            _ => None,
+        }) {
+        Some(value) if value.fract() == 0.0 && value > 0.0 => value as usize,
+        _ => return None,
+    };
+    Some((channel, name, modulator))
 }

@@ -534,10 +534,13 @@ pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("{}{}", stderr, stdout));
+        let error = format!("{}{}", stderr, stdout);
+        log_dgenlisp_compile_failure("effect", &src_path, &error, source);
+        return Err(error);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    log_dgenlisp_compile_manifest("effect", &src_path, &stdout);
     Ok(stdout)
 }
 
@@ -2082,10 +2085,28 @@ pub fn compile_instrument_with_asset_base(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("{}{}", stderr, stdout));
+        let error = format!("{}{}", stderr, stdout);
+        log_dgenlisp_compile_failure("instrument", &src_path, &error, source);
+        return Err(error);
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    log_dgenlisp_compile_manifest("instrument", &src_path, &stdout);
+    Ok(stdout)
+}
+
+fn log_dgenlisp_compile_failure(kind: &str, src_path: &Path, error: &str, source: &str) {
+    eprintln!(
+        "[dgenlisp compile failed] kind={kind} path={}\nerror:\n{error}\nsource:\n{source}\n[/dgenlisp compile failed]",
+        src_path.display()
+    );
+}
+
+fn log_dgenlisp_compile_manifest(kind: &str, src_path: &Path, manifest: &str) {
+    eprintln!(
+        "[dgenlisp compile manifest] kind={kind} path={}\nmanifest:\n{manifest}\n[/dgenlisp compile manifest]",
+        src_path.display()
+    );
 }
 
 pub fn compile_and_load_instrument(

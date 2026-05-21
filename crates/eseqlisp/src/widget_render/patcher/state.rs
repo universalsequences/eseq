@@ -475,10 +475,6 @@ pub(super) fn set_connection_segment_edit(
             segment,
         },
     );
-    debug_log_edit_event(
-        &format!("set-source-connection-segment view={view_key} cable={cable_id}"),
-        state,
-    );
 }
 
 pub(super) fn delete_connection_edit_or_mark_deleted(
@@ -592,10 +588,6 @@ pub(super) fn set_node_edit_position(
     {
         edit.position = position;
     }
-    debug_log_edit_event(
-        &format!("set-node-position view={view_key} node={}", node.id),
-        state,
-    );
 }
 
 pub(super) fn active_patcher_patch(
