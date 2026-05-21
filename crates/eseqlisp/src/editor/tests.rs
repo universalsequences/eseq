@@ -2155,6 +2155,43 @@ fn tree_double_click_activates_leaf() {
 }
 
 #[test]
+fn patcher_background_double_click_consumes_local_only_event() {
+    let path = temp_file_path("patcher-double-click-create");
+    std::fs::write(&path, "(+ 1 2)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 12);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (def last-event (state nil))
+                (effect
+                  (patcher
+                    :height 10
+                    :path "{}"
+                    :on-change (lambda (event) (set! last-event event))))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+
+    let click = mouse_event(MouseEventKind::Down(MouseButton::Left), 20, 5);
+    editor.handle_mouse_precise(click, 0, 0, 40, 12, 20.0, 5.0);
+    editor.handle_mouse_precise(click, 0, 0, 40, 12, 20.0, 5.0);
+    editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_ne!(
+        editor.runtime.eval_str("last-event").unwrap().unwrap(),
+        Value::Nil,
+        "double-click should leave the patcher text edit active so Enter emits a patcher change"
+    );
+}
+
+#[test]
 fn tree_sample_drag_drops_on_compatible_box_target() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

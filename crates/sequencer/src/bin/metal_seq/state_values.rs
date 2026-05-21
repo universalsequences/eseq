@@ -5013,6 +5013,7 @@ mod tests {
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(0.0)),
+                ("current-track", Value::Number(0.0)),
                 ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-selected-sample", Value::String(String::new())),
@@ -5157,6 +5158,35 @@ mod tests {
         assert!(
             value_contains_string(tree, "digitone") || value_contains_string(tree, "minimoog"),
             "instrument tab should render saved instruments"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_new_instrument_editor_uses_finalize_copy() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-instrument".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
+        assert!(value_contains_string(tree, "Draft patch"));
+        assert!(value_contains_string(tree, "track "));
+        assert!(value_contains_string(tree, "Save as"));
+        assert!(value_contains_string(tree, "Finalize"));
+        assert!(
+            !value_contains_string(tree, "Save & Add"),
+            "new instrument editor should use finalization copy"
         );
     }
 

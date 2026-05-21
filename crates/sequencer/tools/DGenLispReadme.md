@@ -200,8 +200,9 @@ Return 1.0 for true, 0.0 for false:
 
 ```lisp
 (phasor freq)              ; ramp 0→1 at freq Hz
-(phasor freq reset)        ; with reset trigger
+(phasor freq reset)        ; optional reset trigger; defaults to 0
 (stateful-phasor freq)     ; forced stateful variant
+(stateful-phasor freq reset)
 (noise)                    ; white noise
 (noise @size 1024)         ; per-bin signalTensor noise
 (noise @size 1024 @hop 256); hop-rate tensor noise
@@ -274,7 +275,8 @@ Supported modulation modes are `additive`, `multiplicative`, and `semitone`.
 
 ```lisp
 (scale sig inMin inMax outMin outMax)  ; linear rescale
-(triangle phase)                       ; phasor (0..1) → triangle (-1..1)
+(triangle phase)                       ; equivalent to (triangle phase 0.5)
+(triangle phase duty)                  ; duty/width 0..1, e.g. 0 follows phase
 (wrap sig min max)                     ; wrap value to range
 (clip sig min max)                     ; clamp value to range
 ```

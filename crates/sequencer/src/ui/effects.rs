@@ -164,6 +164,29 @@ impl App {
         }
     }
 
+    pub fn add_transient_instrument_track_sync(
+        &mut self,
+        name: &str,
+        source: &str,
+        asset_base: Option<&std::path::Path>,
+    ) -> Result<usize, String> {
+        let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+            source,
+            self.graph.sample_rate,
+            asset_base,
+        )?;
+        let cache_idx = self.cache_instrument_engine(name, source, &result.manifest, result.lib);
+        let manifest = self.editor.engine_registry.engines[cache_idx]
+            .manifest
+            .clone();
+        let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+        let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        unsafe {
+            self.graph_controller()
+                .add_custom_track(name, cache_idx, &manifest, &*lib_ptr)
+        }
+    }
+
     pub fn replace_current_custom_instrument_sync(
         &mut self,
         name: &str,

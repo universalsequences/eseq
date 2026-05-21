@@ -7,8 +7,8 @@ use crate::layout::LayoutNode;
 use super::display::node_display_label;
 use super::emit::debug_log_patch_lisp;
 use super::geometry::{
-    connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_macro_drill_in,
-    hit_patcher_node, hit_patcher_output_port, hit_patcher_segmented_cable_horizontal_segment,
+    connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_node,
+    hit_patcher_output_port, hit_patcher_segmented_cable_horizontal_segment,
     nearest_patcher_input_port, nearest_patcher_output_port, patch_content_size,
     patch_input_indices, patch_input_slot_counts, patch_node_rects, patch_output_counts,
     patcher_back_button_rect, patcher_breadcrumb_rect, patcher_origin, patcher_zoom, port_center,
@@ -22,11 +22,11 @@ use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, Outp
 use super::state::{
     PatcherDragState, PatcherInteractionState, PatcherMacroEdit, PatcherPanState,
     active_patcher_patch, active_patcher_view_key, allocate_created_connection,
-    allocate_created_node, connection_id_from_ports, delete_connection_edit_or_mark_deleted,
-    ensure_source_node_edit, get_patcher_interaction_state, get_patcher_pan_state, node_edit_key,
-    patch_with_created_macros, patch_with_interaction_state, patcher_state_key,
-    set_connection_segment_edit, set_node_edit_position, set_patcher_interaction_state,
-    set_patcher_pan_state, source_connection_id,
+    allocate_created_node, connection_id_from_ports, debug_log_edit_event,
+    delete_connection_edit_or_mark_deleted, ensure_source_node_edit, get_patcher_interaction_state,
+    get_patcher_pan_state, node_edit_key, patch_with_created_macros, patch_with_interaction_state,
+    patcher_state_key, set_connection_segment_edit, set_node_edit_position,
+    set_patcher_interaction_state, set_patcher_pan_state, source_connection_id,
 };
 use super::text::{
     begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col_with_zoom,
@@ -150,27 +150,6 @@ pub(super) fn handle_patcher_pointer_down(
     let Some((patch, pan_state, _view_key)) = load_interactive_patch_for_node(node) else {
         return;
     };
-    if let Ok((_, root_patch)) = load_patch_from_props(&node.props)
-        && let Some((_node_id, macro_name)) = hit_patcher_macro_drill_in(
-            &patch,
-            &patch_with_created_macros(root_patch, &state),
-            node.rect,
-            &pan_state,
-            local_col,
-            local_row,
-        )
-    {
-        state.active_macro = Some(macro_name);
-        state.selected_nodes.clear();
-        state.hovered_node = None;
-        state.hovered_macro_drill_in = None;
-        state.drag = None;
-        state.text_edit = None;
-        state.selected_cable = None;
-        set_patcher_interaction_state(key, state);
-        reset_patcher_pan(key);
-        return;
-    }
     let hit = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
     if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone()) {
         if hit.as_deref() == Some(edit_node_id.as_str()) {
@@ -660,20 +639,6 @@ pub(super) fn handle_patcher_pointer_moved(node: &LayoutNode, local_col: f32, lo
     let mut state = get_patcher_interaction_state(key);
     state.hover_back_button = state.active_macro.is_some()
         && rect_contains(patcher_back_button_rect(node.rect), local_col, local_row);
-    state.hovered_macro_drill_in =
-        load_patch_from_props(&node.props)
-            .ok()
-            .and_then(|(_, root_patch)| {
-                hit_patcher_macro_drill_in(
-                    &patch,
-                    &patch_with_created_macros(root_patch, &state),
-                    node.rect,
-                    &pan_state,
-                    local_col,
-                    local_row,
-                )
-                .map(|(node_id, _)| node_id)
-            });
     state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
     set_patcher_interaction_state(key, state);
 }
@@ -707,14 +672,14 @@ pub(super) fn open_selected_macro_node(
     {
         return false;
     }
-    state.active_macro = Some(macro_name);
+    state.active_macro = Some(macro_name.clone());
     state.selected_nodes.clear();
     state.selected_cable = None;
     state.hovered_node = None;
-    state.hovered_macro_drill_in = None;
     state.hover_back_button = false;
     state.drag = None;
     state.text_edit = None;
+    debug_log_edit_event(&format!("open-macro name={macro_name}"), state);
     true
 }
 
@@ -753,6 +718,10 @@ pub(super) fn promote_created_macro_definition(
             name,
             instance_node_id: node_id.to_string(),
         },
+    );
+    debug_log_edit_event(
+        &format!("promote-created-macro view={view_key} node={node_id}"),
+        state,
     );
     true
 }
@@ -834,9 +803,9 @@ fn navigate_patcher_to_root(key: u64, state: &mut PatcherInteractionState) {
     state.selected_nodes.clear();
     state.selected_cable = None;
     state.hovered_node = None;
-    state.hovered_macro_drill_in = None;
     state.hover_back_button = false;
     state.drag = None;
+    debug_log_edit_event("navigate-root", state);
     set_patcher_interaction_state(key, state.clone());
     reset_patcher_pan(key);
 }

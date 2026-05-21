@@ -34,6 +34,13 @@ pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Resul
     writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
 }
 
+pub fn patcher_has_text_edit(node: &crate::layout::LayoutNode) -> bool {
+    node.widget_type == "patcher"
+        && state::get_patcher_interaction_state(state::patcher_state_key(node))
+            .text_edit
+            .is_some()
+}
+
 #[cfg(any(test, feature = "patcher-test-support"))]
 pub fn emit_patch_writeback_with_inserted_node_before_first_output(
     source: &str,
@@ -235,10 +242,10 @@ use interaction::{
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
-    active_patcher_patch, active_patcher_view_key, delete_connection_edit_or_mark_deleted,
-    delete_selected_nodes, get_patcher_interaction_state, patch_with_interaction_state,
-    patcher_state_key, patcher_state_key_from_parts, set_connection_segment_edit,
-    set_patcher_interaction_state,
+    active_patcher_patch, active_patcher_view_key, debug_log_edit_event, debug_log_writeback_event,
+    delete_connection_edit_or_mark_deleted, delete_selected_nodes, get_patcher_interaction_state,
+    patch_with_interaction_state, patcher_state_key, patcher_state_key_from_parts,
+    set_connection_segment_edit, set_patcher_interaction_state,
 };
 use text::{cancel_patcher_text_edit, commit_patcher_text_edit};
 use writeback::emit_patch_writeback;
@@ -397,6 +404,41 @@ impl WidgetDefinition for PatcherWidget {
         let key = patcher_state_key(node);
         let mut state = get_patcher_interaction_state(key);
         let view_key = active_patcher_view_key(&state);
+        if state.text_edit.is_none() {
+            return match key_event.code {
+                KeyCode::Enter if open_selected_macro_node(node, &mut state) => {
+                    set_patcher_interaction_state(key, state);
+                    reset_patcher_pan(key);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
+                KeyCode::Backspace | KeyCode::Delete if state.selected_cable.is_some() => {
+                    if let Some(cable_id) = state.selected_cable.clone() {
+                        let changed = delete_connection_edit_or_mark_deleted(
+                            &mut state, &view_key, &cable_id,
+                        );
+                        state.drag = None;
+                        if changed
+                            && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
+                        {
+                            debug_log_patch_lisp(&view_key, &patch);
+                        }
+                        set_patcher_interaction_state(key, state);
+                        Some(patcher_widget_event(changed))
+                    } else {
+                        None
+                    }
+                }
+                KeyCode::Backspace | KeyCode::Delete if !state.selected_nodes.is_empty() => {
+                    let changed = delete_selected_nodes(&mut state, &view_key);
+                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                        debug_log_patch_lisp(&view_key, &patch);
+                    }
+                    set_patcher_interaction_state(key, state);
+                    Some(patcher_widget_event(changed))
+                }
+                _ => None,
+            };
+        }
         match key_event.code {
             KeyCode::Char('y') | KeyCode::Char('Y')
                 if state.text_edit.is_none()
@@ -431,11 +473,6 @@ impl WidgetDefinition for PatcherWidget {
                 }
                 set_patcher_interaction_state(key, state);
                 Some(patcher_widget_event(changed))
-            }
-            KeyCode::Enter if open_selected_macro_node(node, &mut state) => {
-                set_patcher_interaction_state(key, state);
-                reset_patcher_pan(key);
-                Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Esc if state.text_edit.is_some() => {
                 cancel_patcher_text_edit(&mut state, &view_key);
@@ -549,16 +586,29 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     };
 
     match emit_patch_writeback(&source, intent, &state) {
-        Ok(source) => map_value(vec![
-            ("status", Value::Keyword("valid".to_string())),
-            ("path", Value::String(path_str)),
-            ("source", Value::String(source)),
-        ]),
-        Err(error) => map_value(vec![
-            ("status", Value::Keyword("invalid".to_string())),
-            ("path", Value::String(path_str)),
-            ("diagnostic", Value::String(format!("{error:?}"))),
-        ]),
+        Ok(source) => {
+            debug_log_writeback_event(
+                "payload-valid",
+                format!("path={path_str}\nintent={intent:?}\nsource:\n{source}"),
+            );
+            map_value(vec![
+                ("status", Value::Keyword("valid".to_string())),
+                ("path", Value::String(path_str)),
+                ("source", Value::String(source)),
+            ])
+        }
+        Err(error) => {
+            debug_log_edit_event("writeback-payload-invalid-state", &state);
+            debug_log_writeback_event(
+                "payload-invalid",
+                format!("path={path_str}\nintent={intent:?}\nerror={error:?}"),
+            );
+            map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                ("diagnostic", Value::String(format!("{error:?}"))),
+            ])
+        }
     }
 }
 

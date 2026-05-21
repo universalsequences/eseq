@@ -12,8 +12,8 @@ use super::model::{
 use super::project::{dgenlisp_operator_names, dgenlisp_operator_required_input_counts};
 use super::state::{
     PatcherConnectionEdit, PatcherConnectionOrigin, PatcherInteractionState, PatcherNodeOrigin,
-    active_patcher_view_key, connection_edit_key, default_created_macro_source, node_edit_key,
-    patch_with_created_macros, source_connection_id,
+    active_patcher_view_key, connection_edit_key, debug_log_writeback_event,
+    default_created_macro_source, node_edit_key, patch_with_created_macros, source_connection_id,
 };
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
@@ -95,6 +95,7 @@ pub(super) fn emit_patch_writeback(
     let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
     apply_created_macro_writeback(&mut document, &root_patch, interaction_state)?;
     let effective_root_patch = patch_with_created_macros(root_patch.clone(), interaction_state);
+    apply_created_macro_parameter_writeback(&mut document, interaction_state)?;
 
     validate_connection_edits(&effective_root_patch, interaction_state)?;
     apply_node_deletions(&mut document, &effective_root_patch, interaction_state)?;
@@ -150,6 +151,7 @@ pub(super) fn emit_patch_writeback(
             PatcherNodeOrigin::Created { .. } => {
                 if !created_history_edit(edit)
                     && !created_value_edit(edit)
+                    && !created_macro_parameter_edit(edit)
                     && !created_macro_instance_edit(interaction_state, edit)
                 {
                     return Err(WriteBackError::UnsupportedCreatedNode {
@@ -215,10 +217,24 @@ fn validate_connection_edits(
     for edit in interaction_state.edit_state.connections.values() {
         match edit.origin {
             PatcherConnectionOrigin::Created { .. } => {
-                if !connection_edit_touches_history(root_patch, interaction_state, edit)
-                    && !connection_edit_touches_created_value(interaction_state, edit)
-                    && !connection_edit_has_source_destination(root_patch, edit)
-                {
+                let touches_history =
+                    connection_edit_touches_history(root_patch, interaction_state, edit);
+                let touches_created_value =
+                    connection_edit_touches_created_value(interaction_state, edit);
+                let has_source_destination =
+                    connection_edit_has_source_destination(root_patch, edit);
+                if !touches_history && !touches_created_value && !has_source_destination {
+                    debug_log_writeback_event(
+                        "validation-failed-created-connection",
+                        created_connection_validation_details(
+                            root_patch,
+                            interaction_state,
+                            edit,
+                            touches_history,
+                            touches_created_value,
+                            has_source_destination,
+                        ),
+                    );
                     return Err(WriteBackError::UnsupportedCreatedConnection {
                         view_key: edit.view_key.clone(),
                         connection_id: edit.id.clone(),
@@ -226,6 +242,13 @@ fn validate_connection_edits(
                 }
             }
             PatcherConnectionOrigin::Source { .. } => {
+                debug_log_writeback_event(
+                    "validation-failed-source-connection-edit",
+                    format!(
+                        "source connection edits are unsupported; delete and recreate instead\n{}",
+                        connection_edit_details(edit)
+                    ),
+                );
                 return Err(WriteBackError::UnsupportedDeletedConnection {
                     view_key: edit.view_key.clone(),
                     connection_id: edit.id.clone(),
@@ -236,24 +259,43 @@ fn validate_connection_edits(
 
     for key in interaction_state.edit_state.deleted_connections.iter() {
         let (view_key, connection_id) = split_scoped_key(key);
-        if !deleted_connection_has_history_replacement(
+        let has_history_replacement = deleted_connection_has_history_replacement(
             root_patch,
             interaction_state,
             &view_key,
             &connection_id,
-        ) && !deleted_connection_has_created_value_replacement(
+        );
+        let has_created_value_replacement = deleted_connection_has_created_value_replacement(
             root_patch,
             interaction_state,
             &view_key,
             &connection_id,
-        ) && !source_connection_is_deletable(root_patch, &view_key, &connection_id)
-            && !deleted_connection_is_incident_to_deleted_node(
-                root_patch,
-                interaction_state,
-                &view_key,
-                &connection_id,
-            )
+        );
+        let is_deletable = source_connection_is_deletable(root_patch, &view_key, &connection_id);
+        let incident_to_deleted_node = deleted_connection_is_incident_to_deleted_node(
+            root_patch,
+            interaction_state,
+            &view_key,
+            &connection_id,
+        );
+        if !has_history_replacement
+            && !has_created_value_replacement
+            && !is_deletable
+            && !incident_to_deleted_node
         {
+            debug_log_writeback_event(
+                "validation-failed-deleted-connection",
+                deleted_connection_validation_details(
+                    root_patch,
+                    interaction_state,
+                    &view_key,
+                    &connection_id,
+                    has_history_replacement,
+                    has_created_value_replacement,
+                    is_deletable,
+                    incident_to_deleted_node,
+                ),
+            );
             return Err(WriteBackError::UnsupportedDeletedConnection {
                 view_key,
                 connection_id,
@@ -262,6 +304,137 @@ fn validate_connection_edits(
     }
 
     Ok(())
+}
+
+fn created_connection_validation_details(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    edit: &PatcherConnectionEdit,
+    touches_history: bool,
+    touches_created_value: bool,
+    has_source_destination: bool,
+) -> String {
+    format!(
+        "{}\nchecks: touches_history={touches_history} touches_created_value={touches_created_value} has_source_destination={has_source_destination}\nfrom_node={}\nto_node={}\ncreated_from={}\ncreated_to={}\nsource_destination={}",
+        connection_edit_details(edit),
+        node_debug_details(
+            root_patch,
+            interaction_state,
+            &edit.view_key,
+            &edit.from.node_id
+        ),
+        node_debug_details(
+            root_patch,
+            interaction_state,
+            &edit.view_key,
+            &edit.to.node_id
+        ),
+        created_value_node(interaction_state, &edit.view_key, &edit.from.node_id)
+            .map(|node| format!("{:?}", node))
+            .unwrap_or_else(|| "none".to_string()),
+        created_value_node(interaction_state, &edit.view_key, &edit.to.node_id)
+            .map(|node| format!("{:?}", node))
+            .unwrap_or_else(|| "none".to_string()),
+        patch_for_view(root_patch, &edit.view_key)
+            .and_then(|patch| patch_node(patch, &edit.to.node_id))
+            .and_then(|node| node.source.as_ref())
+            .map(|source| format!("{:?}", source.owner))
+            .unwrap_or_else(|| "none".to_string()),
+    )
+}
+
+fn deleted_connection_validation_details(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    connection_id: &str,
+    has_history_replacement: bool,
+    has_created_value_replacement: bool,
+    is_deletable: bool,
+    incident_to_deleted_node: bool,
+) -> String {
+    let source_connection = source_connection(root_patch, view_key, connection_id);
+    let destination_from_id = connection_destination_from_id(connection_id);
+    let replacements = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|edit| edit.view_key == view_key)
+        .filter(|edit| {
+            destination_from_id
+                .as_ref()
+                .is_some_and(|to| edit.to == *to)
+                || source_connection.is_some_and(|connection| {
+                    edit.to.node_id == connection.to_node
+                        && edit.to.input_index == connection.to_input
+                })
+        })
+        .map(connection_edit_details)
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "view={view_key} connection_id={connection_id}\nchecks: has_history_replacement={has_history_replacement} has_created_value_replacement={has_created_value_replacement} is_deletable={is_deletable} incident_to_deleted_node={incident_to_deleted_node}\nsource_connection={}\ndestination_from_id={:?}\nreplacement_candidates:\n{}",
+        source_connection
+            .map(source_connection_details)
+            .unwrap_or_else(|| "none".to_string()),
+        destination_from_id,
+        if replacements.is_empty() {
+            "none".to_string()
+        } else {
+            replacements
+        },
+    )
+}
+
+fn connection_edit_details(edit: &PatcherConnectionEdit) -> String {
+    format!(
+        "edit view={} id={} origin={:?} from={}:{} to={}:{} kind={:?} segment={:?}",
+        edit.view_key,
+        edit.id,
+        edit.origin,
+        edit.from.node_id,
+        edit.from.output_index,
+        edit.to.node_id,
+        edit.to.input_index,
+        edit.kind,
+        edit.segment
+    )
+}
+
+fn source_connection_details(connection: &PatchConnection) -> String {
+    format!(
+        "source from={}:{} to={}:{} kind={:?} source={:?}",
+        connection.from_node,
+        connection.from_output,
+        connection.to_node,
+        connection.to_input,
+        connection.kind,
+        connection.source
+    )
+}
+
+fn node_debug_details(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> String {
+    let patch_node = patch_for_view(root_patch, view_key)
+        .and_then(|patch| patch_node(patch, node_id))
+        .map(|node| {
+            format!(
+                "patch-node id={} op={} kind={:?} label={:?} source={:?}",
+                node.id, node.op, node.kind, node.label, node.source
+            )
+        })
+        .unwrap_or_else(|| "patch-node none".to_string());
+    let edit_node = interaction_state
+        .edit_state
+        .nodes
+        .get(&node_edit_key(view_key, node_id))
+        .map(|edit| format!("edit-node {:?}", edit))
+        .unwrap_or_else(|| "edit-node none".to_string());
+    format!("{patch_node}; {edit_node}")
 }
 
 fn apply_created_macro_writeback(
@@ -293,6 +466,40 @@ fn apply_created_macro_writeback(
         document.prepend_macro(expr)?;
     }
 
+    Ok(())
+}
+
+fn apply_created_macro_parameter_writeback(
+    document: &mut SourceDocument,
+    interaction_state: &PatcherInteractionState,
+) -> Result<(), WriteBackError> {
+    let mut params = interaction_state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| created_macro_parameter_edit(edit))
+        .map(|edit| {
+            created_macro_parameter(edit)
+                .map(|param| (edit.view_key.clone(), edit.id.clone(), param))
+        })
+        .collect::<Result<Vec<_>, WriteBackError>>()?;
+    params.sort_by(|(_, _, left), (_, _, right)| {
+        left.macro_name
+            .cmp(&right.macro_name)
+            .then(left.index.cmp(&right.index))
+    });
+
+    for (view_key, node_id, param) in params {
+        document.ensure_macro_param(
+            &SourceScopeId::Macro {
+                name: param.macro_name,
+            },
+            param.index,
+            param.name.as_deref(),
+            &view_key,
+            &node_id,
+        )?;
+    }
     Ok(())
 }
 
@@ -488,6 +695,79 @@ fn created_value_edit(edit: &super::state::PatcherNodeEdit) -> bool {
     matches!(&edit.origin, PatcherNodeOrigin::Created { .. })
         && !edit.text.trim().is_empty()
         && !created_history_edit(edit)
+        && !created_macro_parameter_edit(edit)
+}
+
+fn created_macro_parameter_edit(edit: &super::state::PatcherNodeEdit) -> bool {
+    matches!(&edit.origin, PatcherNodeOrigin::Created { .. })
+        && edit.view_key.starts_with("macro:")
+        && created_macro_parameter_candidate(edit)
+}
+
+fn created_macro_parameter_candidate(edit: &super::state::PatcherNodeEdit) -> bool {
+    let Ok(Expression::List(items)) = parse_created_node_text(edit) else {
+        return false;
+    };
+    symbol_at(&items, 0) == Some("in")
+}
+
+#[derive(Debug, Clone)]
+struct CreatedMacroParameter {
+    macro_name: String,
+    index: usize,
+    name: Option<String>,
+}
+
+fn created_macro_parameter(
+    edit: &super::state::PatcherNodeEdit,
+) -> Result<CreatedMacroParameter, WriteBackError> {
+    let Some(macro_name) = edit.view_key.strip_prefix("macro:") else {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created macro parameter must be in a macro view".to_string(),
+        });
+    };
+    let expr = parse_created_node_text(edit)?;
+    let Expression::List(items) = expr else {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created macro parameter must parse as an in form".to_string(),
+        });
+    };
+    if symbol_at(&items, 0) != Some("in") {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created macro parameter must use the in operator".to_string(),
+        });
+    }
+    let Some(Expression::Number(channel)) = items.get(1) else {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created macro parameter must include an input channel".to_string(),
+        });
+    };
+    if *channel < 1.0 || channel.fract() != 0.0 {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created macro parameter channel must be a positive integer".to_string(),
+        });
+    }
+    let name =
+        symbol_attribute_value(&items, "@name").map_err(|reason| WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason,
+        })?;
+    Ok(CreatedMacroParameter {
+        macro_name: macro_name.to_string(),
+        index: (*channel as usize) - 1,
+        name,
+    })
 }
 
 fn created_macro_instance_edit(
@@ -1162,6 +1442,22 @@ fn value_reference_expr(
         && let Some(literal) = created_literal_expr(edit)
     {
         return Ok(literal);
+    }
+    if let Some(edit) = interaction_state
+        .edit_state
+        .nodes
+        .get(&node_edit_key(view_key, &from.node_id))
+        .filter(|edit| created_macro_parameter_edit(edit))
+    {
+        let param = created_macro_parameter(edit)?;
+        return Ok(Expression::Symbol(document.macro_param_name(
+            &SourceScopeId::Macro {
+                name: param.macro_name,
+            },
+            param.index,
+            view_key,
+            &from.node_id,
+        )?));
     }
     let Some(node) =
         patch_for_view(root_patch, view_key).and_then(|patch| patch_node(patch, &from.node_id))
@@ -2634,6 +2930,99 @@ impl SourceDocument {
         Ok(())
     }
 
+    fn ensure_macro_param(
+        &mut self,
+        scope: &SourceScopeId,
+        index: usize,
+        preferred_name: Option<&str>,
+        view_key: &str,
+        node_id: &str,
+    ) -> Result<String, WriteBackError> {
+        let SourceScopeId::Macro { name: macro_name } = scope else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: "created macro parameter requires a macro scope".to_string(),
+            });
+        };
+        let Some(macro_doc) = self.macros.get_mut(macro_name) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: "missing macro scope for created parameter".to_string(),
+            });
+        };
+        if let Some(existing) = macro_doc.param_name(index) {
+            return Ok(existing.to_string());
+        }
+
+        let mut used = macro_doc.reserved_names();
+        while macro_doc.params.len() <= index {
+            let slot = macro_doc.params.len();
+            let preferred = if slot == index {
+                preferred_name
+                    .map(str::to_string)
+                    .unwrap_or_else(|| default_macro_param_name(slot))
+            } else {
+                default_macro_param_name(slot)
+            };
+            if !is_symbol_name(&preferred) {
+                return Err(WriteBackError::InvalidEdit {
+                    view_key: view_key.to_string(),
+                    node_id: node_id.to_string(),
+                    reason: format!("invalid macro parameter name `{preferred}`"),
+                });
+            }
+            let name = if slot == index && preferred_name.is_some() {
+                if used.contains(&preferred) {
+                    return Err(WriteBackError::BindingRenameCollision {
+                        view_key: view_key.to_string(),
+                        node_id: node_id.to_string(),
+                        name: preferred,
+                    });
+                }
+                preferred
+            } else {
+                unique_symbol_name(&used, &preferred)
+            };
+            used.insert(name.clone());
+            macro_doc.params.push(Expression::Symbol(name));
+        }
+        macro_doc
+            .param_name(index)
+            .map(str::to_string)
+            .ok_or_else(|| WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: format!("missing macro parameter {}", index),
+            })
+    }
+
+    fn macro_param_name(
+        &self,
+        scope: &SourceScopeId,
+        index: usize,
+        view_key: &str,
+        node_id: &str,
+    ) -> Result<String, WriteBackError> {
+        let SourceScopeId::Macro { name } = scope else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: "macro parameter reference requires a macro scope".to_string(),
+            });
+        };
+        self.macros
+            .get(name)
+            .and_then(|macro_doc| macro_doc.param_name(index))
+            .map(str::to_string)
+            .ok_or_else(|| WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: format!("missing macro parameter {}", index),
+            })
+    }
+
     fn form_expr(&self, scope: &SourceScopeId, index: usize) -> Option<&Expression> {
         match scope {
             SourceScopeId::Root => match &self
@@ -2992,6 +3381,52 @@ impl MacroDocument {
                 _ => None,
             })
             .unwrap_or(Expression::Number(0.0))
+    }
+
+    fn param_name(&self, index: usize) -> Option<&str> {
+        match self.params.get(index) {
+            Some(Expression::Symbol(name)) => Some(name),
+            _ => None,
+        }
+    }
+
+    fn reserved_names(&self) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for param in &self.params {
+            if let Expression::Symbol(name) = param {
+                names.insert(name.clone());
+            }
+        }
+        for form in &self.body {
+            collect_scope_binding_names(&form.expr, &mut names);
+        }
+        names
+    }
+}
+
+fn default_macro_param_name(index: usize) -> String {
+    if index == 0 {
+        "input".to_string()
+    } else {
+        format!("input{}", index + 1)
+    }
+}
+
+fn is_symbol_name(name: &str) -> bool {
+    matches!(parse_single_expression(name), Ok(Expression::Symbol(symbol)) if symbol == name)
+}
+
+fn unique_symbol_name(used: &HashSet<String>, preferred: &str) -> String {
+    if !used.contains(preferred) {
+        return preferred.to_string();
+    }
+    let mut suffix = next_suffix_for_stem(used, preferred);
+    loop {
+        let candidate = format!("{preferred}{suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
     }
 }
 

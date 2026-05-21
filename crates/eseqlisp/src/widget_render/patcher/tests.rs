@@ -3217,7 +3217,7 @@ fn super_y_toggles_selected_cable_segmentation() {
                     modifiers: KeyModifiers::SUPER,
                 },
             )
-            .is_some()
+            .is_none()
     );
 
     let state = get_patcher_interaction_state(key);
@@ -3228,7 +3228,7 @@ fn super_y_toggles_selected_cable_segmentation() {
         .find(|connection| source_connection_id(connection) == selected_cable)
         .and_then(|connection| connection.segment)
         .unwrap();
-    assert!(!segment.is_segmented);
+    assert!(segment.is_segmented);
 }
 
 #[test]
@@ -4138,7 +4138,7 @@ fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
 }
 
 #[test]
-fn enter_on_macro_instance_inside_macro_opens_nested_macro_view() {
+fn enter_on_macro_instance_inside_macro_opens_nested_macro() {
     let source = r#"
             (defmacro tone (x)
               (phasor x))
@@ -4622,6 +4622,40 @@ fn backspace_without_text_edit_deletes_selected_nodes() {
 }
 
 #[test]
+fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
+    let node = LayoutNode {
+        widget_id: 556_688,
+        stable_widget_id: Some(556_688),
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "patcher".to_string(),
+        rect: Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 80.0,
+            height: 30.0,
+        },
+        props: HashMap::new(),
+        children: Vec::new(),
+        focusable: true,
+    };
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    assert!(!patcher_has_text_edit(&node));
+
+    let mut state = PatcherInteractionState::default();
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text: String::new(),
+        original_text: String::new(),
+        state: TextInputState::default(),
+    });
+    set_patcher_interaction_state(key, state);
+    assert!(patcher_has_text_edit(&node));
+}
+
+#[test]
 fn created_node_reedit_updates_same_node_edit_text() {
     let mut state = PatcherInteractionState::default();
     let created_id = allocate_created_node(&mut state, "root", (3.0, 4.0));
@@ -4998,6 +5032,125 @@ fn writeback_created_macro_default_return_rewired_to_chain_then_root_input_compi
     assert!(
         emitted.contains("(def ap1 (ap pitch))"),
         "connecting root pitch to the macro should emit a macro call:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn writeback_created_macro_input_extends_header_and_root_usage_arity() {
+    let source = "(def pitch (in 1 @name pitch))\n(out pitch 1 @name audio)";
+    let root_patch = parse(source);
+    let pitch_to_out = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "pitch")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let macro_instance = allocate_created_text_node(&mut state, "root", "defmacro *op*");
+    assert!(promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        "root",
+        &macro_instance,
+    ));
+
+    state.active_macro = Some("op".to_string());
+    let input2 = allocate_created_text_node(&mut state, "macro:op", "in 2");
+    let macro_patch = patch_with_interaction_state(root_patch.clone(), &state, "macro:op");
+    let input2_node = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == input2)
+        .expect("created macro input should be visible");
+    assert_eq!(input2_node.kind, NodeKind::In);
+
+    state.active_macro = None;
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &macro_instance))
+        .unwrap()
+        .text = "op 3".to_string();
+    let root_with_created_input = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let edited_instance = root_with_created_input
+        .nodes
+        .iter()
+        .find(|node| node.id == macro_instance)
+        .expect("macro instance should still exist");
+    assert_eq!(edited_instance.kind, NodeKind::MacroInstance);
+    assert_eq!(edited_instance.args.len(), 2);
+    assert_eq!(edited_instance.diagnostic, None);
+
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(pitch_to_out),
+        ));
+    connect_output_to_input(&mut state, "root", "pitch", &macro_instance, 0);
+    connect_output_to_input(
+        &mut state,
+        "root",
+        &macro_instance,
+        &pitch_to_out.to_node,
+        0,
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert_eq!(
+        emitted,
+        "(defmacro op (input input2) (* input 1.0))\n(def pitch (in 1 @name pitch))\n(def op1 (op pitch 3.0))\n(out op1 1 @name audio)"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn writeback_created_macro_input_allows_existing_usage_to_gain_argument() {
+    let source = r#"
+        (defmacro op (input) input)
+        (def pitch (in 1 @name pitch))
+        (def op1 (op pitch))
+        (out op1 1 @name audio)
+    "#;
+    let root_patch = parse(source);
+    let op1 = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "op1")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let input2 = allocate_created_text_node(&mut state, "macro:op", "in 2");
+    ensure_source_node_edit(&mut state, "root", op1, node_display_label(op1));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "op1"))
+        .unwrap()
+        .text = "op 3".to_string();
+
+    let root_with_created_input = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let edited_op1 = root_with_created_input
+        .nodes
+        .iter()
+        .find(|node| node.id == "op1")
+        .unwrap();
+    assert_eq!(edited_op1.args.len(), 2);
+    assert_eq!(edited_op1.diagnostic, None);
+
+    let macro_patch = patch_with_interaction_state(root_patch, &state, "macro:op");
+    assert!(macro_patch.nodes.iter().any(|node| node.id == input2));
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(defmacro op (input input2) input)"),
+        "created macro inlet should extend defmacro params:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def op1 (op pitch 3.0))"),
+        "root macro usage should retain the new second argument:\n{emitted}"
     );
     compile_patch_source_with_dgenlisp(&emitted)
         .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));

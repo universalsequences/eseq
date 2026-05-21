@@ -5102,6 +5102,12 @@
             "name": "freq",
             "required": true,
             "summary": "Frequency in Hz."
+          },
+          {
+            "kind": "signal|float",
+            "name": "reset",
+            "required": false,
+            "summary": "Optional reset trigger. Defaults to 0."
           }
         ],
         "name": "phasor",
@@ -6531,6 +6537,12 @@
             "name": "freq",
             "required": true,
             "summary": "Frequency in Hz."
+          },
+          {
+            "kind": "signal|float",
+            "name": "reset",
+            "required": false,
+            "summary": "Optional reset trigger. Defaults to 0."
           }
         ],
         "name": "stateful-phasor",
@@ -7120,6 +7132,12 @@
             "name": "phase",
             "required": true,
             "summary": "Phase signal, usually 0..1."
+          },
+          {
+            "kind": "signal|float",
+            "name": "duty",
+            "required": false,
+            "summary": "Optional duty cycle width in 0..1. Defaults to 0.5; 0 follows the phase ramp."
           }
         ],
         "name": "triangle",

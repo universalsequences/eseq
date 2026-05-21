@@ -225,7 +225,7 @@ impl Editor {
         // All other widgets let space fall through to keybindings.
         let is_text_input = node.widget_type == "text-input"
             || node.widget_type == "textbox"
-            || node.widget_type == "patcher";
+            || crate::widget_render::patcher::patcher_has_text_edit(&node);
         if key.code == KeyCode::Char(' ') && !is_text_input {
             return false;
         }

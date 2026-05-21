@@ -137,7 +137,7 @@ CURATED_OPERATORS = {
     "window": {"category": "windowing", "summary": "Named window tensor. Currently supports Hann.", "signatures": ["(window @type hann @N 1024)"], "arity": {"minimum": 0, "maximum": None}},
     "overlap-add": {"category": "windowing", "summary": "Scatter-add a signalTensor into an output signal.", "signatures": ["(overlap-add signalTensor hop)"], "arity": {"minimum": 2, "maximum": 2}},
     "scale": {"category": "utility", "summary": "Linear rescale.", "signatures": ["(scale sig inMin inMax outMin outMax)"], "arity": {"minimum": 5, "maximum": 5}},
-    "triangle": {"category": "utility", "summary": "Convert a 0..1 phase to a -1..1 triangle.", "signatures": ["(triangle phase)"], "arity": {"minimum": 1, "maximum": 1}},
+    "triangle": {"category": "utility", "summary": "Convert a 0..1 phase to a triangle wave with optional duty.", "signatures": ["(triangle phase)", "(triangle phase duty)"], "arity": {"minimum": 1, "maximum": 2}},
     "wrap": {"category": "utility", "summary": "Wrap into a range.", "signatures": ["(wrap sig min max)"], "arity": {"minimum": 3, "maximum": 3}},
     "clip": {"category": "utility", "summary": "Clamp into a range.", "signatures": ["(clip sig min max)"], "arity": {"minimum": 3, "maximum": 3}},
     "gswitch": {"category": "conditional", "summary": "Conditional branch.", "signatures": ["(gswitch condition true_value false_value)"], "arity": {"minimum": 3, "maximum": 3}},
@@ -284,6 +284,14 @@ CURATED_OPERATOR_ATTRIBUTES = {
 
 
 CURATED_OPERATOR_INPUTS = {
+    "phasor": [
+        {"name": "freq", "kind": "signal|float", "summary": "Frequency in Hz.", "required": True},
+        {"name": "reset", "kind": "signal|float", "summary": "Optional reset trigger. Defaults to 0.", "required": False},
+    ],
+    "stateful-phasor": [
+        {"name": "freq", "kind": "signal|float", "summary": "Frequency in Hz.", "required": True},
+        {"name": "reset", "kind": "signal|float", "summary": "Optional reset trigger. Defaults to 0.", "required": False},
+    ],
     "zeros": [{"name": "shape", "kind": "int[]", "summary": "Tensor shape, either as a bracket list or individual dimension arguments.", "required": True, "variadic": True}],
     "ones": [{"name": "shape", "kind": "int[]", "summary": "Tensor shape, either as a bracket list or individual dimension arguments.", "required": True, "variadic": True}],
     "randn": [{"name": "shape", "kind": "int[]", "summary": "Tensor shape, either as a bracket list or individual dimension arguments.", "required": True, "variadic": True}],
@@ -292,6 +300,10 @@ CURATED_OPERATOR_INPUTS = {
         {"name": "value", "kind": "float", "summary": "Fill value.", "required": True},
     ],
     "tensor-param": [{"name": "shape", "kind": "int[]", "summary": "Tensor parameter shape, either as a bracket list, individual dimension arguments, or @shape.", "required": False, "variadic": True}],
+    "triangle": [
+        {"name": "phase", "kind": "signal|float", "summary": "Phase signal, usually 0..1.", "required": True},
+        {"name": "duty", "kind": "signal|float", "summary": "Optional duty cycle width in 0..1. Defaults to 0.5; 0 follows the phase ramp.", "required": False},
+    ],
     "wavetable": [{"name": "shape", "kind": "int[]", "summary": "Wavetable shape when not supplied with @shape.", "required": False, "variadic": True}],
     "wavetable-param": [{"name": "shape", "kind": "int[]", "summary": "Wavetable parameter shape when not supplied with @shape.", "required": False, "variadic": True}],
 }

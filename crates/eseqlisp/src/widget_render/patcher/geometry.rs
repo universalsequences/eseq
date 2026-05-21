@@ -9,9 +9,7 @@ use super::metrics::{
     PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
-use super::model::{
-    ArgValue, CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection,
-};
+use super::model::{ArgValue, CableEndpoint, InputPortRef, OutputPortRef, Patch, PatchConnection};
 use super::state::{PatcherPanState, source_connection_id};
 
 pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
@@ -116,7 +114,12 @@ pub(super) fn patch_input_slot_counts(
         let count = input_indices
             .get(&node.id)
             .map(|indices| {
-                let connected_span = indices.iter().copied().max().map(|idx| idx + 1).unwrap_or(0);
+                let connected_span = indices
+                    .iter()
+                    .copied()
+                    .max()
+                    .map(|idx| idx + 1)
+                    .unwrap_or(0);
                 connected_span.max(node.args.len())
             })
             .unwrap_or(0);
@@ -533,39 +536,4 @@ pub(super) fn patcher_back_button_rect(rect: Rect) -> Rect {
         width: 2.0,
         height: 1.4,
     }
-}
-
-pub(super) fn patcher_macro_drill_in_rect(rect: Rect) -> Rect {
-    Rect {
-        row: rect.row + 0.22,
-        col: rect.col + rect.width - 1.35,
-        width: 1.05,
-        height: (rect.height - 0.44).max(0.1),
-    }
-}
-
-pub(super) fn hit_patcher_macro_drill_in(
-    patch: &Patch,
-    root_patch: &Patch,
-    rect: Rect,
-    pan_state: &PatcherPanState,
-    local_col: f32,
-    local_row: f32,
-) -> Option<(String, String)> {
-    let node_rects = patch_node_rects(patch, rect, pan_state);
-    patch.nodes.iter().rev().find_map(|node| {
-        if node.kind != NodeKind::MacroInstance {
-            return None;
-        }
-        if !root_patch
-            .macros
-            .iter()
-            .any(|macro_patch| macro_patch.name == node.op)
-        {
-            return None;
-        }
-        let node_rect = *node_rects.get(&node.id)?;
-        rect_contains(patcher_macro_drill_in_rect(node_rect), local_col, local_row)
-            .then(|| (node.id.clone(), node.op.clone()))
-    })
 }

@@ -711,20 +711,41 @@
             :font-size 9
             :color :gray
             :bg :transparent)))
-      ;; Name input (only for new-* modes)
-      (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "new-effect"))
-        (text-input
-          :width :fill
-          :value sbrowser-editor-name
-          :placeholder (if (= SEQ.editor-mode "new-instrument") "instrument-name" "effect-name")
-          :on-change (lambda (v) (set! sbrowser-editor-name v))
-          :height 1.5
-          :font-size 12)
-        ;; For edit modes, show the file name
-        (label SEQ.editor-buffer-name
-          :font-size 10
-          :color :gray
-          :bg :transparent))
+      (if (= SEQ.editor-mode "new-instrument")
+        (v-stack :width :fill :gap 0.35
+          (label "Draft patch"
+            :font-size 9
+            :color :gray
+            :bg :transparent)
+          (label (str "track " (+ SEQ.current-track 1))
+            :font-size 11
+            :color :white
+            :bg :transparent)
+          (label "Save as"
+            :font-size 9
+            :color :gray
+            :bg :transparent)
+          (text-input
+            :width :fill
+            :value sbrowser-editor-name
+            :placeholder "instrument-name"
+            :on-change (lambda (v) (set! sbrowser-editor-name v))
+            :height 1.5
+            :font-size 12))
+        ;; Name input (only for new effects)
+        (if (= SEQ.editor-mode "new-effect")
+          (text-input
+            :width :fill
+            :value sbrowser-editor-name
+            :placeholder "effect-name"
+            :on-change (lambda (v) (set! sbrowser-editor-name v))
+            :height 1.5
+            :font-size 12)
+          ;; For edit modes, show the file name
+          (label SEQ.editor-buffer-name
+            :font-size 10
+            :color :gray
+            :bg :transparent)))
       ;; Error display
       (if (not (= SEQ.editor-error ""))
         (label SEQ.editor-error
@@ -734,9 +755,12 @@
         (box))
       ;; Save button
       (button
-        (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "new-effect"))
-          "Save & Add"
+        (if (= SEQ.editor-mode "new-instrument")
+          "Finalize"
+          (if (= SEQ.editor-mode "new-effect")
+            "Save & Add"
           "Save")
+        )
         :variant :primary
         :width 10
         :height 1.2

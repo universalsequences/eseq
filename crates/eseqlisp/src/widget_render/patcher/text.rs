@@ -4,7 +4,10 @@ use crate::layout::Rect;
 use super::super::text_input::closest_char_index_for_x;
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
-use super::state::{PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, node_edit_key};
+use super::state::{
+    PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, debug_log_edit_event,
+    node_edit_key,
+};
 
 fn patcher_text_char_width_cells() -> f32 {
     (NODE_FONT_SIZE * 0.55 / 10.0).max(0.25)
@@ -66,6 +69,7 @@ pub(super) fn begin_patcher_text_edit(
         },
     });
     state.hover_back_button = false;
+    debug_log_edit_event("begin-text-edit", state);
 }
 
 pub(super) fn commit_patcher_text_edit(
@@ -85,8 +89,22 @@ pub(super) fn commit_patcher_text_edit(
     if node_edit.text.is_empty() && matches!(node_edit.origin, PatcherNodeOrigin::Created { .. }) {
         state.edit_state.nodes.remove(&key);
         state.selected_nodes.remove(&edit.node_id);
+        debug_log_edit_event(
+            &format!(
+                "commit-text-edit view={view_key} node={} removed-empty-created",
+                edit.node_id
+            ),
+            state,
+        );
         return true;
     }
+    debug_log_edit_event(
+        &format!(
+            "commit-text-edit view={view_key} node={} changed={changed}",
+            edit.node_id
+        ),
+        state,
+    );
     changed
 }
 
@@ -102,6 +120,10 @@ pub(super) fn cancel_patcher_text_edit(state: &mut PatcherInteractionState, view
         state.edit_state.nodes.remove(&key);
         state.selected_nodes.remove(&edit.node_id);
     }
+    debug_log_edit_event(
+        &format!("cancel-text-edit view={view_key} node={}", edit.node_id),
+        state,
+    );
 }
 
 pub(super) fn update_patcher_text_edit_pointer(

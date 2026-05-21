@@ -2,16 +2,16 @@ use std::collections::HashMap;
 
 #[cfg(target_os = "macos")]
 use super::super::text_input::{cursor_x_from_char_cache, selection_range as text_selection_range};
+use super::super::{CellBuffer, styled_cell};
 #[cfg(target_os = "macos")]
 use super::super::{
-    ndc_bounds, MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive,
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
-    WidgetInstance, WidgetViewport,
+    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive, MetalPrimitive,
+    MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance,
+    WidgetViewport, ndc_bounds,
 };
-use super::super::{styled_cell, CellBuffer};
 #[cfg(target_os = "macos")]
 use crate::layout::LayoutNode;
-use crate::layout::{f64_to_f32, Rect};
+use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
 use crate::vm::Value;
 
@@ -19,7 +19,7 @@ use super::display::{node_display_label, preview};
 use super::geometry::{
     connection_cable_edit_points, connection_endpoints, patch_content_size, patch_input_indices,
     patch_input_slot_counts, patch_node_rects, patch_output_counts, patcher_back_button_rect,
-    patcher_macro_drill_in_rect, patcher_zoom, port_center, rect_from_points,
+    patcher_zoom, port_center, rect_from_points,
 };
 use super::load_patch_from_props;
 use super::metrics::{
@@ -29,10 +29,10 @@ use super::metrics::{
 };
 use super::model::{ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode};
 use super::state::{
+    PatcherDragState, PatcherInteractionState, PatcherPanState, PatcherTextEdit,
     active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
     get_patcher_pan_state, patch_with_interaction_state, patcher_back_label, patcher_breadcrumb,
-    patcher_state_key, set_patcher_pan_state, source_connection_id, PatcherDragState,
-    PatcherInteractionState, PatcherPanState, PatcherTextEdit,
+    patcher_state_key, set_patcher_pan_state, source_connection_id,
 };
 
 pub(super) fn render_tui(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -421,7 +421,6 @@ pub(super) fn draw_patch(
                 .text_edit
                 .as_ref()
                 .filter(|edit| edit.node_id == node.id),
-            interaction_state.hovered_macro_drill_in.as_deref() == Some(node.id.as_str()),
             &highlighted_inputs,
             &highlighted_outputs,
             zoom,
@@ -530,7 +529,6 @@ fn push_node(
     selected: bool,
     hovered: bool,
     edit: Option<&PatcherTextEdit>,
-    macro_drill_in_hovered: bool,
     highlighted_inputs: &[usize],
     highlighted_outputs: &[usize],
     zoom: f32,
@@ -592,7 +590,6 @@ fn push_node(
     }
     push_node_edit_selection(prims, rect, viewport, edit, zoom);
     push_node_label(prims, node, rect, text, edit, viewport, zoom);
-    push_macro_drill_in(prims, node, rect, macro_drill_in_hovered, zoom);
     push_node_edit_cursor(prims, rect, viewport, edit, zoom);
     if let Some(diagnostic) = &node.diagnostic {
         prims.push(MetalPrimitive::ProportionalText(
@@ -727,38 +724,6 @@ fn push_node_edit_cursor(
         },
         color: theme::PATCHER_EDIT_CURSOR(),
     }));
-}
-
-#[cfg(target_os = "macos")]
-fn push_macro_drill_in(
-    prims: &mut Vec<MetalPrimitive>,
-    node: &PatchNode,
-    rect: Rect,
-    hovered: bool,
-    zoom: f32,
-) {
-    if node.kind != NodeKind::MacroInstance {
-        return;
-    }
-    let button_rect = patcher_macro_drill_in_rect(rect);
-    let color = if hovered {
-        theme::PATCHER_BACK_BUTTON_HOVER_TEXT()
-    } else {
-        theme::PATCHER_TEXT_MUTED()
-    };
-    prims.push(MetalPrimitive::ProportionalText(
-        MetalProportionalTextPrimitive {
-            row: button_rect.row + 0.1,
-            col: button_rect.col + 0.34 * zoom,
-            align_width: button_rect.width,
-            h_align: 0.0,
-            text: ">".to_string(),
-            font_size: 12.0,
-            scale: zoom,
-            fg: color,
-            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
-        },
-    ));
 }
 
 #[cfg(target_os = "macos")]

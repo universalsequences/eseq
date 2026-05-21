@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::hash::{Hash, Hasher};
 
 use super::super::bump_widget_state_generation;
@@ -20,6 +21,8 @@ use super::model::{
 };
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
+
+const DEBUG_EDITS_ENV: &str = "ESEQ_PATCHER_DEBUG_EDITS";
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PatcherPanState {
@@ -103,7 +106,6 @@ pub(super) fn clamp_patcher_pan_state(state: &mut PatcherPanState) {
 pub(super) struct PatcherInteractionState {
     pub(super) selected_nodes: HashSet<String>,
     pub(super) hovered_node: Option<String>,
-    pub(super) hovered_macro_drill_in: Option<String>,
     pub(super) hover_back_button: bool,
     pub(super) selected_cable: Option<String>,
     pub(super) edit_state: PatchEditState,
@@ -229,6 +231,113 @@ pub(super) fn set_patcher_interaction_state(key: u64, state: PatcherInteractionS
     }
 }
 
+pub(super) fn debug_log_edit_event(action: &str, state: &PatcherInteractionState) {
+    if !debug_edit_logging_enabled() {
+        return;
+    }
+    eprintln!(
+        "[patcher edit] action={action} active_view={} selected_nodes={:?} selected_cable={:?} text_edit={} drag={}",
+        active_patcher_view_key(state),
+        state.selected_nodes,
+        state.selected_cable,
+        state
+            .text_edit
+            .as_ref()
+            .map(|edit| format!("{} {:?}->{:?}", edit.node_id, edit.original_text, edit.text))
+            .unwrap_or_else(|| "none".to_string()),
+        state
+            .drag
+            .as_ref()
+            .map(|drag| format!("{drag:?}"))
+            .unwrap_or_else(|| "none".to_string()),
+    );
+    eprintln!(
+        "[patcher edit state] nodes={} deleted_nodes={} connections={} deleted_connections={} created_macros={}",
+        state.edit_state.nodes.len(),
+        state.edit_state.deleted_nodes.len(),
+        state.edit_state.connections.len(),
+        state.edit_state.deleted_connections.len(),
+        state.edit_state.created_macros.len(),
+    );
+    for edit in sorted_node_edits(state) {
+        eprintln!(
+            "[patcher edit node] view={} id={} origin={:?} text={:?} position=({:.2},{:.2})",
+            edit.view_key, edit.id, edit.origin, edit.text, edit.position.0, edit.position.1
+        );
+    }
+    for deleted in sorted_strings(&state.edit_state.deleted_nodes) {
+        eprintln!("[patcher edit deleted-node] {deleted}");
+    }
+    for edit in sorted_connection_edits(state) {
+        eprintln!(
+            "[patcher edit cable] view={} id={} origin={:?} from={}:{} to={}:{} kind={:?} segment={:?}",
+            edit.view_key,
+            edit.id,
+            edit.origin,
+            edit.from.node_id,
+            edit.from.output_index,
+            edit.to.node_id,
+            edit.to.input_index,
+            edit.kind,
+            edit.segment
+        );
+    }
+    for deleted in sorted_strings(&state.edit_state.deleted_connections) {
+        eprintln!("[patcher edit deleted-cable] {deleted}");
+    }
+    for macro_edit in sorted_macro_edits(state) {
+        eprintln!(
+            "[patcher edit macro] name={} instance={}",
+            macro_edit.name, macro_edit.instance_node_id
+        );
+    }
+    eprintln!("[/patcher edit]");
+}
+
+pub(super) fn debug_log_writeback_event(action: &str, details: impl AsRef<str>) {
+    if debug_edit_logging_enabled() {
+        eprintln!(
+            "[patcher writeback] action={action}\n{}\n[/patcher writeback]",
+            details.as_ref()
+        );
+    }
+}
+
+fn debug_edit_logging_enabled() -> bool {
+    env::var(DEBUG_EDITS_ENV)
+        .ok()
+        .is_some_and(|value| env_flag_enabled(&value))
+}
+
+fn env_flag_enabled(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+}
+
+fn sorted_node_edits(state: &PatcherInteractionState) -> Vec<&PatcherNodeEdit> {
+    let mut edits = state.edit_state.nodes.values().collect::<Vec<_>>();
+    edits.sort_by_key(|edit| (edit.view_key.as_str(), edit.id.as_str()));
+    edits
+}
+
+fn sorted_connection_edits(state: &PatcherInteractionState) -> Vec<&PatcherConnectionEdit> {
+    let mut edits = state.edit_state.connections.values().collect::<Vec<_>>();
+    edits.sort_by_key(|edit| (edit.view_key.as_str(), edit.id.as_str()));
+    edits
+}
+
+fn sorted_macro_edits(state: &PatcherInteractionState) -> Vec<&PatcherMacroEdit> {
+    let mut edits = state.edit_state.created_macros.values().collect::<Vec<_>>();
+    edits.sort_by_key(|edit| edit.name.as_str());
+    edits
+}
+
+fn sorted_strings(values: &HashSet<String>) -> Vec<&str> {
+    let mut values = values.iter().map(String::as_str).collect::<Vec<_>>();
+    values.sort_unstable();
+    values
+}
+
 pub(super) fn active_patcher_view_key(interaction_state: &PatcherInteractionState) -> String {
     interaction_state
         .active_macro
@@ -288,6 +397,10 @@ pub(super) fn allocate_created_node(
             position,
         },
     );
+    debug_log_edit_event(
+        &format!("allocate-created-node view={view_key} id={id}"),
+        state,
+    );
     id
 }
 
@@ -299,6 +412,10 @@ pub(super) fn allocate_created_connection(
 ) -> String {
     let id = format!("created-cable-{}", state.edit_state.next_created_connection);
     state.edit_state.next_created_connection += 1;
+    let action = format!(
+        "allocate-created-connection view={view_key} id={id} from={}:{} to={}:{}",
+        from.node_id, from.output_index, to.node_id, to.input_index
+    );
     state.edit_state.connections.insert(
         format!("{view_key}::{id}"),
         PatcherConnectionEdit {
@@ -313,6 +430,7 @@ pub(super) fn allocate_created_connection(
             segment: None,
         },
     );
+    debug_log_edit_event(&action, state);
     id
 }
 
@@ -331,13 +449,17 @@ pub(super) fn set_connection_segment_edit(
         if let Some(edit) = state.edit_state.connections.get_mut(&key) {
             edit.segment = segment;
         }
+        debug_log_edit_event(
+            &format!("set-source-connection-segment view={view_key} cable={cable_id}"),
+            state,
+        );
         return;
     }
     state.edit_state.connections.insert(
         connection_edit_key(view_key, &cable_id),
         PatcherConnectionEdit {
             view_key: view_key.to_string(),
-            id: cable_id,
+            id: cable_id.clone(),
             origin: PatcherConnectionOrigin::Source {
                 source_connection_id: source_connection_id(connection),
             },
@@ -352,6 +474,10 @@ pub(super) fn set_connection_segment_edit(
             kind: connection.kind,
             segment,
         },
+    );
+    debug_log_edit_event(
+        &format!("set-source-connection-segment view={view_key} cable={cable_id}"),
+        state,
     );
 }
 
@@ -384,6 +510,10 @@ pub(super) fn delete_connection_edit_or_mark_deleted(
     if state.selected_cable.as_deref() == Some(cable_id) {
         state.selected_cable = None;
     }
+    debug_log_edit_event(
+        &format!("delete-connection view={view_key} cable={cable_id} changed={changed}"),
+        state,
+    );
     changed
 }
 
@@ -418,6 +548,10 @@ pub(super) fn delete_selected_nodes(state: &mut PatcherInteractionState, view_ke
     state.selected_cable = None;
     state.drag = None;
     state.text_edit = None;
+    debug_log_edit_event(
+        &format!("delete-selected-nodes view={view_key} nodes={selected_nodes:?}"),
+        state,
+    );
     true
 }
 
@@ -458,6 +592,10 @@ pub(super) fn set_node_edit_position(
     {
         edit.position = position;
     }
+    debug_log_edit_event(
+        &format!("set-node-position view={view_key} node={}", node.id),
+        state,
+    );
 }
 
 pub(super) fn active_patcher_patch(
@@ -508,11 +646,7 @@ pub(super) fn patch_with_interaction_state(
     view_key: &str,
 ) -> Patch {
     patch = patch_with_created_macros(patch, interaction_state);
-    let macro_arities = patch
-        .macros
-        .iter()
-        .map(|macro_patch| (macro_patch.name.clone(), macro_patch.params.len()))
-        .collect::<HashMap<_, _>>();
+    let macro_arities = macro_arities_with_created_inputs(&patch, interaction_state);
     patch.nodes.retain(|node| {
         !interaction_state
             .edit_state
@@ -622,6 +756,45 @@ pub(super) fn patch_with_created_macros(
         }
     }
     patch
+}
+
+fn macro_arities_with_created_inputs(
+    patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+) -> HashMap<String, usize> {
+    let mut macro_arities = patch
+        .macros
+        .iter()
+        .map(|macro_patch| (macro_patch.name.clone(), macro_patch.params.len()))
+        .collect::<HashMap<_, _>>();
+    for edit in interaction_state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| matches!(edit.origin, PatcherNodeOrigin::Created { .. }))
+    {
+        let Some(macro_name) = edit.view_key.strip_prefix("macro:") else {
+            continue;
+        };
+        let Ok((op, inline_args)) = parse_editor_node_text(edit.text.trim()) else {
+            continue;
+        };
+        if op != "in" {
+            continue;
+        }
+        let Some(channel) = inline_args
+            .first()
+            .and_then(|arg| arg.parse::<usize>().ok())
+            .filter(|channel| *channel > 0)
+        else {
+            continue;
+        };
+        macro_arities
+            .entry(macro_name.to_string())
+            .and_modify(|arity| *arity = (*arity).max(channel))
+            .or_insert(channel);
+    }
+    macro_arities
 }
 
 fn default_created_macro_patch(name: &str) -> Option<MacroPatch> {

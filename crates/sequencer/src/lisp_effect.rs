@@ -9117,16 +9117,21 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("instruments/piano-to-test/dsp.lisp");
         let source = std::fs::read_to_string(&path).expect("read piano-to-test dsp source");
-        let emitted = eseqlisp::widget_render::patcher::emit_patch_writeback_with_first_node_text_edit(
-            &source,
-            eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
-            "svf",
-            "svf knock_cutoff 1.40 1",
-        )
-        .expect("patcher writeback should edit svf node text");
+        let emitted =
+            eseqlisp::widget_render::patcher::emit_patch_writeback_with_first_node_text_edit(
+                &source,
+                eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                "svf",
+                "svf knock_cutoff 1.40 1",
+            )
+            .expect("patcher writeback should edit svf node text");
 
         compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
-            |error| panic!("patcher-edited piano-to-test svf source should compile:\n{error}\n{emitted}"),
+            |error| {
+                panic!(
+                    "patcher-edited piano-to-test svf source should compile:\n{error}\n{emitted}"
+                )
+            },
         );
     }
 

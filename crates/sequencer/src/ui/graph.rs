@@ -1071,7 +1071,7 @@ impl GraphController<'_> {
         Ok(new_selected)
     }
 
-    fn clear_track_in_place(&mut self, track_idx: usize) -> Result<usize, String> {
+    pub fn clear_track_in_place(&mut self, track_idx: usize) -> Result<usize, String> {
         if track_idx >= self.app.tracks.len() {
             return Err("Invalid track index".to_string());
         }

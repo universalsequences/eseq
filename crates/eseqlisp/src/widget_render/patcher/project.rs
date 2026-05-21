@@ -342,7 +342,7 @@ impl Projector {
 
         let body = if items.len() > 3 { &items[3..] } else { &[] };
         let mut projector = Projector::new_in_scope(
-            HashSet::new(),
+            self.known_macros.clone(),
             SourceScopeId::Macro {
                 name: name.to_string(),
             },
@@ -1148,6 +1148,48 @@ pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, Operat
     })
 }
 
+pub(super) fn dgenlisp_operator_required_input_counts() -> &'static HashMap<String, usize> {
+    static OPERATOR_REQUIRED_INPUT_COUNTS: OnceLock<HashMap<String, usize>> = OnceLock::new();
+    OPERATOR_REQUIRED_INPUT_COUNTS.get_or_init(|| {
+        let metadata: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../sequencer/tools/dgenlisp-operators.json"
+        ))
+        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let operators = metadata
+            .get("operators")
+            .and_then(serde_json::Value::as_array)
+            .expect("bundled dgenlisp-operators.json must contain an operators array");
+        let mut counts = HashMap::new();
+        for operator in operators {
+            let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let count = documented_required_input_count(operator);
+            counts.insert(name.to_string(), count);
+            if let Some(aliases) = operator
+                .get("aliases")
+                .and_then(serde_json::Value::as_array)
+            {
+                for alias in aliases {
+                    if let Some(alias) = alias.as_str() {
+                        counts.insert(alias.to_string(), count);
+                    }
+                }
+            }
+        }
+        for special_form in expression_special_forms(&metadata) {
+            let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            counts.insert(
+                name.to_string(),
+                documented_special_form_input_count(special_form),
+            );
+        }
+        counts
+    })
+}
+
 fn expression_special_forms(metadata: &serde_json::Value) -> Vec<&serde_json::Value> {
     metadata
         .get("special_forms")
@@ -1170,6 +1212,32 @@ fn documented_special_form_input_count(form: &serde_json::Value) -> usize {
             Some(inner.split_whitespace().count().saturating_sub(1))
         })
         .unwrap_or(1)
+}
+
+fn documented_required_input_count(operator: &serde_json::Value) -> usize {
+    let required_count = operator
+        .get("inputs")
+        .and_then(serde_json::Value::as_array)
+        .map(|inputs| {
+            inputs
+                .iter()
+                .filter(|input| {
+                    input
+                        .get("required")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    if required_count > 0 {
+        return required_count;
+    }
+    operator
+        .get("input_count")
+        .and_then(|count| count.get("minimum").or_else(|| count.get("maximum")))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize
 }
 
 fn documented_port_count(operator: &serde_json::Value, array_key: &str, count_key: &str) -> usize {

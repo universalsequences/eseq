@@ -1054,7 +1054,10 @@ impl Editor {
         if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) {
             crate::widget_render::scroll::set_current_event_scroll_offset(None);
             let output = handle_event(&node, widget_event);
-            return self.apply_widget_output(output);
+            let _ = self.apply_widget_output(output);
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+            return true;
         }
         let Some(double_click_node) = self
             .runtime
@@ -1073,7 +1076,10 @@ impl Editor {
         };
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         let output = handle_event(&double_click_node, widget_event);
-        self.apply_widget_output(output)
+        let _ = self.apply_widget_output(output);
+        self.runtime.invalidate_layout_deferred();
+        self.mark_needs_redraw();
+        true
     }
 
     fn is_double_click_candidate(
@@ -1084,15 +1090,33 @@ impl Editor {
     ) -> bool {
         const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
         const DOUBLE_CLICK_SLOP: f32 = 1.5;
-        self.active_leaf()
-            .last_widget_click
-            .as_ref()
-            .is_some_and(|click| {
-                click.widget_id == widget_id
-                    && click.at.elapsed() <= DOUBLE_CLICK_WINDOW
-                    && (click.precise_col - precise_col).abs() <= DOUBLE_CLICK_SLOP
-                    && (click.precise_row - precise_row).abs() <= DOUBLE_CLICK_SLOP
-            })
+        let probe_enabled = std::env::var_os("ESEQLISP_DOUBLE_CLICK_PROBE").is_some();
+        let Some(click) = self.active_leaf().last_widget_click.as_ref() else {
+            if probe_enabled {
+                eprintln!("double-click probe: no previous widget click");
+            }
+            return false;
+        };
+        let elapsed = click.at.elapsed();
+        let delta_col = (click.precise_col - precise_col).abs();
+        let delta_row = (click.precise_row - precise_row).abs();
+        let same_widget = click.widget_id == widget_id;
+        let within_window = elapsed <= DOUBLE_CLICK_WINDOW;
+        let within_slop = delta_col <= DOUBLE_CLICK_SLOP && delta_row <= DOUBLE_CLICK_SLOP;
+        let candidate = same_widget && within_window && within_slop;
+        if probe_enabled {
+            eprintln!(
+                "double-click probe: elapsed_ms={} same_widget={} delta_col={:.3} delta_row={:.3} within_window={} within_slop={} candidate={}",
+                elapsed.as_millis(),
+                same_widget,
+                delta_col,
+                delta_row,
+                within_window,
+                within_slop,
+                candidate,
+            );
+        }
+        candidate
     }
 
     pub(super) fn remember_widget_click(
