@@ -120,6 +120,42 @@ fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
     }
 }
 
+fn allocate_created_text_node(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    text: &str,
+) -> String {
+    let node_id = allocate_created_node(state, view_key, (0.0, 0.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(view_key, &node_id))
+        .unwrap()
+        .text = text.to_string();
+    node_id
+}
+
+fn connect_output_to_input(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    from_node: &str,
+    to_node: &str,
+    to_input: usize,
+) {
+    allocate_created_connection(
+        state,
+        view_key,
+        OutputPortRef {
+            node_id: from_node.to_string(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: to_node.to_string(),
+            input_index: to_input,
+        },
+    );
+}
+
 fn patcher_test_node(path: &std::path::Path) -> LayoutNode {
     LayoutNode {
         widget_id: 1,
@@ -4821,13 +4857,7 @@ fn writeback_deleting_created_macro_default_return_keeps_valid_body() {
     let source = "(def sig (in 1))\n(out sig 1)";
     let root_patch = parse(source);
     let mut state = PatcherInteractionState::default();
-    let created_id = allocate_created_node(&mut state, "root", (3.0, 4.0));
-    state
-        .edit_state
-        .nodes
-        .get_mut(&node_edit_key("root", &created_id))
-        .unwrap()
-        .text = "defmacro *op*".to_string();
+    let created_id = allocate_created_text_node(&mut state, "root", "defmacro *op*");
     assert!(promote_created_macro_definition(
         &root_patch,
         &mut state,
@@ -4894,56 +4924,11 @@ fn writeback_replacing_created_macro_default_body_with_chain_compiles() {
         .deleted_nodes
         .insert(node_edit_key("macro:op", &return_node.id));
 
-    let phasor = allocate_created_node(&mut state, "macro:op", (2.0, 1.0));
-    state
-        .edit_state
-        .nodes
-        .get_mut(&node_edit_key("macro:op", &phasor))
-        .unwrap()
-        .text = "phasor".to_string();
-    let triangle = allocate_created_node(&mut state, "macro:op", (3.0, 1.0));
-    state
-        .edit_state
-        .nodes
-        .get_mut(&node_edit_key("macro:op", &triangle))
-        .unwrap()
-        .text = "triangle".to_string();
-    allocate_created_connection(
-        &mut state,
-        "macro:op",
-        OutputPortRef {
-            node_id: input.id.clone(),
-            output_index: 0,
-        },
-        InputPortRef {
-            node_id: phasor.clone(),
-            input_index: 0,
-        },
-    );
-    allocate_created_connection(
-        &mut state,
-        "macro:op",
-        OutputPortRef {
-            node_id: phasor,
-            output_index: 0,
-        },
-        InputPortRef {
-            node_id: triangle.clone(),
-            input_index: 0,
-        },
-    );
-    allocate_created_connection(
-        &mut state,
-        "macro:op",
-        OutputPortRef {
-            node_id: triangle,
-            output_index: 0,
-        },
-        InputPortRef {
-            node_id: out.id.clone(),
-            input_index: 0,
-        },
-    );
+    let phasor = allocate_created_text_node(&mut state, "macro:op", "phasor");
+    let triangle = allocate_created_text_node(&mut state, "macro:op", "triangle");
+    connect_output_to_input(&mut state, "macro:op", &input.id, &phasor, 0);
+    connect_output_to_input(&mut state, "macro:op", &phasor, &triangle, 0);
+    connect_output_to_input(&mut state, "macro:op", &triangle, &out.id, 0);
 
     let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
     assert_eq!(
@@ -4959,13 +4944,7 @@ fn writeback_created_macro_default_return_rewired_to_chain_then_root_input_compi
     let source = "(def pitch (in 1 @name pitch))\n(out (* (phasor pitch) 1) 1 @name audio)";
     let root_patch = parse(source);
     let mut state = PatcherInteractionState::default();
-    let macro_instance = allocate_created_node(&mut state, "root", (3.0, 4.0));
-    state
-        .edit_state
-        .nodes
-        .get_mut(&node_edit_key("root", &macro_instance))
-        .unwrap()
-        .text = "defmacro *ap*".to_string();
+    let macro_instance = allocate_created_text_node(&mut state, "root", "defmacro *ap*");
     assert!(promote_created_macro_definition(
         &root_patch,
         &mut state,
@@ -5003,72 +4982,16 @@ fn writeback_created_macro_default_return_rewired_to_chain_then_root_input_compi
             &source_connection_id(return_to_out),
         ));
 
-    let phasor = allocate_created_node(&mut state, "macro:ap", (2.0, 1.0));
-    state
-        .edit_state
-        .nodes
-        .get_mut(&node_edit_key("macro:ap", &phasor))
-        .unwrap()
-        .text = "phasor".to_string();
-    let triangle = allocate_created_node(&mut state, "macro:ap", (3.0, 1.0));
-    state
-        .edit_state
-        .nodes
-        .get_mut(&node_edit_key("macro:ap", &triangle))
-        .unwrap()
-        .text = "triangle".to_string();
-    allocate_created_connection(
-        &mut state,
-        "macro:ap",
-        OutputPortRef {
-            node_id: input.id.clone(),
-            output_index: 0,
-        },
-        InputPortRef {
-            node_id: phasor.clone(),
-            input_index: 0,
-        },
-    );
-    allocate_created_connection(
-        &mut state,
-        "macro:ap",
-        OutputPortRef {
-            node_id: phasor,
-            output_index: 0,
-        },
-        InputPortRef {
-            node_id: triangle.clone(),
-            input_index: 0,
-        },
-    );
-    allocate_created_connection(
-        &mut state,
-        "macro:ap",
-        OutputPortRef {
-            node_id: triangle,
-            output_index: 0,
-        },
-        InputPortRef {
-            node_id: out.id.clone(),
-            input_index: 0,
-        },
-    );
+    let phasor = allocate_created_text_node(&mut state, "macro:ap", "phasor");
+    let triangle = allocate_created_text_node(&mut state, "macro:ap", "triangle");
+    connect_output_to_input(&mut state, "macro:ap", &input.id, &phasor, 0);
+    connect_output_to_input(&mut state, "macro:ap", &phasor, &triangle, 0);
+    connect_output_to_input(&mut state, "macro:ap", &triangle, &out.id, 0);
 
     let source_with_macro_chain =
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
     state.active_macro = None;
-    allocate_created_connection(
-        &mut state,
-        "root",
-        OutputPortRef {
-            node_id: "pitch".to_string(),
-            output_index: 0,
-        },
-        InputPortRef {
-            node_id: macro_instance,
-            input_index: 0,
-        },
-    );
+    connect_output_to_input(&mut state, "root", "pitch", &macro_instance, 0);
 
     let emitted =
         emit_patch_writeback(&source_with_macro_chain, PatcherIntent::Instrument, &state).unwrap();
