@@ -105,6 +105,7 @@ struct InstrumentEditSession {
     buffer_name: String,
     engine_id: usize,
     last_valid_source: String,
+    last_valid_layout: Option<String>,
     visible_revision_valid: bool,
     preview_generation: u64,
     mode: InstrumentEditMode,
@@ -124,6 +125,7 @@ impl InstrumentEditSession {
             buffer_name,
             engine_id,
             last_valid_source: persisted_source.clone(),
+            last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
             mode: InstrumentEditMode::EditExisting { persisted_source },
@@ -146,6 +148,7 @@ impl InstrumentEditSession {
             buffer_name,
             engine_id,
             last_valid_source: source,
+            last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
             mode: InstrumentEditMode::CreateDraft {
@@ -160,6 +163,7 @@ impl InstrumentEditSession {
 struct PendingInstrumentPreview {
     generation: u64,
     source: String,
+    layout: Option<String>,
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
 }
 
@@ -215,13 +219,11 @@ fn create_new_instrument_draft_dir() -> Result<PathBuf, String> {
 
 fn show_instrument_patcher_layout_source(buffer_name: &str) -> String {
     let buffer_name = escape_lisp_string(buffer_name);
-    format!(
-        "(do\n  (set! remembered-step-panel-buffer (seq-current-step-buffer))\n  (set! step-panel-buffer \"{buffer_name}\")\n  (if (= lower-panel-buffer \"*piano-roll*\")\n    (seq-apply-piano-roll-layout)\n    (seq-apply-fx-layout)))"
-    )
+    format!("(seq-apply-instrument-patcher-layout \"{buffer_name}\")")
 }
 
 fn restore_instrument_patcher_layout_source() -> &'static str {
-    "(do\n  (set! step-panel-buffer remembered-step-panel-buffer)\n  (if (= lower-panel-buffer \"*piano-roll*\")\n    (seq-apply-piano-roll-layout)\n    (seq-apply-fx-layout)))"
+    "(seq-restore-instrument-patcher-layout)"
 }
 
 fn escape_lisp_string(value: &str) -> String {
@@ -976,6 +978,41 @@ fn finalized_instrument_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
     )
 }
 
+fn patcher_layout_sidecar_path_for_dsp(dsp_path: &Path) -> PathBuf {
+    dsp_path.with_file_name("dsp.layout.json")
+}
+
+fn copy_patcher_layout_sidecar(source_dsp: &Path, target_dsp: &Path) -> std::io::Result<()> {
+    let source_layout = patcher_layout_sidecar_path_for_dsp(source_dsp);
+    if !source_layout.exists() {
+        return Ok(());
+    }
+    let target_layout = patcher_layout_sidecar_path_for_dsp(target_dsp);
+    if let Some(parent) = target_layout.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(source_layout, target_layout).map(|_| ())
+}
+
+fn write_patcher_layout_sidecar(dsp_path: &Path, layout: &str) -> std::io::Result<()> {
+    let layout_path = patcher_layout_sidecar_path_for_dsp(dsp_path);
+    if let Some(parent) = layout_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = layout_path.with_file_name(format!(
+        ".{}.tmp",
+        layout_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("dsp.layout.json")
+    ));
+    std::fs::write(&tmp_path, layout)?;
+    std::fs::rename(&tmp_path, &layout_path).or_else(|error| {
+        let _ = std::fs::remove_file(&tmp_path);
+        Err(error)
+    })
+}
+
 fn finalized_effect_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
     (
         Path::new("effects").join(slug),
@@ -1545,19 +1582,17 @@ mod tests {
     fn instrument_patcher_layout_preserves_lower_panel_buffer() {
         let source = show_instrument_patcher_layout_source("*instrument-patcher:digitone*");
 
-        assert!(source.contains("(set! remembered-step-panel-buffer (seq-current-step-buffer))"));
-        assert!(source.contains("(set! step-panel-buffer \"*instrument-patcher:digitone*\")"));
-        assert!(source.contains("(= lower-panel-buffer \"*piano-roll*\")"));
-        assert!(source.contains("(seq-apply-fx-layout)"));
+        assert_eq!(
+            source,
+            "(seq-apply-instrument-patcher-layout \"*instrument-patcher:digitone*\")"
+        );
     }
 
     #[test]
     fn instrument_patcher_layout_restore_uses_remembered_step_panel() {
         let source = restore_instrument_patcher_layout_source();
 
-        assert!(source.contains("(set! step-panel-buffer remembered-step-panel-buffer)"));
-        assert!(source.contains("(= lower-panel-buffer \"*piano-roll*\")"));
-        assert!(source.contains("(seq-apply-fx-layout)"));
+        assert_eq!(source, "(seq-restore-instrument-patcher-layout)");
     }
 
     #[test]
@@ -6791,6 +6826,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.refresh_runtime_side_effects();
                                         continue;
                                     }
+                                    let target_dsp = final_dir.join("dsp.lisp");
+                                    if let Some(layout) = session.last_valid_layout.as_deref() {
+                                        if let Err(error) =
+                                            write_patcher_layout_sidecar(&target_dsp, layout)
+                                        {
+                                            let _ = std::fs::remove_dir_all(&final_dir);
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-error",
+                                                Value::String(format!(
+                                                    "Failed to save finalized instrument layout: {error}"
+                                                )),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            continue;
+                                        }
+                                    } else if let InstrumentEditMode::CreateDraft {
+                                        temp_dir, ..
+                                    } = &session.mode
+                                    {
+                                        let source_dsp = temp_dir.join("dsp.lisp");
+                                        if let Err(error) =
+                                            copy_patcher_layout_sidecar(&source_dsp, &target_dsp)
+                                        {
+                                            let _ = std::fs::remove_dir_all(&final_dir);
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-error",
+                                                Value::String(format!(
+                                                    "Failed to save finalized instrument layout: {error}"
+                                                )),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            continue;
+                                        }
+                                    }
                                     if let Err(error) = app.replace_custom_instrument_track_sync(
                                         draft_track,
                                         &final_name,
@@ -7024,6 +7099,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             editor.refresh_runtime_side_effects();
                                             continue;
                                         }
+                                        if let Some(layout) = session.last_valid_layout.as_deref() {
+                                            if let Err(e) =
+                                                write_patcher_layout_sidecar(&session.path, layout)
+                                            {
+                                                let rt = editor.runtime_mut();
+                                                rt.set_reactive(
+                                                    "SEQ",
+                                                    "editor-error",
+                                                    Value::String(format!(
+                                                        "Failed to save layout: {e}"
+                                                    )),
+                                                );
+                                                rt.run_reactive_cycle();
+                                                editor.refresh_runtime_side_effects();
+                                                continue;
+                                            }
+                                        }
 
                                         let buf_name = session.buffer_name.clone();
                                         if let Err(error) = editor
@@ -7193,6 +7285,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let status = extract_string_from_payload(&payload, "status")
                             .unwrap_or_else(|| "invalid".to_string());
+                        if status == "layout" {
+                            if let Some(layout) = extract_string_from_payload(&payload, "layout") {
+                                session.last_valid_layout = Some(layout);
+                                if let Some(pending) = pending_instrument_preview.as_mut() {
+                                    pending.layout = session.last_valid_layout.clone();
+                                }
+                            }
+                            continue;
+                        }
                         if status != "valid" {
                             session.preview_generation = session.preview_generation.wrapping_add(1);
                             session.visible_revision_valid = false;
@@ -7222,6 +7323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
 
+                        let layout = extract_string_from_payload(&payload, "layout");
                         session.preview_generation = session.preview_generation.wrapping_add(1);
                         session.visible_revision_valid = false;
                         let generation = session.preview_generation;
@@ -7241,6 +7343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pending_instrument_preview = Some(PendingInstrumentPreview {
                             generation,
                             source,
+                            layout,
                             receiver: rx,
                         });
                         let rt = editor.runtime_mut();
@@ -7904,14 +8007,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(completed_preview) = pending_instrument_preview.as_ref().and_then(|pending| {
             match pending.receiver.try_recv() {
-                Ok(result) => Some(Ok((pending.generation, pending.source.clone(), result))),
+                Ok(result) => Some(Ok((
+                    pending.generation,
+                    pending.source.clone(),
+                    pending.layout.clone(),
+                    result,
+                ))),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(())),
             }
         }) {
             let _ = pending_instrument_preview.take();
             match completed_preview {
-                Ok((generation, source, compile_result)) => {
+                Ok((generation, source, layout, compile_result)) => {
                     if let Some(session) = instrument_edit_session.as_mut() {
                         if session.preview_generation == generation {
                             match compile_result {
@@ -7923,6 +8031,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ) {
                                     Ok(()) => {
                                         session.last_valid_source = source;
+                                        session.last_valid_layout = layout;
                                         session.visible_revision_valid = true;
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(

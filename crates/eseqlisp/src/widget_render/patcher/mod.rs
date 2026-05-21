@@ -8,6 +8,7 @@ mod metrics;
 mod model;
 mod project;
 mod render;
+mod sidecar;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -235,10 +236,10 @@ pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
 use display::node_display_label;
 use emit::debug_log_patch_lisp;
 use interaction::{
-    handle_patcher_double_click, handle_patcher_pointer_down, handle_patcher_pointer_drag,
-    handle_patcher_pointer_moved, handle_patcher_pointer_up, open_selected_macro_node,
-    pan_patcher_by_delta, pan_patcher_by_wheel, promote_created_macro_definition,
-    reset_patcher_pan, zoom_patcher_by_magnify,
+    PatcherChangeKind, handle_patcher_double_click, handle_patcher_pointer_down,
+    handle_patcher_pointer_drag, handle_patcher_pointer_moved, handle_patcher_pointer_up,
+    open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel,
+    promote_created_macro_definition, reset_patcher_pan, zoom_patcher_by_magnify,
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
@@ -423,7 +424,7 @@ impl WidgetDefinition for PatcherWidget {
                             debug_log_patch_lisp(&view_key, &patch);
                         }
                         set_patcher_interaction_state(key, state);
-                        Some(patcher_widget_event(changed))
+                        Some(patcher_semantic_event(changed))
                     } else {
                         None
                     }
@@ -434,7 +435,7 @@ impl WidgetDefinition for PatcherWidget {
                         debug_log_patch_lisp(&view_key, &patch);
                     }
                     set_patcher_interaction_state(key, state);
-                    Some(patcher_widget_event(changed))
+                    Some(patcher_semantic_event(changed))
                 }
                 _ => None,
             };
@@ -447,7 +448,7 @@ impl WidgetDefinition for PatcherWidget {
             {
                 if toggle_selected_cable_segmented(node, &mut state, &view_key) {
                     set_patcher_interaction_state(key, state);
-                    Some(WidgetEvent::Custom(Value::Nil))
+                    Some(patcher_widget_event(PatcherChangeKind::Layout))
                 } else {
                     None
                 }
@@ -472,7 +473,7 @@ impl WidgetDefinition for PatcherWidget {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
                 set_patcher_interaction_state(key, state);
-                Some(patcher_widget_event(changed))
+                Some(patcher_semantic_event(changed))
             }
             KeyCode::Esc if state.text_edit.is_some() => {
                 cancel_patcher_text_edit(&mut state, &view_key);
@@ -488,7 +489,7 @@ impl WidgetDefinition for PatcherWidget {
                         debug_log_patch_lisp(&view_key, &patch);
                     }
                     set_patcher_interaction_state(key, state);
-                    Some(patcher_widget_event(changed))
+                    Some(patcher_semantic_event(changed))
                 } else {
                     None
                 }
@@ -501,7 +502,7 @@ impl WidgetDefinition for PatcherWidget {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
                 set_patcher_interaction_state(key, state);
-                Some(patcher_widget_event(changed))
+                Some(patcher_semantic_event(changed))
             }
             _ => {
                 let edit = state.text_edit.as_mut()?;
@@ -522,7 +523,15 @@ impl WidgetDefinition for PatcherWidget {
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<super::EventOutput> {
         match event {
-            WidgetEvent::Custom(Value::Bool(true)) => patcher_change_output(node),
+            WidgetEvent::Custom(Value::Keyword(kind)) if kind == "semantic-change" => {
+                patcher_change_output(node, patcher_writeback_payload(node))
+            }
+            WidgetEvent::Custom(Value::Keyword(kind)) if kind == "layout-change" => {
+                patcher_change_output(node, patcher_layout_payload(node))
+            }
+            WidgetEvent::Custom(Value::Bool(true)) => {
+                patcher_change_output(node, patcher_writeback_payload(node))
+            }
             WidgetEvent::Custom(Value::Nil) | WidgetEvent::Custom(Value::Bool(false)) => None,
             _ => None,
         }
@@ -543,16 +552,77 @@ impl WidgetDefinition for PatcherWidget {
     }
 }
 
-fn patcher_widget_event(changed: bool) -> WidgetEvent {
-    WidgetEvent::Custom(Value::Bool(changed))
+fn patcher_widget_event(change: PatcherChangeKind) -> WidgetEvent {
+    match change {
+        PatcherChangeKind::None => WidgetEvent::Custom(Value::Nil),
+        PatcherChangeKind::Layout => WidgetEvent::Custom(Value::Keyword("layout-change".into())),
+        PatcherChangeKind::Semantic => {
+            WidgetEvent::Custom(Value::Keyword("semantic-change".into()))
+        }
+    }
 }
 
-fn patcher_change_output(node: &LayoutNode) -> Option<super::EventOutput> {
+fn patcher_semantic_event(changed: bool) -> WidgetEvent {
+    patcher_widget_event(if changed {
+        PatcherChangeKind::Semantic
+    } else {
+        PatcherChangeKind::None
+    })
+}
+
+fn patcher_change_output(node: &LayoutNode, payload: Value) -> Option<super::EventOutput> {
     let callback = node.props.get("on-change")?.clone();
     Some(super::EventOutput {
         callback,
-        args: vec![patcher_writeback_payload(node)],
+        args: vec![payload],
     })
+}
+
+fn patcher_layout_payload(node: &LayoutNode) -> Value {
+    let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
+    let key = patcher_state_key(node);
+    let state = get_patcher_interaction_state(key);
+    let Some(path_str) = path else {
+        return map_value(vec![
+            ("status", Value::Keyword("invalid".to_string())),
+            (
+                "diagnostic",
+                Value::String("patcher requires :path".to_string()),
+            ),
+        ]);
+    };
+    let path_buf = PathBuf::from(&path_str);
+    let root_patch = match load_patch_from_props(&node.props) {
+        Ok((_, patch)) => patch,
+        Err(error) => {
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                (
+                    "diagnostic",
+                    Value::String(format!("failed to load patch for layout: {error}")),
+                ),
+            ]);
+        }
+    };
+    match sidecar::current_layout_json(&root_patch, &state) {
+        Ok(layout) => map_value(vec![
+            ("status", Value::Keyword("layout".to_string())),
+            ("path", Value::String(path_str)),
+            ("layout", Value::String(layout)),
+        ]),
+        Err(error) => map_value(vec![
+            ("status", Value::Keyword("invalid".to_string())),
+            ("path", Value::String(path_str)),
+            (
+                "diagnostic",
+                Value::String(format!(
+                    "failed to build layout sidecar for '{}': {error}",
+                    path_buf.display()
+                )),
+            ),
+        ]),
+    }
 }
 
 fn patcher_writeback_payload(node: &LayoutNode) -> Value {
@@ -585,17 +655,49 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
         }
     };
 
+    let root_patch = match load_patch_from_props(&node.props) {
+        Ok((_, patch)) => Some(patch),
+        Err(error) => {
+            debug_log_writeback_event(
+                "layout-source-load-failed",
+                format!("path={path_str}\nintent={intent:?}\nerror={error}"),
+            );
+            None
+        }
+    };
+
     match emit_patch_writeback(&source, intent, &state) {
         Ok(source) => {
+            let layout =
+                root_patch.and_then(|root_patch| match parse_patch_source(&source, intent) {
+                    Ok(mut emitted_patch) => {
+                        match sidecar::emitted_layout_json(&mut emitted_patch, &root_patch, &state)
+                        {
+                            Ok(layout) => Some(layout),
+                            Err(error) => {
+                                eprintln!("failed to build emitted patcher layout: {error}");
+                                None
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("failed to parse emitted patch for layout persistence: {error}");
+                        None
+                    }
+                });
             debug_log_writeback_event(
                 "payload-valid",
                 format!("path={path_str}\nintent={intent:?}\nsource:\n{source}"),
             );
-            map_value(vec![
+            let mut entries = vec![
                 ("status", Value::Keyword("valid".to_string())),
                 ("path", Value::String(path_str)),
                 ("source", Value::String(source)),
-            ])
+            ];
+            if let Some(layout) = layout {
+                entries.push(("layout", Value::String(layout)));
+            }
+            map_value(entries)
         }
         Err(error) => {
             debug_log_edit_event("writeback-payload-invalid-state", &state);
@@ -709,8 +811,17 @@ pub(super) fn load_patch_from_props(
     let source = std::fs::read_to_string(&path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
     let intent = patcher_intent_from_props(props);
-    let patch = parse_patch_source(&source, intent)?;
+    let mut patch = parse_patch_source(&source, intent)?;
+    sidecar::apply_or_materialize(&path, &mut patch)?;
     Ok((path, patch))
+}
+
+pub(in crate::widget_render::patcher) fn persist_patcher_layout(
+    node: &LayoutNode,
+    state: &state::PatcherInteractionState,
+) -> Result<(), String> {
+    let (path, root_patch) = load_patch_from_props(&node.props)?;
+    sidecar::save_current_layout(&path, &root_patch, state)
 }
 
 fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {

@@ -62,6 +62,18 @@
         0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13)))
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
+(def seq-patcher-bottom-bar-layout-spec ()
+  (list :cols :gap 1
+    0.333 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 33 :min-height 13 :max-height 13)
+    0.334 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 33 :max-width 40 :min-height 13 :max-height 13)
+    0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13)))
+
+(def seq-instrument-patcher-layout-spec (patcher-buffer)
+  (list :rows :gap 1
+    0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+    0.80 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)
+    0.15 (seq-patcher-bottom-bar-layout-spec)))
+
 (def seq-apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
   (do
     (set-layout (seq-lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
@@ -76,6 +88,19 @@
   (do
     (set! lower-panel-buffer "*piano-roll*")
     (seq-apply-lower-panel-layout "*piano-roll*" 1.0 13 50)))
+
+(def seq-apply-instrument-patcher-layout (patcher-buffer)
+  (do
+    (set! remembered-step-panel-buffer (seq-current-step-buffer))
+    (set-layout (seq-instrument-patcher-layout-spec patcher-buffer))
+    (host-command "refresh-mixer-ui" (dict))))
+
+(def seq-restore-instrument-patcher-layout ()
+  (do
+    (set! step-panel-buffer remembered-step-panel-buffer)
+    (if (= lower-panel-buffer "*piano-roll*")
+      (seq-apply-piano-roll-layout)
+      (seq-apply-fx-layout))))
 
 (def seq-current-step-buffer ()
   (seq-sanitized-step-buffer

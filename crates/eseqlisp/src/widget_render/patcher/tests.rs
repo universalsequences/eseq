@@ -88,6 +88,276 @@ fn temp_patcher_source_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{name}-{nonce}.lisp"))
 }
 
+fn temp_patcher_dsp_path(name: &str) -> std::path::PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{name}-{nonce}"));
+    fs::create_dir_all(&dir).unwrap();
+    dir.join("dsp.lisp")
+}
+
+fn patcher_props_for_path(path: &std::path::Path) -> HashMap<String, Value> {
+    HashMap::from([
+        (
+            "path".to_string(),
+            Value::String(path.to_string_lossy().into()),
+        ),
+        (
+            "intent".to_string(),
+            Value::Keyword("instrument".to_string()),
+        ),
+    ])
+}
+
+#[test]
+fn missing_layout_sidecar_is_materialized_on_first_load() {
+    let path = temp_patcher_dsp_path("patcher-sidecar-materialize");
+    fs::write(
+        &path,
+        "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)",
+    )
+    .unwrap();
+
+    let (_path, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let sidecar = fs::read_to_string(&sidecar_path).expect("sidecar should be written");
+    let json: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+
+    assert_eq!(json["version"], 1);
+    assert!(
+        json["root"]["nodes"]
+            .as_object()
+            .expect("root nodes")
+            .contains_key("phase")
+    );
+    assert!(patch.nodes.iter().any(|node| node.id == "phase"));
+}
+
+#[test]
+fn existing_layout_sidecar_preserves_positions_and_places_only_new_nodes() {
+    let path = temp_patcher_dsp_path("patcher-sidecar-preserve");
+    fs::write(
+        &path,
+        "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)",
+    )
+    .unwrap();
+    load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    json["root"]["nodes"]["phase"] = serde_json::json!({ "x": 123.0, "y": 45.0 });
+    fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+    fs::write(
+        &path,
+        "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(def shaped (* phase 0.5))\n(out shaped 1 @name audio)",
+    )
+    .unwrap();
+    let (_path, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+
+    let phase = patch.nodes.iter().find(|node| node.id == "phase").unwrap();
+    let shaped = patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    assert_eq!(phase.position, (123.0, 45.0));
+    assert_ne!(
+        shaped.position,
+        (0.0, 0.0),
+        "new node should keep an auto/constrained placement"
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert!(
+        saved["root"]["nodes"]
+            .as_object()
+            .unwrap()
+            .contains_key("shaped")
+    );
+}
+
+#[test]
+fn persisted_widget_layout_reloads_exact_saved_positions_after_restart() {
+    let path = temp_patcher_dsp_path("patcher-sidecar-widget-reload");
+    fs::write(
+        &path,
+        "(defmacro shape (sig) (def folded (* sig 0.5)) folded)\n\
+         (def pitch (in 1 @name pitch))\n\
+         (def phase (phasor pitch))\n\
+         (def shaped (shape phase))\n\
+         (out shaped 1 @name audio)",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let phase = root_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "phase")
+        .unwrap();
+    let shaped = root_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "shaped")
+        .unwrap();
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "shape")
+        .unwrap();
+    let folded = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "folded")
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(
+        &mut state,
+        "root",
+        phase,
+        (41.25, 7.5),
+        node_display_label(phase),
+    );
+    set_node_edit_position(
+        &mut state,
+        "root",
+        shaped,
+        (103.75, 29.25),
+        node_display_label(shaped),
+    );
+    set_node_edit_position(
+        &mut state,
+        "macro:shape",
+        folded,
+        (14.5, 88.0),
+        node_display_label(folded),
+    );
+    set_patcher_interaction_state(key, state.clone());
+
+    persist_patcher_layout(&node, &state).expect("layout should save");
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+
+    let (_path, reloaded) = load_patch_from_props(&node.props).unwrap();
+    assert_eq!(
+        reloaded
+            .nodes
+            .iter()
+            .find(|patch_node| patch_node.id == "phase")
+            .unwrap()
+            .position,
+        (41.25, 7.5)
+    );
+    assert_eq!(
+        reloaded
+            .nodes
+            .iter()
+            .find(|patch_node| patch_node.id == "shaped")
+            .unwrap()
+            .position,
+        (103.75, 29.25)
+    );
+    let reloaded_macro = reloaded
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "shape")
+        .unwrap();
+    assert_eq!(
+        reloaded_macro
+            .patch
+            .nodes
+            .iter()
+            .find(|patch_node| patch_node.id == "folded")
+            .unwrap()
+            .position,
+        (14.5, 88.0)
+    );
+}
+
+#[test]
+fn macro_layout_sidecar_is_scoped_by_macro_name() {
+    let path = temp_patcher_dsp_path("patcher-sidecar-macro");
+    fs::write(
+        &path,
+        "(defmacro op (sig) (def shaped (* sig 0.5)) shaped)\n(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(def out1 (op phase))\n(out out1 1 @name audio)",
+    )
+    .unwrap();
+    load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    json["macros"]["op"]["nodes"]["shaped"] = serde_json::json!({ "x": 77.0, "y": 33.0 });
+    fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+    let (_path, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "op")
+        .unwrap();
+    let shaped = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "shaped")
+        .unwrap();
+    assert_eq!(shaped.position, (77.0, 33.0));
+}
+
+#[test]
+fn stale_and_malformed_sidecar_entries_do_not_change_semantics() {
+    let path = temp_patcher_dsp_path("patcher-sidecar-stale");
+    fs::write(
+        &path,
+        "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)",
+    )
+    .unwrap();
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    fs::write(
+        &sidecar_path,
+        r#"{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "phase": { "x": 88.0, "y": 22.0 },
+      "missing": { "x": 1.0, "y": 2.0 }
+    },
+    "cables": {
+      "missing:0->phase:0": { "segmented": true, "y": 5.0 }
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    let (_path, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    assert_eq!(
+        patch
+            .nodes
+            .iter()
+            .find(|node| node.id == "phase")
+            .unwrap()
+            .position,
+        (88.0, 22.0)
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert!(
+        !saved["root"]["nodes"]
+            .as_object()
+            .unwrap()
+            .contains_key("missing")
+    );
+    fs::write(&sidecar_path, "{ not json").unwrap();
+    let (_path, reparsed) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    assert!(reparsed.nodes.iter().any(|node| node.id == "phase"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&sidecar_path).unwrap())
+            .is_ok(),
+        "malformed sidecar should be replaced with a valid materialized layout"
+    );
+}
+
 fn compile_patch_source_with_dgenlisp(source: &str) -> Result<(), String> {
     let source_path = temp_patcher_source_path("patcher-dgen-compile");
     let out_dir = std::env::temp_dir().join("patcher-dgen-compile-out");
@@ -310,6 +580,380 @@ fn patcher_change_payload_emits_valid_writeback_source() {
         matches!(map.get("source").map(|value| value.borrow().clone()), Some(Value::String(source)) if source.contains("out sig"))
     );
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved() {
+    let path = temp_patcher_dsp_path("patcher-unsaved-layout-preview");
+    fs::write(&path, "(def sig (phasor 440))\n(out sig 1 @name audio)\n").unwrap();
+    let node = patcher_test_node(&path);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let output = root_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.kind == NodeKind::Out)
+        .unwrap();
+    let incoming = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == output.id && connection.to_input == 0)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let created = allocate_created_node(&mut state, "root", (222.0, 33.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &created))
+        .unwrap()
+        .text = "* 0.5".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(incoming)));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: incoming.from_node.clone(),
+            output_index: incoming.from_output,
+        },
+        InputPortRef {
+            node_id: created.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: created.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: output.id.clone(),
+            input_index: 0,
+        },
+    );
+    set_patcher_interaction_state(patcher_state_key(&node), state);
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let original_sidecar: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+
+    let payload = patcher_writeback_payload(&node);
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+    let layout = match map.get("layout").map(|value| value.borrow().clone()) {
+        Some(Value::String(layout)) => layout,
+        other => panic!("expected emitted layout string, got {other:?}"),
+    };
+    assert!(
+        !layout.contains(&created),
+        "emitted layout should be reconciled to emitted source ids"
+    );
+
+    let installed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(
+        installed, original_sidecar,
+        "semantic preview payload must not persist sidecar before Save/Finalize"
+    );
+    fs::write(
+        &path,
+        match map.get("source").map(|value| value.borrow().clone()) {
+            Some(Value::String(source)) => source,
+            other => panic!("expected emitted source string, got {other:?}"),
+        },
+    )
+    .unwrap();
+    fs::write(&sidecar_path, layout).unwrap();
+    set_patcher_interaction_state(patcher_state_key(&node), PatcherInteractionState::default());
+    let reloaded = load_patch_from_props(&node.props).unwrap().1;
+    assert!(
+        reloaded
+            .nodes
+            .iter()
+            .any(|patch_node| patch_node.id == "mul1"),
+        "saved source and sidecar should reload with emitted ids"
+    );
+}
+
+#[test]
+fn semantic_save_payload_layout_reloads_saved_widget_positions_after_restart() {
+    let path = temp_patcher_dsp_path("patcher-sidecar-semantic-save-reload");
+    fs::write(
+        &path,
+        "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let phase = root_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "phase")
+        .unwrap();
+    let out = root_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.kind == NodeKind::Out)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(
+        &mut state,
+        "root",
+        phase,
+        (52.0, 18.25),
+        node_display_label(phase),
+    );
+    set_node_edit_position(
+        &mut state,
+        "root",
+        out,
+        (133.5, 61.0),
+        node_display_label(out),
+    );
+    set_patcher_interaction_state(key, state);
+
+    let payload = patcher_writeback_payload(&node);
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+    let source = match map.get("source").map(|value| value.borrow().clone()) {
+        Some(Value::String(source)) => source,
+        other => panic!("expected emitted source string, got {other:?}"),
+    };
+    let layout = match map.get("layout").map(|value| value.borrow().clone()) {
+        Some(Value::String(layout)) => layout,
+        other => panic!("expected emitted layout string, got {other:?}"),
+    };
+    fs::write(&path, source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&path), layout).unwrap();
+
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_path, reloaded) = load_patch_from_props(&node.props).unwrap();
+    assert_eq!(
+        reloaded
+            .nodes
+            .iter()
+            .find(|patch_node| patch_node.id == "phase")
+            .unwrap()
+            .position,
+        (52.0, 18.25)
+    );
+    assert_eq!(
+        reloaded
+            .nodes
+            .iter()
+            .find(|patch_node| patch_node.kind == NodeKind::Out)
+            .unwrap()
+            .position,
+        (133.5, 61.0)
+    );
+}
+
+#[test]
+fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
+    let draft_path = temp_patcher_dsp_path("patcher-create-flow-draft");
+    fs::write(
+        &draft_path,
+        "(def gate (in 1 @name gate))\n\
+         (def pitch (in 2 @name pitch))\n\
+         (def velocity (in 3 @name velocity))\n\
+         (def trigger (in 4 @name trigger))\n\
+         (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)\n\
+         (def env (adsr gate trigger 5 120 0.8 180))\n\
+         (def phase (phasor pitch))\n\
+         (def osc (scale phase 0 1 -1 1))\n\
+         (out (* osc env velocity (mod gain)) 1 @name audio)\n",
+    )
+    .unwrap();
+    let draft_node = patcher_test_node(&draft_path);
+    let key = patcher_state_key(&draft_node);
+    let (_path, root_patch) = load_patch_from_props(&draft_node.props).unwrap();
+    let phase_to_osc = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "phase" && connection.to_node == "osc")
+        .expect("starter patch should connect phase into osc");
+
+    let mut state = PatcherInteractionState::default();
+    let multiply = allocate_created_text_node(&mut state, "root", "* 3");
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(phase_to_osc),
+        ));
+    connect_output_to_input(&mut state, "root", "phase", &multiply, 0);
+    connect_output_to_input(&mut state, "root", &multiply, "osc", 0);
+    let placed_position = (87.25, 24.5);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &multiply))
+        .unwrap()
+        .position = placed_position;
+    set_patcher_interaction_state(key, state);
+
+    let payload = patcher_writeback_payload(&draft_node);
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+    let source = match map.get("source").map(|value| value.borrow().clone()) {
+        Some(Value::String(source)) => source,
+        other => panic!("expected emitted source string, got {other:?}"),
+    };
+    let layout = match map.get("layout").map(|value| value.borrow().clone()) {
+        Some(Value::String(layout)) => layout,
+        other => panic!("expected emitted layout string, got {other:?}"),
+    };
+    assert!(
+        source.contains("(def mul1 (* phase 3.0))"),
+        "created multiply should be materialized before final save:\n{source}"
+    );
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    let mul_layout = &layout_json["root"]["nodes"]["mul1"];
+    assert!(
+        (mul_layout["x"].as_f64().unwrap() - placed_position.0 as f64).abs() < 0.0001
+            && (mul_layout["y"].as_f64().unwrap() - placed_position.1 as f64).abs() < 0.0001,
+        "emitted finalized layout should transfer created-node position to generated id: {layout}"
+    );
+
+    let final_path = temp_patcher_dsp_path("patcher-create-flow-finalized");
+    fs::write(&final_path, source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&final_path), layout).unwrap();
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let final_node = patcher_test_node(&final_path);
+    let (_path, reloaded) = load_patch_from_props(&final_node.props).unwrap();
+    let mul = reloaded
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "mul1")
+        .expect("finalized patch should reload generated multiply node");
+    assert_eq!(mul.position, placed_position);
+}
+
+#[test]
+fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_source_node() {
+    let path = temp_patcher_dsp_path("patcher-existing-created-chain");
+    fs::write(
+        &path,
+        "(def gate (in 1 @name gate))\n\
+         (def pitch (in 2 @name pitch))\n\
+         (def velocity (in 3 @name velocity))\n\
+         (def trigger (in 4 @name trigger))\n\
+         (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)\n\
+         (def env (adsr gate trigger 5 120 0.8 180))\n\
+         (def phase (phasor pitch))\n\
+         (def osc (scale phase 0 1 -1 1))\n\
+         (out (* osc env velocity (mod gain)) 1 @name audio)\n",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let osc = root_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "osc")
+        .expect("fixture should project source osc node");
+    let final_multiply = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "osc")
+        .map(|connection| connection.to_node.clone())
+        .expect("osc should feed final output multiply");
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &osc.id));
+    let multiply = allocate_created_text_node(&mut state, "root", "* 1");
+    let cosine = allocate_created_text_node(&mut state, "root", "cos");
+    let mul_position = (62.0, 34.0);
+    let cos_position = (43.0, 22.0);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &multiply))
+        .unwrap()
+        .position = mul_position;
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &cosine))
+        .unwrap()
+        .position = cos_position;
+    connect_output_to_input(&mut state, "root", "phase", &multiply, 0);
+    connect_output_to_input(&mut state, "root", &multiply, &cosine, 0);
+    connect_output_to_input(&mut state, "root", &cosine, &final_multiply, 0);
+    set_patcher_interaction_state(key, state);
+
+    let payload = patcher_writeback_payload(&node);
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+    let source = match map.get("source").map(|value| value.borrow().clone()) {
+        Some(Value::String(source)) => source,
+        other => panic!("expected emitted source string, got {other:?}"),
+    };
+    let layout = match map.get("layout").map(|value| value.borrow().clone()) {
+        Some(Value::String(layout)) => layout,
+        other => panic!("expected emitted layout string, got {other:?}"),
+    };
+    assert!(
+        source.contains("(def mul1 (* phase 1.0))")
+            && source.contains("(def cos1 (cos mul1)")
+            && source.contains("(* cos1 env velocity"),
+        "created replacement chain should be materialized before save:\n{source}"
+    );
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    assert!(
+        (layout_json["root"]["nodes"]["mul1"]["x"].as_f64().unwrap() - mul_position.0 as f64).abs()
+            < 0.0001
+            && (layout_json["root"]["nodes"]["mul1"]["y"].as_f64().unwrap()
+                - mul_position.1 as f64)
+                .abs()
+                < 0.0001,
+        "emitted layout should keep created multiply position: {layout}"
+    );
+    assert!(
+        (layout_json["root"]["nodes"]["cos1"]["x"].as_f64().unwrap() - cos_position.0 as f64).abs()
+            < 0.0001
+            && (layout_json["root"]["nodes"]["cos1"]["y"].as_f64().unwrap()
+                - cos_position.1 as f64)
+                .abs()
+                < 0.0001,
+        "emitted layout should keep created cos position: {layout}"
+    );
+
+    fs::write(&path, source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&path), layout).unwrap();
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_path, reloaded) = load_patch_from_props(&node.props).unwrap();
+    assert_eq!(
+        reloaded
+            .nodes
+            .iter()
+            .find(|patch_node| patch_node.id == "mul1")
+            .unwrap()
+            .position,
+        mul_position
+    );
+    assert_eq!(
+        reloaded
+            .nodes
+            .iter()
+            .find(|patch_node| patch_node.id == "cos1")
+            .unwrap()
+            .position,
+        cos_position
+    );
 }
 
 #[test]
@@ -1011,6 +1655,94 @@ fn writeback_node_text_edit_rewrites_owning_root_expression() {
 }
 
 #[test]
+fn writeback_allows_source_connection_segment_layout_edit() {
+    let source = r#"
+        (param freq)
+        (def result (phasor freq))
+    "#;
+    let patch = parse(source);
+    let connection = patch.connections.first().unwrap();
+    let mut state = PatcherInteractionState::default();
+    set_connection_segment_edit(
+        &mut state,
+        "root",
+        connection,
+        Some(CableSegmentInfo {
+            is_segmented: true,
+            segment_row: 12.5,
+        }),
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param freq)\n(def result (phasor freq))"
+    );
+}
+
+#[test]
+fn writeback_source_connection_edit_moves_destination_input() {
+    let source = r#"
+        (param freq)
+        (param mod)
+        (def result (phasor freq mod))
+    "#;
+    let patch = parse(source);
+    let connection = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_input == 0)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    set_connection_segment_edit(&mut state, "root", connection, connection.segment);
+    state
+        .edit_state
+        .connections
+        .get_mut(&connection_edit_key(
+            "root",
+            &source_connection_id(connection),
+        ))
+        .unwrap()
+        .to
+        .input_index = 1;
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param freq)\n(param mod)\n(def result (phasor __patcher_missing_input__ freq))"
+    );
+}
+
+#[test]
+fn writeback_source_connection_edit_replaces_source_reference() {
+    let source = r#"
+        (def a (in 1))
+        (def b (in 2))
+        (def result (+ a 1))
+    "#;
+    let patch = parse(source);
+    let b = patch.nodes.iter().find(|node| node.id == "b").unwrap();
+    let connection = patch.connections.first().unwrap();
+    let mut state = PatcherInteractionState::default();
+    set_connection_segment_edit(&mut state, "root", connection, connection.segment);
+    state
+        .edit_state
+        .connections
+        .get_mut(&connection_edit_key(
+            "root",
+            &source_connection_id(connection),
+        ))
+        .unwrap()
+        .from = OutputPortRef {
+        node_id: b.id.clone(),
+        output_index: 0,
+    };
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def a (in 1))\n(def b (in 2))\n(def result (+ b 1.0))"
+    );
+}
+
+#[test]
 fn writeback_root_param_rename_updates_resolved_references_only() {
     let source = r#"
         (def unresolved (phasor freq))
@@ -1463,6 +2195,214 @@ fn writeback_created_history_uses_generated_name_for_make_read_and_write() {
 }
 
 #[test]
+fn writeback_created_history_feedback_into_created_mix_emits_onepole() {
+    let source = r#"
+        (def sig (in 1))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    let mix = allocate_created_text_node(&mut state, "root", "mix ? 0.99");
+    let history = allocate_created_text_node(&mut state, "root", "history");
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+
+    connect_output_to_input(&mut state, "root", &sig.id, &mix, 0);
+    connect_output_to_input(&mut state, "root", &sig.id, &history, 0);
+    connect_output_to_input(&mut state, "root", &history, &mix, 1);
+    connect_output_to_input(&mut state, "root", &mix, &out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert_eq!(
+        emitted,
+        "(make-history history1)\n(def sig (in 1))\n(def mix1 (mix sig (read-history history1) 0.99))\n(out mix1 1)\n(write-history history1 sig)"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+    assert!(!emitted.contains("created-"));
+}
+
+#[test]
+fn writeback_created_history_recursive_onepole_writes_generated_mix() {
+    let source = r#"
+        (def sig (in 1))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    let mix = allocate_created_text_node(&mut state, "root", "mix ? 0.99");
+    let history = allocate_created_text_node(&mut state, "root", "history");
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+
+    connect_output_to_input(&mut state, "root", &sig.id, &mix, 0);
+    connect_output_to_input(&mut state, "root", &history, &mix, 1);
+    connect_output_to_input(&mut state, "root", &mix, &out.id, 0);
+    connect_output_to_input(&mut state, "root", &mix, &history, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert_eq!(
+        emitted,
+        "(make-history history1)\n(def sig (in 1))\n(def mix1 (mix sig (read-history history1) 0.99))\n(out mix1 1)\n(write-history history1 mix1)"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+    assert!(!emitted.contains("created-"));
+}
+
+#[test]
+fn writeback_created_history_longer_feedback_chain_preserves_generated_dependency_order() {
+    let source = r#"
+        (def sig (in 1))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    let mix = allocate_created_text_node(&mut state, "root", "mix ? 0.99");
+    let multiply = allocate_created_text_node(&mut state, "root", "* 0.5");
+    let history = allocate_created_text_node(&mut state, "root", "history");
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+
+    connect_output_to_input(&mut state, "root", &sig.id, &mix, 0);
+    connect_output_to_input(&mut state, "root", &history, &mix, 1);
+    connect_output_to_input(&mut state, "root", &mix, &multiply, 0);
+    connect_output_to_input(&mut state, "root", &multiply, &out.id, 0);
+    connect_output_to_input(&mut state, "root", &multiply, &history, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert_eq!(
+        emitted,
+        "(make-history history1)\n(def sig (in 1))\n(def mix1 (mix sig (read-history history1) 0.99))\n(def mul1 (* mix1 0.5))\n(out mul1 1)\n(write-history history1 mul1)"
+    );
+    assert_eq!(emitted.matches("(make-history").count(), 1);
+    assert_eq!(emitted.matches("(write-history").count(), 1);
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+    assert!(!emitted.contains("created-"));
+}
+
+#[test]
+fn writeback_source_history_read_into_created_mix_preserves_history_name() {
+    let source = r#"
+        (make-history h)
+        (def sig (in 1))
+        (out sig 1)
+        (write-history h sig)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let history = patch.nodes.iter().find(|node| node.id == "h").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    let mix = allocate_created_text_node(&mut state, "root", "mix ? 0.99");
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+
+    connect_output_to_input(&mut state, "root", &sig.id, &mix, 0);
+    connect_output_to_input(&mut state, "root", &history.id, &mix, 1);
+    connect_output_to_input(&mut state, "root", &mix, &out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert_eq!(
+        emitted,
+        "(make-history h)\n(def sig (in 1))\n(def mix1 (mix sig (read-history h) 0.99))\n(out mix1 1)\n(write-history h sig)"
+    );
+    assert_eq!(emitted.matches("(make-history h)").count(), 1);
+    assert!(!emitted.contains("history1"));
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn writeback_multiple_writes_to_created_history_return_blocker() {
+    let source = r#"
+        (def sig (in 1))
+        (def other (in 2))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let other = patch.nodes.iter().find(|node| node.id == "other").unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    let history = allocate_created_text_node(&mut state, "root", "history");
+    connect_output_to_input(&mut state, "root", &sig.id, &history, 0);
+    connect_output_to_input(&mut state, "root", &other.id, &history, 0);
+
+    assert!(matches!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state),
+        Err(WriteBackError::MultipleHistoryWrites { history_id, .. }) if history_id == history
+    ));
+}
+
+#[test]
 fn writeback_created_macro_history_emits_inside_defmacro() {
     let source = "(defmacro ap (sig) sig)";
     let patch = parse(source);
@@ -1866,7 +2806,7 @@ fn writeback_generated_binding_can_depend_on_created_phasor_and_literal() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def phasor1 (phasor 5.0))\n(def sig (phasor 440.0))\n(def mul1 (* sig phasor1))\n(out mul1 1)"
+        "(def value1 5.0)\n(def phasor1 (phasor value1))\n(def sig (phasor 440.0))\n(def mul1 (* sig phasor1))\n(out mul1 1)"
     );
 }
 
@@ -4195,6 +5135,88 @@ fn patcher_node_drag_converts_screen_delta_to_model_delta_after_zoom() {
 }
 
 #[test]
+fn patcher_node_drag_release_reports_layout_change_for_host_layout_payload() {
+    let path = temp_patcher_dsp_path("patcher-drag-release-layout-change");
+    fs::write(&path, "(def pitch (in 1 @name pitch))\n").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let original_sidecar: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    let pan = get_patcher_pan_state(key);
+    let rect = *patch_node_rects(&root_patch, node.rect, &pan)
+        .get("pitch")
+        .unwrap();
+    let start = (rect.col + rect.width * 0.5, rect.row + rect.height * 0.5);
+
+    handle_patcher_pointer_down(&node, start.0, start.1, KeyModifiers::empty(), 10.0, 20.0);
+    handle_patcher_pointer_drag(&node, start.0 + 3.0, start.1 + 2.0);
+    assert_eq!(
+        handle_patcher_pointer_up(&node, start.0 + 3.0, start.1 + 2.0),
+        PatcherChangeKind::Layout,
+        "layout-only drag release should notify the host without implying a semantic change"
+    );
+    let edited_after_drag = patch_with_interaction_state(
+        root_patch.clone(),
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    let expected_position = edited_after_drag
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "pitch")
+        .unwrap()
+        .position;
+
+    let payload = patcher_layout_payload(&node);
+    let Value::Map(map) = payload else {
+        panic!("expected layout payload map");
+    };
+    assert!(matches!(
+        map.get("status").map(|value| value.borrow().clone()),
+        Some(Value::Keyword(status)) if status == "layout"
+    ));
+    assert!(
+        map.get("layout").is_some(),
+        "layout-only payload should include the current sidecar"
+    );
+    assert!(
+        map.get("source").is_none(),
+        "layout-only payload must not include source, because source triggers recompilation"
+    );
+    let layout = match map.get("layout").map(|value| value.borrow().clone()) {
+        Some(Value::String(layout)) => layout,
+        other => panic!("expected layout string, got {other:?}"),
+    };
+    let payload_sidecar: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    let payload_pitch_position = &payload_sidecar["root"]["nodes"]["pitch"];
+    assert!(
+        (payload_pitch_position["x"].as_f64().unwrap() - expected_position.0 as f64).abs() < 0.0001
+            && (payload_pitch_position["y"].as_f64().unwrap() - expected_position.1 as f64).abs()
+                < 0.0001,
+        "layout payload should include the moved position: payload={payload_pitch_position:?}, expected={expected_position:?}"
+    );
+
+    let disk_sidecar: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(
+        disk_sidecar, original_sidecar,
+        "layout-only drag release must not persist to disk before Save/Finalize"
+    );
+
+    fs::write(&sidecar_path, layout).unwrap();
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let reloaded = load_patch_from_props(&node.props).unwrap().1;
+    let pitch = reloaded
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == "pitch")
+        .unwrap();
+    assert_eq!(pitch.position, expected_position);
+}
+
+#[test]
 fn patcher_double_click_create_uses_model_position_after_zoom() {
     let path = temp_patcher_source_path("patcher-zoom-create");
     fs::write(&path, "\n").unwrap();
@@ -4655,7 +5677,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
     let input_indices = patch_input_indices(&patch);
     assert_eq!(
         input_indices.get("draft").map(Vec::as_slice),
-        Some(&[0][..])
+        Some(&[0, 1][..])
     );
 
     let multiply = node_from_editor_text("mul", "* 3", (0.0, 0.0), &macro_arities, false);
@@ -5635,6 +6657,82 @@ fn writeback_macro_created_node_after_generated_binding_preserves_dependency() {
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
         "(defmacro op (input) (def phasor1 (phasor input)) (def triangle1 (triangle phasor1)) triangle1)"
     );
+}
+
+#[test]
+fn writeback_literal_into_created_phasor_in_macro_preserves_literal_node() {
+    let source = "(defmacro xop (input input2) (def phasor1 (phasor input)) (def triangle1 (triangle phasor1 input2)) (def mul1 (* triangle1 twopi)) mul1)\n(def pitch (in 2 @name pitch))\n(def xop1 (xop pitch 1.0))\n(out xop1 1 @name audio)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "xop")
+        .unwrap();
+    let triangle = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "triangle1")
+        .unwrap();
+
+    let mut state = PatcherInteractionState {
+        active_macro: Some("xop".to_string()),
+        ..Default::default()
+    };
+    let rate = allocate_created_text_node(&mut state, "macro:xop", "0.3");
+    let phasor = allocate_created_text_node(&mut state, "macro:xop", "phasor");
+    connect_output_to_input(&mut state, "macro:xop", &rate, &phasor, 0);
+    connect_output_to_input(&mut state, "macro:xop", &phasor, &triangle.id, 1);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def value1 0.3)"),
+        "created literal should be preserved as a generated binding:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def phasor2 (phasor value1))"),
+        "created phasor should reference the literal node binding instead of inlining it:\n{emitted}"
+    );
+    assert!(
+        !emitted.contains("(def phasor2 (phasor 0.3))"),
+        "connected literal must not be inlined into the created phasor:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def triangle1 (triangle phasor1 phasor2))"),
+        "created phasor should still connect into triangle's second inlet:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+
+    let roundtrip = parse(&emitted);
+    let xop = roundtrip
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "xop")
+        .unwrap();
+    let value = xop
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Constant && node.op == "0.3")
+        .expect("roundtrip should project the generated literal as a constant node");
+    let phasor = xop
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor2")
+        .expect("roundtrip should keep the generated phasor binding");
+    assert_eq!(node_display_label(phasor), "phasor");
+    assert!(xop.patch.connections.iter().any(|connection| {
+        connection.from_node == value.id
+            && connection.to_node == phasor.id
+            && connection.to_input == 0
+    }));
+    assert!(xop.patch.connections.iter().any(|connection| {
+        connection.from_node == phasor.id
+            && connection.to_node == "triangle1"
+            && connection.to_input == 1
+    }));
 }
 
 #[test]

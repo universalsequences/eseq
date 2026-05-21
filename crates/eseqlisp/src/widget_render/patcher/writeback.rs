@@ -192,19 +192,27 @@ pub(super) fn emit_patch_writeback(
         }
     }
 
-    let generated =
-        apply_generated_binding_writeback(&mut document, &effective_root_patch, interaction_state)?;
+    let history_bindings =
+        resolve_history_bindings(&document, &effective_root_patch, interaction_state);
+    let generated = apply_generated_binding_writeback(
+        &mut document,
+        &effective_root_patch,
+        interaction_state,
+        &history_bindings,
+    )?;
     apply_cable_writeback(
         &mut document,
         &effective_root_patch,
         interaction_state,
         &generated,
+        &history_bindings,
     )?;
     apply_history_writeback(
         &mut document,
         &effective_root_patch,
         interaction_state,
         &generated,
+        &history_bindings,
     )?;
 
     Ok(document.emit())
@@ -242,17 +250,26 @@ fn validate_connection_edits(
                 }
             }
             PatcherConnectionOrigin::Source { .. } => {
-                debug_log_writeback_event(
-                    "validation-failed-source-connection-edit",
-                    format!(
-                        "source connection edits are unsupported; delete and recreate instead\n{}",
-                        connection_edit_details(edit)
-                    ),
-                );
-                return Err(WriteBackError::UnsupportedDeletedConnection {
-                    view_key: edit.view_key.clone(),
-                    connection_id: edit.id.clone(),
-                });
+                if source_connection_edit_is_layout_only(root_patch, edit) {
+                    continue;
+                }
+                let original_is_deletable =
+                    source_connection_edit_original_is_deletable(root_patch, edit);
+                let has_source_destination =
+                    connection_edit_has_source_destination(root_patch, edit);
+                if !original_is_deletable || !has_source_destination {
+                    debug_log_writeback_event(
+                        "validation-failed-source-connection-edit",
+                        format!(
+                            "source connection edit cannot be decomposed into delete/create writeback\n{}\nchecks: original_is_deletable={original_is_deletable} has_source_destination={has_source_destination}",
+                            connection_edit_details(edit),
+                        ),
+                    );
+                    return Err(WriteBackError::UnsupportedDeletedConnection {
+                        view_key: edit.view_key.clone(),
+                        connection_id: edit.id.clone(),
+                    });
+                }
             }
         }
     }
@@ -666,6 +683,37 @@ fn source_connection_is_deletable(root_patch: &Patch, view_key: &str, connection
         .is_some()
 }
 
+fn source_connection_edit_is_layout_only(root_patch: &Patch, edit: &PatcherConnectionEdit) -> bool {
+    let PatcherConnectionOrigin::Source {
+        source_connection_id,
+    } = &edit.origin
+    else {
+        return false;
+    };
+    let Some(connection) = source_connection(root_patch, &edit.view_key, source_connection_id)
+    else {
+        return false;
+    };
+    edit.from.node_id == connection.from_node
+        && edit.from.output_index == connection.from_output
+        && edit.to.node_id == connection.to_node
+        && edit.to.input_index == connection.to_input
+        && edit.kind == connection.kind
+}
+
+fn source_connection_edit_original_is_deletable(
+    root_patch: &Patch,
+    edit: &PatcherConnectionEdit,
+) -> bool {
+    let PatcherConnectionOrigin::Source {
+        source_connection_id,
+    } = &edit.origin
+    else {
+        return false;
+    };
+    source_connection_is_deletable(root_patch, &edit.view_key, source_connection_id)
+}
+
 fn split_scoped_key(key: &str) -> (String, String) {
     key.split_once("::")
         .map(|(view, id)| (view.to_string(), id.to_string()))
@@ -975,13 +1023,72 @@ impl GeneratedBindings {
     }
 }
 
-fn apply_generated_binding_writeback(
-    document: &mut SourceDocument,
+#[derive(Debug, Clone, Default)]
+struct HistoryBindings {
+    names: HashMap<(String, String), String>,
+    pending_make_forms: Vec<(SourceScopeId, String)>,
+}
+
+impl HistoryBindings {
+    fn insert(&mut self, view_key: &str, node_id: &str, name: String) {
+        self.names
+            .insert((view_key.to_string(), node_id.to_string()), name);
+    }
+
+    fn get(&self, view_key: &str, node_id: &str) -> Option<&str> {
+        self.names
+            .get(&(view_key.to_string(), node_id.to_string()))
+            .map(String::as_str)
+    }
+
+    fn read_expr(&self, view_key: &str, node_id: &str) -> Option<Expression> {
+        self.get(view_key, node_id).map(|name| {
+            Expression::List(vec![
+                Expression::Symbol("read-history".to_string()),
+                Expression::Symbol(name.to_string()),
+            ])
+        })
+    }
+}
+
+fn resolve_history_bindings(
+    document: &SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
-) -> Result<GeneratedBindings, WriteBackError> {
-    let mut generated = GeneratedBindings::default();
-    let mut allocator = GeneratedNameAllocator::new(document);
+) -> HistoryBindings {
+    let mut bindings = HistoryBindings::default();
+    let mut allocator = HistoryNameAllocator::new(document);
+    for view_key in writeback_views(root_patch, interaction_state) {
+        let Some(patch) = patch_for_view(root_patch, &view_key) else {
+            continue;
+        };
+        let scope = scope_for_view_key(&view_key);
+        for node in patch
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::History)
+        {
+            bindings.insert(&view_key, &node.id, node.id.clone());
+        }
+        let mut created_history_ids = interaction_state
+            .edit_state
+            .nodes
+            .values()
+            .filter(|edit| edit.view_key == view_key)
+            .filter(|edit| created_history_edit(edit))
+            .map(|edit| edit.id.clone())
+            .collect::<Vec<_>>();
+        created_history_ids.sort();
+        for node_id in created_history_ids {
+            let name = allocator.allocate(&scope);
+            bindings.insert(&view_key, &node_id, name.clone());
+            bindings.pending_make_forms.push((scope.clone(), name));
+        }
+    }
+    bindings
+}
+
+fn writeback_views(root_patch: &Patch, interaction_state: &PatcherInteractionState) -> Vec<String> {
     let mut views = vec!["root".to_string()];
     views.extend(
         root_patch
@@ -994,17 +1101,33 @@ fn apply_generated_binding_writeback(
             views.push(edit.view_key.clone());
         }
     }
+    for edit in interaction_state.edit_state.connections.values() {
+        if !views.contains(&edit.view_key) {
+            views.push(edit.view_key.clone());
+        }
+    }
+    views
+}
+
+fn apply_generated_binding_writeback(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    history_bindings: &HistoryBindings,
+) -> Result<GeneratedBindings, WriteBackError> {
+    let mut generated = GeneratedBindings::default();
+    let mut allocator = GeneratedNameAllocator::new(document);
 
     let mut pending_forms: Vec<(SourceScopeId, usize, usize, usize, Expression)> = Vec::new();
     let mut next_generated_def_order = 0usize;
-    for view_key in views {
+    for view_key in writeback_views(root_patch, interaction_state) {
         let scope = scope_for_view_key(&view_key);
         let mut created_nodes = interaction_state
             .edit_state
             .nodes
             .values()
             .filter(|edit| edit.view_key == view_key)
-            .filter(|edit| created_generated_binding_edit(edit))
+            .filter(|edit| created_generated_value_edit(edit))
             .filter(|edit| {
                 !created_macro_instance_edit(interaction_state, edit)
                     || created_macro_instance_is_connected(interaction_state, edit)
@@ -1017,11 +1140,12 @@ fn apply_generated_binding_writeback(
             if !created_param_edit(edit) {
                 continue;
             }
-            let generated_expr = created_node_expression(
+            let generated_expr = created_value_expression(
                 document,
                 root_patch,
                 interaction_state,
                 &generated,
+                history_bindings,
                 &view_key,
                 edit,
             )?;
@@ -1063,6 +1187,7 @@ fn apply_generated_binding_writeback(
                     root_patch,
                     interaction_state,
                     &generated,
+                    history_bindings,
                     &view_key,
                     edit,
                 )? {
@@ -1078,7 +1203,7 @@ fn apply_generated_binding_writeback(
         created_nodes.retain(|edit| !materialized_nodes.contains(&edit.id));
 
         for edit in &created_nodes {
-            let op = created_node_operator(edit)?;
+            let op = created_generated_binding_stem(edit)?;
             let name = allocator.allocate(&scope, &op);
             generated.insert(&view_key, &edit.id, name);
         }
@@ -1088,11 +1213,12 @@ fn apply_generated_binding_writeback(
                 .get(&view_key, &edit.id)
                 .expect("created node name allocated before emission")
                 .to_string();
-            let generated_expr = created_node_expression(
+            let generated_expr = created_value_expression(
                 document,
                 root_patch,
                 interaction_state,
                 &generated,
+                history_bindings,
                 &view_key,
                 edit,
             )?;
@@ -1156,14 +1282,16 @@ fn materialized_created_node_binding(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
     view_key: &str,
     edit: &super::state::PatcherNodeEdit,
 ) -> Result<Option<String>, WriteBackError> {
-    let expr = match created_node_expression(
+    let expr = match created_value_expression(
         document,
         root_patch,
         interaction_state,
         generated,
+        history_bindings,
         view_key,
         edit,
     ) {
@@ -1241,8 +1369,8 @@ fn materialized_created_node_outputs_match_source(
         })
 }
 
-fn created_generated_binding_edit(edit: &super::state::PatcherNodeEdit) -> bool {
-    created_value_edit(edit) && created_literal_expr(edit).is_none()
+fn created_generated_value_edit(edit: &super::state::PatcherNodeEdit) -> bool {
+    created_value_edit(edit)
 }
 
 fn created_param_edit(edit: &super::state::PatcherNodeEdit) -> bool {
@@ -1311,6 +1439,15 @@ fn created_node_operator(edit: &super::state::PatcherNodeEdit) -> Result<String,
     Ok(op.to_string())
 }
 
+fn created_generated_binding_stem(
+    edit: &super::state::PatcherNodeEdit,
+) -> Result<String, WriteBackError> {
+    if created_literal_expr(edit).is_some() {
+        return Ok("value".to_string());
+    }
+    created_node_operator(edit)
+}
+
 fn generated_binding_dependency_depth(
     interaction_state: &PatcherInteractionState,
     view_key: &str,
@@ -1339,7 +1476,7 @@ fn generated_binding_dependency_depth_inner(
                 .edit_state
                 .nodes
                 .get(&node_edit_key(view_key, &connection.from.node_id))
-                .is_some_and(created_generated_binding_edit)
+                .is_some_and(created_generated_value_edit)
         })
         .map(|connection| {
             1 + generated_binding_dependency_depth_inner(
@@ -1383,11 +1520,35 @@ fn created_literal_expr(edit: &super::state::PatcherNodeEdit) -> Option<Expressi
     }
 }
 
+fn created_value_expression(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+) -> Result<Expression, WriteBackError> {
+    if let Some(literal) = created_literal_expr(edit) {
+        return Ok(literal);
+    }
+    created_node_expression(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        history_bindings,
+        view_key,
+        edit,
+    )
+}
+
 fn created_node_expression(
     document: &SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
     view_key: &str,
     edit: &super::state::PatcherNodeEdit,
 ) -> Result<Expression, WriteBackError> {
@@ -1438,6 +1599,7 @@ fn created_node_expression(
             root_patch,
             interaction_state,
             generated,
+            history_bindings,
             view_key,
             &connection.from,
         )?;
@@ -1525,9 +1687,13 @@ fn value_reference_expr(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
     view_key: &str,
     from: &OutputPortRef,
 ) -> Result<Expression, WriteBackError> {
+    if let Some(read_expr) = history_bindings.read_expr(view_key, &from.node_id) {
+        return Ok(read_expr);
+    }
     if let Some(name) = generated.get(view_key, &from.node_id) {
         return Ok(Expression::Symbol(name.to_string()));
     }
@@ -1763,15 +1929,13 @@ fn rewrite_created_literal_consumers(
         .values()
         .filter(|connection| connection.view_key == view_key)
         .filter_map(|connection| {
-            let literal = created_value_node(interaction_state, view_key, &connection.from.node_id)
+            created_value_node(interaction_state, view_key, &connection.from.node_id)
                 .and_then(created_literal_expr)?;
-            (generated.get(view_key, &connection.to.node_id).is_none())
-                .then_some((connection, literal))
+            (generated.get(view_key, &connection.to.node_id).is_none()).then_some(connection)
         })
         .collect::<Vec<_>>();
-    consumers
-        .sort_by_key(|(connection, _)| (connection.to.node_id.clone(), connection.to.input_index));
-    for (connection, literal) in consumers {
+    consumers.sort_by_key(|connection| (connection.to.node_id.clone(), connection.to.input_index));
+    for connection in consumers {
         let Some(dest) = patch_for_view(root_patch, view_key)
             .and_then(|patch| patch_node(patch, &connection.to.node_id))
         else {
@@ -1781,7 +1945,16 @@ fn rewrite_created_literal_consumers(
                 reason: "created literal consumer must be source-backed or generated".to_string(),
             });
         };
-        rewrite_node_input(document, view_key, dest, connection.to.input_index, literal)?;
+        let value = value_reference_expr(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            &HistoryBindings::default(),
+            view_key,
+            &connection.from,
+        )?;
+        rewrite_node_input(document, view_key, dest, connection.to.input_index, value)?;
     }
     Ok(())
 }
@@ -1866,6 +2039,14 @@ fn generated_node_consumers(
         .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
         .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
         .filter(|connection| {
+            !node_is_history(
+                root_patch,
+                interaction_state,
+                view_key,
+                &connection.to.node_id,
+            )
+        })
+        .filter(|connection| {
             patch_for_view(root_patch, view_key)
                 .and_then(|patch| patch_node(patch, &connection.to.node_id))
                 .is_some()
@@ -1896,6 +2077,14 @@ fn rewrite_created_value_consumers(
         .values()
         .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
         .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
+        .filter(|connection| {
+            !node_is_history(
+                root_patch,
+                interaction_state,
+                view_key,
+                &connection.to.node_id,
+            )
+        })
         .collect::<Vec<_>>();
     consumers.sort_by_key(|connection| (connection.to.node_id.clone(), connection.to.input_index));
     for connection in consumers {
@@ -1968,6 +2157,7 @@ fn apply_cable_writeback(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
 ) -> Result<(), WriteBackError> {
     let mut deleted = interaction_state
         .edit_state
@@ -2018,10 +2208,30 @@ fn apply_cable_writeback(
         )?;
     }
 
+    let mut source_edits = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| matches!(connection.origin, PatcherConnectionOrigin::Source { .. }))
+        .filter(|connection| !source_connection_edit_is_layout_only(root_patch, connection))
+        .collect::<Vec<_>>();
+    source_edits.sort_by(|a, b| a.id.cmp(&b.id));
+    for connection in source_edits {
+        apply_source_connection_edit_writeback(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            connection,
+        )?;
+    }
+
     let mut created = interaction_state
         .edit_state
         .connections
         .values()
+        .filter(|connection| matches!(connection.origin, PatcherConnectionOrigin::Created { .. }))
         .collect::<Vec<_>>();
     created.sort_by(|a, b| a.id.cmp(&b.id));
     for connection in created {
@@ -2035,6 +2245,7 @@ fn apply_cable_writeback(
             root_patch,
             interaction_state,
             generated,
+            history_bindings,
             &connection.view_key,
             &connection.from,
         )?;
@@ -2057,72 +2268,103 @@ fn apply_cable_writeback(
     Ok(())
 }
 
+fn apply_source_connection_edit_writeback(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    edit: &PatcherConnectionEdit,
+) -> Result<(), WriteBackError> {
+    let PatcherConnectionOrigin::Source {
+        source_connection_id,
+    } = &edit.origin
+    else {
+        return Ok(());
+    };
+    let Some(original) = source_connection(root_patch, &edit.view_key, source_connection_id) else {
+        return Err(WriteBackError::UnsupportedDeletedConnection {
+            view_key: edit.view_key.clone(),
+            connection_id: edit.id.clone(),
+        });
+    };
+    let Some(original_dest) = patch_for_view(root_patch, &edit.view_key)
+        .and_then(|patch| patch_node(patch, &original.to_node))
+    else {
+        return Err(WriteBackError::UnsupportedDeletedConnection {
+            view_key: edit.view_key.clone(),
+            connection_id: edit.id.clone(),
+        });
+    };
+    let Some(new_dest) = patch_for_view(root_patch, &edit.view_key)
+        .and_then(|patch| patch_node(patch, &edit.to.node_id))
+    else {
+        return Err(WriteBackError::UnsupportedCreatedConnection {
+            view_key: edit.view_key.clone(),
+            connection_id: edit.id.clone(),
+        });
+    };
+    let same_destination =
+        original.to_node == edit.to.node_id && original.to_input == edit.to.input_index;
+    if !same_destination {
+        rewrite_node_input(
+            document,
+            &edit.view_key,
+            original_dest,
+            original.to_input,
+            Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
+        )?;
+    }
+    let value = value_reference_expr(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        history_bindings,
+        &edit.view_key,
+        &edit.from,
+    )?;
+    rewrite_node_input(
+        document,
+        &edit.view_key,
+        new_dest,
+        edit.to.input_index,
+        value,
+    )
+}
+
 fn apply_history_writeback(
     document: &mut SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
 ) -> Result<(), WriteBackError> {
-    let mut allocator = HistoryNameAllocator::new(document);
-    let mut pending_make_forms = Vec::new();
-    let mut pending_write_forms = Vec::new();
-    let mut views = vec!["root".to_string()];
-    views.extend(
-        root_patch
-            .macros
-            .iter()
-            .map(|macro_patch| format!("macro:{}", macro_patch.name)),
-    );
-    for edit in interaction_state.edit_state.nodes.values() {
-        if !views.contains(&edit.view_key) {
-            views.push(edit.view_key.clone());
-        }
-    }
-    for edit in interaction_state.edit_state.connections.values() {
-        if !views.contains(&edit.view_key) {
-            views.push(edit.view_key.clone());
-        }
-    }
+    let mut pending_write_forms: Vec<(SourceScopeId, String, Expression)> = Vec::new();
 
-    for view_key in views {
-        let Some(patch) = patch_for_view(root_patch, &view_key) else {
+    for view_key in writeback_views(root_patch, interaction_state) {
+        if patch_for_view(root_patch, &view_key).is_none() {
             continue;
         };
         validate_single_history_writes(root_patch, interaction_state, &view_key)?;
 
         let scope = scope_for_view_key(&view_key);
-        let mut history_names = HashMap::new();
-        for node in patch
-            .nodes
-            .iter()
-            .filter(|node| node.kind == NodeKind::History)
-        {
-            history_names.insert(node.id.clone(), node.id.clone());
-        }
-        let mut created_history_ids = interaction_state
-            .edit_state
-            .nodes
-            .values()
-            .filter(|edit| edit.view_key == view_key)
-            .filter(|edit| created_history_edit(edit))
-            .map(|edit| edit.id.clone())
-            .collect::<Vec<_>>();
-        created_history_ids.sort();
-        for node_id in created_history_ids {
-            let name = allocator.allocate(&scope);
-            history_names.insert(node_id, name.clone());
-            pending_make_forms.push((scope.clone(), name));
-        }
-
         let mut created_connections = interaction_state
             .edit_state
             .connections
             .values()
             .filter(|edit| edit.view_key == view_key)
+            .filter(|edit| matches!(edit.origin, PatcherConnectionOrigin::Created { .. }))
             .collect::<Vec<_>>();
         created_connections.sort_by(|a, b| a.id.cmp(&b.id));
         for connection in created_connections {
-            if let Some(history_name) = history_names.get(&connection.from.node_id) {
+            if let Some(history_name) = history_bindings.get(&view_key, &connection.from.node_id) {
+                if generated.get(&view_key, &connection.to.node_id).is_some()
+                    || created_value_node(interaction_state, &view_key, &connection.to.node_id)
+                        .is_some()
+                {
+                    continue;
+                }
                 apply_history_read_connection(
                     document,
                     root_patch,
@@ -2130,7 +2372,9 @@ fn apply_history_writeback(
                     connection,
                     history_name,
                 )?;
-            } else if let Some(history_name) = history_names.get(&connection.to.node_id) {
+            } else if let Some(history_name) =
+                history_bindings.get(&view_key, &connection.to.node_id)
+            {
                 let (value, value_scope) = connection_source_expr(
                     document,
                     root_patch,
@@ -2154,7 +2398,7 @@ fn apply_history_writeback(
                 ) {
                     document.replace_expr(&write_value_expr, value)?;
                 } else {
-                    pending_write_forms.push((scope.clone(), history_name.clone(), value));
+                    pending_write_forms.push((scope.clone(), history_name.to_string(), value));
                 }
             } else {
                 if generated.get(&view_key, &connection.from.node_id).is_some()
@@ -2171,17 +2415,17 @@ fn apply_history_writeback(
         }
     }
 
-    for (scope, name) in pending_make_forms.into_iter().rev() {
+    for (scope, name) in history_bindings.pending_make_forms.iter().rev() {
         document.prepend_form(
-            &scope,
+            scope,
             Expression::List(vec![
                 Expression::Symbol("make-history".to_string()),
-                Expression::Symbol(name),
+                Expression::Symbol(name.clone()),
             ]),
         )?;
     }
     for (scope, name, value) in pending_write_forms {
-        document.insert_history_write(&scope, name, value)?;
+        document.insert_history_write(&scope, name.to_string(), value)?;
     }
     Ok(())
 }

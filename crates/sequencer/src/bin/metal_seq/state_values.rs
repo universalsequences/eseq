@@ -7931,6 +7931,59 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_instrument_patcher_layout_uses_transport_patcher_and_three_part_bottom_bar() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.create_scratch_buffer(
+            "*instrument-patcher:test*",
+            "",
+            eseqlisp::BufferMode::ESeqLisp,
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seq-apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
+            .expect("apply instrument patcher layout");
+        editor.refresh_runtime_side_effects();
+
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let tile = |name: &str| {
+            frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == name)
+                .unwrap_or_else(|| panic!("expected tile for {name}"))
+        };
+
+        let transport = tile("*transport*").rect;
+        let patcher = tile("*instrument-patcher:test*").rect;
+        let samples = tile("*samples*").rect;
+        let mixer = tile("*mixer*").rect;
+        let fx = tile("*fx*").rect;
+
+        assert!(
+            transport.row < patcher.row && patcher.row + patcher.height <= samples.row,
+            "patcher mode should stack transport, patcher, then bottom bar; transport={transport:?} patcher={patcher:?} samples={samples:?}"
+        );
+        assert!(
+            patcher.height > samples.height * 4.0,
+            "patcher should dominate the viewport; patcher={patcher:?} bottom={samples:?}"
+        );
+        assert!(
+            (samples.height - 13.0).abs() < 0.75
+                && (mixer.height - 13.0).abs() < 0.75
+                && (fx.height - 13.0).abs() < 0.75,
+            "bottom bar should use the fixed mixer-panel height; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+        );
+        assert!(
+            (samples.width - mixer.width).abs() <= 1.0
+                && (mixer.width - fx.width).abs() <= 1.0
+                && (samples.row - mixer.row).abs() <= 0.1
+                && (mixer.row - fx.row).abs() <= 0.1,
+            "samples/mixer/fx should divide the bottom bar into three horizontal parts; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_dot_global_binding_toggles_recording_outside_editable_text_buffers() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

@@ -34,6 +34,13 @@ use super::text::{
 };
 use super::{debug_patch_for_state, load_patch_from_props};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PatcherChangeKind {
+    None,
+    Layout,
+    Semantic,
+}
+
 pub(super) fn pan_patcher_by_wheel(node: &LayoutNode, mouse_kind: MouseEventKind) {
     let (delta_x, delta_y) = match mouse_kind {
         MouseEventKind::ScrollUp => (0.0, -WHEEL_PAN_STEP_CELLS),
@@ -561,9 +568,17 @@ pub(super) fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, loc
     set_patcher_interaction_state(key, state);
 }
 
-pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local_row: f32) -> bool {
+pub(super) fn handle_patcher_pointer_up(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+) -> PatcherChangeKind {
     let key = patcher_state_key(node);
     let mut state = get_patcher_interaction_state(key);
+    let layout_changed = matches!(
+        state.drag,
+        Some(PatcherDragState::Nodes { .. } | PatcherDragState::CableSegment { .. })
+    );
     let mut semantic_changed = false;
     if let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) {
         if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone())
@@ -579,7 +594,7 @@ pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local
                 true,
             );
             set_patcher_interaction_state(key, state);
-            return false;
+            return PatcherChangeKind::None;
         }
         if let Some(PatcherDragState::Cable {
             from,
@@ -628,7 +643,13 @@ pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local
     }
     state.drag = None;
     set_patcher_interaction_state(key, state);
-    semantic_changed
+    if semantic_changed {
+        PatcherChangeKind::Semantic
+    } else if layout_changed {
+        PatcherChangeKind::Layout
+    } else {
+        PatcherChangeKind::None
+    }
 }
 
 pub(super) fn handle_patcher_pointer_moved(node: &LayoutNode, local_col: f32, local_row: f32) {
