@@ -24,6 +24,25 @@ fn parse(source: &str) -> Patch {
     parse_patch_source(source, PatcherIntent::Instrument).unwrap()
 }
 
+#[test]
+fn named_constant_def_projects_with_binding_id() {
+    let patch = parse("(def value1 0.3)\n(def phase (phasor value1))");
+
+    let constant = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "0.3")
+        .expect("constant node");
+    assert_eq!(constant.id, "value1");
+    assert!(patch.nodes.iter().all(|node| node.id != "0.3"));
+    assert!(
+        patch
+            .connections
+            .iter()
+            .any(|connection| connection.from_node == "value1" && connection.to_node == "phase")
+    );
+}
+
 fn source_expr(scope: SourceScopeId, form_index: usize, path: &[usize]) -> SourceExprId {
     SourceExprId {
         form_id: SourceFormId {
@@ -723,7 +742,7 @@ fn semantic_save_payload_layout_reloads_saved_widget_positions_after_restart() {
     };
     let source = match map.get("source").map(|value| value.borrow().clone()) {
         Some(Value::String(source)) => source,
-        other => panic!("expected emitted source string, got {other:?}"),
+        other => panic!("expected emitted source string, got {other:?}; payload={map:?}"),
     };
     let layout = match map.get("layout").map(|value| value.borrow().clone()) {
         Some(Value::String(layout)) => layout,
@@ -805,7 +824,7 @@ fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
     };
     let source = match map.get("source").map(|value| value.borrow().clone()) {
         Some(Value::String(source)) => source,
-        other => panic!("expected emitted source string, got {other:?}"),
+        other => panic!("expected emitted source string, got {other:?}; payload={map:?}"),
     };
     let layout = match map.get("layout").map(|value| value.borrow().clone()) {
         Some(Value::String(layout)) => layout,
@@ -900,7 +919,7 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
     };
     let source = match map.get("source").map(|value| value.borrow().clone()) {
         Some(Value::String(source)) => source,
-        other => panic!("expected emitted source string, got {other:?}"),
+        other => panic!("expected emitted source string, got {other:?}; payload={map:?}"),
     };
     let layout = match map.get("layout").map(|value| value.borrow().clone()) {
         Some(Value::String(layout)) => layout,
@@ -953,6 +972,80 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
             .unwrap()
             .position,
         cos_position
+    );
+}
+
+#[test]
+fn semantic_save_payload_maps_created_literal_layout_to_generated_constant_binding() {
+    let path = temp_patcher_dsp_path("patcher-created-literal-layout");
+    fs::write(
+        &path,
+        "(def pitch (in 1 @name pitch))\n\
+         (def phase (phasor pitch))\n\
+         (def tri (triangle phase 0.1))\n\
+         (out tri 1 @name audio)\n",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let literal_position = (19.25, 20.5);
+    let phasor_position = (22.0, 22.75);
+
+    let mut state = PatcherInteractionState::default();
+    let literal = allocate_created_text_node(&mut state, "root", "0.3");
+    let phasor = allocate_created_text_node(&mut state, "root", "phasor");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &literal))
+        .unwrap()
+        .position = literal_position;
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &phasor))
+        .unwrap()
+        .position = phasor_position;
+    connect_output_to_input(&mut state, "root", &literal, &phasor, 0);
+    connect_output_to_input(&mut state, "root", &phasor, "tri", 1);
+    set_patcher_interaction_state(key, state);
+
+    let payload = patcher_writeback_payload(&node);
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+    let source = match map.get("source").map(|value| value.borrow().clone()) {
+        Some(Value::String(source)) => source,
+        other => panic!("expected emitted source string, got {other:?}; payload={map:?}"),
+    };
+    let layout = match map.get("layout").map(|value| value.borrow().clone()) {
+        Some(Value::String(layout)) => layout,
+        other => panic!("expected emitted layout string, got {other:?}"),
+    };
+
+    assert!(
+        source.contains("(def value1 0.3)") && source.contains("(def phasor1 (phasor value1))"),
+        "created literal should materialize as a named constant feeding phasor:\n{source}"
+    );
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    assert!(
+        layout_json["root"]["nodes"]["0.3"].is_null(),
+        "layout should not use literal text as the saved node id: {layout}"
+    );
+    assert!(
+        (layout_json["root"]["nodes"]["value1"]["x"]
+            .as_f64()
+            .unwrap()
+            - literal_position.0 as f64)
+            .abs()
+            < 0.0001
+            && (layout_json["root"]["nodes"]["value1"]["y"]
+                .as_f64()
+                .unwrap()
+                - literal_position.1 as f64)
+                .abs()
+                < 0.0001,
+        "layout should keep the visible constant position under value1: {layout}"
     );
 }
 

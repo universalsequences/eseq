@@ -91,6 +91,20 @@ pub(super) fn emit_patch_writeback(
     intent: PatcherIntent,
     interaction_state: &PatcherInteractionState,
 ) -> Result<String, WriteBackError> {
+    emit_patch_writeback_result(source, intent, interaction_state).map(|result| result.source)
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PatchWritebackResult {
+    pub(super) source: String,
+    pub(super) generated_node_ids: HashMap<(String, String), String>,
+}
+
+pub(super) fn emit_patch_writeback_result(
+    source: &str,
+    intent: PatcherIntent,
+    interaction_state: &PatcherInteractionState,
+) -> Result<PatchWritebackResult, WriteBackError> {
     let mut document = SourceDocument::parse(source)?;
     let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
     apply_created_macro_writeback(&mut document, &root_patch, interaction_state)?;
@@ -215,7 +229,10 @@ pub(super) fn emit_patch_writeback(
         &history_bindings,
     )?;
 
-    Ok(document.emit())
+    Ok(PatchWritebackResult {
+        source: document.emit(),
+        generated_node_ids: generated.node_id_map(),
+    })
 }
 
 fn validate_connection_edits(
@@ -1020,6 +1037,10 @@ impl GeneratedBindings {
         self.names
             .get(&(view_key.to_string(), node_id.to_string()))
             .map(String::as_str)
+    }
+
+    fn node_id_map(&self) -> HashMap<(String, String), String> {
+        self.names.clone()
     }
 }
 

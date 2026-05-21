@@ -249,7 +249,7 @@ use state::{
     set_connection_segment_edit, set_patcher_interaction_state,
 };
 use text::{cancel_patcher_text_edit, commit_patcher_text_edit};
-use writeback::emit_patch_writeback;
+use writeback::emit_patch_writeback_result;
 
 use super::text_input::{TextEditOutcome, apply_text_entry_key, cache_char_widths};
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent};
@@ -666,33 +666,39 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
         }
     };
 
-    match emit_patch_writeback(&source, intent, &state) {
-        Ok(source) => {
-            let layout =
-                root_patch.and_then(|root_patch| match parse_patch_source(&source, intent) {
-                    Ok(mut emitted_patch) => {
-                        match sidecar::emitted_layout_json(&mut emitted_patch, &root_patch, &state)
-                        {
-                            Ok(layout) => Some(layout),
-                            Err(error) => {
-                                eprintln!("failed to build emitted patcher layout: {error}");
-                                None
-                            }
+    match emit_patch_writeback_result(&source, intent, &state) {
+        Ok(result) => {
+            let layout = root_patch.and_then(|root_patch| {
+                match parse_patch_source(&result.source, intent) {
+                    Ok(mut emitted_patch) => match sidecar::emitted_layout_json_with_node_map(
+                        &mut emitted_patch,
+                        &root_patch,
+                        &state,
+                        &result.generated_node_ids,
+                    ) {
+                        Ok(layout) => Some(layout),
+                        Err(error) => {
+                            eprintln!("failed to build emitted patcher layout: {error}");
+                            None
                         }
-                    }
+                    },
                     Err(error) => {
                         eprintln!("failed to parse emitted patch for layout persistence: {error}");
                         None
                     }
-                });
+                }
+            });
             debug_log_writeback_event(
                 "payload-valid",
-                format!("path={path_str}\nintent={intent:?}\nsource:\n{source}"),
+                format!(
+                    "path={path_str}\nintent={intent:?}\nsource:\n{}",
+                    result.source
+                ),
             );
             let mut entries = vec![
                 ("status", Value::Keyword("valid".to_string())),
                 ("path", Value::String(path_str)),
-                ("source", Value::String(source)),
+                ("source", Value::String(result.source)),
             ];
             if let Some(layout) = layout {
                 entries.push(("layout", Value::String(layout)));

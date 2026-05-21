@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::display::node_size;
-use super::lisp::is_numeric_literal;
 use super::model::{CableSegmentInfo, Patch, PatchNode};
 use super::state::{
     PatcherInteractionState, patch_with_created_macros, patch_with_interaction_state,
@@ -98,24 +97,14 @@ pub(super) fn current_layout_json(
         .map_err(|error| format!("failed to serialize layout sidecar: {error}"))
 }
 
-pub(super) fn save_emitted_layout(
-    source_path: &Path,
+pub(super) fn emitted_layout_json_with_node_map(
     emitted_patch: &mut Patch,
     previous_root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
-) -> Result<(), String> {
-    let previous = root_patch_with_interaction(previous_root_patch, interaction_state);
-    transfer_positions(&previous, emitted_patch);
-    save_patch_layout(source_path, emitted_patch)
-}
-
-pub(super) fn emitted_layout_json(
-    emitted_patch: &mut Patch,
-    previous_root_patch: &Patch,
-    interaction_state: &PatcherInteractionState,
+    node_id_map: &HashMap<(String, String), String>,
 ) -> Result<String, String> {
-    let previous = root_patch_with_interaction(previous_root_patch, interaction_state);
-    transfer_positions(&previous, emitted_patch);
+    let visible = root_patch_with_interaction(previous_root_patch, interaction_state);
+    overlay_visible_layout(emitted_patch, &visible, node_id_map);
     serde_json::to_string_pretty(&sidecar_from_patch(emitted_patch))
         .map(|json| format!("{json}\n"))
         .map_err(|error| format!("failed to serialize layout sidecar: {error}"))
@@ -313,201 +302,89 @@ fn root_patch_with_interaction(
     root
 }
 
-fn transfer_positions(previous: &Patch, emitted: &mut Patch) {
-    transfer_scope_positions(previous, emitted);
-    let previous_macros = previous
+fn overlay_visible_layout(
+    emitted: &mut Patch,
+    visible: &Patch,
+    node_id_map: &HashMap<(String, String), String>,
+) {
+    overlay_scope_visible_layout(emitted, visible, "root", node_id_map);
+    let visible_macros = visible
         .macros
         .iter()
         .map(|macro_patch| (macro_patch.name.as_str(), &macro_patch.patch))
         .collect::<HashMap<_, _>>();
     for macro_patch in &mut emitted.macros {
-        if let Some(previous_patch) = previous_macros.get(macro_patch.name.as_str()) {
-            transfer_scope_positions(previous_patch, &mut macro_patch.patch);
+        if let Some(visible_patch) = visible_macros.get(macro_patch.name.as_str()) {
+            let view_key = format!("macro:{}", macro_patch.name);
+            overlay_scope_visible_layout(
+                &mut macro_patch.patch,
+                visible_patch,
+                &view_key,
+                node_id_map,
+            );
         }
     }
 }
 
-fn transfer_scope_positions(previous: &Patch, emitted: &mut Patch) {
-    let emitted_connections = emitted.connections.clone();
-    let previous_by_id = previous
+fn overlay_scope_visible_layout(
+    emitted: &mut Patch,
+    visible: &Patch,
+    view_key: &str,
+    node_id_map: &HashMap<(String, String), String>,
+) {
+    let live_node_ids = emitted
         .nodes
         .iter()
-        .map(|node| (node.id.as_str(), node))
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    let positions = visible
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let emitted_id = mapped_node_id(view_key, &node.id, node_id_map);
+            live_node_ids
+                .contains(emitted_id.as_str())
+                .then_some((emitted_id, node.position))
+        })
         .collect::<HashMap<_, _>>();
-    let mut used_previous = HashSet::new();
     for node in &mut emitted.nodes {
-        if let Some(previous_node) = previous_by_id.get(node.id.as_str()) {
-            node.position = previous_node.position;
-            used_previous.insert(previous_node.id.as_str());
+        if let Some(position) = positions.get(&node.id) {
+            node.position = *position;
         }
     }
 
-    let mut previous_by_signature: HashMap<NodeSignature, Vec<&PatchNode>> = HashMap::new();
-    for node in &previous.nodes {
-        if used_previous.contains(node.id.as_str()) {
-            continue;
-        }
-        previous_by_signature
-            .entry(NodeSignature::from_node(node))
-            .or_default()
-            .push(node);
-    }
-    for node in &mut emitted.nodes {
-        if previous_by_id.contains_key(node.id.as_str()) {
-            continue;
-        }
-        if let Some(previous_node) =
-            match_previous_node_by_outputs(previous, &emitted_connections, node, &mut used_previous)
-        {
-            node.position = previous_node.position;
-            continue;
-        }
-        if let Some(previous_node) =
-            match_previous_node_by_inputs(previous, &emitted_connections, node, &mut used_previous)
-        {
-            node.position = previous_node.position;
-            continue;
-        }
-        if let Some(candidates) = previous_by_signature.get_mut(&NodeSignature::from_node(node))
-            && !candidates.is_empty()
-        {
-            let previous_node = candidates.remove(0);
-            node.position = previous_node.position;
-        }
-    }
-}
-
-fn match_previous_node_by_outputs<'a>(
-    previous: &'a Patch,
-    emitted_connections: &[super::model::PatchConnection],
-    emitted_node: &PatchNode,
-    used_previous: &mut HashSet<&'a str>,
-) -> Option<&'a PatchNode> {
-    let emitted_outputs = output_target_signature(emitted_connections, &emitted_node.id);
-    if emitted_outputs.is_empty() {
-        return None;
-    }
-    let mut matches = previous
-        .nodes
+    let visible_segments = visible
+        .connections
         .iter()
-        .filter(|node| !used_previous.contains(node.id.as_str()))
-        .filter(|node| output_target_signature(&previous.connections, &node.id) == emitted_outputs)
-        .collect::<Vec<_>>();
-    if matches.len() != 1 {
-        return None;
-    }
-    let node = matches.remove(0);
-    used_previous.insert(node.id.as_str());
-    Some(node)
-}
-
-fn match_previous_node_by_inputs<'a>(
-    previous: &'a Patch,
-    emitted_connections: &[super::model::PatchConnection],
-    emitted_node: &PatchNode,
-    used_previous: &mut HashSet<&'a str>,
-) -> Option<&'a PatchNode> {
-    let emitted_inputs = input_source_signature(emitted_connections, &emitted_node.id);
-    if emitted_inputs.is_empty() {
-        return None;
-    }
-    let mut matches = previous
-        .nodes
-        .iter()
-        .filter(|node| !used_previous.contains(node.id.as_str()))
-        .filter(|node| node_core_signature(node) == node_core_signature(emitted_node))
-        .filter(|node| input_source_signature(&previous.connections, &node.id) == emitted_inputs)
-        .collect::<Vec<_>>();
-    if matches.len() != 1 {
-        return None;
-    }
-    let node = matches.remove(0);
-    used_previous.insert(node.id.as_str());
-    Some(node)
-}
-
-fn node_core_signature(
-    node: &PatchNode,
-) -> (std::mem::Discriminant<super::model::NodeKind>, &str, usize) {
-    (
-        std::mem::discriminant(&node.kind),
-        node.op.as_str(),
-        node.outputs.len(),
-    )
-}
-
-fn output_target_signature(
-    connections: &[super::model::PatchConnection],
-    node_id: &str,
-) -> Vec<(usize, String, usize)> {
-    let mut targets = connections
-        .iter()
-        .filter(|connection| connection.from_node == node_id)
-        .map(|connection| {
-            (
-                connection.from_output,
-                connection.to_node.clone(),
-                connection.to_input,
-            )
+        .filter_map(|connection| {
+            let from_node = mapped_node_id(view_key, &connection.from_node, node_id_map);
+            let to_node = mapped_node_id(view_key, &connection.to_node, node_id_map);
+            if !live_node_ids.contains(&from_node) || !live_node_ids.contains(&to_node) {
+                return None;
+            }
+            let mut mapped = connection.clone();
+            mapped.from_node = from_node;
+            mapped.to_node = to_node;
+            Some((source_connection_id(&mapped), connection.segment))
         })
-        .collect::<Vec<_>>();
-    targets.sort();
-    targets
+        .collect::<HashMap<_, _>>();
+    for connection in &mut emitted.connections {
+        let id = source_connection_id(connection);
+        if let Some(segment) = visible_segments.get(&id) {
+            connection.segment = *segment;
+        }
+    }
 }
 
-fn input_source_signature(
-    connections: &[super::model::PatchConnection],
+fn mapped_node_id(
+    view_key: &str,
     node_id: &str,
-) -> Vec<(usize, String, usize)> {
-    let mut sources = connections
-        .iter()
-        .filter(|connection| connection.to_node == node_id)
-        .map(|connection| {
-            (
-                connection.to_input,
-                connection.from_node.clone(),
-                connection.from_output,
-            )
-        })
-        .collect::<Vec<_>>();
-    sources.sort();
-    sources
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct NodeSignature {
-    kind: std::mem::Discriminant<super::model::NodeKind>,
-    op: String,
-    args: Vec<String>,
-    outputs: usize,
-}
-
-impl NodeSignature {
-    fn from_node(node: &PatchNode) -> Self {
-        Self {
-            kind: std::mem::discriminant(&node.kind),
-            op: node.op.clone(),
-            args: node
-                .args
-                .iter()
-                .map(|arg| match arg {
-                    super::model::ArgValue::Literal(value) => literal_signature(value),
-                    super::model::ArgValue::SymbolRef(_) => "symbol".to_string(),
-                    super::model::ArgValue::ConnectedExpr => "connected".to_string(),
-                })
-                .collect(),
-            outputs: node.outputs.len(),
-        }
-    }
-}
-
-fn literal_signature(value: &str) -> String {
-    if is_numeric_literal(value) {
-        if let Ok(number) = value.parse::<f64>() {
-            return format!("number:{number:.9}");
-        }
-    }
-    format!("literal:{value}")
+    node_id_map: &HashMap<(String, String), String>,
+) -> String {
+    node_id_map
+        .get(&(view_key.to_string(), node_id.to_string()))
+        .cloned()
+        .unwrap_or_else(|| node_id.to_string())
 }
 
 fn node_rect(node: &PatchNode) -> (f32, f32, f32, f32) {
@@ -522,22 +399,4 @@ fn node_rect(node: &PatchNode) -> (f32, f32, f32, f32) {
 
 fn rects_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
     a.0 < b.2 && a.2 > b.0 && a.1 < b.3 && a.3 > b.1
-}
-
-#[cfg(any(test, feature = "patcher-test-support"))]
-pub(super) fn save_emitted_layout_for_test(
-    source_path: &Path,
-    emitted_source: &str,
-    intent: super::model::PatcherIntent,
-    previous_root_patch: &Patch,
-    interaction_state: &PatcherInteractionState,
-) -> Result<Patch, String> {
-    let mut emitted = super::parse_patch_source(emitted_source, intent)?;
-    save_emitted_layout(
-        source_path,
-        &mut emitted,
-        previous_root_patch,
-        interaction_state,
-    )?;
-    Ok(emitted)
 }

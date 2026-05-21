@@ -476,6 +476,7 @@ impl Projector {
                     Some((
                         self.add_constant_node(
                             name,
+                            stable_id.as_deref(),
                             Some(NodeSource {
                                 owner,
                                 expr: Some(source_expr),
@@ -491,6 +492,7 @@ impl Projector {
             Expression::Number(_) => Some((
                 self.add_constant_node(
                     &format_patch_literal(expr),
+                    stable_id.as_deref(),
                     Some(NodeSource {
                         owner,
                         expr: Some(source_expr),
@@ -778,6 +780,7 @@ impl Projector {
                 .expect("projected source node has a source expression");
             let constant_id = self.add_constant_node(
                 &value,
+                None,
                 Some(NodeSource {
                     owner: SourceOwner::ArgumentSlot {
                         call: to_call.clone(),
@@ -805,8 +808,13 @@ impl Projector {
         }
     }
 
-    fn add_constant_node(&mut self, value: &str, source: Option<NodeSource>) -> String {
-        let id = self.unique_id(value);
+    fn add_constant_node(
+        &mut self,
+        value: &str,
+        stable_id: Option<&str>,
+        source: Option<NodeSource>,
+    ) -> String {
+        let id = self.unique_id(stable_id.unwrap_or(value));
         self.patch.nodes.push(PatchNode {
             id: id.clone(),
             op: value.to_string(),
