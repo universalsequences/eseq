@@ -1314,6 +1314,31 @@ impl Editor {
         }
     }
 
+    fn tile_content_layout_viewport(
+        &self,
+        tile_id: TileId,
+        border_inset: u16,
+    ) -> Option<(f32, f32)> {
+        let rect = self.tile_rect(tile_id)?;
+        if border_inset != 0 {
+            return self
+                .tile_content_area(tile_id, border_inset)
+                .map(|(_, _, width, height)| (width as f32, height as f32));
+        }
+
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        let show_status = self.tile_effective_show_status(tile_id)?;
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        Some(metal_tile_content_viewport(
+            &rect,
+            show_status,
+            leaf.show_border,
+            leaf.border_width_px,
+            cell_w,
+            cell_h,
+        ))
+    }
+
     fn tile_content_precise_event_position(
         &self,
         tile_id: TileId,
@@ -1405,13 +1430,9 @@ impl Editor {
     ) -> R {
         let previous_tile = self.active_tile;
         let switched = tile_id != previous_tile;
-        let previous_viewport = self
-            .tile_content_area(previous_tile, border_inset)
-            .map(|(_, _, width, height)| (width as f32, height as f32));
+        let previous_viewport = self.tile_content_layout_viewport(previous_tile, border_inset);
 
-        let target_viewport = self
-            .tile_content_area(tile_id, border_inset)
-            .map(|(_, _, width, height)| (width as f32, height as f32));
+        let target_viewport = self.tile_content_layout_viewport(tile_id, border_inset);
 
         if switched {
             self.switch_active_tile_with_viewport(tile_id, target_viewport);

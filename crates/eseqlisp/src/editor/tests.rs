@@ -3016,6 +3016,68 @@ fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
 }
 
 #[test]
+fn metal_tiled_widget_click_uses_fractional_layout_viewport_without_relayout() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def clicked (state false))
+                (effect
+                  (button "hit"
+                    :width 4
+                    :height 1
+                    :on-click (lambda (info) (set! clicked true))))
+            "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+
+    let tile_id = editor.active_tile;
+    if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.show_border = true;
+        leaf.show_status = false;
+        leaf.border_width_px = 0.25;
+    }
+    editor.cached_tile_rects = vec![(
+        tile_id,
+        crate::layout::Rect {
+            col: 3.25,
+            row: 10.5,
+            width: 20.0,
+            height: 8.0,
+        },
+    )];
+    editor.set_layout_viewport_exact(19.5, 7.5);
+    editor.runtime.drain_rendered_layouts();
+    let layout_revision = editor.widget_layout_revision();
+
+    let precise_col: f32 = 3.25 + 0.25 + 0.5;
+    let precise_row: f32 = 10.5 + 0.25 + 0.5;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+
+    assert_eq!(editor.widget_layout_revision(), layout_revision);
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "routing a Metal tile click must not relayout from fractional viewport to floored viewport"
+    );
+    assert_eq!(
+        editor.runtime.eval_str("clicked").unwrap().unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
 fn mouse_down_updates_knob_via_bind_shorthand() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
