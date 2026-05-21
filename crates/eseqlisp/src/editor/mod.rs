@@ -40,7 +40,7 @@ fn metal_tile_content_viewport(
     border_width_px: f32,
     cell_w: f32,
     cell_h: f32,
-) -> (u16, u16) {
+) -> (f32, f32) {
     let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
     let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
     let border_inset_px = if show_border {
@@ -51,13 +51,10 @@ fn metal_tile_content_viewport(
     } else {
         0.0
     };
-    let cols = (rect.width - border_inset_px * 2.0 / cell_w.max(1.0))
-        .max(0.0)
-        .floor() as u16;
+    let cols = (rect.width - border_inset_px * 2.0 / cell_w.max(1.0)).max(0.0);
     let content_height =
         rect.height - border_inset_px * 2.0 / cell_h.max(1.0) - if show_status { 1.0 } else { 0.0 };
-    let rows = content_height.max(0.0).floor() as u16;
-    (cols.max(1), rows.max(1))
+    (cols.max(1.0), content_height.max(1.0))
 }
 
 fn metal_tile_content_viewport_height_exact(
@@ -617,7 +614,7 @@ impl Editor {
     pub fn switch_active_tile_with_viewport(
         &mut self,
         new_tile: TileId,
-        viewport: Option<(u16, u16)>,
+        viewport: Option<(f32, f32)>,
     ) {
         if new_tile == self.active_tile {
             return;
@@ -1362,16 +1359,16 @@ impl Editor {
         let switched = tile_id != previous_tile;
         let previous_viewport = self
             .tile_content_area(previous_tile, border_inset)
-            .map(|(_, _, width, height)| (width, height));
+            .map(|(_, _, width, height)| (width as f32, height as f32));
 
         let target_viewport = self
             .tile_content_area(tile_id, border_inset)
-            .map(|(_, _, width, height)| (width, height));
+            .map(|(_, _, width, height)| (width as f32, height as f32));
 
         if switched {
             self.switch_active_tile_with_viewport(tile_id, target_viewport);
         } else if let Some((width, height)) = target_viewport {
-            self.set_layout_viewport(width, height);
+            self.set_layout_viewport_exact(width, height);
         }
 
         let result = f(self);
@@ -2065,7 +2062,7 @@ impl Editor {
         let viewport_rows = if viewport_rows > 0.0 {
             viewport_rows
         } else {
-            self.runtime.layout_rows() as f32
+            self.runtime.layout_rows_exact()
         };
         let overflow = self
             .runtime
@@ -2083,7 +2080,7 @@ impl Editor {
     pub fn clamp_widget_scroll_offsets(&mut self) {
         let max_v = self.max_widget_vertical_scroll();
         let max_h = {
-            let vp = self.runtime.layout_cols() as f32;
+            let vp = self.runtime.layout_cols_exact();
             let aspect = self.runtime.layout_aspect();
             self.runtime
                 .current_layout
@@ -2102,7 +2099,7 @@ impl Editor {
         let max_v = self.max_widget_vertical_scroll();
 
         let max_h = {
-            let vp = self.runtime.layout_cols() as f32;
+            let vp = self.runtime.layout_cols_exact();
             let aspect = self.runtime.layout_aspect();
             self.runtime
                 .current_layout
@@ -2144,6 +2141,11 @@ impl Editor {
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
         self.runtime.set_layout_viewport(cols, rows);
+        self.sync_layout_to_active_leaf();
+    }
+
+    pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
+        self.runtime.set_layout_viewport_exact(cols, rows);
         self.sync_layout_to_active_leaf();
     }
 
@@ -4059,7 +4061,7 @@ impl Editor {
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         // Collect tile viewports first to avoid borrow issues
-        let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -4085,7 +4087,10 @@ impl Editor {
                         cell_w,
                         cell_h,
                     ),
-                    None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
+                    None => (
+                        self.runtime.layout_cols_exact(),
+                        self.runtime.layout_rows_exact(),
+                    ),
                 };
                 Some((id, cols, rows))
             })
@@ -4160,7 +4165,7 @@ impl Editor {
         let buffer_id = self.buffers[buffer_idx].id as u64;
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
-        let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -4185,7 +4190,10 @@ impl Editor {
                         cell_w,
                         cell_h,
                     ),
-                    None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
+                    None => (
+                        self.runtime.layout_cols_exact(),
+                        self.runtime.layout_rows_exact(),
+                    ),
                 };
                 Some((id, cols, rows))
             })

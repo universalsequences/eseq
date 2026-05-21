@@ -429,7 +429,7 @@ impl Editor {
     pub(super) fn restore_buffer_widget_tree_with_cached_layout(
         &mut self,
         cached_layout: Option<std::sync::Arc<LayoutNode>>,
-        viewport: Option<(u16, u16)>,
+        viewport: Option<(f32, f32)>,
         layout_revision: u64,
     ) {
         crate::widget_render::clear_overlay();
