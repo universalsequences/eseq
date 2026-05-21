@@ -111,7 +111,7 @@
       :widget-slider-dot    '(0.36 0.36 0.38)   ;
       :widget-knob-filled   '(0.00 0.48 0.95)   ;
       :widget-knob-track    '(0.04 0.04 0.04)   ;
-      :patcher-bg           '(0.12 0.13 0.14)
+      :patcher-bg           '(0.08 0.08 0.08)
       :patcher-grid-minor   '(0.22 0.23 0.25 0.34)
       :patcher-grid-major   '(0.32 0.33 0.36 0.46)
       :patcher-text         '(0.88 0.88 0.89)
@@ -122,8 +122,8 @@
       :patcher-marquee-fill '(0.00 0.48 0.95 0.12)
       :patcher-marquee-border '(0.00 0.48 0.95 0.72)
       :patcher-node-bg      '(0.17 0.17 0.18)
-      :patcher-node-border  '(0.31 0.31 0.34)
-      :patcher-node-text    '(0.20 0.78 0.35)
+      :patcher-node-border  '(0.32 0.32 0.39)
+      :patcher-node-text    '(0.30 0.98 0.75)
       :patcher-node-tail-text '(0.92 0.92 0.94)
       :patcher-io-node-bg   '(0.17 0.17 0.18)
       :patcher-io-node-border '(0.36 0.36 0.39)
@@ -133,7 +133,7 @@
       :patcher-param-node-text '(0.45 0.68 1.00)
       :patcher-code-node-bg '(0.22 0.12 0.13)
       :patcher-code-node-border '(1.00 0.35 0.39)
-      :patcher-code-node-text '(1.00 0.54 0.58)
+      :patcher-code-node-text '(0.58 0.54 0.58)
       :patcher-node-hover-border '(0.58 0.58 0.62)
       :patcher-node-selected-border '(0.00 0.48 0.95)
       :patcher-port-input   '(1.00 0.80 0.00)

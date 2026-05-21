@@ -43,10 +43,14 @@ pub(super) fn attribute_value(items: &[Expression], attr: &str) -> Option<String
 }
 
 pub(super) fn attribute_symbol_value<'a>(items: &'a [Expression], attr: &str) -> Option<&'a str> {
-    items.windows(2).find_map(|pair| match (&pair[0], &pair[1]) {
-        (Expression::Symbol(key), Expression::Symbol(value)) if key == attr => Some(value.as_str()),
-        _ => None,
-    })
+    items
+        .windows(2)
+        .find_map(|pair| match (&pair[0], &pair[1]) {
+            (Expression::Symbol(key), Expression::Symbol(value)) if key == attr => {
+                Some(value.as_str())
+            }
+            _ => None,
+        })
 }
 
 pub(super) fn node_kind_for_op(op: &str, macros: &HashSet<String>) -> NodeKind {

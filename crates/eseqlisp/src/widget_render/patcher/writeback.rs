@@ -856,15 +856,14 @@ fn created_node_expression(
 
     normalize_created_node_inline_args(items, &macro_arities, max_input_index);
     for connection in inbound {
-        let value =
-            value_reference_expr(
-                document,
-                root_patch,
-                interaction_state,
-                generated,
-                view_key,
-                &connection.from,
-            )?;
+        let value = value_reference_expr(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            view_key,
+            &connection.from,
+        )?;
         let item_index = connection.to.input_index + 1;
         while items.len() <= item_index {
             items.push(Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()));
@@ -884,7 +883,10 @@ fn normalize_created_node_inline_args(
     };
     let known_macros = macro_arities.keys().cloned().collect::<HashSet<_>>();
     let kind = node_kind_for_op(&op, &known_macros);
-    if matches!(kind, NodeKind::In | NodeKind::Out | NodeKind::Param | NodeKind::Constant) {
+    if matches!(
+        kind,
+        NodeKind::In | NodeKind::Out | NodeKind::Param | NodeKind::Constant
+    ) {
         return;
     }
     let shape = editor_node_port_shape(&op, kind, macro_arities);
@@ -1100,14 +1102,13 @@ fn rewrite_created_literal_consumers(
         .filter(|connection| connection.view_key == view_key)
         .filter_map(|connection| {
             let literal = created_value_node(interaction_state, view_key, &connection.from.node_id)
-            .and_then(created_literal_expr)?;
+                .and_then(created_literal_expr)?;
             (generated.get(view_key, &connection.to.node_id).is_none())
                 .then_some((connection, literal))
         })
         .collect::<Vec<_>>();
-    consumers.sort_by_key(|(connection, _)| {
-        (connection.to.node_id.clone(), connection.to.input_index)
-    });
+    consumers
+        .sort_by_key(|(connection, _)| (connection.to.node_id.clone(), connection.to.input_index));
     for (connection, literal) in consumers {
         let Some(dest) = patch_for_view(root_patch, view_key)
             .and_then(|patch| patch_node(patch, &connection.to.node_id))
@@ -1118,13 +1119,7 @@ fn rewrite_created_literal_consumers(
                 reason: "created literal consumer must be source-backed or generated".to_string(),
             });
         };
-        rewrite_node_input(
-            document,
-            view_key,
-            dest,
-            connection.to.input_index,
-            literal,
-        )?;
+        rewrite_node_input(document, view_key, dest, connection.to.input_index, literal)?;
     }
     Ok(())
 }
@@ -1153,9 +1148,15 @@ fn collect_generated_node_prior_form_dependencies(
     }
     if let Some(edit) = created_value_node(interaction_state, view_key, node_id) {
         if created_literal_expr(edit).is_none() {
-            for connection in interaction_state.edit_state.connections.values().filter(
-                |connection| connection.view_key == view_key && connection.to.node_id == node_id,
-            ) {
+            for connection in
+                interaction_state
+                    .edit_state
+                    .connections
+                    .values()
+                    .filter(|connection| {
+                        connection.view_key == view_key && connection.to.node_id == node_id
+                    })
+            {
                 collect_generated_node_prior_form_dependencies(
                     patch,
                     interaction_state,
