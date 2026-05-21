@@ -96,6 +96,37 @@ pub fn emit_patch_writeback_with_inserted_node_before_first_output(
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
+pub fn emit_patch_writeback_with_first_node_text_edit(
+    source: &str,
+    intent: PatcherIntent,
+    op: &str,
+    edited_text: &str,
+) -> Result<String, String> {
+    let patch = parse_patch_source(source, intent)?;
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == op)
+        .ok_or_else(|| format!("patch has no `{op}` node"))?;
+    let mut state = state::PatcherInteractionState::default();
+    state::set_node_edit_position(
+        &mut state,
+        "root",
+        node,
+        node.position,
+        display::node_display_label(node),
+    );
+    state
+        .edit_state
+        .nodes
+        .get_mut(&state::node_edit_key("root", &node.id))
+        .expect("source node edit should be present")
+        .text = edited_text.to_string();
+
+    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+}
+
+#[cfg(any(test, feature = "patcher-test-support"))]
 pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
     source: &str,
     intent: PatcherIntent,

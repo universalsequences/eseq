@@ -26,6 +26,10 @@ and try again within a small retry budget.
 Critical effect DSP rules:
 - There is no top-level wrapper form. A complete effect is top-level `(def ...)`,
   `(defmacro ...)`, `(param ...)`, `(in ...)`, and `(out ...)` forms.
+- Prefer `(defmacro ...)` for complex, self-contained DSP computations that have
+  clear inputs and one conceptual result, even when the helper is only used once.
+  Use this to name and isolate meaningful logic, not to hide simple one-line
+  arithmetic or split tightly coupled signal flow.
 - Never write `(defeffect ...)` in `dsp_source`. Never put the effect name
   inside `dsp_source`; the artifact tool's `name` field is the effect name.
 - Effects are stereo audio processors. Always declare:

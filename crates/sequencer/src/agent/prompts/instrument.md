@@ -106,6 +106,10 @@ Critical syntax rules:
   `(definstrument ...)`, `(defsynth ...)`, `(process ...)`, or `(main ...)`.
 - A complete instrument is just top-level `(def ...)`, `(defmacro ...)`,
   `(param ...)`, `(in ...)`, and `(out ...)` forms.
+- Prefer `(defmacro ...)` for complex, self-contained DSP computations that have
+  clear inputs and one conceptual result, even when the helper is only used once.
+  Use this to name and isolate meaningful logic, not to hide simple one-line
+  arithmetic or split tightly coupled signal flow.
 - DGenLisp is order-dependent. Never reference a symbol before the top-level
   form that defines it. Every `(def name ...)` must appear before any later
   `(def ...)` or `(out ...)` that reads `name`. Before calling an artifact tool,
