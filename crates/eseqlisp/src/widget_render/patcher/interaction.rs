@@ -9,7 +9,8 @@ use super::emit::debug_log_patch_lisp;
 use super::geometry::{
     connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_macro_drill_in,
     hit_patcher_node, hit_patcher_output_port, hit_patcher_segmented_cable_horizontal_segment,
-    nearest_patcher_input_port, nearest_patcher_output_port, patch_content_size, patch_node_rects,
+    nearest_patcher_input_port, nearest_patcher_output_port, patch_content_size,
+    patch_input_indices, patch_input_slot_counts, patch_node_rects, patch_output_counts,
     patcher_back_button_rect, patcher_breadcrumb_rect, patcher_origin, patcher_zoom, port_center,
     rect_contains, rect_from_points, rects_intersect, screen_to_model,
 };
@@ -18,7 +19,6 @@ use super::metrics::{
     SEGMENTED_CABLE_DRAG_PADDING_CELLS, WHEEL_PAN_STEP_CELLS,
 };
 use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, OutputPortRef, Patch};
-use super::render::{patch_input_indices, patch_input_slot_counts, patch_output_counts};
 use super::state::{
     PatcherDragState, PatcherInteractionState, PatcherPanState, active_patcher_patch,
     active_patcher_view_key, allocate_created_connection, allocate_created_node,

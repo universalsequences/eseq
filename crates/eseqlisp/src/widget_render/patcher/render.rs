@@ -17,9 +17,9 @@ use crate::vm::Value;
 
 use super::display::{node_display_label, preview};
 use super::geometry::{
-    connection_cable_edit_points, connection_endpoints, patch_content_size, patch_node_rects,
-    patcher_back_button_rect, patcher_macro_drill_in_rect, patcher_zoom, port_center,
-    rect_from_points,
+    connection_cable_edit_points, connection_endpoints, patch_content_size, patch_input_indices,
+    patch_input_slot_counts, patch_node_rects, patch_output_counts, patcher_back_button_rect,
+    patcher_macro_drill_in_rect, patcher_zoom, port_center, rect_from_points,
 };
 use super::load_patch_from_props;
 use super::metrics::{
@@ -27,7 +27,7 @@ use super::metrics::{
     NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
-use super::model::{ArgValue, ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode};
+use super::model::{ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode};
 use super::state::{
     PatcherDragState, PatcherInteractionState, PatcherPanState, PatcherTextEdit,
     active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
@@ -395,59 +395,6 @@ pub(super) fn draw_patch(
             zoom,
         );
     }
-}
-
-pub(super) fn patch_input_indices(patch: &Patch) -> HashMap<String, Vec<usize>> {
-    let mut indices: HashMap<String, Vec<usize>> = HashMap::new();
-    for node in &patch.nodes {
-        for (idx, arg) in node.args.iter().enumerate() {
-            if matches!(arg, ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr) {
-                indices.entry(node.id.clone()).or_default().push(idx);
-            }
-        }
-    }
-    for connection in &patch.connections {
-        let node_indices = indices.entry(connection.to_node.clone()).or_default();
-        if !node_indices.contains(&connection.to_input) {
-            node_indices.push(connection.to_input);
-        }
-    }
-    for node_indices in indices.values_mut() {
-        node_indices.sort_unstable();
-        node_indices.dedup();
-    }
-    indices
-}
-
-pub(super) fn patch_input_slot_counts(
-    patch: &Patch,
-    input_indices: &HashMap<String, Vec<usize>>,
-) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    for node in &patch.nodes {
-        let count = input_indices.get(&node.id).map(Vec::len).unwrap_or(0);
-        if count > 0 {
-            counts.insert(node.id.clone(), count);
-        }
-    }
-    counts
-}
-
-pub(super) fn patch_output_counts(patch: &Patch) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    for node in &patch.nodes {
-        if !node.outputs.is_empty() {
-            counts.insert(node.id.clone(), node.outputs.len());
-        }
-    }
-    for connection in &patch.connections {
-        let needed = connection.from_output + 1;
-        counts
-            .entry(connection.from_node.clone())
-            .and_modify(|count| *count = (*count).max(needed))
-            .or_insert(needed);
-    }
-    counts
 }
 
 #[cfg(target_os = "macos")]

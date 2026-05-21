@@ -66,6 +66,20 @@ pub(crate) fn cache_char_widths(text: String, font_size: f32, ctx: &MeasureCtx<'
     });
 }
 
+pub(crate) fn text_width_from_char_cache(
+    text: &str,
+    font_size: f32,
+    fallback_char_width_cells: f32,
+) -> f32 {
+    CHAR_WIDTH_CACHE.with(|c| {
+        let key = (font_size.to_bits(), text.to_string());
+        if let Some(widths) = c.borrow().get(&key) {
+            return widths.iter().sum();
+        }
+        text.chars().count() as f32 * fallback_char_width_cells
+    })
+}
+
 fn set_state(widget_id: u64, state: TextInputState) {
     let changed = STATES.with(|s| {
         let mut states = s.borrow_mut();

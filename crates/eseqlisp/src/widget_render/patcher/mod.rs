@@ -583,9 +583,9 @@ fn toggle_selected_cable_segmented(
     if segment.is_segmented && segment.segment_row == 0.0 {
         let pan_state = state::get_patcher_pan_state(patcher_state_key(node));
         let node_rects = geometry::patch_node_rects(&patch, node.rect, &pan_state);
-        let input_indices = render::patch_input_indices(&patch);
-        let input_slot_counts = render::patch_input_slot_counts(&patch, &input_indices);
-        let output_counts = render::patch_output_counts(&patch);
+        let input_indices = geometry::patch_input_indices(&patch);
+        let input_slot_counts = geometry::patch_input_slot_counts(&patch, &input_indices);
+        let output_counts = geometry::patch_output_counts(&patch);
         if let Some((start, end)) = geometry::connection_endpoints(
             &connection,
             &node_rects,

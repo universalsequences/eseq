@@ -55,6 +55,24 @@ impl TextMeasurer for FixedWidthTextMeasurer {
     }
 }
 
+struct VariableWidthTextMeasurer;
+
+impl TextMeasurer for VariableWidthTextMeasurer {
+    fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+        text.chars()
+            .map(|ch| match ch {
+                'i' | 'l' | ' ' => 4.0,
+                'W' | 'm' => 18.0,
+                _ => 10.0,
+            })
+            .sum()
+    }
+
+    fn line_height_px(&self, _font_size: f32) -> f32 {
+        20.0
+    }
+}
+
 fn node_expr(node: &PatchNode) -> SourceExprId {
     node.source
         .as_ref()
@@ -100,6 +118,108 @@ fn patcher_test_node(path: &std::path::Path) -> LayoutNode {
         ]),
         children: Vec::new(),
         focusable: true,
+    }
+}
+
+#[test]
+fn node_size_uses_cached_proportional_character_widths() {
+    let label = "Wii".to_string();
+    let measurer = VariableWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    cache_char_widths(label.clone(), NODE_FONT_SIZE, &measure_ctx);
+
+    let node = PatchNode {
+        id: "wide-narrow".to_string(),
+        op: label,
+        kind: NodeKind::Builtin,
+        label: String::new(),
+        args: Vec::new(),
+        outputs: Vec::new(),
+        position: (0.0, 0.0),
+        diagnostic: None,
+        source: None,
+    };
+
+    let (width, height) = node_size(&node);
+
+    assert_eq!(height, NODE_HEIGHT);
+    assert_eq!(
+        width, 5.8,
+        "measured `Wii` should be 2.6 cells plus node padding, not 3 fixed-width characters"
+    );
+}
+
+#[test]
+fn node_rects_leave_room_for_multiple_input_ports() {
+    let patch = parse(
+        r#"
+            (def a (in 1 @name a))
+            (def b (in 2 @name b))
+            (def c (in 3 @name c))
+            (def d (in 4 @name d))
+            (def sig (svf a b c d))
+            "#,
+    );
+    let rects = patch_node_rects(
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        &PatcherPanState::default(),
+    );
+    let sig = rects.get("sig").expect("svf rect");
+    let zoom = DEFAULT_ZOOM;
+    let expected_width = (PORT_EDGE_PADDING_CELLS * 2.0 + PORT_MIN_CENTER_SPACING_CELLS * 3.0)
+        * zoom;
+
+    assert_eq!(sig.width, expected_width);
+}
+
+#[test]
+fn multi_input_port_centers_keep_minimum_spacing() {
+    let patch = parse(
+        r#"
+            (def a (in 1 @name a))
+            (def b (in 2 @name b))
+            (def c (in 3 @name c))
+            (def d (in 4 @name d))
+            (def sig (svf a b c d))
+            "#,
+    );
+    let rects = patch_node_rects(
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        &PatcherPanState::default(),
+    );
+    let sig = *rects.get("sig").expect("svf rect");
+    let input_indices = patch_input_indices(&patch);
+    let slot_count = patch_input_slot_counts(&patch, &input_indices)
+        .get("sig")
+        .copied()
+        .expect("svf input slots");
+    let centers: Vec<f32> = (0..slot_count)
+        .map(|idx| port_center(sig, idx, slot_count, true).0)
+        .collect();
+    let min_spacing = PORT_MIN_CENTER_SPACING_CELLS * DEFAULT_ZOOM;
+
+    for pair in centers.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= min_spacing - 0.0001,
+            "adjacent input ports should be separated by at least {min_spacing}, got {centers:?}"
+        );
     }
 }
 

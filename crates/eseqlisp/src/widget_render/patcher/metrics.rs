@@ -4,6 +4,7 @@ pub(super) const NODE_MIN_WIDTH: f32 = 5.8;
 pub(super) const NODE_HEIGHT: f32 = 1.68;
 pub(super) const CODE_NODE_MIN_WIDTH: f32 = 14.0;
 pub(super) const CODE_NODE_HEIGHT: f32 = 3.7;
+pub(super) const PORT_MIN_CENTER_SPACING_CELLS: f32 = 2.8;
 pub(super) const LAYER_SPACING: f32 = 4.95;
 pub(super) const NODE_COLUMN_GAP: f32 = 3.0;
 pub(super) const VIEW_PADDING_X: f32 = 4.0;

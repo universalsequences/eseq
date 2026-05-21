@@ -1,4 +1,8 @@
-use super::metrics::{CODE_NODE_HEIGHT, CODE_NODE_MIN_WIDTH, NODE_HEIGHT, NODE_MIN_WIDTH};
+use super::super::text_input::text_width_from_char_cache;
+use super::metrics::{
+    CODE_NODE_FONT_SIZE, CODE_NODE_HEIGHT, CODE_NODE_MIN_WIDTH, NODE_FONT_SIZE, NODE_HEIGHT,
+    NODE_MIN_WIDTH, PORT_EDGE_PADDING_CELLS, PORT_MIN_CENTER_SPACING_CELLS,
+};
 use super::model::{ArgValue, NodeKind, PatchNode};
 
 pub(super) fn preview(text: &str, max_chars: usize) -> String {
@@ -15,10 +19,9 @@ pub(super) fn preview(text: &str, max_chars: usize) -> String {
 
 pub(super) fn node_display_label(node: &PatchNode) -> String {
     let base = match node.kind {
-        NodeKind::Builtin
-        | NodeKind::MacroInstance
-        | NodeKind::Out
-        | NodeKind::Constant => node.op.as_str(),
+        NodeKind::Builtin | NodeKind::MacroInstance | NodeKind::Out | NodeKind::Constant => {
+            node.op.as_str()
+        }
         NodeKind::In => return node.label.clone(),
         _ => node.label.as_str(),
     };
@@ -60,7 +63,15 @@ pub(super) fn node_display_label(node: &PatchNode) -> String {
 }
 
 pub(super) fn node_size(node: &PatchNode) -> (f32, f32) {
-    let char_width = if node.kind == NodeKind::CodeIsland {
+    node_size_for_ports(node, 0, node.outputs.len())
+}
+
+pub(super) fn node_size_for_ports(
+    node: &PatchNode,
+    input_slot_count: usize,
+    output_count: usize,
+) -> (f32, f32) {
+    let fallback_char_width = if node.kind == NodeKind::CodeIsland {
         0.52
     } else {
         1.16
@@ -71,13 +82,37 @@ pub(super) fn node_size(node: &PatchNode) -> (f32, f32) {
         2.65
     };
     let label = node_display_label(node);
-    let text_width = label.chars().count() as f32 * char_width + horizontal_padding;
+    let font_size = if node.kind == NodeKind::CodeIsland {
+        CODE_NODE_FONT_SIZE
+    } else {
+        NODE_FONT_SIZE
+    };
+    let text_width =
+        text_width_from_char_cache(&label, font_size, fallback_char_width) + horizontal_padding;
     if node.kind == NodeKind::CodeIsland {
         (
-            text_width.max(CODE_NODE_MIN_WIDTH).min(34.0),
+            text_width
+                .max(CODE_NODE_MIN_WIDTH)
+                .min(34.0)
+                .max(port_width(input_slot_count.max(output_count))),
             CODE_NODE_HEIGHT,
         )
     } else {
-        (text_width.max(NODE_MIN_WIDTH).min(96.0), NODE_HEIGHT)
+        (
+            text_width
+                .max(NODE_MIN_WIDTH)
+                .min(96.0)
+                .max(port_width(input_slot_count.max(output_count))),
+            NODE_HEIGHT,
+        )
+    }
+}
+
+fn port_width(port_count: usize) -> f32 {
+    if port_count == 0 {
+        0.0
+    } else {
+        PORT_EDGE_PADDING_CELLS * 2.0
+            + PORT_MIN_CENTER_SPACING_CELLS * port_count.saturating_sub(1) as f32
     }
 }

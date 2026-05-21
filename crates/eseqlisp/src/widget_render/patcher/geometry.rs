@@ -2,21 +2,30 @@ use std::collections::HashMap;
 
 use crate::layout::Rect;
 
-use super::display::node_size;
+use super::display::node_size_for_ports;
 use super::metrics::{
     CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HIT_RADIUS_CELLS,
     CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT, PATCH_ORIGIN_COL_OFFSET,
     PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
-use super::model::{CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection};
+use super::model::{
+    ArgValue, CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection,
+};
 use super::state::{PatcherPanState, source_connection_id};
 
 pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
+    let input_indices = patch_input_indices(patch);
+    let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
+    let output_counts = patch_output_counts(patch);
     let mut max_col: f32 = VIEW_PADDING_X * 2.0;
     let mut max_row: f32 = VIEW_PADDING_Y * 2.0;
     for node in &patch.nodes {
-        let (width, height) = node_size(node);
+        let (width, height) = node_size_for_ports(
+            node,
+            input_slot_counts.get(&node.id).copied().unwrap_or(0),
+            output_counts.get(&node.id).copied().unwrap_or(0),
+        );
         max_col = max_col.max(PATCH_ORIGIN_COL_OFFSET + node.position.0 + width + VIEW_PADDING_X);
         max_row = max_row.max(PATCH_ORIGIN_ROW_OFFSET + node.position.1 + height + VIEW_PADDING_Y);
     }
@@ -51,11 +60,18 @@ pub(super) fn patch_node_rects(
 ) -> HashMap<String, Rect> {
     let origin = patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
+    let input_indices = patch_input_indices(patch);
+    let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
+    let output_counts = patch_output_counts(patch);
     patch
         .nodes
         .iter()
         .map(|node| {
-            let size = node_size(node);
+            let size = node_size_for_ports(
+                node,
+                input_slot_counts.get(&node.id).copied().unwrap_or(0),
+                output_counts.get(&node.id).copied().unwrap_or(0),
+            );
             (
                 node.id.clone(),
                 Rect {
@@ -67,6 +83,59 @@ pub(super) fn patch_node_rects(
             )
         })
         .collect()
+}
+
+pub(super) fn patch_input_indices(patch: &Patch) -> HashMap<String, Vec<usize>> {
+    let mut indices: HashMap<String, Vec<usize>> = HashMap::new();
+    for node in &patch.nodes {
+        for (idx, arg) in node.args.iter().enumerate() {
+            if matches!(arg, ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr) {
+                indices.entry(node.id.clone()).or_default().push(idx);
+            }
+        }
+    }
+    for connection in &patch.connections {
+        let node_indices = indices.entry(connection.to_node.clone()).or_default();
+        if !node_indices.contains(&connection.to_input) {
+            node_indices.push(connection.to_input);
+        }
+    }
+    for node_indices in indices.values_mut() {
+        node_indices.sort_unstable();
+        node_indices.dedup();
+    }
+    indices
+}
+
+pub(super) fn patch_input_slot_counts(
+    patch: &Patch,
+    input_indices: &HashMap<String, Vec<usize>>,
+) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for node in &patch.nodes {
+        let count = input_indices.get(&node.id).map(Vec::len).unwrap_or(0);
+        if count > 0 {
+            counts.insert(node.id.clone(), count);
+        }
+    }
+    counts
+}
+
+pub(super) fn patch_output_counts(patch: &Patch) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for node in &patch.nodes {
+        if !node.outputs.is_empty() {
+            counts.insert(node.id.clone(), node.outputs.len());
+        }
+    }
+    for connection in &patch.connections {
+        let needed = connection.from_output + 1;
+        counts
+            .entry(connection.from_node.clone())
+            .and_modify(|count| *count = (*count).max(needed))
+            .or_insert(needed);
+    }
+    counts
 }
 
 pub(super) fn hit_patcher_node(
