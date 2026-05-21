@@ -20,7 +20,14 @@ fn capture_patcher_lexilush_png() {
     );
     let status = std::process::Command::new(exe)
         .args([
-            "--source", &source, "--width", "2050", "--height", "1218", "--out",
+            "--source",
+            &source,
+            "--width",
+            "2050",
+            "--height",
+            "1218",
+            "--patcher-fit",
+            "--out",
         ])
         .arg(&out)
         .status()

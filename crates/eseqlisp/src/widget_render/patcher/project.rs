@@ -3,13 +3,13 @@ use std::sync::OnceLock;
 
 use crate::parser::{Expression, format_expression};
 
-use super::display::{node_size, preview};
+use super::display::preview;
+use super::layout;
 use super::lisp::{
     attribute_symbol_value, attribute_value, connection_kind_for_op, default_outputs,
     format_patch_literal, is_numeric_literal, is_unsupported_call_head, node_kind_for_op,
     node_label, symbol_at,
 };
-use super::metrics::{LAYER_SPACING, NODE_COLUMN_GAP, VIEW_PADDING_X, VIEW_PADDING_Y};
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
     ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch, NodeKind, NodeSource,
@@ -1024,12 +1024,14 @@ fn instrument_input_signature(expr: &Expression) -> Option<(usize, &str, usize)>
         _ => return None,
     };
     let name = attribute_symbol_value(items, "@name")?;
-    let modulator = match items.windows(2).find_map(|pair| match (&pair[0], &pair[1]) {
-        (Expression::Symbol(key), Expression::Number(value)) if key == "@modulator" => {
-            Some(*value)
-        }
-        _ => None,
-    }) {
+    let modulator = match items
+        .windows(2)
+        .find_map(|pair| match (&pair[0], &pair[1]) {
+            (Expression::Symbol(key), Expression::Number(value)) if key == "@modulator" => {
+                Some(*value)
+            }
+            _ => None,
+        }) {
         Some(value) if value.fract() == 0.0 && value > 0.0 => value as usize,
         _ => return None,
     };
@@ -1037,67 +1039,7 @@ fn instrument_input_signature(expr: &Expression) -> Option<(usize, &str, usize)>
 }
 
 pub(super) fn assign_layout(patch: &mut Patch) {
-    let mut id_to_idx = HashMap::new();
-    for (idx, node) in patch.nodes.iter().enumerate() {
-        id_to_idx.insert(node.id.clone(), idx);
-    }
-
-    let mut layers = vec![0usize; patch.nodes.len()];
-    for (idx, node) in patch.nodes.iter().enumerate() {
-        layers[idx] = match node.kind {
-            NodeKind::In | NodeKind::Param => 0,
-            NodeKind::CodeIsland | NodeKind::MacroDefinition => 1,
-            _ => 1,
-        };
-    }
-
-    for _ in 0..patch.nodes.len() {
-        let mut changed = false;
-        for connection in &patch.connections {
-            let (Some(&from), Some(&to)) = (
-                id_to_idx.get(&connection.from_node),
-                id_to_idx.get(&connection.to_node),
-            ) else {
-                continue;
-            };
-            if connection.kind == ConnectionKind::Feedback {
-                continue;
-            }
-            let next = layers[from].saturating_add(1);
-            if layers[to] < next {
-                layers[to] = next;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    let out_layer = layers.iter().copied().max().unwrap_or(1).saturating_add(1);
-    for (idx, node) in patch.nodes.iter().enumerate() {
-        if node.kind == NodeKind::Out {
-            layers[idx] = out_layer;
-        }
-    }
-
-    let mut by_layer: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (idx, layer) in layers.iter().copied().enumerate() {
-        by_layer.entry(layer).or_default().push(idx);
-    }
-
-    let mut layer_keys = by_layer.keys().copied().collect::<Vec<_>>();
-    layer_keys.sort_unstable();
-    for layer in layer_keys {
-        let nodes = by_layer.get_mut(&layer).unwrap();
-        nodes.sort_by(|a, b| patch.nodes[*a].id.cmp(&patch.nodes[*b].id));
-        let mut col = VIEW_PADDING_X;
-        for idx in nodes.iter().copied() {
-            let (width, _) = node_size(&patch.nodes[idx]);
-            patch.nodes[idx].position = (col, VIEW_PADDING_Y + layer as f32 * LAYER_SPACING);
-            col += width + NODE_COLUMN_GAP;
-        }
-    }
+    layout::assign_layout(patch);
 }
 
 pub(super) fn dgenlisp_constant_names() -> &'static HashSet<String> {
@@ -1212,9 +1154,7 @@ fn expression_special_forms(metadata: &serde_json::Value) -> Vec<&serde_json::Va
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|form| {
-            form.get("name").and_then(serde_json::Value::as_str) == Some("mod")
-        })
+        .filter(|form| form.get("name").and_then(serde_json::Value::as_str) == Some("mod"))
         .collect()
 }
 

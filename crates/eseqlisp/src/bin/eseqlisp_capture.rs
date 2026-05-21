@@ -23,6 +23,11 @@ fn run() -> Result<(), String> {
 
     let args = CaptureArgs::parse(std::env::args().skip(1))?;
     let source = args.source()?;
+    let source = if args.patcher_fit || args.patcher_zoom.is_some() {
+        inject_patcher_capture_props(&source, args.patcher_zoom, args.patcher_fit)?
+    } else {
+        source
+    };
 
     let mut backend = MetalBackend::new_capture(args.width, args.height)
         .map_err(|_| "failed to create Metal backend".to_string())?;
@@ -111,6 +116,8 @@ struct CaptureArgs {
     width: u32,
     height: u32,
     out: std::path::PathBuf,
+    patcher_zoom: Option<f32>,
+    patcher_fit: bool,
     touchpad_scroll: Option<(f32, f32)>,
     click: Option<(f32, f32)>,
     super_y: bool,
@@ -128,6 +135,8 @@ impl CaptureArgs {
             width: 1600,
             height: 1000,
             out: std::path::PathBuf::from("/tmp/eseqlisp-capture.png"),
+            patcher_zoom: None,
+            patcher_fit: false,
             touchpad_scroll: None,
             click: None,
             super_y: false,
@@ -144,6 +153,14 @@ impl CaptureArgs {
                 }
                 "--width" => parsed.width = parse_u32(&mut args, "--width")?,
                 "--height" => parsed.height = parse_u32(&mut args, "--height")?,
+                "--patcher-zoom" => {
+                    let zoom = parse_f32(&mut args, "--patcher-zoom")?;
+                    if !(zoom.is_finite() && zoom > 0.0) {
+                        return Err("--patcher-zoom expects a positive finite number".to_string());
+                    }
+                    parsed.patcher_zoom = Some(zoom);
+                }
+                "--patcher-fit" => parsed.patcher_fit = true,
                 "--touchpad-scroll" => {
                     let delta_x = parse_f32(&mut args, "--touchpad-scroll delta-x")?;
                     let delta_y = parse_f32(&mut args, "--touchpad-scroll delta-y")?;
@@ -182,7 +199,7 @@ impl CaptureArgs {
     }
 
     fn usage() -> String {
-        "usage: eseqlisp_capture (--source LISP | --source-file PATH) [--width PX] [--height PX] [--touchpad-scroll DX DY] [--click COL ROW] [--super-y] --out PATH"
+        "usage: eseqlisp_capture (--source LISP | --source-file PATH) [--width PX] [--height PX] [--patcher-zoom ZOOM] [--patcher-fit] [--touchpad-scroll DX DY] [--click COL ROW] [--super-y] --out PATH"
             .to_string()
     }
 }
@@ -219,4 +236,29 @@ where
     let raw = next_value(args, flag)?;
     raw.parse::<f32>()
         .map_err(|_| format!("{flag} expects a number"))
+}
+
+#[cfg(target_os = "macos")]
+fn inject_patcher_capture_props(
+    source: &str,
+    zoom: Option<f32>,
+    fit: bool,
+) -> Result<String, String> {
+    let needle = "(patcher";
+    let Some(idx) = source.find(needle) else {
+        return Err(
+            "patcher capture options require the source to contain a patcher widget".to_string(),
+        );
+    };
+    let insert_at = idx + needle.len();
+    let mut injected = String::with_capacity(source.len() + 32);
+    injected.push_str(&source[..insert_at]);
+    if let Some(zoom) = zoom {
+        injected.push_str(&format!(" :initial-zoom {zoom}"));
+    }
+    if fit {
+        injected.push_str(" :fit true");
+    }
+    injected.push_str(&source[insert_at..]);
+    Ok(injected)
 }

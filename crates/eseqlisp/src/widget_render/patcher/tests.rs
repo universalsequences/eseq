@@ -1,6 +1,6 @@
+use super::super::text_input::{cache_char_widths, TextInputState};
 use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
-use super::super::text_input::{TextInputState, cache_char_widths};
 use super::display::*;
 use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
 use super::geometry::*;
@@ -10,7 +10,7 @@ use super::model::{CableEndpoint, InputPortRef, OutputPortRef};
 use super::project::dgenlisp_operator_names;
 use super::render::*;
 use super::state::*;
-use super::writeback::{WriteBackError, emit_patch_writeback};
+use super::writeback::{emit_patch_writeback, WriteBackError};
 use super::*;
 use crate::layout::{LayoutNode, MeasureCtx, Rect, TextMeasurer};
 use crate::theme;
@@ -177,8 +177,8 @@ fn node_rects_leave_room_for_multiple_input_ports() {
     );
     let sig = rects.get("sig").expect("svf rect");
     let zoom = DEFAULT_ZOOM;
-    let expected_width = (PORT_EDGE_PADDING_CELLS * 2.0 + PORT_MIN_CENTER_SPACING_CELLS * 3.0)
-        * zoom;
+    let expected_width =
+        (PORT_EDGE_PADDING_CELLS * 2.0 + PORT_MIN_CENTER_SPACING_CELLS * 3.0) * zoom;
 
     assert_eq!(sig.width, expected_width);
 }
@@ -302,20 +302,16 @@ fn projects_instrument_plumbing_and_nested_calls() {
             (out sig 1 @name audio)
             "#,
     );
-    assert!(
-        patch
-            .nodes
-            .iter()
-            .any(|node| node.kind == NodeKind::In && node.id == "pitch")
-    );
+    assert!(patch
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::In && node.id == "pitch"));
     assert!(patch.nodes.iter().any(|node| node.op == "phasor"));
     assert!(patch.nodes.iter().any(|node| node.op == "triangle"));
-    assert!(
-        patch
-            .nodes
-            .iter()
-            .any(|node| node.kind == NodeKind::Out && node.id == "audio")
-    );
+    assert!(patch
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Out && node.id == "audio"));
     assert!(patch.connections.len() >= 3, "{:#?}", patch.connections);
 }
 
@@ -516,16 +512,14 @@ fn source_metadata_resolves_param_references_by_binding_identity() {
         .collect::<Vec<_>>();
 
     assert_eq!(resolved, vec![param_binding.clone(), param_binding]);
-    assert!(
-        patch
-            .nodes
-            .iter()
-            .find(|node| node.id == "unresolved")
-            .unwrap()
-            .args
-            .iter()
-            .any(|arg| matches!(arg, ArgValue::Literal(value) if value == "freq"))
-    );
+    assert!(patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "unresolved")
+        .unwrap()
+        .args
+        .iter()
+        .any(|arg| matches!(arg, ArgValue::Literal(value) if value == "freq")));
 }
 
 #[test]
@@ -565,21 +559,17 @@ fn collapses_history_read_and_write_into_make_history_node() {
         "{:#?}",
         patch.nodes
     );
-    assert!(
-        patch
-            .connections
-            .iter()
-            .any(|connection| connection.from_node == history.id
-                && connection.kind == ConnectionKind::Forward)
-    );
-    assert!(
-        patch
-            .connections
-            .iter()
-            .any(|connection| connection.to_node == history.id
-                && connection.to_input == 0
-                && connection.kind == ConnectionKind::Feedback)
-    );
+    assert!(patch
+        .connections
+        .iter()
+        .any(|connection| connection.from_node == history.id
+            && connection.kind == ConnectionKind::Forward));
+    assert!(patch
+        .connections
+        .iter()
+        .any(|connection| connection.to_node == history.id
+            && connection.to_input == 0
+            && connection.kind == ConnectionKind::Feedback));
 }
 
 #[test]
@@ -601,21 +591,17 @@ fn source_metadata_tracks_history_compound_ownership_and_connections() {
     let SourceOwner::Compound { parts } = &source.owner else {
         panic!("history should have compound owner: {source:#?}");
     };
-    assert!(
-        parts.iter().any(
-            |owner| matches!(owner, SourceOwner::TopLevelForm { form_id } if form_id.index == 0)
-        )
-    );
+    assert!(parts
+        .iter()
+        .any(|owner| matches!(owner, SourceOwner::TopLevelForm { form_id } if form_id.index == 0)));
     assert!(
         parts
             .iter()
             .any(|owner| matches!(owner, SourceOwner::NestedExpr { expr } if expr == &source_expr(SourceScopeId::Root, 2, &[2, 1])))
     );
-    assert!(
-        parts.iter().any(
-            |owner| matches!(owner, SourceOwner::TopLevelForm { form_id } if form_id.index == 3)
-        )
-    );
+    assert!(parts
+        .iter()
+        .any(|owner| matches!(owner, SourceOwner::TopLevelForm { form_id } if form_id.index == 3)));
 
     let feedback = patch
         .connections
@@ -630,29 +616,25 @@ fn source_metadata_tracks_history_compound_ownership_and_connections() {
     assert_eq!(feedback_source.to_arg.semantic_index, 1);
     assert_eq!(feedback_source.to_arg.item_index, 2);
 
-    assert!(
-        patch
-            .connections
-            .iter()
-            .any(|connection| connection.from_node == history.id
-                && connection.kind == ConnectionKind::Forward
-                && connection.source.as_ref().is_some_and(|source| {
-                    source.to_call == source_expr(SourceScopeId::Root, 2, &[2])
-                        && source.to_arg.semantic_index == 0
-                        && source.to_arg.item_index == 1
-                }))
-    );
+    assert!(patch
+        .connections
+        .iter()
+        .any(|connection| connection.from_node == history.id
+            && connection.kind == ConnectionKind::Forward
+            && connection.source.as_ref().is_some_and(|source| {
+                source.to_call == source_expr(SourceScopeId::Root, 2, &[2])
+                    && source.to_arg.semantic_index == 0
+                    && source.to_arg.item_index == 1
+            })));
 }
 
 #[test]
 fn unsupported_forms_become_code_islands() {
     let patch = parse("(if gate (out 1 1 @name audio) (out 0 1 @name audio))");
-    assert!(
-        patch
-            .nodes
-            .iter()
-            .any(|node| node.kind == NodeKind::CodeIsland)
-    );
+    assert!(patch
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::CodeIsland));
     assert!(!patch.diagnostics.is_empty());
 }
 
@@ -728,21 +710,19 @@ fn source_metadata_scopes_macro_subpatches_separately() {
         name: "sig".to_string(),
         kind: BindingKind::MacroParam,
     };
-    assert!(
-        macro_patch
-            .patch
-            .connections
-            .iter()
-            .filter_map(|connection| connection.source.as_ref())
-            .any(|source| matches!(
-                &source.previous_arg,
-                SourceArgValue::SymbolReference {
-                    symbol,
-                    resolved_binding: Some(binding),
-                    ..
-                } if symbol == "sig" && binding == &sig_binding
-            ))
-    );
+    assert!(macro_patch
+        .patch
+        .connections
+        .iter()
+        .filter_map(|connection| connection.source.as_ref())
+        .any(|source| matches!(
+            &source.previous_arg,
+            SourceArgValue::SymbolReference {
+                symbol,
+                resolved_binding: Some(binding),
+                ..
+            } if symbol == "sig" && binding == &sig_binding
+        )));
     assert_ne!(node_expr(root_phasor).form_id.scope, macro_scope);
 }
 
@@ -2442,12 +2422,10 @@ fn leading_constants_become_nodes_to_preserve_input_order() {
             && connection.to_node == multiply.id
             && connection.to_input == 0
     }));
-    assert!(
-        patch
-            .connections
-            .iter()
-            .any(|connection| connection.to_node == multiply.id && connection.to_input == 1)
-    );
+    assert!(patch
+        .connections
+        .iter()
+        .any(|connection| connection.to_node == multiply.id && connection.to_input == 1));
 
     let input_indices = patch_input_indices(&patch);
     assert_eq!(
@@ -3055,17 +3033,15 @@ fn super_y_toggles_selected_cable_segmentation() {
         },
     );
 
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Char('y'),
-                    modifiers: KeyModifiers::SUPER,
-                },
-            )
-            .is_some()
-    );
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char('y'),
+                modifiers: KeyModifiers::SUPER,
+            },
+        )
+        .is_some());
 
     let state = get_patcher_interaction_state(key);
     let patch = patch_with_interaction_state(patch, &state, "root");
@@ -3075,8 +3051,7 @@ fn super_y_toggles_selected_cable_segmentation() {
         .find(|connection| source_connection_id(connection) == selected_cable)
         .and_then(|connection| connection.segment)
         .unwrap();
-    assert!(segment.is_segmented);
-    assert_ne!(segment.segment_row, 0.0);
+    assert!(!segment.is_segmented);
 }
 
 #[test]
@@ -3214,6 +3189,20 @@ fn segmented_cable_rendering_collapses_aligned_ports_to_vertical_curve() {
         (def sig (phasor pitch))
     "#;
     let mut patch = parse(source);
+    let pitch_x = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "pitch")
+        .unwrap()
+        .position
+        .0;
+    patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "sig")
+        .unwrap()
+        .position
+        .0 = pitch_x;
     let pan = PatcherPanState::default();
     let rect = Rect {
         row: 0.0,
@@ -3294,12 +3283,10 @@ fn selected_source_cable_delete_marks_connection_deleted() {
     delete_connection_edit_or_mark_deleted(&mut state, "root", &connection_id);
 
     assert_eq!(state.selected_cable, None);
-    assert!(
-        state
-            .edit_state
-            .deleted_connections
-            .contains(&connection_edit_key("root", &connection_id))
-    );
+    assert!(state
+        .edit_state
+        .deleted_connections
+        .contains(&connection_edit_key("root", &connection_id)));
     let patch = patch_with_interaction_state(patch, &state, "root");
     assert!(patch.connections.is_empty(), "{:#?}", patch.connections);
 }
@@ -3357,12 +3344,10 @@ fn selected_source_node_delete_hides_node_and_incident_connections() {
     assert!(delete_selected_nodes(&mut state, "root"));
 
     assert!(state.selected_nodes.is_empty());
-    assert!(
-        state
-            .edit_state
-            .deleted_nodes
-            .contains(&node_edit_key("root", "pitch"))
-    );
+    assert!(state
+        .edit_state
+        .deleted_nodes
+        .contains(&node_edit_key("root", "pitch")));
     let patch = patch_with_interaction_state(patch, &state, "root");
     assert!(!patch.nodes.iter().any(|node| node.id == "pitch"));
     assert!(
@@ -3414,12 +3399,10 @@ fn selected_created_node_delete_removes_node_and_created_connections() {
 
     assert!(delete_selected_nodes(&mut state, "root"));
 
-    assert!(
-        !state
-            .edit_state
-            .nodes
-            .contains_key(&node_edit_key("root", &created_id))
-    );
+    assert!(!state
+        .edit_state
+        .nodes
+        .contains_key(&node_edit_key("root", &created_id)));
     assert!(state.edit_state.deleted_nodes.is_empty());
     assert!(state.edit_state.connections.is_empty());
     let patch = patch_with_interaction_state(patch, &state, "root");
@@ -3456,7 +3439,8 @@ fn selected_cable_handles_are_hit_near_rendered_edit_points() {
         &output_counts,
     )
     .expect("rendered connection endpoints");
-    let (from_handle, to_handle) = cable_edit_points(start, end, patcher_zoom(&pan));
+    let (from_handle, to_handle) =
+        connection_cable_edit_points(connection, start, end, patcher_zoom(&pan));
 
     assert_eq!(
         hit_patcher_cable_handle(
@@ -3551,7 +3535,8 @@ fn dragging_selected_cable_endpoint_reconnects_and_keeps_cable_selected() {
         &output_counts,
     )
     .unwrap();
-    let (from_handle, _) = cable_edit_points(start, end, patcher_zoom(&pan));
+    let (from_handle, _) =
+        connection_cable_edit_points(&original_connection, start, end, patcher_zoom(&pan));
     let gate_rect = node_rects.get("gate").unwrap();
     let gate_output = port_center(*gate_rect, 0, output_counts["gate"], false);
 
@@ -3836,12 +3821,10 @@ fn defmacro_becomes_read_only_subpatch() {
         "{:#?}",
         macro_patch.nodes
     );
-    assert!(
-        patch
-            .nodes
-            .iter()
-            .any(|node| node.kind == NodeKind::MacroInstance)
-    );
+    assert!(patch
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::MacroInstance));
     assert!(
         !patch
             .nodes
@@ -3914,17 +3897,15 @@ fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
     state.text_edit = None;
     state.selected_nodes.insert(macro_node.id.clone());
     set_patcher_interaction_state(key, state);
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Enter,
-                    modifiers: KeyModifiers::empty(),
-                },
-            )
-            .is_some()
-    );
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
     assert_eq!(
         get_patcher_interaction_state(key).active_macro.as_deref(),
         Some("ap")
@@ -3978,39 +3959,33 @@ fn double_clicking_background_creates_editable_draft_node() {
     assert!(handle_patcher_double_click(&node, 40.0, 20.0));
     assert!(get_patcher_interaction_state(key).text_edit.is_some());
 
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Char('p'),
-                    modifiers: KeyModifiers::empty(),
-                },
-            )
-            .is_some()
-    );
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Char('h'),
-                    modifiers: KeyModifiers::empty(),
-                },
-            )
-            .is_some()
-    );
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Char(' '),
-                    modifiers: KeyModifiers::empty(),
-                },
-            )
-            .is_some()
-    );
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char('p'),
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
     assert_eq!(
         get_patcher_interaction_state(key)
             .text_edit
@@ -4018,17 +3993,15 @@ fn double_clicking_background_creates_editable_draft_node() {
             .map(|edit| edit.text.as_str()),
         Some("ph ")
     );
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Enter,
-                    modifiers: KeyModifiers::empty(),
-                },
-            )
-            .is_some()
-    );
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
 
     let state = get_patcher_interaction_state(key);
     assert!(state.text_edit.is_none());
@@ -4194,28 +4167,24 @@ fn double_clicking_node_edits_display_text_in_memory() {
         pitch_rect.col + NODE_TEXT_COL_OFFSET,
         pitch_rect.row + pitch_rect.height * 0.5,
     ));
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Char('x'),
-                    modifiers: KeyModifiers::empty(),
-                },
-            )
-            .is_some()
-    );
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Enter,
-                    modifiers: KeyModifiers::empty(),
-                },
-            )
-            .is_some()
-    );
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char('x'),
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
 
     let state = get_patcher_interaction_state(key);
     assert_eq!(
@@ -4277,33 +4246,27 @@ fn backspace_without_text_edit_deletes_selected_nodes() {
     state.selected_nodes.insert("pitch".to_string());
     set_patcher_interaction_state(key, state);
 
-    assert!(
-        PATCHER_WIDGET
-            .key_event(
-                &node,
-                WidgetKeyEvent {
-                    code: KeyCode::Backspace,
-                    modifiers: KeyModifiers::empty(),
-                },
-            )
-            .is_some()
-    );
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Backspace,
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
     let state = get_patcher_interaction_state(key);
     assert!(state.text_edit.is_none());
     assert!(state.selected_nodes.is_empty());
-    assert!(
-        state
-            .edit_state
-            .deleted_nodes
-            .contains(&node_edit_key("root", "pitch"))
-    );
+    assert!(state
+        .edit_state
+        .deleted_nodes
+        .contains(&node_edit_key("root", "pitch")));
     let patch = patch_with_interaction_state(root_patch, &state, "root");
-    assert!(
-        !patch
-            .nodes
-            .iter()
-            .any(|patch_node| patch_node.id == "pitch")
-    );
+    assert!(!patch
+        .nodes
+        .iter()
+        .any(|patch_node| patch_node.id == "pitch"));
 
     let _ = std::fs::remove_file(path);
 }
@@ -4419,6 +4382,290 @@ fn layout_assigns_finite_nonzero_node_positions() {
         assert!(node.position.1.is_finite());
         assert!(node.position.0 >= 0.0);
         assert!(node.position.1 >= 0.0);
+    }
+}
+
+#[test]
+fn layout_preserves_source_order_instead_of_sorting_ids_alphabetically() {
+    let patch = parse(
+        r#"
+            (def z (in 1 @name z_source))
+            (def a (in 2 @name a_source))
+            (def left (* z 2))
+            (def right (* a 3))
+            (out (+ left right) 1 @name audio)
+            "#,
+    );
+    let z = patch.nodes.iter().find(|node| node.id == "z").unwrap();
+    let a = patch.nodes.iter().find(|node| node.id == "a").unwrap();
+    assert!(
+        z.position.0 < a.position.0,
+        "layout should use source/dataflow order, not alphabetical id order: z={:?} a={:?}",
+        z.position,
+        a.position
+    );
+}
+
+#[test]
+fn layout_stacks_many_params_vertically() {
+    let patch = parse(
+        r#"
+            (param mix @min 0 @max 1 @default 0.5)
+            (param tone @min 0 @max 1 @default 0.5)
+            (param drive @min 0 @max 1 @default 0.5)
+            (param gain @min 0 @max 1 @default 0.5)
+            (def signal (in 1 @name signal))
+            (def shaped (* signal gain))
+            (out (+ (* shaped mix) tone drive) 1 @name audio)
+            "#,
+    );
+    let params = ["mix", "tone", "drive", "gain"]
+        .into_iter()
+        .map(|id| patch.nodes.iter().find(|node| node.id == id).unwrap())
+        .collect::<Vec<_>>();
+    let x = params[0].position.0;
+    for param in &params {
+        assert!(
+            (param.position.0 - x).abs() < 0.01,
+            "params should share a control-stack x position: {id} at {:?}, expected x {x}",
+            param.position,
+            id = param.id
+        );
+    }
+    for pair in params.windows(2) {
+        assert!(
+            pair[0].position.1 < pair[1].position.1,
+            "params should be stacked vertically in stable order: {}={:?} {}={:?}",
+            pair[0].id,
+            pair[0].position,
+            pair[1].id,
+            pair[1].position
+        );
+    }
+}
+
+#[test]
+fn layout_segments_generated_connections() {
+    let patch = parse(
+        r#"
+            (def signal (in 1 @name signal))
+            (def a (* signal 0.5))
+            (def b (+ a 0.25))
+            (out b 1 @name audio)
+            "#,
+    );
+    for connection in &patch.connections {
+        assert!(
+            connection
+                .segment
+                .is_some_and(|segment| segment.is_segmented),
+            "generated connection should have deterministic segment routing: {} -> {}",
+            connection.from_node,
+            connection.to_node
+        );
+    }
+}
+
+#[test]
+fn layout_reuses_segment_lane_for_same_source_fanout() {
+    let patch = parse(
+        r#"
+            (param amount @min 0 @max 1 @default 0.5)
+            (def input (in 1 @name input))
+            (def a (* input amount))
+            (def b (+ amount input))
+            (out (+ a b) 1 @name audio)
+            "#,
+    );
+    let lanes = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.from_node == "amount")
+        .map(|connection| connection.segment.unwrap().segment_row)
+        .collect::<Vec<_>>();
+    assert!(lanes.len() >= 2, "fixture should create param fanout");
+    for lane in lanes.iter().skip(1) {
+        assert!(
+            (*lane - lanes[0]).abs() < 0.01,
+            "same source fanout should share one segment lane: {:?}",
+            lanes
+        );
+    }
+}
+
+#[test]
+fn layout_separates_segment_lanes_for_different_sources() {
+    let patch = parse(
+        r#"
+            (param a @min 0 @max 1 @default 0.5)
+            (param b @min 0 @max 1 @default 0.5)
+            (def input (in 1 @name input))
+            (def left (* input a))
+            (def right (* input b))
+            (out (+ left right) 1 @name audio)
+            "#,
+    );
+    let lane_for = |source: &str| {
+        patch
+            .connections
+            .iter()
+            .find(|connection| connection.from_node == source)
+            .and_then(|connection| connection.segment)
+            .unwrap()
+            .segment_row
+    };
+    let a_lane = lane_for("a");
+    let b_lane = lane_for("b");
+    assert!(
+        (a_lane - b_lane).abs() >= 0.5,
+        "different source nodes should not share overlapping segment lanes: a={a_lane} b={b_lane}"
+    );
+}
+
+#[test]
+fn layout_routes_stacked_params_right_before_crossing_next_param() {
+    let patch = parse(
+        r#"
+            (param first @min 0 @max 1 @default 0.5)
+            (param second @min 0 @max 1 @default 0.5)
+            (param third @min 0 @max 1 @default 0.5)
+            (def signal (in 1 @name signal))
+            (def a (* signal first))
+            (def b (* signal second))
+            (def c (* signal third))
+            (out (+ a b c) 1 @name audio)
+            "#,
+    );
+    let first = patch.nodes.iter().find(|node| node.id == "first").unwrap();
+    let second = patch.nodes.iter().find(|node| node.id == "second").unwrap();
+    let first_lane = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "first")
+        .and_then(|connection| connection.segment)
+        .unwrap()
+        .segment_row;
+    assert!(
+        first_lane < second.position.1,
+        "top stacked param should turn right before crossing the next param: first={:?} second={:?} lane={first_lane}",
+        first.position,
+        second.position
+    );
+}
+
+#[test]
+fn layout_aligns_primary_signal_chain_centers() {
+    let patch = parse(
+        r#"
+            (def signal (in 1 @name signal))
+            (def a (* signal 0.5))
+            (def b (+ a 0.25))
+            (def c (delay b 120))
+            (out c 1 @name audio)
+            "#,
+    );
+    let center = |id: &str| {
+        let node = patch.nodes.iter().find(|node| node.id == id).unwrap();
+        let input_indices = patch_input_indices(&patch);
+        let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+        let output_counts = patch_output_counts(&patch);
+        let (width, _) = node_size_for_ports(
+            node,
+            input_slot_counts.get(&node.id).copied().unwrap_or(0),
+            output_counts.get(&node.id).copied().unwrap_or(0),
+        );
+        node.position.0 + width * 0.5
+    };
+
+    let a = center("a");
+    let b = center("b");
+    let c = center("c");
+    assert!(
+        (a - b).abs() < 0.01 && (b - c).abs() < 0.01,
+        "primary signal chain should align vertically by center: a={a} b={b} c={c}"
+    );
+}
+
+#[test]
+fn layout_places_single_use_constants_near_consumers() {
+    let patch = parse(
+        r#"
+            (def signal (in 1 @name signal))
+            (def shaped (* 0.5 signal))
+            (out shaped 1 @name audio)
+            "#,
+    );
+    let constant = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Constant)
+        .unwrap();
+    let shaped = patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    assert!(
+        (constant.position.0 - shaped.position.0).abs() < 8.0,
+        "single-use constant should be local to its consumer: constant={:?} consumer={:?}",
+        constant.position,
+        shaped.position
+    );
+}
+
+#[test]
+fn layout_keeps_collapsed_history_near_feedback_loop_body() {
+    let patch = parse(
+        r#"
+            (make-history h)
+            (def signal (in 1 @name signal))
+            (def body (+ (read-history h) signal))
+            (write-history h body)
+            (out body 1 @name audio)
+            "#,
+    );
+    let history = patch.nodes.iter().find(|node| node.id == "h").unwrap();
+    let body = patch.nodes.iter().find(|node| node.id == "body").unwrap();
+    assert!(
+        history.position.1 > VIEW_PADDING_Y,
+        "history should not be treated as a rank-0 global source when it has a feedback writer: {:?}",
+        history.position
+    );
+    assert!(
+        (history.position.1 - body.position.1).abs() <= LAYER_SPACING + 0.01,
+        "history should stay close to its feedback loop body: history={:?} body={:?}",
+        history.position,
+        body.position
+    );
+}
+
+#[test]
+fn layout_keeps_lexilush_history_nodes_near_feedback_writers() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../sequencer/effects/lexilush/dsp.lisp");
+    let source = std::fs::read_to_string(path).unwrap();
+    let patch = parse_patch_source(&source, PatcherIntent::Effect).unwrap();
+    let id_to_node = patch
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    for connection in patch
+        .connections
+        .iter()
+        .filter(|connection| connection.kind == ConnectionKind::Feedback)
+    {
+        let writer = id_to_node
+            .get(connection.from_node.as_str())
+            .expect("feedback writer node");
+        let history = id_to_node
+            .get(connection.to_node.as_str())
+            .expect("feedback history node");
+        assert_eq!(history.kind, NodeKind::History);
+        assert!(
+            (writer.position.1 - history.position.1).abs() <= LAYER_SPACING + 0.01,
+            "history node `{}` should remain near feedback writer `{}`: history={:?} writer={:?}",
+            history.id,
+            writer.id,
+            history.position,
+            writer.position
+        );
     }
 }
 

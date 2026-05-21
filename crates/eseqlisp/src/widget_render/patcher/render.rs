@@ -2,16 +2,16 @@ use std::collections::HashMap;
 
 #[cfg(target_os = "macos")]
 use super::super::text_input::{cursor_x_from_char_cache, selection_range as text_selection_range};
-use super::super::{CellBuffer, styled_cell};
 #[cfg(target_os = "macos")]
 use super::super::{
-    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive, MetalPrimitive,
-    MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds,
+    ndc_bounds, MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive,
+    MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
+    WidgetInstance, WidgetViewport,
 };
+use super::super::{styled_cell, CellBuffer};
 #[cfg(target_os = "macos")]
 use crate::layout::LayoutNode;
-use crate::layout::Rect;
+use crate::layout::{f64_to_f32, Rect};
 use crate::theme;
 use crate::vm::Value;
 
@@ -29,10 +29,10 @@ use super::metrics::{
 };
 use super::model::{ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode};
 use super::state::{
-    PatcherDragState, PatcherInteractionState, PatcherPanState, PatcherTextEdit,
     active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
     get_patcher_pan_state, patch_with_interaction_state, patcher_back_label, patcher_breadcrumb,
-    patcher_state_key, set_patcher_pan_state, source_connection_id,
+    patcher_state_key, set_patcher_pan_state, source_connection_id, PatcherDragState,
+    PatcherInteractionState, PatcherPanState, PatcherTextEdit,
 };
 
 pub(super) fn render_tui(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -77,6 +77,12 @@ pub(super) fn build_metal_primitives_for_patcher(
     }));
     let key = patcher_state_key(node);
     let mut pan_state = get_patcher_pan_state(key);
+    let pan_uninitialized = pan_state.content_width == 0.0 && pan_state.content_height == 0.0;
+    if pan_uninitialized {
+        if let Some(initial_zoom) = patcher_initial_zoom(&node.props) {
+            pan_state.zoom = initial_zoom;
+        }
+    }
     pan_state.viewport_width = node.rect.width;
     pan_state.viewport_height = node.rect.height;
 
@@ -88,6 +94,11 @@ pub(super) fn build_metal_primitives_for_patcher(
             let patch = active_patcher_patch(&root_patch, &interaction_state);
             let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
             let content_size = patch_content_size(&patch);
+            if pan_uninitialized && patcher_fit_enabled(&node.props) {
+                pan_state.zoom = fit_zoom(content_size, node.rect);
+                pan_state.offset_x = 0.0;
+                pan_state.offset_y = 0.0;
+            }
             let zoom = patcher_zoom(&pan_state);
             pan_state.content_width = (content_size.0 * zoom).max(node.rect.width);
             pan_state.content_height = (content_size.1 * zoom).max(node.rect.height);
@@ -160,6 +171,27 @@ pub(super) fn build_metal_primitives_for_patcher(
         }
     }
     prims
+}
+
+#[cfg(target_os = "macos")]
+fn patcher_initial_zoom(props: &HashMap<String, Value>) -> Option<f32> {
+    let Some(Value::Number(zoom)) = props.get("initial-zoom") else {
+        return None;
+    };
+    let zoom = f64_to_f32(*zoom);
+    (zoom.is_finite() && zoom > 0.0).then_some(zoom)
+}
+
+#[cfg(target_os = "macos")]
+fn patcher_fit_enabled(props: &HashMap<String, Value>) -> bool {
+    !matches!(props.get("fit"), Some(Value::Nil) | None)
+}
+
+#[cfg(target_os = "macos")]
+fn fit_zoom(content_size: (f32, f32), rect: Rect) -> f32 {
+    let width_zoom = rect.width / content_size.0.max(1.0);
+    let height_zoom = rect.height / content_size.1.max(1.0);
+    width_zoom.min(height_zoom).clamp(0.05, 2.5)
 }
 
 #[cfg(target_os = "macos")]

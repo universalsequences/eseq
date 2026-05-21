@@ -2,6 +2,7 @@ mod display;
 mod emit;
 mod geometry;
 mod interaction;
+mod layout;
 mod lisp;
 mod metrics;
 mod model;
