@@ -230,7 +230,8 @@ use emit::debug_log_patch_lisp;
 use interaction::{
     handle_patcher_double_click, handle_patcher_pointer_down, handle_patcher_pointer_drag,
     handle_patcher_pointer_moved, handle_patcher_pointer_up, open_selected_macro_node,
-    pan_patcher_by_delta, pan_patcher_by_wheel, reset_patcher_pan, zoom_patcher_by_magnify,
+    pan_patcher_by_delta, pan_patcher_by_wheel, promote_created_macro_definition,
+    reset_patcher_pan, zoom_patcher_by_magnify,
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
@@ -410,7 +411,21 @@ impl WidgetDefinition for PatcherWidget {
                 }
             }
             KeyCode::Enter if state.text_edit.is_some() => {
+                let committed_node_id = state.text_edit.as_ref().map(|edit| edit.node_id.clone());
                 let changed = commit_patcher_text_edit(&mut state, &view_key);
+                let promoted_macro = committed_node_id.as_deref().is_some_and(|node_id| {
+                    load_patch_from_props(&node.props)
+                        .ok()
+                        .is_some_and(|(_, root_patch)| {
+                            promote_created_macro_definition(
+                                &root_patch,
+                                &mut state,
+                                &view_key,
+                                node_id,
+                            )
+                        })
+                });
+                let changed = changed || promoted_macro;
                 if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
                     debug_log_patch_lisp(&view_key, &patch);
                 }

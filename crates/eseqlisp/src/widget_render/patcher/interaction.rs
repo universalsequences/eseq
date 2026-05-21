@@ -20,12 +20,13 @@ use super::metrics::{
 };
 use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, OutputPortRef, Patch};
 use super::state::{
-    PatcherDragState, PatcherInteractionState, PatcherPanState, active_patcher_patch,
-    active_patcher_view_key, allocate_created_connection, allocate_created_node,
-    connection_id_from_ports, delete_connection_edit_or_mark_deleted, ensure_source_node_edit,
-    get_patcher_interaction_state, get_patcher_pan_state, patch_with_interaction_state,
-    patcher_state_key, set_connection_segment_edit, set_node_edit_position,
-    set_patcher_interaction_state, set_patcher_pan_state, source_connection_id,
+    PatcherDragState, PatcherInteractionState, PatcherMacroEdit, PatcherPanState,
+    active_patcher_patch, active_patcher_view_key, allocate_created_connection,
+    allocate_created_node, connection_id_from_ports, delete_connection_edit_or_mark_deleted,
+    ensure_source_node_edit, get_patcher_interaction_state, get_patcher_pan_state, node_edit_key,
+    patch_with_created_macros, patch_with_interaction_state, patcher_state_key,
+    set_connection_segment_edit, set_node_edit_position, set_patcher_interaction_state,
+    set_patcher_pan_state, source_connection_id,
 };
 use super::text::{
     begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col_with_zoom,
@@ -152,7 +153,7 @@ pub(super) fn handle_patcher_pointer_down(
     if let Ok((_, root_patch)) = load_patch_from_props(&node.props)
         && let Some((_node_id, macro_name)) = hit_patcher_macro_drill_in(
             &patch,
-            &root_patch,
+            &patch_with_created_macros(root_patch, &state),
             node.rect,
             &pan_state,
             local_col,
@@ -665,7 +666,7 @@ pub(super) fn handle_patcher_pointer_moved(node: &LayoutNode, local_col: f32, lo
             .and_then(|(_, root_patch)| {
                 hit_patcher_macro_drill_in(
                     &patch,
-                    &root_patch,
+                    &patch_with_created_macros(root_patch, &state),
                     node.rect,
                     &pan_state,
                     local_col,
@@ -698,6 +699,7 @@ pub(super) fn open_selected_macro_node(
     }) else {
         return false;
     };
+    let root_patch = patch_with_created_macros(root_patch, state);
     if !root_patch
         .macros
         .iter()
@@ -714,6 +716,67 @@ pub(super) fn open_selected_macro_node(
     state.drag = None;
     state.text_edit = None;
     true
+}
+
+pub(super) fn promote_created_macro_definition(
+    root_patch: &Patch,
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    if view_key != "root" {
+        return false;
+    }
+    let key = node_edit_key(view_key, node_id);
+    let Some(edit) = state.edit_state.nodes.get_mut(&key) else {
+        return false;
+    };
+    if !matches!(edit.origin, super::state::PatcherNodeOrigin::Created { .. }) {
+        return false;
+    }
+    let Some(name) = parse_created_macro_definition_text(&edit.text) else {
+        return false;
+    };
+    if root_patch
+        .macros
+        .iter()
+        .any(|macro_patch| macro_patch.name == name)
+        || state.edit_state.created_macros.contains_key(&name)
+    {
+        return false;
+    }
+
+    edit.text = name.clone();
+    state.edit_state.created_macros.insert(
+        name.clone(),
+        PatcherMacroEdit {
+            name,
+            instance_node_id: node_id.to_string(),
+        },
+    );
+    true
+}
+
+pub(super) fn parse_created_macro_definition_text(text: &str) -> Option<String> {
+    let mut parts = text.split_whitespace();
+    (parts.next()? == "defmacro").then_some(())?;
+    let raw_name = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let name = raw_name
+        .strip_prefix('*')
+        .and_then(|stripped| stripped.strip_suffix('*'))
+        .unwrap_or(raw_name);
+    is_valid_created_macro_name(name).then(|| name.to_string())
+}
+
+fn is_valid_created_macro_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.chars().any(char::is_whitespace)
+        && !name
+            .chars()
+            .any(|ch| matches!(ch, '(' | ')' | '"' | '\'' | '`' | ';'))
 }
 
 pub(super) fn handle_patcher_double_click(

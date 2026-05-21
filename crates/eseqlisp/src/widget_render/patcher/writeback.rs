@@ -3,18 +3,17 @@ use std::collections::{HashMap, HashSet};
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::display::node_display_label;
-use super::lisp::{
-    editor_node_port_shape, node_kind_for_op, parse_patch_source, positional_args, symbol_at,
-};
+use super::lisp::{node_kind_for_op, parse_patch_source, positional_args, symbol_at};
 use super::model::{
-    BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind, OutputPortRef,
-    Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId,
-    SourceOwner, SourceScopeId,
+    ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
+    OutputPortRef, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId,
+    SourceFormId, SourceOwner, SourceScopeId,
 };
-use super::project::dgenlisp_operator_names;
+use super::project::{dgenlisp_operator_names, dgenlisp_operator_required_input_counts};
 use super::state::{
     PatcherConnectionEdit, PatcherConnectionOrigin, PatcherInteractionState, PatcherNodeOrigin,
-    active_patcher_view_key, connection_edit_key, node_edit_key, source_connection_id,
+    active_patcher_view_key, connection_edit_key, default_created_macro_source, node_edit_key,
+    patch_with_created_macros, source_connection_id,
 };
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
@@ -94,13 +93,15 @@ pub(super) fn emit_patch_writeback(
 ) -> Result<String, WriteBackError> {
     let mut document = SourceDocument::parse(source)?;
     let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
+    apply_created_macro_writeback(&mut document, &root_patch, interaction_state)?;
+    let effective_root_patch = patch_with_created_macros(root_patch.clone(), interaction_state);
 
-    validate_connection_edits(&root_patch, interaction_state)?;
-    apply_node_deletions(&mut document, &root_patch, interaction_state)?;
+    validate_connection_edits(&effective_root_patch, interaction_state)?;
+    apply_node_deletions(&mut document, &effective_root_patch, interaction_state)?;
 
     let active_view_key = active_patcher_view_key(interaction_state);
     if let Some(text_edit) = interaction_state.text_edit.as_ref() {
-        let patch = patch_for_view(&root_patch, &active_view_key).ok_or_else(|| {
+        let patch = patch_for_view(&effective_root_patch, &active_view_key).ok_or_else(|| {
             WriteBackError::InvalidEdit {
                 view_key: active_view_key.clone(),
                 node_id: text_edit.node_id.clone(),
@@ -116,7 +117,7 @@ pub(super) fn emit_patch_writeback(
         if text_edit.text.trim() != node_display_label(node).trim() {
             apply_node_text_edit(
                 &mut document,
-                &root_patch,
+                &effective_root_patch,
                 &active_view_key,
                 node,
                 &text_edit.text,
@@ -134,7 +135,7 @@ pub(super) fn emit_patch_writeback(
         .values()
         .collect::<Vec<_>>();
     node_edits.sort_by_key(|edit| {
-        source_edit_sort_key(&root_patch, edit).unwrap_or_else(|| {
+        source_edit_sort_key(&effective_root_patch, edit).unwrap_or_else(|| {
             (
                 edit.view_key.clone(),
                 usize::MAX,
@@ -147,7 +148,10 @@ pub(super) fn emit_patch_writeback(
     for edit in node_edits {
         match &edit.origin {
             PatcherNodeOrigin::Created { .. } => {
-                if !created_history_edit(edit) && !created_value_edit(edit) {
+                if !created_history_edit(edit)
+                    && !created_value_edit(edit)
+                    && !created_macro_instance_edit(interaction_state, edit)
+                {
                     return Err(WriteBackError::UnsupportedCreatedNode {
                         view_key: edit.view_key.clone(),
                         node_id: edit.id.clone(),
@@ -158,13 +162,14 @@ pub(super) fn emit_patch_writeback(
                 if active_text_key == Some((edit.view_key.as_str(), source_node_id.as_str())) {
                     continue;
                 }
-                let patch = patch_for_view(&root_patch, &edit.view_key).ok_or_else(|| {
-                    WriteBackError::InvalidEdit {
-                        view_key: edit.view_key.clone(),
-                        node_id: edit.id.clone(),
-                        reason: "node edit targets a missing patch view".to_string(),
-                    }
-                })?;
+                let patch =
+                    patch_for_view(&effective_root_patch, &edit.view_key).ok_or_else(|| {
+                        WriteBackError::InvalidEdit {
+                            view_key: edit.view_key.clone(),
+                            node_id: edit.id.clone(),
+                            reason: "node edit targets a missing patch view".to_string(),
+                        }
+                    })?;
                 let node = patch_node(patch, source_node_id).ok_or_else(|| {
                     WriteBackError::InvalidEdit {
                         view_key: edit.view_key.clone(),
@@ -175,7 +180,7 @@ pub(super) fn emit_patch_writeback(
                 if edit.text.trim() != node_display_label(node).trim() {
                     apply_node_text_edit(
                         &mut document,
-                        &root_patch,
+                        &effective_root_patch,
                         &edit.view_key,
                         node,
                         &edit.text,
@@ -186,9 +191,19 @@ pub(super) fn emit_patch_writeback(
     }
 
     let generated =
-        apply_generated_binding_writeback(&mut document, &root_patch, interaction_state)?;
-    apply_cable_writeback(&mut document, &root_patch, interaction_state, &generated)?;
-    apply_history_writeback(&mut document, &root_patch, interaction_state, &generated)?;
+        apply_generated_binding_writeback(&mut document, &effective_root_patch, interaction_state)?;
+    apply_cable_writeback(
+        &mut document,
+        &effective_root_patch,
+        interaction_state,
+        &generated,
+    )?;
+    apply_history_writeback(
+        &mut document,
+        &effective_root_patch,
+        interaction_state,
+        &generated,
+    )?;
 
     Ok(document.emit())
 }
@@ -244,6 +259,38 @@ fn validate_connection_edits(
                 connection_id,
             });
         }
+    }
+
+    Ok(())
+}
+
+fn apply_created_macro_writeback(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+) -> Result<(), WriteBackError> {
+    let existing_names = root_patch
+        .macros
+        .iter()
+        .map(|macro_patch| macro_patch.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut edits = interaction_state
+        .edit_state
+        .created_macros
+        .values()
+        .filter(|edit| !existing_names.contains(edit.name.as_str()))
+        .collect::<Vec<_>>();
+    edits.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for edit in edits.into_iter().rev() {
+        let expr = parse_single_expression(&default_created_macro_source(&edit.name)).map_err(
+            |reason| WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: edit.instance_node_id.clone(),
+                reason,
+            },
+        )?;
+        document.prepend_macro(expr)?;
     }
 
     Ok(())
@@ -443,6 +490,32 @@ fn created_value_edit(edit: &super::state::PatcherNodeEdit) -> bool {
         && !created_history_edit(edit)
 }
 
+fn created_macro_instance_edit(
+    interaction_state: &PatcherInteractionState,
+    edit: &super::state::PatcherNodeEdit,
+) -> bool {
+    edit.view_key == "root"
+        && interaction_state
+            .edit_state
+            .created_macros
+            .get(edit.text.trim())
+            .is_some_and(|macro_edit| macro_edit.instance_node_id == edit.id)
+}
+
+fn created_macro_instance_is_connected(
+    interaction_state: &PatcherInteractionState,
+    edit: &super::state::PatcherNodeEdit,
+) -> bool {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .any(|connection| {
+            connection.view_key == edit.view_key
+                && (connection.from.node_id == edit.id || connection.to.node_id == edit.id)
+        })
+}
+
 fn connection_edit_touches_created_value(
     interaction_state: &PatcherInteractionState,
     edit: &PatcherConnectionEdit,
@@ -475,12 +548,14 @@ fn deleted_connection_has_created_value_replacement(
     view_key: &str,
     connection_id: &str,
 ) -> bool {
-    let Some(connection) = source_connection(root_patch, view_key, connection_id) else {
+    let Some(to) = source_connection(root_patch, view_key, connection_id)
+        .map(|connection| InputPortRef {
+            node_id: connection.to_node.clone(),
+            input_index: connection.to_input,
+        })
+        .or_else(|| connection_destination_from_id(connection_id))
+    else {
         return false;
-    };
-    let to = InputPortRef {
-        node_id: connection.to_node.clone(),
-        input_index: connection.to_input,
     };
     interaction_state
         .edit_state
@@ -491,6 +566,15 @@ fn deleted_connection_has_created_value_replacement(
             created_value_node(interaction_state, view_key, &edit.from.node_id).is_some()
                 && edit.to == to
         })
+}
+
+fn connection_destination_from_id(connection_id: &str) -> Option<InputPortRef> {
+    let (_, to) = connection_id.split_once("->")?;
+    let (node_id, input_index) = to.rsplit_once(':')?;
+    Some(InputPortRef {
+        node_id: node_id.to_string(),
+        input_index: input_index.parse().ok()?,
+    })
 }
 
 fn deleted_connection_has_history_replacement(
@@ -641,8 +725,38 @@ fn apply_generated_binding_writeback(
             .values()
             .filter(|edit| edit.view_key == view_key)
             .filter(|edit| created_generated_binding_edit(edit))
+            .filter(|edit| {
+                !created_macro_instance_edit(interaction_state, edit)
+                    || created_macro_instance_is_connected(interaction_state, edit)
+            })
             .collect::<Vec<_>>();
         created_nodes.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let mut materialized_nodes = HashSet::new();
+        loop {
+            let mut changed = false;
+            for edit in &created_nodes {
+                if materialized_nodes.contains(&edit.id) {
+                    continue;
+                }
+                if let Some(name) = materialized_created_node_binding(
+                    document,
+                    root_patch,
+                    interaction_state,
+                    &generated,
+                    &view_key,
+                    edit,
+                )? {
+                    generated.insert(&view_key, &edit.id, name);
+                    materialized_nodes.insert(edit.id.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        created_nodes.retain(|edit| !materialized_nodes.contains(&edit.id));
 
         for edit in &created_nodes {
             let op = created_node_operator(edit)?;
@@ -708,7 +822,7 @@ fn apply_generated_binding_writeback(
             view_key_for_scope(scope_b)
                 .cmp(&view_key_for_scope(scope_a))
                 .then(index_b.cmp(index_a))
-                .then(depth_b.cmp(depth_a))
+                .then(depth_a.cmp(depth_b))
                 .then(order_b.cmp(order_a))
         },
     );
@@ -716,6 +830,96 @@ fn apply_generated_binding_writeback(
         document.insert_form(&scope, index, expr)?;
     }
     Ok(generated)
+}
+
+fn materialized_created_node_binding(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+) -> Result<Option<String>, WriteBackError> {
+    let expr = match created_node_expression(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        view_key,
+        edit,
+    ) {
+        Ok(expr) => expr,
+        Err(WriteBackError::UnsupportedGeneratedBinding { reason, .. })
+            if reason == "generated binding source must be source-backed or generated" =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return Ok(None);
+    };
+    for node in &patch.nodes {
+        let Some(source) = node.source.as_ref() else {
+            continue;
+        };
+        let SourceOwner::BindingValue {
+            binding: BindingTarget::Symbol(name),
+            form_id,
+            value_path,
+        } = &source.owner
+        else {
+            continue;
+        };
+        let source_expr = SourceExprId {
+            form_id: form_id.clone(),
+            path: value_path.clone(),
+        };
+        if document.expr(&source_expr) == Some(&expr)
+            && materialized_created_node_outputs_match_source(
+                root_patch,
+                interaction_state,
+                view_key,
+                edit,
+                node,
+                generated,
+            )
+        {
+            return Ok(Some(name.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn materialized_created_node_outputs_match_source(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+    source_node: &PatchNode,
+    generated: &GeneratedBindings,
+) -> bool {
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return false;
+    };
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
+        .all(|connection| {
+            if generated.get(view_key, &connection.to.node_id).is_some()
+                || created_value_node(interaction_state, view_key, &connection.to.node_id).is_some()
+            {
+                return true;
+            }
+            patch.connections.iter().any(|source_connection| {
+                source_connection.from_node == source_node.id
+                    && source_connection.from_output == connection.from.output_index
+                    && source_connection.to_node == connection.to.node_id
+                    && source_connection.to_input == connection.to.input_index
+            })
+        })
 }
 
 fn created_generated_binding_edit(edit: &super::state::PatcherNodeEdit) -> bool {
@@ -889,7 +1093,7 @@ fn normalize_created_node_inline_args(
     ) {
         return;
     }
-    let shape = editor_node_port_shape(&op, kind, macro_arities);
+    let required_input_count = created_node_required_input_count(&op, kind, macro_arities);
     let inline_args = positional_args(items, 1)
         .into_iter()
         .cloned()
@@ -908,7 +1112,7 @@ fn normalize_created_node_inline_args(
         }
     }
 
-    let mut input_count = shape.input_count.max(inline_args.len() + 1);
+    let mut input_count = required_input_count.max(inline_args.len() + 1);
     if let Some(max_input_index) = max_input_index {
         input_count = input_count.max(max_input_index + 1);
     }
@@ -925,6 +1129,22 @@ fn normalize_created_node_inline_args(
     }
     rebuilt.extend(attributes);
     *items = rebuilt;
+}
+
+fn created_node_required_input_count(
+    op: &str,
+    kind: NodeKind,
+    macro_arities: &HashMap<String, usize>,
+) -> usize {
+    match kind {
+        NodeKind::In | NodeKind::Param | NodeKind::Constant => 0,
+        NodeKind::Out | NodeKind::History => 1,
+        NodeKind::MacroInstance => macro_arities.get(op).copied().unwrap_or(1),
+        _ => dgenlisp_operator_required_input_counts()
+            .get(op)
+            .copied()
+            .unwrap_or(1),
+    }
 }
 
 fn value_reference_expr(
@@ -1285,7 +1505,7 @@ fn rewrite_node_input(
             {
                 return document.replace_expr(&arg.expr, value);
             }
-            return document.replace_expr(
+            return document.replace_or_insert_macro_return(
                 &SourceExprId {
                     form_id: form_id.clone(),
                     path: Default::default(),
@@ -2173,7 +2393,27 @@ fn edited_expression_for_node(
         return Ok(Expression::List(merged));
     }
 
+    if node_display_omits_first_input(node)
+        && let Some(source_expr) = source_expr
+        && let Some(Expression::List(original_items)) = document.expr(source_expr)
+        && let Some(first_input_item) =
+            positional_item_index(original_items, 0).and_then(|idx| original_items.get(idx))
+    {
+        let mut merged = Vec::with_capacity(edited_items.len() + 1);
+        merged.push(edited_items[0].clone());
+        merged.push(first_input_item.clone());
+        merged.extend(edited_items.iter().skip(1).cloned());
+        return Ok(Expression::List(merged));
+    }
+
     Ok(Expression::List(edited_items))
+}
+
+fn node_display_omits_first_input(node: &PatchNode) -> bool {
+    matches!(
+        node.args.first(),
+        Some(ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr)
+    )
 }
 
 fn parse_single_expression(source: &str) -> Result<Expression, String> {
@@ -2192,8 +2432,14 @@ fn parse_single_expression(source: &str) -> Result<Expression, String> {
 
 #[derive(Debug, Clone)]
 struct SourceDocument {
-    forms: Vec<SourceForm>,
+    forms: Vec<DocumentForm>,
     macros: HashMap<String, MacroDocument>,
+}
+
+#[derive(Debug, Clone)]
+struct DocumentForm {
+    original_index: Option<usize>,
+    form: SourceForm,
 }
 
 #[derive(Debug, Clone)]
@@ -2203,10 +2449,16 @@ enum SourceForm {
 }
 
 #[derive(Debug, Clone)]
+struct MacroBodyForm {
+    original_index: Option<usize>,
+    expr: Expression,
+}
+
+#[derive(Debug, Clone)]
 struct MacroDocument {
     name: String,
     params: Vec<Expression>,
-    body: Vec<Expression>,
+    body: Vec<MacroBodyForm>,
 }
 
 impl SourceDocument {
@@ -2220,12 +2472,18 @@ impl SourceDocument {
 
         let mut forms = Vec::new();
         let mut macros = HashMap::new();
-        for expr in exprs {
+        for (index, expr) in exprs.into_iter().enumerate() {
             if let Some(macro_doc) = MacroDocument::from_expr(&expr) {
-                forms.push(SourceForm::Macro(macro_doc.name.clone()));
+                forms.push(DocumentForm {
+                    original_index: Some(index),
+                    form: SourceForm::Macro(macro_doc.name.clone()),
+                });
                 macros.insert(macro_doc.name.clone(), macro_doc);
             } else {
-                forms.push(SourceForm::Expr(expr));
+                forms.push(DocumentForm {
+                    original_index: Some(index),
+                    form: SourceForm::Expr(expr),
+                });
             }
         }
         Ok(Self { forms, macros })
@@ -2257,17 +2515,66 @@ impl SourceDocument {
         })
     }
 
+    fn replace_or_insert_macro_return(
+        &mut self,
+        expr_id: &SourceExprId,
+        replacement: Expression,
+    ) -> Result<(), WriteBackError> {
+        if self
+            .form_expr(&expr_id.form_id.scope, expr_id.form_id.index)
+            .is_some()
+        {
+            return self.replace_expr(expr_id, replacement);
+        }
+        let SourceScopeId::Macro { name } = &expr_id.form_id.scope else {
+            return self.replace_expr(expr_id, replacement);
+        };
+        let Some(macro_doc) = self.macros.get_mut(name) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&expr_id.form_id.scope),
+                node_id: String::new(),
+                reason: "missing macro scope for return replacement".to_string(),
+            });
+        };
+        if macro_doc.body.len() == 1
+            && macro_doc.body[0].original_index.is_none()
+            && macro_doc.body[0].expr == macro_doc.default_return_expression()
+        {
+            macro_doc.body.clear();
+        }
+        let index = macro_doc
+            .body
+            .iter()
+            .position(|form| {
+                form.original_index
+                    .is_some_and(|original| original >= expr_id.form_id.index)
+            })
+            .unwrap_or(macro_doc.body.len());
+        macro_doc.body.insert(
+            index,
+            MacroBodyForm {
+                original_index: Some(expr_id.form_id.index),
+                expr: replacement,
+            },
+        );
+        Ok(())
+    }
+
     fn remove_form(&mut self, form_id: &SourceFormId) -> Result<(), WriteBackError> {
         match &form_id.scope {
             SourceScopeId::Root => {
-                if form_id.index >= self.forms.len() {
+                let Some(position) = self
+                    .forms
+                    .iter()
+                    .position(|form| form.original_index == Some(form_id.index))
+                else {
                     return Err(WriteBackError::InvalidEdit {
                         view_key: view_key_for_scope(&form_id.scope),
                         node_id: String::new(),
                         reason: format!("missing root source form {}", form_id.index),
                     });
-                }
-                self.forms.remove(form_id.index);
+                };
+                self.forms.remove(position);
                 Ok(())
             }
             SourceScopeId::Macro { name } => {
@@ -2278,14 +2585,19 @@ impl SourceDocument {
                         reason: "missing macro scope for form removal".to_string(),
                     });
                 };
-                if form_id.index >= macro_doc.body.len() {
+                let Some(position) = macro_doc
+                    .body
+                    .iter()
+                    .position(|form| form.original_index == Some(form_id.index))
+                else {
                     return Err(WriteBackError::InvalidEdit {
                         view_key: view_key_for_scope(&form_id.scope),
                         node_id: String::new(),
                         reason: format!("missing macro source form {}", form_id.index),
                     });
-                }
-                macro_doc.body.remove(form_id.index);
+                };
+                macro_doc.body.remove(position);
+                macro_doc.ensure_valid_body();
                 Ok(())
             }
         }
@@ -2324,28 +2636,50 @@ impl SourceDocument {
 
     fn form_expr(&self, scope: &SourceScopeId, index: usize) -> Option<&Expression> {
         match scope {
-            SourceScopeId::Root => match self.forms.get(index)? {
+            SourceScopeId::Root => match &self
+                .forms
+                .iter()
+                .find(|form| form.original_index == Some(index))?
+                .form
+            {
                 SourceForm::Expr(expr) => Some(expr),
                 SourceForm::Macro(_) => None,
             },
-            SourceScopeId::Macro { name } => self.macros.get(name)?.body.get(index),
+            SourceScopeId::Macro { name } => self
+                .macros
+                .get(name)?
+                .body
+                .iter()
+                .find(|form| form.original_index == Some(index))
+                .map(|form| &form.expr),
         }
     }
 
     fn form_expr_mut(&mut self, scope: &SourceScopeId, index: usize) -> Option<&mut Expression> {
         match scope {
-            SourceScopeId::Root => match self.forms.get_mut(index)? {
+            SourceScopeId::Root => match &mut self
+                .forms
+                .iter_mut()
+                .find(|form| form.original_index == Some(index))?
+                .form
+            {
                 SourceForm::Expr(expr) => Some(expr),
                 SourceForm::Macro(_) => None,
             },
-            SourceScopeId::Macro { name } => self.macros.get_mut(name)?.body.get_mut(index),
+            SourceScopeId::Macro { name } => self
+                .macros
+                .get_mut(name)?
+                .body
+                .iter_mut()
+                .find(|form| form.original_index == Some(index))
+                .map(|form| &mut form.expr),
         }
     }
 
     fn emit(&self) -> String {
         self.forms
             .iter()
-            .filter_map(|form| match form {
+            .filter_map(|form| match &form.form {
                 SourceForm::Expr(expr) => Some(format_writeback_expression(expr)),
                 SourceForm::Macro(name) => self.macros.get(name).map(MacroDocument::emit),
             })
@@ -2360,7 +2694,13 @@ impl SourceDocument {
     ) -> Result<(), WriteBackError> {
         match scope {
             SourceScopeId::Root => {
-                self.forms.insert(0, SourceForm::Expr(expr));
+                self.forms.insert(
+                    0,
+                    DocumentForm {
+                        original_index: None,
+                        form: SourceForm::Expr(expr),
+                    },
+                );
                 Ok(())
             }
             SourceScopeId::Macro { name } => {
@@ -2371,7 +2711,13 @@ impl SourceDocument {
                         reason: "missing macro scope for history form".to_string(),
                     });
                 };
-                macro_doc.body.insert(0, expr);
+                macro_doc.body.insert(
+                    0,
+                    MacroBodyForm {
+                        original_index: None,
+                        expr,
+                    },
+                );
                 Ok(())
             }
         }
@@ -2385,8 +2731,21 @@ impl SourceDocument {
     ) -> Result<(), WriteBackError> {
         match scope {
             SourceScopeId::Root => {
-                let index = index.min(self.forms.len());
-                self.forms.insert(index, SourceForm::Expr(expr));
+                let index = self
+                    .forms
+                    .iter()
+                    .position(|form| {
+                        form.original_index
+                            .is_some_and(|original| original >= index)
+                    })
+                    .unwrap_or(self.forms.len());
+                self.forms.insert(
+                    index,
+                    DocumentForm {
+                        original_index: None,
+                        form: SourceForm::Expr(expr),
+                    },
+                );
                 Ok(())
             }
             SourceScopeId::Macro { name } => {
@@ -2397,11 +2756,46 @@ impl SourceDocument {
                         reason: "missing macro scope for generated binding".to_string(),
                     });
                 };
-                let index = index.min(macro_doc.body.len());
-                macro_doc.body.insert(index, expr);
+                let index = macro_doc
+                    .body
+                    .iter()
+                    .position(|form| {
+                        form.original_index
+                            .is_some_and(|original| original >= index)
+                    })
+                    .unwrap_or(macro_doc.body.len());
+                macro_doc.body.insert(
+                    index,
+                    MacroBodyForm {
+                        original_index: None,
+                        expr,
+                    },
+                );
                 Ok(())
             }
         }
+    }
+
+    fn prepend_macro(&mut self, expr: Expression) -> Result<(), WriteBackError> {
+        let Some(macro_doc) = MacroDocument::from_expr(&expr) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: "created macro source did not parse as defmacro".to_string(),
+            });
+        };
+        if self.macros.contains_key(&macro_doc.name) {
+            return Ok(());
+        }
+        self.forms.insert(
+            0,
+            DocumentForm {
+                original_index: None,
+                form: SourceForm::Macro(macro_doc.name.clone()),
+            },
+        );
+        self.macros.insert(macro_doc.name.clone(), macro_doc);
+        Ok(())
     }
 
     fn insert_history_write(
@@ -2417,7 +2811,10 @@ impl SourceDocument {
         ]);
         match scope {
             SourceScopeId::Root => {
-                self.forms.push(SourceForm::Expr(expr));
+                self.forms.push(DocumentForm {
+                    original_index: None,
+                    form: SourceForm::Expr(expr),
+                });
                 Ok(())
             }
             SourceScopeId::Macro { name } => {
@@ -2429,7 +2826,13 @@ impl SourceDocument {
                     });
                 };
                 let index = macro_doc.body.len().saturating_sub(1);
-                macro_doc.body.insert(index, expr);
+                macro_doc.body.insert(
+                    index,
+                    MacroBodyForm {
+                        original_index: None,
+                        expr,
+                    },
+                );
                 Ok(())
             }
         }
@@ -2462,7 +2865,7 @@ impl SourceDocument {
         match scope {
             SourceScopeId::Root => {
                 for form in &self.forms {
-                    match form {
+                    match &form.form {
                         SourceForm::Expr(expr) => collect_scope_binding_names(expr, &mut names),
                         SourceForm::Macro(name) => {
                             names.insert(name.clone());
@@ -2477,8 +2880,8 @@ impl SourceDocument {
                             names.insert(name.clone());
                         }
                     }
-                    for expr in &macro_doc.body {
-                        collect_scope_binding_names(expr, &mut names);
+                    for form in &macro_doc.body {
+                        collect_scope_binding_names(&form.expr, &mut names);
                     }
                 }
             }
@@ -2499,7 +2902,7 @@ impl SourceDocument {
             SourceScopeId::Root => self
                 .forms
                 .iter()
-                .filter_map(|form| match form {
+                .filter_map(|form| match &form.form {
                     SourceForm::Expr(expr) => Some(expr),
                     SourceForm::Macro(_) => None,
                 })
@@ -2507,7 +2910,7 @@ impl SourceDocument {
             SourceScopeId::Macro { name } => self
                 .macros
                 .get(name)
-                .map(|macro_doc| macro_doc.body.iter().collect())
+                .map(|macro_doc| macro_doc.body.iter().map(|form| &form.expr).collect())
                 .unwrap_or_default(),
         }
     }
@@ -2544,7 +2947,16 @@ impl MacroDocument {
         Some(Self {
             name,
             params,
-            body: items.iter().skip(3).cloned().collect(),
+            body: items
+                .iter()
+                .skip(3)
+                .cloned()
+                .enumerate()
+                .map(|(index, expr)| MacroBodyForm {
+                    original_index: Some(index),
+                    expr,
+                })
+                .collect(),
         })
     }
 
@@ -2554,8 +2966,32 @@ impl MacroDocument {
             Expression::Symbol(self.name.clone()),
             Expression::List(self.params.clone()),
         ];
-        items.extend(self.body.clone());
+        let body = if self.body.is_empty() {
+            vec![self.default_return_expression()]
+        } else {
+            self.body.iter().map(|form| form.expr.clone()).collect()
+        };
+        items.extend(body);
         format_writeback_expression(&Expression::List(items))
+    }
+
+    fn ensure_valid_body(&mut self) {
+        if self.body.is_empty() {
+            self.body.push(MacroBodyForm {
+                original_index: None,
+                expr: self.default_return_expression(),
+            });
+        }
+    }
+
+    fn default_return_expression(&self) -> Expression {
+        self.params
+            .iter()
+            .find_map(|param| match param {
+                Expression::Symbol(name) => Some(Expression::Symbol(name.clone())),
+                _ => None,
+            })
+            .unwrap_or(Expression::Number(0.0))
     }
 }
 

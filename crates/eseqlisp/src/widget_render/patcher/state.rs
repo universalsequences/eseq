@@ -8,13 +8,15 @@ use super::super::text_input::TextInputState;
 use crate::layout::LayoutNode;
 use crate::vm::Value;
 
-use super::lisp::{editor_node_port_shape, node_kind_for_op, parse_editor_node_text};
+use super::lisp::{
+    editor_node_port_shape, node_kind_for_op, parse_editor_node_text, parse_patch_source,
+};
 use super::metrics::{
     DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS, PAN_OVERSCROLL_VIEWPORT_FACTOR,
 };
 use super::model::{
-    ArgValue, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef, NodeKind,
-    OutputPortRef, Patch, PatchConnection, PatchNode,
+    ArgValue, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef, MacroPatch, NodeKind,
+    OutputPortRef, Patch, PatchConnection, PatchNode, PatcherIntent,
 };
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
@@ -116,8 +118,15 @@ pub(super) struct PatchEditState {
     pub(super) deleted_nodes: HashSet<String>,
     pub(super) connections: HashMap<String, PatcherConnectionEdit>,
     pub(super) deleted_connections: HashSet<String>,
+    pub(super) created_macros: HashMap<String, PatcherMacroEdit>,
     pub(super) next_created_node: u64,
     pub(super) next_created_connection: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PatcherMacroEdit {
+    pub(super) name: String,
+    pub(super) instance_node_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -459,11 +468,16 @@ pub(super) fn active_patcher_patch(
         .active_macro
         .as_deref()
         .and_then(|name| {
-            root_patch
+            patch_with_created_macros(root_patch.clone(), interaction_state)
                 .macros
-                .iter()
+                .into_iter()
                 .find(|macro_patch| macro_patch.name == name)
-                .map(|macro_patch| macro_patch.patch.clone())
+                .map(|macro_patch| {
+                    let mut patch = macro_patch.patch;
+                    patch.macros =
+                        patch_with_created_macros(root_patch.clone(), interaction_state).macros;
+                    patch
+                })
         })
         .unwrap_or_else(|| root_patch.clone())
 }
@@ -493,6 +507,7 @@ pub(super) fn patch_with_interaction_state(
     interaction_state: &PatcherInteractionState,
     view_key: &str,
 ) -> Patch {
+    patch = patch_with_created_macros(patch, interaction_state);
     let macro_arities = patch
         .macros
         .iter()
@@ -588,6 +603,40 @@ pub(super) fn patch_with_interaction_state(
             }),
     );
     patch
+}
+
+pub(super) fn patch_with_created_macros(
+    mut patch: Patch,
+    interaction_state: &PatcherInteractionState,
+) -> Patch {
+    for macro_edit in interaction_state.edit_state.created_macros.values() {
+        if patch
+            .macros
+            .iter()
+            .any(|macro_patch| macro_patch.name == macro_edit.name)
+        {
+            continue;
+        }
+        if let Some(macro_patch) = default_created_macro_patch(&macro_edit.name) {
+            patch.macros.push(macro_patch);
+        }
+    }
+    patch
+}
+
+fn default_created_macro_patch(name: &str) -> Option<MacroPatch> {
+    parse_patch_source(
+        &default_created_macro_source(name),
+        PatcherIntent::Instrument,
+    )
+    .ok()?
+    .macros
+    .into_iter()
+    .find(|macro_patch| macro_patch.name == name)
+}
+
+pub(super) fn default_created_macro_source(name: &str) -> String {
+    format!("(defmacro {name} (input) (* input 1))")
 }
 
 fn apply_node_text_override(
