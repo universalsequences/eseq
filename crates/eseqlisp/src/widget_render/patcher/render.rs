@@ -536,10 +536,10 @@ fn push_node(
         border = theme::PATCHER_NODE_SELECTED_BORDER();
     }
     push_node_chrome(prims, rect, bg, border, viewport, zoom);
-    for (visible_index, &index) in input_indices.iter().enumerate() {
+    for &index in input_indices {
         push_port(
             prims,
-            port_center(rect, visible_index, input_slot_count, true),
+            port_center(rect, index, input_slot_count, true),
             true,
             bg,
             highlighted_inputs.contains(&index),

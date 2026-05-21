@@ -2267,7 +2267,83 @@ fn inline_args_keep_placeholders_for_connected_args_before_later_literals() {
     );
 
     let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
-    assert_eq!(input_slot_counts.get(&ap.id).copied(), Some(2));
+    assert_eq!(input_slot_counts.get(&ap.id).copied(), Some(3));
+}
+
+#[test]
+fn inline_literals_reserve_semantic_input_slots_without_rendering_ports() {
+    let patch = parse(
+        r#"
+            (def signal (in 1))
+            (def gain (in 2))
+            (def scaled (* signal gain 0.00012))
+            "#,
+    );
+    let multiply = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "*")
+        .expect("multiply node");
+
+    assert_eq!(node_display_label(multiply), "* ? 0.00012");
+
+    let input_indices = patch_input_indices(&patch);
+    assert_eq!(
+        input_indices.get(&multiply.id).map(Vec::as_slice),
+        Some(&[0, 1][..])
+    );
+
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    assert_eq!(input_slot_counts.get(&multiply.id).copied(), Some(3));
+
+    let rects = patch_node_rects(
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        &PatcherPanState::default(),
+    );
+    let multiply_rect = *rects.get(&multiply.id).expect("multiply rect");
+    let slot_count = input_slot_counts[&multiply.id];
+    let first = port_center(multiply_rect, 0, slot_count, true);
+    let second = port_center(multiply_rect, 1, slot_count, true);
+    let hidden_third = port_center(multiply_rect, 2, slot_count, true);
+
+    assert!(
+        second.0 < hidden_third.0,
+        "the second semantic inlet should stay in the middle slot, leaving the inline third slot hidden"
+    );
+
+    let node_rects = patch_node_rects(
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        &PatcherPanState::default(),
+    );
+    let output_counts = patch_output_counts(&patch);
+    let gain_connection = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == multiply.id && connection.to_input == 1)
+        .expect("gain connection");
+    let (_, gain_endpoint) = connection_endpoints(
+        gain_connection,
+        &node_rects,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+    )
+    .expect("gain endpoint");
+
+    assert_eq!(gain_endpoint, second);
+    assert!(first.0 < second.0);
 }
 
 #[test]
@@ -2312,7 +2388,7 @@ fn leading_numeric_constants_become_nodes_to_preserve_input_order() {
 }
 
 #[test]
-fn trailing_constants_inline_without_reserving_visible_input_slots() {
+fn trailing_constants_inline_reserve_hidden_semantic_input_slots() {
     let patch = parse(
         r#"
             (def pitch (in 1))
@@ -2335,7 +2411,7 @@ fn trailing_constants_inline_without_reserving_visible_input_slots() {
     );
 
     let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
-    assert_eq!(input_slot_counts.get(&multiply.id).copied(), Some(1));
+    assert_eq!(input_slot_counts.get(&multiply.id).copied(), Some(2));
 }
 
 #[test]
@@ -4001,7 +4077,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
     let input_indices = patch_input_indices(&patch);
     assert_eq!(input_indices.get("mul").map(Vec::as_slice), Some(&[0][..]));
     let slot_counts = patch_input_slot_counts(&patch, &input_indices);
-    assert_eq!(slot_counts.get("mul").copied(), Some(1));
+    assert_eq!(slot_counts.get("mul").copied(), Some(2));
 
     let history = node_from_editor_text("hist", "history", (0.0, 0.0), &macro_arities, false);
     assert_eq!(history.kind, NodeKind::History);

@@ -113,7 +113,13 @@ pub(super) fn patch_input_slot_counts(
 ) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     for node in &patch.nodes {
-        let count = input_indices.get(&node.id).map(Vec::len).unwrap_or(0);
+        let count = input_indices
+            .get(&node.id)
+            .map(|indices| {
+                let connected_span = indices.iter().copied().max().map(|idx| idx + 1).unwrap_or(0);
+                connected_span.max(node.args.len())
+            })
+            .unwrap_or(0);
         if count > 0 {
             counts.insert(node.id.clone(), count);
         }
@@ -300,9 +306,8 @@ pub(super) fn nearest_patcher_input_port(
             let slot_count = input_slot_counts.get(&node.id).copied().unwrap_or(0);
             input_indices
                 .iter()
-                .enumerate()
-                .filter_map(move |(visible_index, input_index)| {
-                    let center = port_center(node_rect, visible_index, slot_count, true);
+                .filter_map(move |input_index| {
+                    let center = port_center(node_rect, *input_index, slot_count, true);
                     let distance = distance_squared(center, (local_col, local_row));
                     (distance <= threshold).then(|| {
                         (
@@ -339,10 +344,10 @@ pub(super) fn connection_endpoints(
         false,
     );
     let to_input_indices = input_indices.get(&connection.to_node)?;
-    let visible_input = visible_input_slot(to_input_indices, connection.to_input)?;
+    let semantic_input = visible_input_slot(to_input_indices, connection.to_input)?;
     let end = port_center(
         to,
-        visible_input,
+        semantic_input,
         input_slot_counts
             .get(&connection.to_node)
             .copied()
@@ -355,7 +360,8 @@ pub(super) fn connection_endpoints(
 fn visible_input_slot(input_indices: &[usize], semantic_input: usize) -> Option<usize> {
     input_indices
         .iter()
-        .position(|input_index| *input_index == semantic_input)
+        .find(|input_index| **input_index == semantic_input)
+        .copied()
 }
 
 pub(super) fn hit_patcher_cable(
