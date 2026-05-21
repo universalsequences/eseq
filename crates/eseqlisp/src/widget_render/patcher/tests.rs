@@ -5004,6 +5004,131 @@ fn writeback_created_macro_default_return_rewired_to_chain_then_root_input_compi
 }
 
 #[test]
+fn writeback_two_created_macro_instances_can_replace_existing_source_input() {
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def trigger (in 3 @name trigger))
+        (def attack (param attack @default 5))
+        (def release (param release @default 200))
+        (def env (adsr gate trigger attack 100 1 release))
+        (out env 1 @name audio)
+    "#;
+    let root_patch = parse(source);
+    let mut state = PatcherInteractionState::default();
+    let first_macro = allocate_created_text_node(&mut state, "root", "defmacro *op*");
+    assert!(promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        "root",
+        &first_macro,
+    ));
+    state.active_macro = Some("op".to_string());
+
+    let macro_patch = active_patcher_patch(&root_patch, &state);
+    let input = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let return_node = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "return")
+        .expect("default macro should expose a return node");
+    let out = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let return_to_out = macro_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == return_node.id && connection.to_node == out.id)
+        .unwrap();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "macro:op",
+            &source_connection_id(return_to_out),
+        ));
+    let phasor = allocate_created_text_node(&mut state, "macro:op", "phasor");
+    let triangle = allocate_created_text_node(&mut state, "macro:op", "triangle");
+    connect_output_to_input(&mut state, "macro:op", &input.id, &phasor, 0);
+    connect_output_to_input(&mut state, "macro:op", &phasor, &triangle, 0);
+    connect_output_to_input(&mut state, "macro:op", &triangle, &out.id, 0);
+
+    let source_with_macro_chain =
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    let root_patch = parse(&source_with_macro_chain);
+    let attack_to_env = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "attack" && connection.to_node == "env")
+        .unwrap();
+
+    state.active_macro = None;
+    let second_macro = allocate_created_text_node(&mut state, "root", "op");
+    let sum = allocate_created_text_node(&mut state, "root", "+");
+    connect_output_to_input(&mut state, "root", "pitch", &first_macro, 0);
+    connect_output_to_input(&mut state, "root", "pitch", &second_macro, 0);
+    connect_output_to_input(&mut state, "root", &first_macro, &sum, 0);
+    connect_output_to_input(&mut state, "root", &second_macro, &sum, 1);
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(attack_to_env),
+        ));
+    connect_output_to_input(&mut state, "root", &sum, "env", 2);
+
+    let emitted =
+        emit_patch_writeback(&source_with_macro_chain, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def add1 (+ op1 op2))") || emitted.contains("(def add1 (+ op2 op1))"),
+        "expected summed macro instances before env attack input:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def env (adsr gate trigger add1 100.0 1.0 release))"),
+        "expected env attack input to come from the sum:\n{emitted}"
+    );
+}
+
+#[test]
+fn writeback_stale_deleted_source_connection_recovers_when_created_sum_replaces_it() {
+    let source = r#"
+        (defmacro op (input) (def phasor1 (phasor input)) (def triangle1 (triangle phasor1)) triangle1)
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def trigger (in 3 @name trigger))
+        (def attack (param attack @default 5))
+        (def release (param release @default 200))
+        (def op1 (op pitch))
+        (def op2 (op pitch))
+        (def add1 (+ op1 op2))
+        (def env (adsr gate trigger add1 100 1 release))
+        (out env 1 @name audio)
+    "#;
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", "attack:0->env:2"));
+    let sum = allocate_created_text_node(&mut state, "root", "+");
+    connect_output_to_input(&mut state, "root", "op1", &sum, 0);
+    connect_output_to_input(&mut state, "root", "op2", &sum, 1);
+    connect_output_to_input(&mut state, "root", &sum, "env", 2);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def env (adsr gate trigger add1 100.0 1.0 release))"),
+        "stale attack deletion should not prevent recovery once env input is replaced:\n{emitted}"
+    );
+}
+
+#[test]
 fn writeback_macro_created_node_after_generated_binding_preserves_dependency() {
     let source = "(defmacro op (input) (def phasor1 (phasor input)) phasor1)";
     let root_patch = parse(source);
