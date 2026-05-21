@@ -267,6 +267,7 @@ pub struct MajorMode {
 
 pub struct Editor {
     pub buffers: Vec<Buffer>,
+    buffer_recency: Vec<BufferId>,
     pub tile_root: TileNode,
     pub active_tile: TileId,
     next_tile_id: TileId,
@@ -371,6 +372,7 @@ impl Editor {
 
         let mut editor = Editor {
             buffers: vec![Buffer::new(0, "*scratch*")],
+            buffer_recency: vec![0],
             tile_root: TileNode::Leaf(TileLeaf::new(0, 0)),
             active_tile: 0,
             next_tile_id: 1,
@@ -461,6 +463,46 @@ impl Editor {
     /// Get the buffer index for the active tile.
     pub fn active_buffer_idx(&self) -> usize {
         self.active_leaf().buffer_idx
+    }
+
+    fn record_buffer_access_by_idx(&mut self, buffer_idx: usize) {
+        let Some(buffer) = self.buffers.get(buffer_idx) else {
+            return;
+        };
+        let id = buffer.id;
+        self.buffer_recency.retain(|existing| *existing != id);
+        self.buffer_recency.insert(0, id);
+    }
+
+    fn track_new_buffer(&mut self, id: BufferId, active: bool) {
+        self.buffer_recency.retain(|existing| *existing != id);
+        if active {
+            self.buffer_recency.insert(0, id);
+        } else {
+            self.buffer_recency.push(id);
+        }
+    }
+
+    fn buffer_names_by_recency(&mut self) -> Vec<String> {
+        let ids: std::collections::HashSet<BufferId> =
+            self.buffers.iter().map(|buffer| buffer.id).collect();
+        self.buffer_recency.retain(|id| ids.contains(id));
+
+        for buffer in &self.buffers {
+            if !self.buffer_recency.contains(&buffer.id) {
+                self.buffer_recency.push(buffer.id);
+            }
+        }
+
+        self.buffer_recency
+            .iter()
+            .filter_map(|id| {
+                self.buffers
+                    .iter()
+                    .find(|buffer| buffer.id == *id)
+                    .map(|buffer| buffer.name.clone())
+            })
+            .collect()
     }
 
     /// Recompute cached tile rects for the given viewport.
@@ -624,8 +666,10 @@ impl Editor {
         };
         let cached_layout = target_leaf.cached_layout.clone();
         let layout_revision = target_leaf.layout_revision;
+        let buffer_idx = target_leaf.buffer_idx;
         self.save_current_widget_tree();
         self.active_tile = new_tile;
+        self.record_buffer_access_by_idx(buffer_idx);
         self.sync_runtime_context();
         self.restore_buffer_widget_tree_with_cached_layout(
             cached_layout,
@@ -665,6 +709,8 @@ impl Editor {
             // Switch to the first remaining leaf
             let ids = self.tile_root.leaf_ids();
             self.active_tile = ids[0];
+            let buffer_idx = self.active_buffer_idx();
+            self.record_buffer_access_by_idx(buffer_idx);
             self.sync_runtime_context();
             self.restore_buffer_widget_tree();
             self.mark_needs_redraw();
@@ -793,6 +839,8 @@ impl Editor {
         let ids = self.tile_root.leaf_ids();
         if !ids.is_empty() {
             self.active_tile = ids[0];
+            let buffer_idx = self.active_buffer_idx();
+            self.record_buffer_access_by_idx(buffer_idx);
         }
         self.sync_runtime_context();
         self.restore_buffer_widget_tree();
@@ -2270,7 +2318,9 @@ impl Editor {
         buffer.set_mode(mode);
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
+        let new_idx = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = new_idx;
+        self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -2288,6 +2338,7 @@ impl Editor {
             let mut buffer = Buffer::new(id, name);
             buffer.set_text(text);
             self.buffers.push(buffer);
+            self.track_new_buffer(id, false);
             id
         }
     }
@@ -2298,6 +2349,7 @@ impl Editor {
         buffer.set_text(text);
         buffer.set_mode(mode);
         self.buffers.push(buffer);
+        self.track_new_buffer(id, false);
         id
     }
 
@@ -2315,6 +2367,7 @@ impl Editor {
         }
         let id = self.alloc_buffer_id();
         self.buffers.push(Buffer::new(id, name));
+        self.track_new_buffer(id, false);
         self.buffers.len() - 1
     }
 
@@ -2341,7 +2394,9 @@ impl Editor {
         buffer.dirty = false;
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
+        let new_idx = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = new_idx;
+        self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -2379,7 +2434,9 @@ impl Editor {
         buffer.dirty = false;
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
+        let new_idx = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = new_idx;
+        self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -2411,6 +2468,7 @@ impl Editor {
         buffer.set_mode(mode);
         buffer.dirty = false;
         self.buffers.push(buffer);
+        self.track_new_buffer(id, false);
         Ok(name)
     }
 
@@ -2451,7 +2509,9 @@ impl Editor {
     /// Remove a buffer by name. Returns true if found and removed.
     pub fn remove_buffer_by_name(&mut self, name: &str) -> bool {
         if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+            let removed_id = self.buffers[idx].id;
             self.buffers.remove(idx);
+            self.buffer_recency.retain(|id| *id != removed_id);
             // Fix up any tile leaf buffer indices that pointed past the removed slot
             Self::fix_leaf_indices(&mut self.tile_root, idx);
             true
@@ -2478,6 +2538,7 @@ impl Editor {
         if let Some(index) = self.buffers.iter().position(|buffer| buffer.id == id) {
             self.save_current_widget_tree();
             self.active_leaf_mut().buffer_idx = index;
+            self.record_buffer_access_by_idx(index);
             self.mark_needs_redraw();
             self.sync_runtime_context();
             self.completion = None;
@@ -3999,21 +4060,29 @@ impl Editor {
 
     fn sync_runtime_context(&mut self) {
         let active = self.active_buffer();
-        let buffer_names: Vec<String> = self.buffers.iter().map(|b| b.name.clone()).collect();
-        let mut shared = self.runtime.shared.borrow_mut();
-        shared.current_buffer_id = Some(active.id);
-        shared.current_buffer_name = active.name.clone();
-        shared.current_buffer_path = active.path.clone();
-        shared.current_buffer_read_only = active.read_only;
-        shared.current_buffer_mode = active.mode.name().to_string();
-        shared.current_line_number = active.cursor.0 + 1;
-        shared.current_line_text = active
+        let current_buffer_id = active.id;
+        let current_buffer_name = active.name.clone();
+        let current_buffer_path = active.path.clone();
+        let current_buffer_read_only = active.read_only;
+        let current_buffer_mode = active.mode.name().to_string();
+        let current_line_number = active.cursor.0 + 1;
+        let current_line_text = active
             .lines
             .get(active.cursor.0)
             .cloned()
             .unwrap_or_default();
+        let current_view_mode = active.view_mode.label().to_string();
+        let buffer_names = self.buffer_names_by_recency();
+        let mut shared = self.runtime.shared.borrow_mut();
+        shared.current_buffer_id = Some(current_buffer_id);
+        shared.current_buffer_name = current_buffer_name;
+        shared.current_buffer_path = current_buffer_path;
+        shared.current_buffer_read_only = current_buffer_read_only;
+        shared.current_buffer_mode = current_buffer_mode;
+        shared.current_line_number = current_line_number;
+        shared.current_line_text = current_line_text;
         shared.buffer_names = buffer_names;
-        shared.current_view_mode = active.view_mode.label().to_string();
+        shared.current_view_mode = current_view_mode;
     }
 
     fn sync_runtime_source_context(&mut self) {
@@ -4596,6 +4665,7 @@ impl Editor {
             if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                 self.save_current_widget_tree();
                 self.active_leaf_mut().buffer_idx = idx;
+                self.record_buffer_access_by_idx(idx);
                 self.mark_needs_redraw();
                 self.sync_runtime_context();
                 self.completion = None;
@@ -4983,6 +5053,7 @@ impl Editor {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                         self.save_current_widget_tree();
                         self.active_leaf_mut().buffer_idx = idx;
+                        self.record_buffer_access_by_idx(idx);
                         self.sync_runtime_context();
                         self.restore_buffer_widget_tree();
                         self.refresh_inactive_tile_layouts_for_buffer(idx);

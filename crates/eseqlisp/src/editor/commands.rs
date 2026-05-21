@@ -287,7 +287,7 @@ impl Editor {
             "switch-to-buffer" => {
                 self.completion = None;
                 self.minibuffer = None;
-                let candidates: Vec<String> = self.buffers.iter().map(|b| b.name.clone()).collect();
+                let candidates = self.buffer_names_by_recency();
                 self.minibuffer_input = Some(super::MinibufferMode::SwitchBuffer {
                     input: String::new(),
                     candidates,

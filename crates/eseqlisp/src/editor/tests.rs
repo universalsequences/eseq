@@ -4580,6 +4580,62 @@ fn buffer_list_mode_accepts_filter_input_while_read_only() {
 }
 
 #[test]
+fn buffer_list_native_order_tracks_recent_buffer_switches() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+
+    let grid_id = editor.open_scratch_buffer("*grid*", "");
+    editor.open_scratch_buffer("*gain*", "");
+    editor.set_active_buffer(grid_id);
+
+    let value = editor.runtime_mut().eval_str("(buffer-list)").unwrap().unwrap();
+    let Value::List(items) = value else {
+        panic!("expected buffer-list to return a list");
+    };
+    let names = items
+        .iter()
+        .map(|item| match &*item.borrow() {
+            Value::String(name) => name.clone(),
+            other => panic!("expected buffer name string, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(names[0], "*grid*");
+    assert_eq!(names[1], "*gain*");
+}
+
+#[test]
+fn buffer_list_mode_shows_previous_buffer_first() {
+    let init = include_str!("../../init.lisp").to_string();
+    let runtime = Runtime::with_init_source(&init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init),
+            ..EditorConfig::default()
+        },
+    );
+
+    let grid_id = editor.open_scratch_buffer("*grid*", "");
+    editor.open_scratch_buffer("*gain*", "");
+    editor.set_active_buffer(grid_id);
+
+    editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().name, "*buffers*");
+    assert_eq!(editor.active_buffer().lines[1], "> *grid*");
+    assert!(
+        !editor
+            .active_buffer()
+            .lines
+            .iter()
+            .any(|line| line.contains("*buffers*")),
+        "buffer-list mode should not offer the buffer-list buffer itself"
+    );
+}
+
+#[test]
 fn buffer_list_mode_backspace_updates_filter() {
     let init = include_str!("../../init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);

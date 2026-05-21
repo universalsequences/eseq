@@ -215,9 +215,10 @@
   (let ((bufs (buffer-list))
         (query (string-downcase buflist-filter)))
     (if (= query "")
-      bufs
+      (filter |name| (not (= name "*buffers*")) bufs)
       (filter |name|
-        (string-contains? (string-downcase name) query)
+        (and (not (= name "*buffers*"))
+             (string-contains? (string-downcase name) query))
         bufs))))
 
 (def buflist-format-entry (name)
