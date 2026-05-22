@@ -2,7 +2,7 @@
 #[cfg(target_os = "macos")]
 mod inner {
     use std::collections::hash_map::DefaultHasher;
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use std::fs;
     use std::hash::{Hash, Hasher};
     use std::path::PathBuf;
@@ -1322,6 +1322,10 @@ fragment float4 waveform_frag(
             time_seconds: f32,
         ) {
             for primitive in primitives {
+                if let widget_render::MetalPrimitive::ZLayer { primitive, .. } = primitive {
+                    Self::refresh_widget_scene_time(std::slice::from_mut(primitive), time_seconds);
+                    continue;
+                }
                 if let widget_render::MetalPrimitive::WidgetInstance {
                     widget_type,
                     instance,
@@ -1715,6 +1719,15 @@ fragment float4 waveform_frag(
                 draw_widget_instances(&enc, &self.device, wpipe, instances.as_slice());
             }
 
+            let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
+            draw_vertices(
+                &enc,
+                &self.device,
+                &pipeline,
+                &atlas_texture,
+                circle_quads.as_slice(),
+            );
+
             let foreground_rect_quads =
                 build_foreground_rect_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
             draw_vertices(
@@ -1723,15 +1736,6 @@ fragment float4 waveform_frag(
                 &pipeline,
                 &atlas_texture,
                 foreground_rect_quads.as_slice(),
-            );
-
-            let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
-            draw_vertices(
-                &enc,
-                &self.device,
-                &pipeline,
-                &atlas_texture,
-                circle_quads.as_slice(),
             );
 
             if let (Some(prop_atlas), Some(prop_pipe)) =
@@ -2471,150 +2475,165 @@ fragment float4 waveform_frag(
                     for (seg_scissor, seg_prims) in &segments {
                         enc.setScissorRect(*seg_scissor);
 
-                        let prep_started = Instant::now();
-                        let (bg_runs, fg_runs) = partition_widget_instance_runs(seg_prims);
-                        for (widget_type, instances) in &bg_runs {
-                            let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                                continue;
-                            };
-                            if instances.is_empty() {
-                                continue;
+                        let z_layers = z_ordered_primitive_layers(seg_prims);
+                        for seg_prims in &z_layers {
+                            let prep_started = Instant::now();
+                            let (bg_runs, fg_runs) = partition_widget_instance_runs(seg_prims);
+                            for (widget_type, instances) in &bg_runs {
+                                let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                                    continue;
+                                };
+                                if instances.is_empty() {
+                                    continue;
+                                }
+                                let byte_len = std::mem::size_of_val(instances.as_slice());
+                                let Some(wbuf) = (unsafe {
+                                    self.device.newBufferWithBytes_length_options(
+                                        NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                                        byte_len,
+                                        MTLResourceOptions(0),
+                                    )
+                                }) else {
+                                    continue;
+                                };
+                                enc.setRenderPipelineState(wpipe);
+                                unsafe {
+                                    enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                        MTLPrimitiveType::Triangle,
+                                        0,
+                                        6,
+                                        instances.len() as _,
+                                    );
+                                }
                             }
-                            let byte_len = std::mem::size_of_val(instances.as_slice());
-                            let Some(wbuf) = (unsafe {
-                                self.device.newBufferWithBytes_length_options(
-                                    NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                    byte_len,
-                                    MTLResourceOptions(0),
-                                )
-                            }) else {
-                                continue;
-                            };
-                            enc.setRenderPipelineState(wpipe);
-                            unsafe {
-                                enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
-                                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                    MTLPrimitiveType::Triangle,
-                                    0,
-                                    6,
-                                    instances.len() as _,
+
+                            if let Some(image_pipeline) = self.image_pipeline.clone() {
+                                let images = collect_image_primitives(seg_prims);
+                                self.draw_image_primitives(
+                                    &enc,
+                                    &image_pipeline,
+                                    &images,
+                                    Some(*seg_scissor),
+                                    &mut image_load_budget,
+                                    cell_w,
+                                    cell_h,
+                                    vp_w,
+                                    vp_h,
+                                    render_time_seconds,
                                 );
                             }
-                        }
 
-                        if let Some(image_pipeline) = self.image_pipeline.clone() {
-                            let images = collect_image_primitives(seg_prims);
-                            self.draw_image_primitives(
-                                &enc,
-                                &image_pipeline,
-                                &images,
-                                Some(*seg_scissor),
-                                &mut image_load_budget,
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                                render_time_seconds,
-                            );
-                        }
-
-                        let prim_quads = {
-                            let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                            build_widget_primitive_quads(seg_prims, atlas, vp_w, vp_h)
-                        };
-                        metal_prep_time += prep_started.elapsed();
-                        draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
-
-                        if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
-                            let cables = collect_patch_cable_primitives(
-                                seg_prims,
-                                *seg_scissor,
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                            );
-                            draw_patch_cable_instances(
+                            let prim_quads = {
+                                let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                                build_widget_primitive_quads(seg_prims, atlas, vp_w, vp_h)
+                            };
+                            metal_prep_time += prep_started.elapsed();
+                            draw_text_verts(
                                 &enc,
                                 &self.device,
-                                &cable_pipeline,
-                                &cables,
+                                &pipeline,
+                                &atlas_texture,
+                                &prim_quads,
                             );
-                            enc.setScissorRect(*seg_scissor);
-                        }
 
-                        if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
-                            let waveforms = collect_waveform_primitives(seg_prims);
-                            self.draw_waveform_primitives(
-                                &enc,
-                                &waveform_pipeline,
-                                &waveforms,
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                            );
-                        }
-
-                        for (widget_type, instances) in &fg_runs {
-                            let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                                continue;
-                            };
-                            if instances.is_empty() {
-                                continue;
+                            if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
+                                let cables = collect_patch_cable_primitives(
+                                    seg_prims,
+                                    *seg_scissor,
+                                    cell_w,
+                                    cell_h,
+                                    vp_w,
+                                    vp_h,
+                                );
+                                draw_patch_cable_instances(
+                                    &enc,
+                                    &self.device,
+                                    &cable_pipeline,
+                                    &cables,
+                                );
+                                enc.setScissorRect(*seg_scissor);
                             }
-                            let byte_len = std::mem::size_of_val(instances.as_slice());
-                            let Some(wbuf) = (unsafe {
-                                self.device.newBufferWithBytes_length_options(
-                                    NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                    byte_len,
-                                    MTLResourceOptions(0),
-                                )
-                            }) else {
-                                continue;
-                            };
-                            enc.setRenderPipelineState(wpipe);
-                            unsafe {
-                                enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
-                                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                    MTLPrimitiveType::Triangle,
-                                    0,
-                                    6,
-                                    instances.len() as _,
+
+                            if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
+                                let waveforms = collect_waveform_primitives(seg_prims);
+                                self.draw_waveform_primitives(
+                                    &enc,
+                                    &waveform_pipeline,
+                                    &waveforms,
+                                    cell_w,
+                                    cell_h,
+                                    vp_w,
+                                    vp_h,
                                 );
                             }
-                        }
 
-                        let foreground_rect_quads =
-                            build_foreground_rect_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
-                        draw_text_verts(
-                            &enc,
-                            &self.device,
-                            &pipeline,
-                            &atlas_texture,
-                            &foreground_rect_quads,
-                        );
+                            for (widget_type, instances) in &fg_runs {
+                                let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                                    continue;
+                                };
+                                if instances.is_empty() {
+                                    continue;
+                                }
+                                let byte_len = std::mem::size_of_val(instances.as_slice());
+                                let Some(wbuf) = (unsafe {
+                                    self.device.newBufferWithBytes_length_options(
+                                        NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                                        byte_len,
+                                        MTLResourceOptions(0),
+                                    )
+                                }) else {
+                                    continue;
+                                };
+                                enc.setRenderPipelineState(wpipe);
+                                unsafe {
+                                    enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                        MTLPrimitiveType::Triangle,
+                                        0,
+                                        6,
+                                        instances.len() as _,
+                                    );
+                                }
+                            }
 
-                        let circle_quads =
-                            build_circle_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
-                        draw_text_verts(
-                            &enc,
-                            &self.device,
-                            &pipeline,
-                            &atlas_texture,
-                            &circle_quads,
-                        );
-
-                        if let (Some(prop_atlas), Some(prop_pipe)) =
-                            (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
-                        {
-                            let prop_started = Instant::now();
-                            let prop_verts = build_proportional_text_quads(
-                                seg_prims, prop_atlas, cell_w, cell_h, vp_w, vp_h,
+                            let circle_quads =
+                                build_circle_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
+                            draw_text_verts(
+                                &enc,
+                                &self.device,
+                                &pipeline,
+                                &atlas_texture,
+                                &circle_quads,
                             );
-                            metal_prep_time += prop_started.elapsed();
-                            let prop_tex = prop_atlas.texture.clone();
-                            draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
+
+                            let foreground_rect_quads =
+                                build_foreground_rect_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
+                            draw_text_verts(
+                                &enc,
+                                &self.device,
+                                &pipeline,
+                                &atlas_texture,
+                                &foreground_rect_quads,
+                            );
+
+                            if let (Some(prop_atlas), Some(prop_pipe)) =
+                                (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+                            {
+                                let prop_started = Instant::now();
+                                let prop_verts = build_proportional_text_quads(
+                                    seg_prims, prop_atlas, cell_w, cell_h, vp_w, vp_h,
+                                );
+                                metal_prep_time += prop_started.elapsed();
+                                let prop_tex = prop_atlas.texture.clone();
+                                draw_text_verts(
+                                    &enc,
+                                    &self.device,
+                                    prop_pipe,
+                                    &prop_tex,
+                                    &prop_verts,
+                                );
+                            }
                         }
                     }
                     // Restore tile scissor after segments
@@ -3933,6 +3952,15 @@ fragment float4 waveform_frag(
                 }
             }
 
+            let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
+            draw_vertices(
+                &enc,
+                &self.device,
+                &pipeline,
+                &atlas_texture,
+                circle_quads.as_slice(),
+            );
+
             let foreground_rect_quads =
                 build_foreground_rect_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
             draw_vertices(
@@ -3941,15 +3969,6 @@ fragment float4 waveform_frag(
                 &pipeline,
                 &atlas_texture,
                 foreground_rect_quads.as_slice(),
-            );
-
-            let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
-            draw_vertices(
-                &enc,
-                &self.device,
-                &pipeline,
-                &atlas_texture,
-                circle_quads.as_slice(),
             );
 
             // Proportional text: separate atlas + linear-filtering pipeline.
@@ -4251,7 +4270,9 @@ fragment float4 waveform_frag(
         let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
 
         for prim in primitives {
-            let widget_render::MetalPrimitive::ProportionalText(run) = prim else {
+            let widget_render::MetalPrimitive::ProportionalText(run) =
+                widget_render::innermost_primitive(prim)
+            else {
                 continue;
             };
 
@@ -4658,7 +4679,7 @@ fragment float4 waveform_frag(
         let cell_h = atlas.cell_h as f32;
         let mut verts = Vec::new();
         for primitive in primitives {
-            match primitive {
+            match widget_render::innermost_primitive(primitive) {
                 widget_render::MetalPrimitive::Rect(rect) => {
                     push_solid_rect_vertices(
                         rect.rect, rect.color, cell_w, cell_h, vp_w, vp_h, &mut verts,
@@ -4697,7 +4718,8 @@ fragment float4 waveform_frag(
                 widget_render::MetalPrimitive::Image(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
                 widget_render::MetalPrimitive::PushClipRect(_)
-                | widget_render::MetalPrimitive::PopClipRect => {}
+                | widget_render::MetalPrimitive::PopClipRect
+                | widget_render::MetalPrimitive::ZLayer { .. } => {}
             }
         }
         verts
@@ -4712,7 +4734,9 @@ fragment float4 waveform_frag(
     ) -> Vec<Vertex> {
         let mut verts = Vec::new();
         for primitive in primitives {
-            let widget_render::MetalPrimitive::ForegroundRect(rect) = primitive else {
+            let widget_render::MetalPrimitive::ForegroundRect(rect) =
+                widget_render::innermost_primitive(primitive)
+            else {
                 continue;
             };
             push_solid_rect_vertices(
@@ -4731,7 +4755,9 @@ fragment float4 waveform_frag(
     ) -> Vec<Vertex> {
         let mut verts = Vec::new();
         for primitive in primitives {
-            let widget_render::MetalPrimitive::Circle(circle) = primitive else {
+            let widget_render::MetalPrimitive::Circle(circle) =
+                widget_render::innermost_primitive(primitive)
+            else {
                 continue;
             };
             push_circle_fill_px(
@@ -4753,10 +4779,12 @@ fragment float4 waveform_frag(
     ) -> Vec<widget_render::MetalImagePrimitive> {
         primitives
             .iter()
-            .filter_map(|primitive| match primitive {
-                widget_render::MetalPrimitive::Image(image) => Some(image.clone()),
-                _ => None,
-            })
+            .filter_map(
+                |primitive| match widget_render::innermost_primitive(primitive) {
+                    widget_render::MetalPrimitive::Image(image) => Some(image.clone()),
+                    _ => None,
+                },
+            )
             .collect()
     }
 
@@ -4765,10 +4793,12 @@ fragment float4 waveform_frag(
     ) -> Vec<widget_render::MetalWaveformPrimitive> {
         primitives
             .iter()
-            .filter_map(|primitive| match primitive {
-                widget_render::MetalPrimitive::Waveform(waveform) => Some(waveform.clone()),
-                _ => None,
-            })
+            .filter_map(
+                |primitive| match widget_render::innermost_primitive(primitive) {
+                    widget_render::MetalPrimitive::Waveform(waveform) => Some(waveform.clone()),
+                    _ => None,
+                },
+            )
             .collect()
     }
 
@@ -4782,14 +4812,16 @@ fragment float4 waveform_frag(
     ) -> Vec<PatchCableDrawInstance> {
         primitives
             .iter()
-            .filter_map(|primitive| match primitive {
-                widget_render::MetalPrimitive::PatchCable(cable) => {
-                    patch_cable_draw_instance_from_primitive(
-                        cable, clip, cell_w, cell_h, vp_w, vp_h,
-                    )
-                }
-                _ => None,
-            })
+            .filter_map(
+                |primitive| match widget_render::innermost_primitive(primitive) {
+                    widget_render::MetalPrimitive::PatchCable(cable) => {
+                        patch_cable_draw_instance_from_primitive(
+                            cable, clip, cell_w, cell_h, vp_w, vp_h,
+                        )
+                    }
+                    _ => None,
+                },
+            )
             .collect()
     }
 
@@ -6026,6 +6058,32 @@ fragment float4 waveform_frag(
         segments
     }
 
+    fn z_ordered_primitive_layers(
+        primitives: &[widget_render::MetalPrimitive],
+    ) -> Vec<Vec<widget_render::MetalPrimitive>> {
+        let has_layers = primitives
+            .iter()
+            .any(|primitive| matches!(primitive, widget_render::MetalPrimitive::ZLayer { .. }));
+        if !has_layers {
+            return vec![primitives.to_vec()];
+        }
+        let mut buckets: BTreeMap<i32, Vec<widget_render::MetalPrimitive>> = BTreeMap::new();
+        for primitive in primitives {
+            match primitive {
+                widget_render::MetalPrimitive::ZLayer { z_index, primitive } => {
+                    buckets
+                        .entry(*z_index)
+                        .or_default()
+                        .push((**primitive).clone());
+                }
+                primitive => {
+                    buckets.entry(0).or_default().push(primitive.clone());
+                }
+            }
+        }
+        buckets.into_values().collect()
+    }
+
     fn intersect_scissor_rects(a: MTLScissorRect, b: MTLScissorRect) -> MTLScissorRect {
         let x1 = a.x.max(b.x);
         let y1 = a.y.max(b.y);
@@ -6053,7 +6111,7 @@ fragment float4 waveform_frag(
                 widget_type,
                 instance,
                 is_background,
-            } = primitive
+            } = widget_render::innermost_primitive(primitive)
             {
                 let runs = if *is_background {
                     &mut bg_runs
@@ -6077,7 +6135,7 @@ fragment float4 waveform_frag(
     ) -> bool {
         primitives.iter().any(|primitive| {
             matches!(
-                primitive,
+                widget_render::innermost_primitive(primitive),
                 widget_render::MetalPrimitive::WidgetInstance { widget_type, .. }
                     if is_agent_instrument_stub_animation_widget_type(widget_type)
             )
@@ -6119,6 +6177,18 @@ fragment float4 waveform_frag(
         }
         let reaches_right = |right: f32| (right - layout_width).abs() <= 0.01;
         match prim {
+            widget_render::MetalPrimitive::ZLayer { z_index, primitive } => {
+                widget_render::MetalPrimitive::ZLayer {
+                    z_index,
+                    primitive: Box::new(extend_right_edge_primitive(
+                        *primitive,
+                        layout_width,
+                        extra_cols,
+                        cell_w,
+                        vp_w,
+                    )),
+                }
+            }
             widget_render::MetalPrimitive::Rect(mut r) => {
                 if reaches_right(r.rect.col + r.rect.width) {
                     r.rect.width += extra_cols;
@@ -6212,6 +6282,14 @@ fragment float4 waveform_frag(
         vp_h: f32,
     ) -> widget_render::MetalPrimitive {
         match prim {
+            widget_render::MetalPrimitive::ZLayer { z_index, primitive } => {
+                widget_render::MetalPrimitive::ZLayer {
+                    z_index,
+                    primitive: Box::new(offset_primitive(
+                        *primitive, col_off, row_off, cell_w, cell_h, vp_w, vp_h,
+                    )),
+                }
+            }
             widget_render::MetalPrimitive::Rect(mut r) => {
                 r.rect.col += col_off;
                 r.rect.row += row_off;

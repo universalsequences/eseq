@@ -22,6 +22,7 @@ pub struct SdfWidgetDef {
     pub width: f32,
     pub height: f32,
     pub paint_margin: f32,
+    pub animates: bool,
 }
 
 pub const MAX_SDF_STATE_UNIFORMS: usize = 8;
@@ -501,6 +502,7 @@ pub fn register_inline_shader(
         width: 1.0,
         height: 1.0,
         paint_margin,
+        animates: false,
     };
     SDF_WIDGETS.with(|w| w.borrow_mut().insert(name, Rc::new(def)));
     SDF_WIDGET_REGISTRY_GENERATION.fetch_add(1, Ordering::Relaxed);
@@ -1058,6 +1060,7 @@ mod tests {
             width: 2.8,
             height: 1.4,
             paint_margin: 0.0,
+            animates: false,
         });
 
         assert_eq!(sdf_widget_hit_test(&node, 1.4, 0.7, 1.0), 0);
@@ -1093,6 +1096,7 @@ mod tests {
             width: 1.0,
             height: 1.0,
             paint_margin: 0.5,
+            animates: false,
         });
 
         let viewport = WidgetViewport {

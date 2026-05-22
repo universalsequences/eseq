@@ -401,10 +401,10 @@ fn wrap_text_to_lines(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct WrappedLine {
-    start: usize,
-    end: usize,
-    text: String,
+pub(crate) struct WrappedLine {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) text: String,
 }
 
 fn char_widths_for_text(text: &str, font_size: f32, cell_w: f32) -> Vec<f32> {
@@ -416,7 +416,7 @@ fn char_widths_for_text(text: &str, font_size: f32, cell_w: f32) -> Vec<f32> {
     })
 }
 
-fn wrap_text_to_measured_lines(
+pub(crate) fn wrap_text_to_measured_lines(
     text: &str,
     max_width_cells: f32,
     font_size: f32,

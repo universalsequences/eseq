@@ -9,7 +9,9 @@ use super::metrics::{
     PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
-use super::model::{ArgValue, CableEndpoint, InputPortRef, OutputPortRef, Patch, PatchConnection};
+use super::model::{
+    ArgValue, CableEndpoint, InputPortRef, OutputPortRef, Patch, PatchConnection, PatchNode,
+};
 use super::state::{PatcherPanState, source_connection_id};
 
 pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
@@ -149,13 +151,14 @@ pub(super) fn patch_output_counts(patch: &Patch) -> HashMap<String, usize> {
 
 pub(super) fn hit_patcher_node(
     patch: &Patch,
+    ordered_nodes: &[&PatchNode],
     rect: Rect,
     pan_state: &PatcherPanState,
     local_col: f32,
     local_row: f32,
 ) -> Option<String> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
-    patch.nodes.iter().rev().find_map(|node| {
+    ordered_nodes.iter().rev().find_map(|node| {
         let node_rect = node_rects.get(&node.id)?;
         rect_contains(*node_rect, local_col, local_row).then(|| node.id.clone())
     })
@@ -217,6 +220,7 @@ pub(super) fn distance_squared(a: (f32, f32), b: (f32, f32)) -> f32 {
 
 pub(super) fn hit_patcher_output_port(
     patch: &Patch,
+    ordered_nodes: &[&PatchNode],
     rect: Rect,
     pan_state: &PatcherPanState,
     output_counts: &HashMap<String, usize>,
@@ -228,7 +232,7 @@ pub(super) fn hit_patcher_output_port(
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let radius_px = PORT_OUTER_DIAMETER_PX * 0.5;
     let threshold_px = radius_px * radius_px;
-    patch.nodes.iter().rev().find_map(|node| {
+    ordered_nodes.iter().rev().find_map(|node| {
         let node_rect = *node_rects.get(&node.id)?;
         let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
         (0..output_count).find_map(|output_index| {
@@ -245,6 +249,7 @@ pub(super) fn hit_patcher_output_port(
 
 pub(super) fn hit_patcher_input_port(
     patch: &Patch,
+    ordered_nodes: &[&PatchNode],
     rect: Rect,
     pan_state: &PatcherPanState,
     input_indices: &HashMap<String, Vec<usize>>,
@@ -257,7 +262,7 @@ pub(super) fn hit_patcher_input_port(
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let radius_px = PORT_OUTER_DIAMETER_PX * 0.5;
     let threshold_px = radius_px * radius_px;
-    patch.nodes.iter().rev().find_map(|node| {
+    ordered_nodes.iter().rev().find_map(|node| {
         let node_rect = *node_rects.get(&node.id)?;
         let input_indices = input_indices.get(&node.id)?;
         let input_slot_count = input_slot_counts.get(&node.id).copied().unwrap_or(0);

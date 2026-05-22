@@ -3115,6 +3115,58 @@ fn metal_tiled_widget_click_uses_fractional_layout_viewport_without_relayout() {
 }
 
 #[test]
+fn metal_tiled_fill_widget_does_not_scroll_horizontally_from_floored_content_width() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect
+                  (box :width :fill :height :fill
+                    (label "fits")))
+            "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+
+    let tile_id = editor.active_tile;
+    if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.show_border = true;
+        leaf.show_status = false;
+        leaf.border_width_px = 0.25;
+    }
+    editor.cached_tile_rects = vec![(
+        tile_id,
+        crate::layout::Rect {
+            col: 3.25,
+            row: 10.5,
+            width: 20.0,
+            height: 8.0,
+        },
+    )];
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::ScrollRight, 10, 12),
+        4.0,
+        12.0,
+        0,
+    );
+
+    let layout = editor.widget_layout().expect("widget layout");
+    assert_eq!(layout.rect.width, 19.5);
+    assert_eq!(
+        crate::ui::hit::max_extent_exact(&layout, editor.layout_aspect()).0,
+        19.5
+    );
+    assert_eq!(
+        editor.widget_scroll_left(),
+        0.0,
+        "Metal tiled wheel routing must use the exact 19.5-cell layout viewport, not the floored 19-cell event width"
+    );
+}
+
+#[test]
 fn mouse_down_updates_knob_via_bind_shorthand() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -5099,6 +5151,43 @@ fn ui_only_nested_scroll_content_does_not_inflate_outer_widget_scroll() {
         editor.widget_scroll_top(),
         0.0,
         "scrolling outside the inner scroll should not move the outer viewport"
+    );
+}
+
+#[test]
+fn ui_only_nested_scroll_content_does_not_inflate_outer_horizontal_scroll() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport_exact(19.5, 8.0);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect
+                  (box :width :fill :height :fill
+                    (scroll :width :fill :height 4
+                      (h-stack :gap 0
+                        (box :width 50 :height 2
+                          (label "wide clipped content"))))))
+                "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport_exact(19.5, 8.0);
+
+    let layout = editor.widget_layout().expect("widget layout");
+    assert_eq!(
+        crate::ui::hit::max_extent_exact(&layout, editor.layout_aspect()).0,
+        19.5,
+        "outer widget scroll extent should stop at nested scroll viewport"
+    );
+
+    editor.handle_mouse(mouse_event(MouseEventKind::ScrollRight, 2, 2), 1, 1, 19, 8);
+
+    assert_eq!(
+        editor.widget_scroll_left(),
+        0.0,
+        "content clipped inside nested scroll should not move the outer viewport horizontally"
     );
 }
 

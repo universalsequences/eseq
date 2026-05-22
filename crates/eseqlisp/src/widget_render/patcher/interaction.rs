@@ -22,11 +22,12 @@ use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, Outp
 use super::state::{
     PatcherDragState, PatcherInteractionState, PatcherMacroEdit, PatcherPanState,
     active_patcher_patch, active_patcher_view_key, allocate_created_connection,
-    allocate_created_node, connection_id_from_ports, debug_log_edit_event,
+    allocate_created_node, bring_nodes_to_front, connection_id_from_ports, debug_log_edit_event,
     delete_connection_edit_or_mark_deleted, ensure_source_node_edit, get_patcher_interaction_state,
-    get_patcher_pan_state, node_edit_key, patch_with_created_macros, patch_with_interaction_state,
-    patcher_state_key, set_connection_segment_edit, set_node_edit_position,
-    set_patcher_interaction_state, set_patcher_pan_state, source_connection_id,
+    get_patcher_pan_state, node_edit_key, ordered_patch_nodes, patch_with_created_macros,
+    patch_with_interaction_state, patcher_state_key, set_connection_segment_edit,
+    set_node_edit_position, set_patcher_interaction_state, set_patcher_pan_state,
+    source_connection_id, sync_patcher_z_order,
 };
 use super::text::{
     begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col_with_zoom,
@@ -128,11 +129,13 @@ pub(super) fn zoom_patcher_by_magnify(
 
 fn load_interactive_patch_for_node(node: &LayoutNode) -> Option<(Patch, PatcherPanState, String)> {
     let key = patcher_state_key(node);
-    let interaction_state = get_patcher_interaction_state(key);
+    let mut interaction_state = get_patcher_interaction_state(key);
     let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
     let view_key = active_patcher_view_key(&interaction_state);
     let patch = active_patcher_patch(&root_patch, &interaction_state);
     let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
+    sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
+    set_patcher_interaction_state(key, interaction_state);
     let mut pan_state = get_patcher_pan_state(key);
     sync_patcher_pan_bounds(node, &mut pan_state);
     Some((patch, pan_state, view_key))
@@ -154,10 +157,19 @@ pub(super) fn handle_patcher_pointer_down(
         navigate_patcher_to_root(key, &mut state);
         return;
     }
-    let Some((patch, pan_state, _view_key)) = load_interactive_patch_for_node(node) else {
+    let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) else {
         return;
     };
-    let hit = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    sync_patcher_z_order(&mut state, &view_key, &patch);
+    let ordered_nodes = ordered_patch_nodes(&patch, &state, &view_key);
+    let hit = hit_patcher_node(
+        &patch,
+        &ordered_nodes,
+        node.rect,
+        &pan_state,
+        local_col,
+        local_row,
+    );
     state.last_pointer_model_position = Some(screen_to_model(
         node.rect,
         &pan_state,
@@ -241,6 +253,7 @@ pub(super) fn handle_patcher_pointer_down(
     }
     if let Some(output) = hit_patcher_output_port(
         &patch,
+        &ordered_nodes,
         node.rect,
         &pan_state,
         &output_counts,
@@ -249,6 +262,7 @@ pub(super) fn handle_patcher_pointer_down(
         cell_w,
         cell_h,
     ) {
+        bring_nodes_to_front(&mut state, &view_key, std::slice::from_ref(&output.node_id));
         let Some(node_rect) = patch_node_rects(&patch, node.rect, &pan_state)
             .get(&output.node_id)
             .copied()
@@ -324,9 +338,14 @@ pub(super) fn handle_patcher_pointer_down(
                 if !state.selected_nodes.insert(node_id.clone()) {
                     state.selected_nodes.remove(&node_id);
                 }
+                bring_nodes_to_front(&mut state, &view_key, std::slice::from_ref(&node_id));
             } else if !state.selected_nodes.contains(&node_id) {
                 state.selected_nodes.clear();
-                state.selected_nodes.insert(node_id);
+                state.selected_nodes.insert(node_id.clone());
+                bring_nodes_to_front(&mut state, &view_key, std::slice::from_ref(&node_id));
+            } else {
+                let selected = state.selected_nodes.iter().cloned().collect::<Vec<_>>();
+                bring_nodes_to_front(&mut state, &view_key, &selected);
             }
             let start_positions = patch
                 .nodes
@@ -574,7 +593,15 @@ pub(super) fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, loc
         }
         None => {}
     }
-    state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    let ordered_nodes = ordered_patch_nodes(&patch, &state, &view_key);
+    state.hovered_node = hit_patcher_node(
+        &patch,
+        &ordered_nodes,
+        node.rect,
+        &pan_state,
+        local_col,
+        local_row,
+    );
     set_patcher_interaction_state(key, state);
 }
 
@@ -651,7 +678,15 @@ pub(super) fn handle_patcher_pointer_up(
                 }
             }
         }
-        state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+        let ordered_nodes = ordered_patch_nodes(&patch, &state, &view_key);
+        state.hovered_node = hit_patcher_node(
+            &patch,
+            &ordered_nodes,
+            node.rect,
+            &pan_state,
+            local_col,
+            local_row,
+        );
         if semantic_changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
             debug_log_patch_lisp(&view_key, &patch);
         }
@@ -689,9 +724,18 @@ pub(super) fn handle_patcher_pointer_moved(
     ));
     state.hover_back_button = state.active_macro.is_some()
         && rect_contains(patcher_back_button_rect(node.rect), local_col, local_row);
-    state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    let ordered_nodes = ordered_patch_nodes(&patch, &state, &_view_key);
+    state.hovered_node = hit_patcher_node(
+        &patch,
+        &ordered_nodes,
+        node.rect,
+        &pan_state,
+        local_col,
+        local_row,
+    );
     state.hovered_input_port = hit_patcher_input_port(
         &patch,
+        &ordered_nodes,
         node.rect,
         &pan_state,
         &input_indices,
@@ -704,6 +748,7 @@ pub(super) fn handle_patcher_pointer_moved(
     state.hovered_output_port = if state.hovered_input_port.is_none() {
         hit_patcher_output_port(
             &patch,
+            &ordered_nodes,
             node.rect,
             &pan_state,
             &output_counts,
@@ -846,7 +891,16 @@ pub(super) fn handle_patcher_double_click(
     let patch = patch_with_interaction_state(patch, &state, &view_key);
     let mut pan_state = get_patcher_pan_state(key);
     sync_patcher_pan_bounds(node, &mut pan_state);
-    if let Some(node_id) = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row) {
+    sync_patcher_z_order(&mut state, &view_key, &patch);
+    let ordered_nodes = ordered_patch_nodes(&patch, &state, &view_key);
+    if let Some(node_id) = hit_patcher_node(
+        &patch,
+        &ordered_nodes,
+        node.rect,
+        &pan_state,
+        local_col,
+        local_row,
+    ) {
         let node_rects = patch_node_rects(&patch, node.rect, &pan_state);
         let Some(patch_node) = patch
             .nodes

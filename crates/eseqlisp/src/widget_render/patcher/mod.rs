@@ -63,6 +63,15 @@ pub fn resolve_agentic_bubble(
     if keys.is_empty() {
         return Ok(());
     }
+    let has_matching_bubble = keys.iter().any(|key| {
+        state::get_patcher_interaction_state(*key)
+            .agentic_bubbles
+            .get(bubble_id)
+            .is_some_and(|bubble| bubble.generation == generation)
+    });
+    if !has_matching_bubble {
+        return Ok(());
+    }
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
     let mut wrote = false;
@@ -95,6 +104,90 @@ pub fn resolve_agentic_bubble(
         state::set_patcher_interaction_state(key, interaction);
     }
     Ok(())
+}
+
+pub fn resolve_agentic_bubble_macro_edit(
+    path: impl AsRef<std::path::Path>,
+    intent: PatcherIntent,
+    bubble_id: &str,
+    generation: u64,
+    macro_name: &str,
+    macro_source: &str,
+) -> Result<(), String> {
+    let path = path.as_ref();
+    let keys = state::patcher_keys_for_path(path);
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let has_matching_bubble = keys.iter().any(|key| {
+        state::get_patcher_interaction_state(*key)
+            .agentic_bubbles
+            .get(bubble_id)
+            .is_some_and(|bubble| bubble.generation == generation)
+    });
+    if !has_matching_bubble {
+        return Ok(());
+    }
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    let emitted = writeback::replace_macro_source(&source, macro_name, macro_source)
+        .map_err(|error| format!("{error:?}"))?;
+    std::fs::write(path, emitted)
+        .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
+    rematerialize_edited_macro_layout(path, intent, macro_name)?;
+    for key in keys {
+        let mut interaction = state::get_patcher_interaction_state(key);
+        let Some(bubble) = interaction.agentic_bubbles.get(bubble_id).cloned() else {
+            continue;
+        };
+        if bubble.generation != generation {
+            continue;
+        }
+        if let AgenticBubbleTarget::EditMacro {
+            instance_node_id, ..
+        } = bubble.target
+        {
+            interaction
+                .agentic_morph_nodes
+                .insert(instance_node_id, Instant::now());
+        }
+        interaction.agentic_bubbles.remove(bubble_id);
+        state::set_patcher_interaction_state(key, interaction);
+    }
+    Ok(())
+}
+
+fn rematerialize_edited_macro_layout(
+    path: &std::path::Path,
+    intent: PatcherIntent,
+    macro_name: &str,
+) -> Result<(), String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    let mut patch = parse_patch_source(&source, intent)?;
+    let excluded = std::iter::once(macro_name.to_string()).collect();
+    sidecar::apply_or_materialize_excluding_macro_scopes(path, &mut patch, &excluded)
+}
+
+pub fn resolve_agentic_bubble_answer(
+    path: impl AsRef<std::path::Path>,
+    bubble_id: &str,
+    generation: u64,
+    answer: impl Into<String>,
+) {
+    let answer = answer.into();
+    for key in state::patcher_keys_for_path(path.as_ref()) {
+        let mut interaction = state::get_patcher_interaction_state(key);
+        if let Some(bubble) = interaction.agentic_bubbles.get_mut(bubble_id)
+            && bubble.generation == generation
+        {
+            bubble.state = state::AgenticBubbleState::Answer {
+                text: answer.clone(),
+                answered_at: Instant::now(),
+            };
+        }
+        state::set_patcher_interaction_state(key, interaction);
+    }
 }
 
 struct MaterializedAgenticMacro {
@@ -372,11 +465,12 @@ use interaction::{
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
-    AgenticBubbleState, active_patcher_patch, active_patcher_view_key, allocate_agentic_bubble,
-    debug_log_edit_event, debug_log_writeback_event, delete_connection_edit_or_mark_deleted,
-    delete_selected_nodes, editing_agentic_bubble_id, get_patcher_interaction_state,
-    patch_with_interaction_state, patcher_state_key, patcher_state_key_from_parts,
-    set_connection_segment_edit, set_patcher_interaction_state,
+    AgenticBubbleState, AgenticBubbleTarget, active_patcher_patch, active_patcher_view_key,
+    allocate_agentic_bubble, allocate_agentic_bubble_with_target, debug_log_edit_event,
+    debug_log_writeback_event, delete_connection_edit_or_mark_deleted, delete_selected_nodes,
+    editing_agentic_bubble_id, get_patcher_interaction_state, patch_with_interaction_state,
+    patcher_state_key, patcher_state_key_from_parts, set_connection_segment_edit,
+    set_patcher_interaction_state,
 };
 use text::{
     apply_patcher_autocomplete, cancel_patcher_text_edit,
@@ -392,6 +486,7 @@ use super::{MetalPrimitive, WidgetViewport};
 use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_stable_widget_id,
 };
+use crate::parser::{ASTParser, Expression, Parser, format_expression};
 use crate::vm::Value;
 use std::time::Instant;
 
@@ -572,15 +667,23 @@ impl WidgetDefinition for PatcherWidget {
                     Some(WidgetEvent::Custom(payload))
                 }
                 KeyCode::Esc
-                    if state
-                        .agentic_bubbles
-                        .values()
-                        .any(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. })) =>
+                    if state.agentic_bubbles.values().any(|bubble| {
+                        matches!(
+                            bubble.state,
+                            AgenticBubbleState::Error { .. } | AgenticBubbleState::Answer { .. }
+                        )
+                    }) =>
                 {
                     if let Some(bubble_id) = state
                         .agentic_bubbles
                         .values()
-                        .find(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. }))
+                        .find(|bubble| {
+                            matches!(
+                                bubble.state,
+                                AgenticBubbleState::Error { .. }
+                                    | AgenticBubbleState::Answer { .. }
+                            )
+                        })
                         .map(|bubble| bubble.id.clone())
                     {
                         state.agentic_bubbles.remove(&bubble_id);
@@ -591,15 +694,7 @@ impl WidgetDefinition for PatcherWidget {
                 KeyCode::Char('k') | KeyCode::Char('K')
                     if key_event.modifiers.contains(KeyModifiers::SUPER) =>
                 {
-                    let pan_state = state::get_patcher_pan_state(key);
-                    let position = state.last_pointer_model_position.unwrap_or_else(|| {
-                        geometry::screen_to_model(
-                            node.rect,
-                            &pan_state,
-                            (node.rect.width * 0.5, node.rect.height * 0.5),
-                        )
-                    });
-                    allocate_agentic_bubble(&mut state, position);
+                    open_agentic_bubble_for_context(node, key, &mut state)?;
                     set_patcher_interaction_state(key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 }
@@ -859,7 +954,7 @@ fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> V
         PatcherIntent::Effect => "effect",
         PatcherIntent::Instrument => "instrument",
     };
-    map_value(vec![
+    let mut entries = vec![
         ("status", Value::Keyword("agentic-submit".to_string())),
         ("path", Value::String(path.unwrap_or_default())),
         ("intent", Value::Keyword(intent.to_string())),
@@ -869,7 +964,152 @@ fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> V
         ("macro-name", Value::String(bubble.macro_name.clone())),
         ("x", Value::Number(bubble.position.0 as f64)),
         ("y", Value::Number(bubble.position.1 as f64)),
-    ])
+    ];
+    match &bubble.target {
+        AgenticBubbleTarget::CreateMacro => {
+            entries.push(("target", Value::Keyword("create-macro".to_string())));
+        }
+        AgenticBubbleTarget::EditMacro {
+            instance_node_id,
+            macro_name,
+            params,
+            source,
+        } => {
+            entries.push(("target", Value::Keyword("edit-macro".to_string())));
+            entries.push(("target-node-id", Value::String(instance_node_id.clone())));
+            entries.push(("existing-macro-name", Value::String(macro_name.clone())));
+            entries.push(("existing-macro-params", Value::String(params.join(" "))));
+            entries.push(("existing-macro-source", Value::String(source.clone())));
+        }
+    }
+    map_value(entries)
+}
+
+fn open_agentic_bubble_for_context(
+    node: &LayoutNode,
+    key: u64,
+    state: &mut state::PatcherInteractionState,
+) -> Option<String> {
+    let macro_target = selected_macro_target(node, state);
+    if matches!(macro_target, SelectedMacroTarget::Ambiguous) {
+        return None;
+    }
+    match macro_target {
+        SelectedMacroTarget::Edit {
+            instance_node_id,
+            macro_name,
+            params,
+            source,
+            position,
+        } => Some(allocate_agentic_bubble_with_target(
+            state,
+            position,
+            AgenticBubbleTarget::EditMacro {
+                instance_node_id,
+                macro_name,
+                params,
+                source,
+            },
+        )),
+        SelectedMacroTarget::None => {
+            let pan_state = state::get_patcher_pan_state(key);
+            let position = state.last_pointer_model_position.unwrap_or_else(|| {
+                geometry::screen_to_model(
+                    node.rect,
+                    &pan_state,
+                    (node.rect.width * 0.5, node.rect.height * 0.5),
+                )
+            });
+            Some(allocate_agentic_bubble(state, position))
+        }
+        SelectedMacroTarget::Ambiguous => None,
+    }
+}
+
+enum SelectedMacroTarget {
+    None,
+    Ambiguous,
+    Edit {
+        instance_node_id: String,
+        macro_name: String,
+        params: Vec<String>,
+        source: String,
+        position: (f32, f32),
+    },
+}
+
+fn selected_macro_target(
+    node: &LayoutNode,
+    state: &state::PatcherInteractionState,
+) -> SelectedMacroTarget {
+    let Ok((path, root_patch)) = load_patch_from_props(&node.props) else {
+        return SelectedMacroTarget::None;
+    };
+    let source = std::fs::read_to_string(&path).ok();
+    let view_key = active_patcher_view_key(state);
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, &view_key);
+    let selected = patch
+        .nodes
+        .iter()
+        .filter(|patch_node| {
+            state.selected_nodes.contains(&patch_node.id)
+                && patch_node.kind == NodeKind::MacroInstance
+        })
+        .collect::<Vec<_>>();
+    let [patch_node] = selected.as_slice() else {
+        return if selected.is_empty() {
+            SelectedMacroTarget::None
+        } else {
+            SelectedMacroTarget::Ambiguous
+        };
+    };
+    let macro_name = patch_node.op.clone();
+    let root_patch = state::patch_with_created_macros(root_patch, state);
+    let params = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == macro_name)
+        .map(|macro_patch| macro_patch.params.clone())
+        .unwrap_or_default();
+    let source = state
+        .edit_state
+        .created_macros
+        .get(&macro_name)
+        .and_then(|edit| edit.source.clone())
+        .or_else(|| {
+            source
+                .as_deref()
+                .and_then(|source| macro_source(source, &macro_name))
+        });
+    let Some(source) = source else {
+        return SelectedMacroTarget::None;
+    };
+    SelectedMacroTarget::Edit {
+        instance_node_id: patch_node.id.clone(),
+        macro_name,
+        params,
+        source,
+        position: patch_node.position,
+    }
+}
+
+fn macro_source(source: &str, macro_name: &str) -> Option<String> {
+    let tokens = Parser::new(source.to_string()).parse().ok()?;
+    let exprs = ASTParser::new(tokens).parse().ok()?;
+    exprs.into_iter().find_map(|expr| {
+        let Expression::List(items) = &expr else {
+            return None;
+        };
+        match items.as_slice() {
+            [Expression::Symbol(head), Expression::Symbol(name), ..]
+                if head == "defmacro" && name == macro_name =>
+            {
+                Some(format_expression(&expr))
+            }
+            _ => None,
+        }
+    })
 }
 
 fn slug_agentic_macro_name(prompt: &str) -> String {

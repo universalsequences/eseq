@@ -1047,6 +1047,7 @@ impl Runtime {
                 let mut shader_val = None;
                 let mut widget_state_names: Vec<String> = Vec::new();
                 let mut bindable_props: Vec<String> = Vec::new();
+                let mut animates = false;
 
                 let mut i = 1;
                 while i + 1 < args.len() {
@@ -1069,6 +1070,9 @@ impl Runtime {
                             }
                             "shader" => {
                                 shader_val = Some(args[i + 1].clone());
+                            }
+                            "animates" => {
+                                animates = matches!(args[i + 1], Value::Bool(true));
                             }
                             "state" => {
                                 // Extract state symbol names from quoted list
@@ -1129,6 +1133,7 @@ impl Runtime {
                     width,
                     height,
                     paint_margin,
+                    animates,
                 });
 
                 let widget_type = name.clone();
@@ -1346,7 +1351,7 @@ impl Runtime {
             ("dot", "(dot a b)", "Return the dot product of two vec2 lists."),
             ("load", "(load path)", "Read and evaluate a Lisp file from path."),
             ("sdf->metal", "(sdf->metal sdf-expr)", "Compile a quoted SDF expression to Metal shader source."),
-            ("defwidget", "(defwidget name :width w :height h :shader expr ...)", "Register an SDF-backed widget constructor."),
+            ("defwidget", "(defwidget name :width w :height h :animates bool :shader expr ...)", "Register an SDF-backed widget constructor."),
             ("vec3", "(vec3 x y z)", "Return a tagged SDF vec3 expression."),
             ("vec4", "(vec4 x y z w)", "Return a tagged SDF vec4 expression."),
             ("rgba", "(rgba r g b a)", "Return a tagged SDF color expression."),

@@ -22,12 +22,21 @@ cutoff q 1)` for band-pass; do not use keyword modes such as `:bp`. Example: \
 pub struct AgenticBubbleRequest {
     pub prompt: String,
     pub suggested_macro_name: String,
+    pub follow_up: Option<AgenticBubbleFollowUp>,
 }
 
 #[derive(Debug, Clone)]
-pub struct AgenticBubbleOutput {
+pub struct AgenticBubbleFollowUp {
     pub macro_name: String,
+    pub params: Vec<String>,
     pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum AgenticBubbleOutput {
+    Macro { macro_name: String, source: String },
+    MacroEdit { source: String },
+    Answer { text: String },
 }
 
 pub fn generate_agentic_bubble_macro(
@@ -44,7 +53,7 @@ pub fn generate_agentic_bubble_macro(
     let mut validation_error = None::<String>;
     let mut raw = String::new();
     for attempt in 0..=MAX_RETRIES {
-        let system_prompt = system_prompt();
+        let system_prompt = system_prompt(request.follow_up.is_some());
         let prompt = user_prompt(&request, validation_error.as_deref());
         let messages = vec![AgentMessage {
             role: AgentMessageRole::User,
@@ -76,13 +85,10 @@ pub fn generate_agentic_bubble_macro(
             raw.len(),
             raw
         );
-        match validate_macro_response(&raw) {
-            Ok((macro_name, source)) => {
-                eprintln!(
-                    "[agentic-bubble] validated macro={} source={:?}",
-                    macro_name, source
-                );
-                return Ok(AgenticBubbleOutput { macro_name, source });
+        match validate_agentic_response(&request, &raw) {
+            Ok(output) => {
+                eprintln!("[agentic-bubble] validated output={output:?}");
+                return Ok(output);
             }
             Err(error) if attempt < MAX_RETRIES => {
                 eprintln!(
@@ -146,11 +152,16 @@ fn fast_model_for_provider(state: &AgentProviderState, provider: AgentProviderKi
         .unwrap_or_else(|| "gpt-5-mini".to_string())
 }
 
-fn system_prompt() -> String {
-    format!(
+fn system_prompt(follow_up: bool) -> String {
+    let output_contract = if follow_up {
         "\
-You generate small reusable DGenLisp `defmacro` helpers for an audio patcher.
-
+Output contract:
+- If the user is asking a question or requesting an explanation, output exactly `(answer \"...\")`.
+- If the user is requesting a change, output exactly one `(defmacro name (params...) body...)` form.
+- For edits, preserve the provided macro name and parameter list exactly.
+- Do not output prose, markdown fences, or any other wrapper."
+    } else {
+        "\
 Output contract:
 - Output exactly one `(defmacro name (params...) body...)` form.
 - Do not output prose, explanations, markdown fences, or a complete instrument.
@@ -159,7 +170,13 @@ Output contract:
   audio concept.
 - Choose explicit parameters for every external signal/control the helper needs.
 - Output one signal/value unless the user explicitly asks for a tuple-like result.
-- Keep the macro small enough to be readable in a patcher node.
+- Keep the macro small enough to be readable in a patcher node."
+    };
+    format!(
+        "\
+You generate small reusable DGenLisp `defmacro` helpers for an audio patcher.
+
+{output_contract}
 
 Macro syntax:
 - {DGENLISP_DEFMACRO_CONTRACT}
@@ -210,6 +227,19 @@ fn user_prompt(request: &AgenticBubbleRequest, validation_error: Option<&str>) -
     let retry = validation_error
         .map(|error| format!("\nPrevious output was invalid: {error}\nReturn a corrected macro."))
         .unwrap_or_default();
+    if let Some(follow_up) = &request.follow_up {
+        return format!(
+            "Follow-up prompt: {}\n\nSelected macro name: {}\nSelected macro params: ({})\nSelected macro source:\n{}\n\nDecide whether the user wants an explanation/answer or a macro edit. For an answer, return `(answer \"...\")`. For an edit, return a complete `(defmacro {} ({}) body...)` preserving the exact name and params.\n{}{}",
+            request.prompt.trim(),
+            follow_up.macro_name,
+            follow_up.params.join(" "),
+            follow_up.source,
+            follow_up.macro_name,
+            follow_up.params.join(" "),
+            DGENLISP_DEFMACRO_CONTRACT,
+            retry
+        );
+    }
     format!(
         "Prompt: {}\nProduce a defmacro. Choose the macro name yourself. Suggested fallback name if needed: {}. Choose a clear parameter list. Output a single signal unless the prompt explicitly requires otherwise.\n{}{}",
         request.prompt.trim(),
@@ -217,6 +247,83 @@ fn user_prompt(request: &AgenticBubbleRequest, validation_error: Option<&str>) -
         DGENLISP_DEFMACRO_CONTRACT,
         retry
     )
+}
+
+fn validate_agentic_response(
+    request: &AgenticBubbleRequest,
+    raw: &str,
+) -> Result<AgenticBubbleOutput, String> {
+    if let Some(follow_up) = &request.follow_up {
+        validate_follow_up_response(raw, follow_up)
+    } else {
+        let (macro_name, source) = validate_macro_response(raw)?;
+        Ok(AgenticBubbleOutput::Macro { macro_name, source })
+    }
+}
+
+fn validate_follow_up_response(
+    raw: &str,
+    follow_up: &AgenticBubbleFollowUp,
+) -> Result<AgenticBubbleOutput, String> {
+    let source = extract_lisp_source(raw);
+    let tokens = Parser::new(source.clone())
+        .parse()
+        .map_err(|error| format!("parser token error: {error:?}"))?;
+    let exprs = ASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("parser AST error: {error:?}"))?;
+    if exprs.len() != 1 {
+        return Err(format!(
+            "expected exactly one top-level form, got {}",
+            exprs.len()
+        ));
+    }
+    let Expression::List(items) = &exprs[0] else {
+        return Err("top-level form must be a list".to_string());
+    };
+    match items.as_slice() {
+        [Expression::Symbol(head), Expression::String(text)] if head == "answer" => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err("answer text cannot be empty".to_string());
+            }
+            Ok(AgenticBubbleOutput::Answer {
+                text: text.to_string(),
+            })
+        }
+        [Expression::Symbol(head), Expression::Symbol(name), Expression::List(params), body @ ..]
+            if head == "defmacro" =>
+        {
+            if name != &follow_up.macro_name {
+                return Err(format!(
+                    "edited macro name `{name}` must remain `{}`",
+                    follow_up.macro_name
+                ));
+            }
+            let actual_params = params
+                .iter()
+                .map(|param| match param {
+                    Expression::Symbol(param) => Ok(param.clone()),
+                    _ => Err("defmacro parameters must be symbols".to_string()),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if actual_params != follow_up.params {
+                return Err(format!(
+                    "edited macro params `({})` must remain `({})`",
+                    actual_params.join(" "),
+                    follow_up.params.join(" ")
+                ));
+            }
+            if body.is_empty() {
+                return Err("defmacro body is empty".to_string());
+            }
+            validate_known_operators(body, params)?;
+            Ok(AgenticBubbleOutput::MacroEdit {
+                source: format_expression(&exprs[0]),
+            })
+        }
+        _ => Err("response must be `(answer \"...\")` or the edited defmacro".to_string()),
+    }
 }
 
 fn validate_macro_response(raw: &str) -> Result<(String, String), String> {
@@ -437,7 +544,10 @@ fn available_dgenlisp_names() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{system_prompt, user_prompt, validate_macro_response, AgenticBubbleRequest};
+    use super::{
+        system_prompt, user_prompt, validate_follow_up_response, validate_macro_response,
+        AgenticBubbleFollowUp, AgenticBubbleOutput, AgenticBubbleRequest,
+    };
 
     #[test]
     fn validates_single_named_defmacro() {
@@ -483,8 +593,9 @@ mod tests {
         let request = AgenticBubbleRequest {
             prompt: "create a formant bank".to_string(),
             suggested_macro_name: "agentic-formants".to_string(),
+            follow_up: None,
         };
-        let system = system_prompt();
+        let system = system_prompt(false);
         let user = user_prompt(&request, None);
         for prompt in [system.as_str(), user.as_str()] {
             assert!(prompt.contains("not Common Lisp macros"));
@@ -496,6 +607,39 @@ mod tests {
         assert!(system.contains("polyblep_saw"));
         assert!(!system.contains("such as +, -, *, /, sin"));
         assert!(!system.contains("Use only common DGenLisp primitives"));
+    }
+
+    #[test]
+    fn follow_up_accepts_answer_envelope() {
+        let follow_up = AgenticBubbleFollowUp {
+            macro_name: "smooth".to_string(),
+            params: vec!["sig".to_string(), "amt".to_string()],
+            source: "(defmacro smooth (sig amt) (mix sig amt 0.5))".to_string(),
+        };
+        let output = validate_follow_up_response("(answer \"It smooths a signal.\")", &follow_up)
+            .expect("valid answer");
+        assert!(matches!(output, AgenticBubbleOutput::Answer { text } if text.contains("smooths")));
+    }
+
+    #[test]
+    fn follow_up_rejects_signature_changes() {
+        let follow_up = AgenticBubbleFollowUp {
+            macro_name: "smooth".to_string(),
+            params: vec!["sig".to_string(), "amt".to_string()],
+            source: "(defmacro smooth (sig amt) (mix sig amt 0.5))".to_string(),
+        };
+        let renamed = validate_follow_up_response(
+            "(defmacro smoother (sig amt) (mix sig amt 0.5))",
+            &follow_up,
+        )
+        .unwrap_err();
+        assert!(renamed.contains("must remain `smooth`"));
+        let reparam = validate_follow_up_response(
+            "(defmacro smooth (sig amount) (mix sig amount 0.5))",
+            &follow_up,
+        )
+        .unwrap_err();
+        assert!(reparam.contains("must remain `(sig amt)`"));
     }
 
     #[test]

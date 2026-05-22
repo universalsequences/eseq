@@ -2154,7 +2154,7 @@ impl Editor {
             self.runtime
                 .current_layout
                 .as_ref()
-                .map(|layout| (crate::ui::hit::max_extent(layout, aspect).0 as f32 - vp).max(0.0))
+                .map(|layout| (crate::ui::hit::max_extent_exact(layout, aspect).0 - vp).max(0.0))
                 .unwrap_or(0.0)
         };
         let leaf = self.active_leaf_mut();
@@ -2173,7 +2173,7 @@ impl Editor {
             self.runtime
                 .current_layout
                 .as_ref()
-                .map(|l| (crate::ui::hit::max_extent(l, aspect).0 as f32 - vp).max(0.0))
+                .map(|l| (crate::ui::hit::max_extent_exact(l, aspect).0 - vp).max(0.0))
                 .unwrap_or(0.0)
         };
 
@@ -3842,22 +3842,27 @@ impl Editor {
         let view_mode = self.active_buffer().view_mode;
 
         // Widget layout extent: max right edge of root's direct children.
-        let layout_width =
-            if view_mode != ViewMode::TextOnly && self.active_buffer().widget_tree.is_some() {
-                // Use bounded extent: only count nodes whose left edge starts
-                // within the viewport. This prevents h-stacks with many clipped
-                // children (e.g. 10 effect boxes) from inflating the scroll range,
-                // while still detecting legitimate overflow (e.g. a grid whose
-                // visible cells extend past the viewport).
-                let aspect = self.runtime.layout_aspect();
-                self.runtime
-                    .current_layout
-                    .as_ref()
-                    .map(|l| crate::ui::hit::max_extent_bounded(l, aspect, vp as f32).0 as usize)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+        let layout_overflow = if view_mode != ViewMode::TextOnly
+            && self.active_buffer().widget_tree.is_some()
+        {
+            // Use bounded extent: only count nodes whose left edge starts
+            // within the viewport. This prevents h-stacks with many clipped
+            // children (e.g. 10 effect boxes) from inflating the scroll range,
+            // while still detecting legitimate overflow (e.g. a grid whose
+            // visible cells extend past the viewport).
+            let aspect = self.runtime.layout_aspect();
+            let layout_vp = self.runtime.layout_cols_exact();
+            self.runtime
+                .current_layout
+                .as_ref()
+                .map(|l| {
+                    (crate::ui::hit::max_extent_bounded_exact(l, aspect, layout_vp).0 - layout_vp)
+                        .max(0.0)
+                })
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         // Text line width (only when text is visible).
         let max_line = if view_mode == ViewMode::UiOnly {
@@ -3871,12 +3876,8 @@ impl Editor {
                 .unwrap_or(0)
         };
 
-        let content_width = layout_width.max(max_line);
-        let result = content_width.saturating_sub(vp) as u16;
-        eprintln!(
-            "[MAX-H-SCROLL] view_mode={view_mode:?} layout_width={layout_width} max_line={max_line} vp={vp} result={result}"
-        );
-        result
+        let text_overflow = max_line.saturating_sub(vp) as f32;
+        layout_overflow.max(text_overflow).ceil() as u16
     }
 
     pub fn handle_touchpad_magnify(

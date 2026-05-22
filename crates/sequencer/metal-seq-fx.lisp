@@ -88,7 +88,7 @@
             (str "audio-fx-enabled-" (get fx :slot-idx)))))
       (label title :font-size 11 :color :white :bg :transparent)
       (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
-        (box :bg :dark-gray :width 4 :height 1.0 :align :center
+        (box :width 4 :height 1.0 :align :center
           :on-click (lambda (info)
             (do
               (fx-clear-selected-effect)
@@ -2444,7 +2444,7 @@
                   (instrument-synth-button)
                   (instrument-mods-toggle-button))
             
-            (box :debug-name "instrument-edit-button" :bg :dark-gray :width 1.2 :height 0.9 :align :center
+            (box :debug-name "instrument-edit-button" :width 2.8 :height 1.4 :align :center
               :on-click |x y r|
               (host-command "enter-edit-instrument"
                 (dict :name SEQ.sidebar-instrument-name))

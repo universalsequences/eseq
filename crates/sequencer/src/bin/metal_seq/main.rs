@@ -47,6 +47,7 @@ use crossterm::event::Event;
 
 use eseqlisp::backend::Backend;
 use eseqlisp::editor::ViewMode;
+use eseqlisp::parser::{ASTParser, Expression, Parser};
 use eseqlisp::vm::Value;
 use eseqlisp::{BufferMode, Editor, HostCommand, HostEvent, Runtime};
 
@@ -167,6 +168,12 @@ struct PendingInstrumentPreview {
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
 }
 
+struct PendingInstrumentCancelRestore {
+    session: InstrumentEditSession,
+    persisted_source: String,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+}
+
 struct PendingAgenticBubble {
     path: PathBuf,
     intent: eseqlisp::widget_render::patcher::PatcherIntent,
@@ -175,6 +182,20 @@ struct PendingAgenticBubble {
     receiver: std::sync::mpsc::Receiver<
         Result<sequencer::agent::agentic_bubble::AgenticBubbleOutput, String>,
     >,
+}
+
+fn extract_macro_name_from_defmacro(source: &str) -> Option<String> {
+    let tokens = Parser::new(source.to_string()).parse().ok()?;
+    let exprs = ASTParser::new(tokens).parse().ok()?;
+    let Expression::List(items) = exprs.first()? else {
+        return None;
+    };
+    match items.as_slice() {
+        [Expression::Symbol(head), Expression::Symbol(name), ..] if head == "defmacro" => {
+            Some(name.clone())
+        }
+        _ => None,
+    }
 }
 
 fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -> String {
@@ -1777,6 +1798,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut editor_mode: Option<String> = None;
     let mut instrument_edit_session: Option<InstrumentEditSession> = None;
     let mut pending_instrument_preview: Option<PendingInstrumentPreview> = None;
+    let mut pending_instrument_cancel_restore: Option<PendingInstrumentCancelRestore> = None;
     let mut pending_agentic_bubbles: HashMap<String, PendingAgenticBubble> = HashMap::new();
     let mut editor_effect_name: Option<String> = None; // original effect name (without .lisp)
     let mut editor_effect_slot: Option<usize> = None; // effect slot index for hot-swap
@@ -7332,6 +7354,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 extract_string_from_payload(&payload, "prompt").unwrap_or_default();
                             let macro_name = extract_string_from_payload(&payload, "macro-name")
                                 .unwrap_or_else(|| "agentic-macro".to_string());
+                            let target = extract_string_from_payload(&payload, "target")
+                                .unwrap_or_else(|| "create-macro".to_string());
                             let intent = match extract_string_from_payload(&payload, "intent")
                                 .as_deref()
                             {
@@ -7346,9 +7370,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 task_key, generation, intent, macro_name, prompt
                             );
                             let (tx, rx) = std::sync::mpsc::channel();
+                            let follow_up = if target == "edit-macro" {
+                                let existing_macro_name =
+                                    extract_string_from_payload(&payload, "existing-macro-name")
+                                        .unwrap_or_else(|| macro_name.clone());
+                                let params =
+                                    extract_string_from_payload(&payload, "existing-macro-params")
+                                        .unwrap_or_default()
+                                        .split_whitespace()
+                                        .map(str::to_string)
+                                        .collect::<Vec<_>>();
+                                let source =
+                                    extract_string_from_payload(&payload, "existing-macro-source")
+                                        .unwrap_or_default();
+                                Some(sequencer::agent::agentic_bubble::AgenticBubbleFollowUp {
+                                    macro_name: existing_macro_name,
+                                    params,
+                                    source,
+                                })
+                            } else {
+                                None
+                            };
                             let request = sequencer::agent::agentic_bubble::AgenticBubbleRequest {
                                 prompt,
                                 suggested_macro_name: macro_name.clone(),
+                                follow_up,
                             };
                             std::thread::spawn(move || {
                                 let result =
@@ -7758,22 +7804,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     "cancel-editor" => {
+                        if pending_instrument_cancel_restore.is_some() {
+                            continue;
+                        }
                         let cancelled_instrument_patcher = instrument_edit_session.is_some();
                         if let Some(session) = instrument_edit_session.take() {
                             pending_instrument_preview = None;
                             reset_instrument_patcher_state(&session.path);
-                            match session.mode {
+                            match session.mode.clone() {
                                 InstrumentEditMode::EditExisting { persisted_source } => {
-                                    if let Err(error) = app.replace_custom_instrument_engine_sync(
-                                        session.engine_id,
-                                        &session.name,
-                                        &persisted_source,
-                                    ) {
-                                        editor.handle_host_event(HostEvent::Error(format!(
-                                            "Failed to restore instrument '{}': {error}",
-                                            session.name
-                                        )));
-                                    }
+                                    let source = persisted_source.clone();
+                                    let sample_rate = app.graph.sample_rate;
+                                    let asset_base =
+                                        session.path.parent().map(|parent| parent.to_path_buf());
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    std::thread::spawn(move || {
+                                        let result = sequencer::lisp_effect::compile_and_load_instrument_with_asset_base(
+                                            &source,
+                                            sample_rate,
+                                            asset_base.as_deref(),
+                                        );
+                                        let _ = tx.send(result);
+                                    });
+                                    pending_instrument_cancel_restore =
+                                        Some(PendingInstrumentCancelRestore {
+                                            session,
+                                            persisted_source,
+                                            receiver: rx,
+                                        });
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "editor-canceling", Value::Bool(true));
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "editor-error",
+                                        Value::String(String::new()),
+                                    );
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    editor.mark_needs_redraw();
+                                    continue;
                                 }
                                 InstrumentEditMode::CreateDraft {
                                     temp_dir,
@@ -7867,6 +7936,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
                         rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
                         rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
                         rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
@@ -8093,6 +8163,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 
+        if let Some(completed_cancel_restore) =
+            pending_instrument_cancel_restore
+                .as_ref()
+                .and_then(|pending| match pending.receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("Instrument restore compile thread crashed".to_string()))
+                    }
+                })
+        {
+            let pending = pending_instrument_cancel_restore
+                .take()
+                .expect("completed cancel restore must have pending state");
+            let session = pending.session;
+            match completed_cancel_restore {
+                Ok(result) => match app.apply_compiled_instrument_engine(
+                    session.engine_id,
+                    &session.name,
+                    &pending.persisted_source,
+                    result,
+                ) {
+                    Ok(()) => {
+                        if let Some(buf_name) = editor_buffer_name.take() {
+                            if let Err(error) = editor
+                                .runtime_mut()
+                                .eval_str(restore_instrument_patcher_layout_source())
+                            {
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Failed to restore main editor layout: {error:?}"
+                                )));
+                            }
+                            editor.refresh_runtime_side_effects();
+                            editor.remove_buffer_by_name(&buf_name);
+                        }
+                        editor_mode = None;
+                        editor_effect_name = None;
+                        editor_effect_slot = None;
+                        editor_effect_bus = None;
+
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
+                        rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                        rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                        rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+                        rt.set_reactive(
+                            "SEQ",
+                            "instrument-panel",
+                            build_instrument_panel_value(
+                                &app,
+                                current_track.load(Ordering::Relaxed),
+                                &selected_steps,
+                            ),
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        editor.handle_host_event(HostEvent::Status("Editor cancelled".to_string()));
+                        editor.mark_needs_redraw();
+                    }
+                    Err(error) => {
+                        instrument_edit_session = Some(session);
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-error",
+                            Value::String(format!("Failed to restore instrument: {error}")),
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.mark_needs_redraw();
+                    }
+                },
+                Err(error) => {
+                    instrument_edit_session = Some(session);
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
+                    rt.set_reactive(
+                        "SEQ",
+                        "editor-error",
+                        Value::String(format!("Failed to restore instrument: {error}")),
+                    );
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    editor.mark_needs_redraw();
+                }
+            }
+        }
+
         if let Some(completed_preview) = pending_instrument_preview.as_ref().and_then(|pending| {
             match pending.receiver.try_recv() {
                 Ok(result) => Some(Ok((
@@ -8196,48 +8357,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             };
             match result {
-                Ok(output) => match eseqlisp::widget_render::patcher::resolve_agentic_bubble(
-                    &pending.path,
-                    pending.intent,
-                    &pending.bubble_id,
-                    pending.generation,
-                    &output.macro_name,
-                    &output.source,
-                ) {
-                    Ok(()) => {
-                        eprintln!(
-                            "[agentic-bubble] host materialized path={} bubble={} generation={} macro={}",
-                            pending.path.display(),
-                            pending.bubble_id,
+                Ok(output) => match output {
+                    sequencer::agent::agentic_bubble::AgenticBubbleOutput::Macro {
+                        macro_name,
+                        source,
+                    } => match eseqlisp::widget_render::patcher::resolve_agentic_bubble(
+                        &pending.path,
+                        pending.intent,
+                        &pending.bubble_id,
+                        pending.generation,
+                        &macro_name,
+                        &source,
+                    ) {
+                        Ok(()) => {
+                            eprintln!(
+                                "[agentic-bubble] host materialized path={} bubble={} generation={} macro={}",
+                                pending.path.display(),
+                                pending.bubble_id,
+                                pending.generation,
+                                macro_name
+                            );
+                            editor.refresh_runtime_side_effects();
+                            editor.mark_needs_redraw();
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Generated macro '{}'",
+                                macro_name
+                            )));
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[agentic-bubble] host materialize failed path={} bubble={} generation={} error={}",
+                                pending.path.display(),
+                                pending.bubble_id,
+                                pending.generation,
+                                error
+                            );
+                            eseqlisp::widget_render::patcher::fail_agentic_bubble(
+                                &pending.path,
+                                &pending.bubble_id,
+                                pending.generation,
+                                "materialize failed",
+                                error.clone(),
+                            );
+                            editor.mark_needs_redraw();
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Agentic bubble failed: {error}"
+                            )));
+                        }
+                    },
+                    sequencer::agent::agentic_bubble::AgenticBubbleOutput::MacroEdit { source } => {
+                        let macro_name = extract_macro_name_from_defmacro(&source)
+                            .unwrap_or_else(|| "macro".to_string());
+                        match eseqlisp::widget_render::patcher::resolve_agentic_bubble_macro_edit(
+                            &pending.path,
+                            pending.intent,
+                            &pending.bubble_id,
                             pending.generation,
-                            output.macro_name
-                        );
-                        editor.refresh_runtime_side_effects();
-                        editor.mark_needs_redraw();
-                        editor.handle_host_event(HostEvent::Status(format!(
-                            "Generated macro '{}'",
-                            output.macro_name
-                        )));
+                            &macro_name,
+                            &source,
+                        ) {
+                            Ok(()) => {
+                                editor.refresh_runtime_side_effects();
+                                editor.mark_needs_redraw();
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Updated macro '{}'",
+                                    macro_name
+                                )));
+                            }
+                            Err(error) => {
+                                eseqlisp::widget_render::patcher::fail_agentic_bubble(
+                                    &pending.path,
+                                    &pending.bubble_id,
+                                    pending.generation,
+                                    "materialize failed",
+                                    error.clone(),
+                                );
+                                editor.mark_needs_redraw();
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Agentic bubble failed: {error}"
+                                )));
+                            }
+                        }
                     }
-                    Err(error) => {
-                        eprintln!(
-                            "[agentic-bubble] host materialize failed path={} bubble={} generation={} error={}",
-                            pending.path.display(),
-                            pending.bubble_id,
-                            pending.generation,
-                            error
-                        );
-                        eseqlisp::widget_render::patcher::fail_agentic_bubble(
+                    sequencer::agent::agentic_bubble::AgenticBubbleOutput::Answer { text } => {
+                        eseqlisp::widget_render::patcher::resolve_agentic_bubble_answer(
                             &pending.path,
                             &pending.bubble_id,
                             pending.generation,
-                            "materialize failed",
-                            error.clone(),
+                            text,
                         );
                         editor.mark_needs_redraw();
-                        editor.handle_host_event(HostEvent::Status(format!(
-                            "Agentic bubble failed: {error}"
-                        )));
+                        editor.handle_host_event(HostEvent::Status(
+                            "Agentic bubble answered".to_string(),
+                        ));
                     }
                 },
                 Err(error) => {

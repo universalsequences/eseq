@@ -19,6 +19,45 @@
 (defstate sbrowser-preset-save-mode "")  ;; "" or "save-preset"
 (defstate sbrowser-preset-filter "")
 
+(defwidget editor-spinner
+  :width 3.0 :height 1.25
+  :animates true
+  :shader
+  (let ((phase (* itime 5.4))
+        (p0 (+ 0.45 (* 0.55 (sin phase))))
+        (p1 (+ 0.45 (* 0.55 (sin (- phase 0.75)))))
+        (p2 (+ 0.45 (* 0.55 (sin (- phase 1.5)))))
+        (p3 (+ 0.45 (* 0.55 (sin (- phase 2.25)))))
+        (p4 (+ 0.45 (* 0.55 (sin (- phase 3.0)))))
+        (r0 (+ 0.17 (* 0.12 p0)))
+        (r1 (+ 0.17 (* 0.12 p1)))
+        (r2 (+ 0.17 (* 0.12 p2)))
+        (r3 (+ 0.17 (* 0.12 p3)))
+        (r4 (+ 0.17 (* 0.12 p4))))
+    (sdf/layer
+      (sdf/fill (sdf/translate -0.72 0 (sdf/circle r0))
+        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p0)))))
+      (sdf/fill (sdf/translate -0.36 0 (sdf/circle r1))
+        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p1)))))
+      (sdf/fill (sdf/translate 0 0 (sdf/circle r2))
+        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p2)))))
+      (sdf/fill (sdf/translate 0.36 0 (sdf/circle r3))
+        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p3)))))
+      (sdf/fill (sdf/translate 0.72 0 (sdf/circle r4))
+        (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p4))))))))
+
+(def sbrowser-editor-status-row (text color)
+  (h-stack :width :fill :height 1.35 :gap 0.5 :align :center
+    (editor-spinner :width 2.8 :height 1.15)
+    (label text
+      :font-size 9
+      :color color
+      :bg :transparent)))
+
+(def sbrowser-editor-busy? ()
+  (or SEQ.editor-canceling
+    (= SEQ.editor-error "Preview compiling...")))
+
 (def sbrowser-audition-mode? ()
   (= sbrowser-mode "audition"))
 
@@ -706,10 +745,11 @@
           :color :white
           :bg :transparent)
         (box :bg :dark-gray :width 6 :height 1.5 :align :center
-          :on-click |x y r| (host-command "cancel-editor" (dict))
+          :on-click |x y r|
+            (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
           (label "cancel"
             :font-size 9
-            :color :gray
+            :color (if SEQ.editor-canceling :dim :gray)
             :bg :transparent)))
       (if (= SEQ.editor-mode "new-instrument")
         (v-stack :width :fill :gap 0.35
@@ -746,34 +786,40 @@
             :font-size 10
             :color :gray
             :bg :transparent)))
-      ;; Error display
-      (if (not (= SEQ.editor-error ""))
-        (label SEQ.editor-error
-          :font-size 9
-          :color :red
-          :bg :transparent)
-        (box))
+      ;; Status display
+      (if SEQ.editor-canceling
+        (sbrowser-editor-status-row "Canceling..." :gray)
+        (if (= SEQ.editor-error "Preview compiling...")
+          (sbrowser-editor-status-row SEQ.editor-error :gray)
+          (if (not (= SEQ.editor-error ""))
+            (label SEQ.editor-error
+              :font-size 9
+              :color :red
+              :bg :transparent)
+            (box))))
       ;; Save button
-      (button
-        (if (= SEQ.editor-mode "new-instrument")
-          "Finalize"
-          (if (= SEQ.editor-mode "new-effect")
-            "Save & Add"
-          "Save")
-        )
-        :variant :primary
-        :width 10
-        :height 1.2
-        :font-size 11
-        :on-click |x y r|
+      (if (sbrowser-editor-busy?)
+        (box :height 1.2)
+        (button
           (if (= SEQ.editor-mode "new-instrument")
-            (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
-            (if (= SEQ.editor-mode "edit-instrument")
-              (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
-              (if (= SEQ.editor-mode "new-effect")
-                (host-command "save-new-effect" (dict :name sbrowser-editor-name))
-                (host-command "update-effect" (dict)))))
-        :color :white))))
+            "Finalize"
+            (if (= SEQ.editor-mode "new-effect")
+              "Save & Add"
+            "Save")
+          )
+          :variant :primary
+          :width 10
+          :height 1.2
+          :font-size 11
+          :on-click |x y r|
+            (if (= SEQ.editor-mode "new-instrument")
+              (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
+              (if (= SEQ.editor-mode "edit-instrument")
+                (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
+                (if (= SEQ.editor-mode "new-effect")
+                  (host-command "save-new-effect" (dict :name sbrowser-editor-name))
+                  (host-command "update-effect" (dict)))))
+          :color :white)))))
 
 (def sbrowser-editor-panel ()
   (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))

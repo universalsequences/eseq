@@ -5027,6 +5027,7 @@ mod tests {
                 ("current-project-name", Value::String(String::new())),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
+                ("editor-canceling", Value::Bool(false)),
                 ("editor-error", Value::String(String::new())),
             ],
             true,
@@ -5187,6 +5188,44 @@ mod tests {
         assert!(
             !value_contains_string(tree, "Save & Add"),
             "new instrument editor should use finalization copy"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_editor_compile_status_spinner_is_visible_and_animating() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let tree = editor
+            .runtime_mut()
+            .eval_str(r#"(sbrowser-editor-status-row "Preview compiling..." :gray)"#)
+            .expect("build compile status row")
+            .expect("compile status row should return a widget tree");
+        let layout = editor
+            .runtime_mut()
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 30.0)))
+            .expect("compile status row should lay out");
+        fn find_editor_spinner(
+            node: &eseqlisp::layout::LayoutNode,
+        ) -> Option<&eseqlisp::layout::LayoutNode> {
+            if node.widget_type.contains("editor-spinner") {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_editor_spinner)
+        }
+
+        let spinner =
+            find_editor_spinner(&layout).expect("compile status should render an animated spinner");
+
+        assert!(
+            spinner.rect.width.is_finite()
+                && spinner.rect.height.is_finite()
+                && spinner.rect.width > 0.0
+                && spinner.rect.height > 0.0,
+            "compile spinner should have a finite visible rect, got {:?}",
+            spinner.rect
+        );
+        assert!(
+            eseqlisp::widget_render::layout_wants_animation_frames(&layout),
+            "compile spinner should keep animation frames active"
         );
     }
 

@@ -78,6 +78,30 @@ pub(super) fn apply_or_materialize(source_path: &Path, patch: &mut Patch) -> Res
     }
 }
 
+pub(super) fn apply_or_materialize_excluding_macro_scopes(
+    source_path: &Path,
+    patch: &mut Patch,
+    excluded_macros: &HashSet<String>,
+) -> Result<(), String> {
+    match load_sidecar(source_path) {
+        Ok((SidecarStatus::Present, mut sidecar)) => {
+            sidecar
+                .macros
+                .retain(|macro_name, _| !excluded_macros.contains(macro_name));
+            apply_sidecar(patch, &sidecar);
+            save_patch_layout(source_path, patch)
+        }
+        Ok((SidecarStatus::Missing, _)) => save_patch_layout(source_path, patch),
+        Err(error) => {
+            eprintln!(
+                "failed to load patcher layout sidecar for '{}': {error}",
+                source_path.display()
+            );
+            save_patch_layout(source_path, patch)
+        }
+    }
+}
+
 pub(super) fn save_current_layout(
     source_path: &Path,
     root_patch: &Patch,

@@ -3,13 +3,14 @@ use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use super::super::text_input::{
     cursor_x_from_char_cache, selection_range as text_selection_range, text_width_from_char_cache,
+    wrap_text_to_measured_lines,
 };
 use super::super::{CellBuffer, styled_cell};
 #[cfg(target_os = "macos")]
 use super::super::{
     MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive, MetalPrimitive,
     MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds,
+    WidgetViewport, ndc_bounds, z_layer,
 };
 #[cfg(target_os = "macos")]
 use crate::layout::LayoutNode;
@@ -37,16 +38,20 @@ use super::model::{
 use super::project::OperatorPortDocumentation;
 use super::project::dgenlisp_operator_documentation;
 use super::state::{
-    AgenticBubbleState, PatcherDragState, PatcherInteractionState, PatcherPanState,
-    PatcherTextEdit, active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
-    get_patcher_pan_state, patch_with_interaction_state, patcher_back_label, patcher_breadcrumb,
-    patcher_state_key, set_patcher_pan_state, source_connection_id,
+    AgenticBubbleState, AgenticBubbleTarget, PATCHER_Z_SLOTS_PER_NODE, PatcherDragState,
+    PatcherInteractionState, PatcherPanState, PatcherTextEdit, PatcherZSlot, active_patcher_patch,
+    active_patcher_view_key, get_patcher_interaction_state, get_patcher_pan_state,
+    max_node_z_index, node_z_index, ordered_patch_nodes, patch_with_interaction_state,
+    patcher_back_label, patcher_breadcrumb, patcher_state_key, set_patcher_pan_state,
+    source_connection_id, sync_patcher_z_order,
 };
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
 
 #[cfg(target_os = "macos")]
 const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 9.0;
+#[cfg(target_os = "macos")]
+const PATCHER_OVERLAY_Z: i32 = 1_000_000;
 
 pub(super) fn render_tui(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     for row_offset in 0..rect.height.round() as u16 {
@@ -102,10 +107,11 @@ pub(super) fn build_metal_primitives_for_patcher(
     let loaded = load_patch_from_props(&node.props);
     match loaded {
         Ok((path, root_patch)) => {
-            let interaction_state = get_patcher_interaction_state(key);
+            let mut interaction_state = get_patcher_interaction_state(key);
             let view_key = active_patcher_view_key(&interaction_state);
             let patch = active_patcher_patch(&root_patch, &interaction_state);
             let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
+            sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
             let content_size = patch_content_size(&patch);
             if pan_uninitialized && patcher_fit_enabled(&node.props) {
                 pan_state.zoom = fit_zoom(content_size, node.rect);
@@ -117,24 +123,36 @@ pub(super) fn build_metal_primitives_for_patcher(
             pan_state.content_height = (content_size.1 * zoom).max(node.rect.height);
             set_patcher_pan_state(key, pan_state.clone());
             pan_state = get_patcher_pan_state(key);
-            draw_patch(
+            draw_patch_with_view_key(
                 &mut prims,
                 &patch,
                 node.rect,
                 viewport,
                 &pan_state,
                 &interaction_state,
+                &view_key,
             );
+            let mut bubble_prims = Vec::new();
             draw_agentic_bubbles(
-                &mut prims,
+                &mut bubble_prims,
+                &patch,
                 node.rect,
                 viewport,
                 &pan_state,
                 &interaction_state,
             );
-            push_marquee(&mut prims, node.rect, viewport, &interaction_state);
-            push_back_button(&mut prims, node.rect, viewport, &interaction_state);
-            prims.push(MetalPrimitive::ProportionalText(
+            push_z_layered(&mut prims, PATCHER_OVERLAY_Z + 100, bubble_prims);
+            let mut marquee_prims = Vec::new();
+            push_marquee(&mut marquee_prims, node.rect, viewport, &interaction_state);
+            push_z_layered(&mut prims, PATCHER_OVERLAY_Z + 40, marquee_prims);
+            let mut chrome_overlay_prims = Vec::new();
+            push_back_button(
+                &mut chrome_overlay_prims,
+                node.rect,
+                viewport,
+                &interaction_state,
+            );
+            chrome_overlay_prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
                     row: node.rect.row + 0.7,
                     col: if interaction_state.active_macro.is_some() {
@@ -156,7 +174,7 @@ pub(super) fn build_metal_primitives_for_patcher(
                 },
             ));
             if !patch.diagnostics.is_empty() {
-                prims.push(MetalPrimitive::ProportionalText(
+                chrome_overlay_prims.push(MetalPrimitive::ProportionalText(
                     MetalProportionalTextPrimitive {
                         row: node.rect.row + node.rect.height - 1.7,
                         col: node.rect.col + 1.0,
@@ -173,6 +191,7 @@ pub(super) fn build_metal_primitives_for_patcher(
                     },
                 ));
             }
+            push_z_layered(&mut prims, PATCHER_OVERLAY_Z + 50, chrome_overlay_prims);
         }
         Err(error) => {
             prims.push(MetalPrimitive::ProportionalText(
@@ -278,6 +297,7 @@ fn push_marquee(
 #[cfg(target_os = "macos")]
 fn draw_agentic_bubbles(
     prims: &mut Vec<MetalPrimitive>,
+    patch: &Patch,
     rect: Rect,
     viewport: WidgetViewport,
     pan_state: &PatcherPanState,
@@ -285,15 +305,38 @@ fn draw_agentic_bubbles(
 ) {
     let origin = super::geometry::patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
+    let node_rects = patch_node_rects(patch, rect, pan_state);
     for bubble in interaction_state.agentic_bubbles.values() {
-        let x = origin.0 + bubble.position.0 * zoom;
-        let y = origin.1 + bubble.position.1 * zoom;
-        let width = 18.0 * zoom;
-        let inner_width = width - 1.3 * zoom;
-        let prompt = if bubble.prompt.trim().is_empty() {
-            "cmd+k prompt".to_string()
-        } else {
-            bubble.prompt.clone()
+        let (mut x, y) = match &bubble.target {
+            AgenticBubbleTarget::EditMacro {
+                instance_node_id, ..
+            } => node_rects
+                .get(instance_node_id)
+                .map(|node_rect| (node_rect.col, node_rect.row))
+                .unwrap_or_else(|| {
+                    (
+                        origin.0 + bubble.position.0 * zoom,
+                        origin.1 + bubble.position.1 * zoom,
+                    )
+                }),
+            AgenticBubbleTarget::CreateMacro => (
+                origin.0 + bubble.position.0 * zoom,
+                origin.1 + bubble.position.1 * zoom,
+            ),
+        };
+        let width_cells = match &bubble.state {
+            AgenticBubbleState::Answer { .. } => 34.0,
+            _ => 18.0,
+        };
+        let max_visible_width = (rect.width - 1.0).max(8.0);
+        let width = (width_cells * zoom).min(max_visible_width);
+        let right_edge = rect.col + rect.width - 0.5;
+        x = x.min(right_edge - width).max(rect.col + 0.5);
+        let inner_width = (width - 1.3 * zoom).max(1.0);
+        let prompt = match &bubble.state {
+            AgenticBubbleState::Answer { text, .. } => text.clone(),
+            _ if bubble.prompt.trim().is_empty() => "cmd+k prompt".to_string(),
+            _ => bubble.prompt.clone(),
         };
         let prompt_lines = wrap_agentic_prompt_lines(&prompt, inner_width / zoom, viewport);
         let height = ((4.0 + prompt_lines.len() as f32 * 1.18).max(5.8)) * zoom;
@@ -305,7 +348,7 @@ fn draw_agentic_bubbles(
         };
         let (fill, border, status) = match &bubble.state {
             AgenticBubbleState::Editing => (
-                crate::backend::Color::rgba(0.22, 0.19, 0.08, 0.94),
+                crate::backend::Color::rgba(0.12, 0.09, 0.08, 0.94),
                 theme::PATCHER_NODE_SELECTED_BORDER(),
                 "prompt",
             ),
@@ -332,8 +375,13 @@ fn draw_agentic_bubbles(
                 theme::PATCHER_ERROR(),
                 "error",
             ),
+            AgenticBubbleState::Answer { .. } => (
+                crate::backend::Color::rgba(0.08, 0.12, 0.10, 0.96),
+                theme::PATCHER_NODE_TEXT(),
+                "answer",
+            ),
         };
-        prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+        prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
             rect: Rect {
                 col: x,
                 row: y,
@@ -369,11 +417,8 @@ fn draw_agentic_bubbles(
                 height,
             },
         ] {
-            prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                x: border_rect.col,
-                y: border_rect.row,
-                width: border_rect.width,
-                height: border_rect.height,
+            prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+                rect: border_rect,
                 color: border,
             }));
         }
@@ -383,6 +428,7 @@ fn draw_agentic_bubbles(
                 .map(|elapsed| format!("{}  {:.1}s", status, elapsed.as_secs_f32()))
                 .unwrap_or_else(|| status.to_string()),
             AgenticBubbleState::Error { summary, .. } => format!("{status}: {summary}"),
+            AgenticBubbleState::Answer { .. } => status.to_string(),
             AgenticBubbleState::Editing => status.to_string(),
         };
         prims.push(MetalPrimitive::ProportionalText(
@@ -459,11 +505,12 @@ fn push_agentic_bubble_cursor(
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Clone, Debug)]
-struct AgenticPromptLine {
-    text: String,
-    start: usize,
-    end: usize,
+fn push_z_layered(prims: &mut Vec<MetalPrimitive>, z_index: i32, layer: Vec<MetalPrimitive>) {
+    prims.extend(
+        layer
+            .into_iter()
+            .map(|primitive| z_layer(z_index, primitive)),
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -471,68 +518,11 @@ fn wrap_agentic_prompt_lines(
     text: &str,
     max_width_cells: f32,
     viewport: WidgetViewport,
-) -> Vec<AgenticPromptLine> {
+) -> Vec<super::super::text_input::WrappedLine> {
     if text.trim().is_empty() {
-        return vec![AgenticPromptLine {
-            text: String::new(),
-            start: 0,
-            end: 0,
-        }];
+        return wrap_text_to_measured_lines("", max_width_cells, 13.0, viewport.cell_w);
     }
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut words = Vec::<(usize, usize)>::new();
-    let mut cursor = 0usize;
-    while cursor < chars.len() {
-        while cursor < chars.len() && chars[cursor].is_whitespace() {
-            cursor += 1;
-        }
-        if cursor >= chars.len() {
-            break;
-        }
-        let start = cursor;
-        while cursor < chars.len() && !chars[cursor].is_whitespace() {
-            cursor += 1;
-        }
-        words.push((start, cursor));
-    }
-    let Some(&(first_start, first_end)) = words.first() else {
-        return vec![AgenticPromptLine {
-            text: String::new(),
-            start: 0,
-            end: 0,
-        }];
-    };
-    let mut lines = Vec::new();
-    let mut line_start = first_start;
-    let mut line_end = first_end;
-    for &(word_start, word_end) in words.iter().skip(1) {
-        let candidate_width = prompt_range_width(text, line_start, word_end, viewport);
-        if candidate_width > max_width_cells && line_start < line_end {
-            lines.push(agentic_prompt_line(&chars, line_start, line_end));
-            line_start = word_start;
-            line_end = word_end;
-        } else {
-            line_end = word_end;
-        }
-    }
-    lines.push(agentic_prompt_line(&chars, line_start, line_end));
-    lines
-}
-
-#[cfg(target_os = "macos")]
-fn agentic_prompt_line(chars: &[char], start: usize, end: usize) -> AgenticPromptLine {
-    AgenticPromptLine {
-        text: chars[start..end].iter().collect(),
-        start,
-        end,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn prompt_range_width(text: &str, start: usize, end: usize, viewport: WidgetViewport) -> f32 {
-    let start_x = cursor_x_from_char_cache(text, 13.0, start, viewport.cell_w);
-    let end_x = cursor_x_from_char_cache(text, 13.0, end, viewport.cell_w);
-    (end_x - start_x).max(0.0)
+    wrap_text_to_measured_lines(text, max_width_cells, 13.0, viewport.cell_w)
 }
 
 #[cfg(target_os = "macos")]
@@ -598,12 +588,37 @@ pub(super) fn draw_patch(
     pan_state: &PatcherPanState,
     interaction_state: &PatcherInteractionState,
 ) {
+    let mut interaction_state = interaction_state.clone();
+    sync_patcher_z_order(&mut interaction_state, "root", patch);
+    draw_patch_with_view_key(
+        prims,
+        patch,
+        rect,
+        viewport,
+        pan_state,
+        &interaction_state,
+        "root",
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn draw_patch_with_view_key(
+    prims: &mut Vec<MetalPrimitive>,
+    patch: &Patch,
+    rect: Rect,
+    viewport: WidgetViewport,
+    pan_state: &PatcherPanState,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+) {
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let origin = super::geometry::patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
     let input_indices = patch_input_indices(patch);
     let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
     let output_counts = patch_output_counts(patch);
+    let cable_z = max_node_z_index(patch) + PATCHER_Z_SLOTS_PER_NODE;
+    let cable_handle_z = cable_z + 1;
     let dragged_cable = match &interaction_state.drag {
         Some(PatcherDragState::CableEndpoint { cable_id, .. }) => Some(cable_id.as_str()),
         _ => None,
@@ -624,9 +639,21 @@ pub(super) fn draw_patch(
             continue;
         };
         let selected = interaction_state.selected_cable.as_deref() == Some(connection_id.as_str());
-        push_cable(prims, start, end, connection, origin.1, zoom, selected);
+        let mut cable_prims = Vec::new();
+        push_cable(
+            &mut cable_prims,
+            start,
+            end,
+            connection,
+            origin.1,
+            zoom,
+            selected,
+        );
+        push_z_layered(prims, cable_z, cable_prims);
         if selected {
-            push_cable_handles(prims, connection, start, end, zoom);
+            let mut handle_prims = Vec::new();
+            push_cable_handles(&mut handle_prims, connection, start, end, zoom);
+            push_z_layered(prims, cable_handle_z, handle_prims);
         }
     }
     if let Some(PatcherDragState::Cable {
@@ -637,14 +664,16 @@ pub(super) fn draw_patch(
         ..
     }) = &interaction_state.drag
     {
+        let mut cable_prims = Vec::new();
         push_preview_cable(
-            prims,
+            &mut cable_prims,
             (*start_col, *start_row),
             (*current_col, *current_row),
             ConnectionKind::Forward,
             zoom,
             false,
         );
+        push_z_layered(prims, cable_handle_z, cable_prims);
     }
     if let Some(PatcherDragState::CableEndpoint {
         endpoint,
@@ -665,7 +694,15 @@ pub(super) fn draw_patch(
                 ((*start_col, *start_row), (*current_col, *current_row))
             }
         };
-        push_preview_cable(prims, start, end, ConnectionKind::Forward, zoom, true);
+        let mut cable_prims = Vec::new();
+        push_preview_cable(
+            &mut cable_prims,
+            start,
+            end,
+            ConnectionKind::Forward,
+            zoom,
+            true,
+        );
         let preview_connection = PatchConnection {
             from_node: String::new(),
             from_output: 0,
@@ -675,11 +712,12 @@ pub(super) fn draw_patch(
             segment: None,
             source: None,
         };
-        push_cable_handles(prims, &preview_connection, start, end, zoom);
+        push_cable_handles(&mut cable_prims, &preview_connection, start, end, zoom);
+        push_z_layered(prims, cable_handle_z, cable_prims);
     }
 
     let mut active_edit_panel = None;
-    for node in &patch.nodes {
+    for node in ordered_patch_nodes(patch, interaction_state, view_key) {
         let Some(rect) = node_rects.get(&node.id).copied() else {
             continue;
         };
@@ -713,13 +751,29 @@ pub(super) fn draw_patch(
             &highlighted_inputs,
             &highlighted_outputs,
             zoom,
+            node_z_index(
+                interaction_state,
+                view_key,
+                &node.id,
+                PatcherZSlot::NodeChrome,
+            ),
         );
     }
     if let Some((node_rect, edit)) = active_edit_panel {
-        push_autocomplete_panel(prims, node_rect, edit, &patch.macros, viewport, zoom);
+        let mut overlay_prims = Vec::new();
+        push_autocomplete_panel(
+            &mut overlay_prims,
+            node_rect,
+            edit,
+            &patch.macros,
+            viewport,
+            zoom,
+        );
+        push_z_layered(prims, PATCHER_OVERLAY_Z + 20, overlay_prims);
     }
+    let mut tooltip_prims = Vec::new();
     push_hovered_port_tooltip(
-        prims,
+        &mut tooltip_prims,
         patch,
         &node_rects,
         &input_slot_counts,
@@ -728,6 +782,7 @@ pub(super) fn draw_patch(
         viewport,
         zoom,
     );
+    push_z_layered(prims, PATCHER_OVERLAY_Z + 30, tooltip_prims);
 }
 
 #[cfg(target_os = "macos")]
@@ -1205,6 +1260,7 @@ fn push_node(
     highlighted_inputs: &[usize],
     highlighted_outputs: &[usize],
     zoom: f32,
+    node_chrome_z: i32,
 ) {
     let (bg, mut border, text) = match node.kind {
         NodeKind::In | NodeKind::Out => (
@@ -1241,10 +1297,18 @@ fn push_node(
     if morphing {
         border = theme::PATCHER_CABLE();
     }
-    push_node_chrome(prims, rect, bg, border, viewport, zoom);
+    let node_base_z = node_chrome_z - PatcherZSlot::NodeChrome as i32;
+    let mut chrome_prims = Vec::new();
+    push_node_chrome(&mut chrome_prims, rect, bg, border, viewport, zoom);
+    push_z_layered(
+        prims,
+        node_base_z + PatcherZSlot::NodeChrome as i32,
+        chrome_prims,
+    );
+    let mut port_prims = Vec::new();
     for &index in input_indices {
         push_port(
-            prims,
+            &mut port_prims,
             port_center(rect, index, input_slot_count, true),
             true,
             bg,
@@ -1255,7 +1319,7 @@ fn push_node(
     }
     for index in 0..output_count {
         push_port(
-            prims,
+            &mut port_prims,
             port_center(rect, index, output_count, false),
             false,
             bg,
@@ -1264,11 +1328,18 @@ fn push_node(
             zoom,
         );
     }
-    push_node_edit_selection(prims, rect, viewport, edit, zoom);
-    push_node_label(prims, node, rect, text, edit, viewport, zoom);
-    push_node_edit_cursor(prims, rect, viewport, edit, zoom);
+    push_z_layered(prims, node_base_z + PatcherZSlot::Ports as i32, port_prims);
+    let mut selection_prims = Vec::new();
+    push_node_edit_selection(&mut selection_prims, rect, viewport, edit, zoom);
+    push_z_layered(
+        prims,
+        node_base_z + PatcherZSlot::EditSelection as i32,
+        selection_prims,
+    );
+    let mut text_prims = Vec::new();
+    push_node_label(&mut text_prims, node, rect, text, edit, viewport, zoom);
     if let Some(diagnostic) = &node.diagnostic {
-        prims.push(MetalPrimitive::ProportionalText(
+        text_prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: rect.row + 2.65 * zoom,
                 col: rect.col + 1.0 * zoom,
@@ -1282,6 +1353,14 @@ fn push_node(
             },
         ));
     }
+    push_z_layered(prims, node_base_z + PatcherZSlot::Text as i32, text_prims);
+    let mut cursor_prims = Vec::new();
+    push_node_edit_cursor(&mut cursor_prims, rect, viewport, edit, zoom);
+    push_z_layered(
+        prims,
+        node_base_z + PatcherZSlot::EditCursor as i32,
+        cursor_prims,
+    );
 }
 
 fn highlighted_inputs_for_node(drag: &Option<PatcherDragState>, node_id: &str) -> Vec<usize> {

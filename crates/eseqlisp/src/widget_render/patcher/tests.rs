@@ -1,6 +1,6 @@
 use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
-use super::super::text_input::{TextInputState, cache_char_widths};
+use super::super::text_input::{TextInputState, cache_char_widths, text_width_from_char_cache};
 use super::display::*;
 use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
 use super::geometry::*;
@@ -132,6 +132,16 @@ fn patcher_props_for_path(path: &std::path::Path) -> HashMap<String, Value> {
     ])
 }
 
+#[cfg(target_os = "macos")]
+fn inner_prim(prim: &MetalPrimitive) -> &MetalPrimitive {
+    crate::widget_render::innermost_primitive(prim)
+}
+
+#[cfg(target_os = "macos")]
+fn effective_z(prim: &MetalPrimitive) -> i32 {
+    crate::widget_render::effective_z_index(prim)
+}
+
 #[test]
 fn missing_layout_sidecar_is_materialized_on_first_load() {
     let path = temp_patcher_dsp_path("patcher-sidecar-materialize");
@@ -193,6 +203,161 @@ fn existing_layout_sidecar_preserves_positions_and_places_only_new_nodes() {
             .as_object()
             .unwrap()
             .contains_key("shaped")
+    );
+}
+
+#[test]
+fn z_order_initializes_from_patch_nodes() {
+    let patch = parse("(def a (in 1))\n(def b (phasor a))\n(out b)");
+    let mut state = PatcherInteractionState::default();
+
+    sync_patcher_z_order(&mut state, "root", &patch);
+
+    assert_eq!(
+        state.z_order.get("root").cloned().unwrap_or_default(),
+        patch
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn z_order_removes_deleted_nodes_and_appends_created_nodes() {
+    let patch = parse("(def a (in 1))\n(def b (phasor a))\n(out b)");
+    let mut state = PatcherInteractionState::default();
+    state.z_order.insert(
+        "root".to_string(),
+        vec!["deleted".to_string(), "b".to_string()],
+    );
+
+    sync_patcher_z_order(&mut state, "root", &patch);
+
+    assert_eq!(
+        state.z_order.get("root").cloned().unwrap_or_default(),
+        vec!["b".to_string(), "a".to_string(), "out#0".to_string()]
+    );
+}
+
+#[test]
+fn bring_nodes_to_front_preserves_relative_stack_order() {
+    let mut state = PatcherInteractionState::default();
+    state.z_order.insert(
+        "root".to_string(),
+        vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ],
+    );
+
+    bring_nodes_to_front(&mut state, "root", &["c".to_string(), "a".to_string()]);
+
+    assert_eq!(
+        state.z_order.get("root").cloned().unwrap_or_default(),
+        vec![
+            "b".to_string(),
+            "d".to_string(),
+            "a".to_string(),
+            "c".to_string()
+        ]
+    );
+}
+
+#[test]
+fn created_node_appends_to_top_of_active_view_z_order() {
+    let mut state = PatcherInteractionState::default();
+    state
+        .z_order
+        .insert("macro:shape".to_string(), vec!["existing".to_string()]);
+
+    let created = allocate_created_node(&mut state, "macro:shape", (1.0, 1.0));
+
+    assert_eq!(
+        state
+            .z_order
+            .get("macro:shape")
+            .cloned()
+            .unwrap_or_default(),
+        vec!["existing".to_string(), created]
+    );
+}
+
+#[test]
+fn hit_testing_uses_z_order_not_patch_vector_order() {
+    let mut patch = parse("(def a (in 1))\n(def b (phasor a))");
+    for node in &mut patch.nodes {
+        node.position = (2.0, 2.0);
+    }
+    let mut state = PatcherInteractionState::default();
+    sync_patcher_z_order(&mut state, "root", &patch);
+    bring_nodes_to_front(&mut state, "root", &["a".to_string()]);
+    let ordered = ordered_patch_nodes(&patch, &state, "root");
+
+    let node_rect = patch_node_rects(
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        &PatcherPanState::default(),
+    )
+    .get("a")
+    .copied()
+    .expect("a rect");
+    let hit = hit_patcher_node(
+        &patch,
+        &ordered,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        &PatcherPanState::default(),
+        node_rect.col + node_rect.width * 0.5,
+        node_rect.row + node_rect.height * 0.5,
+    );
+
+    assert_eq!(hit.as_deref(), Some("a"));
+}
+
+#[test]
+fn pointer_down_bring_node_to_front() {
+    let path = temp_patcher_source_path("patcher-z-pointer-down");
+    fs::write(&path, "(def a (in 1))\n(def b (phasor a))").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let (_, patch) = load_patch_from_props(&node.props).expect("load patch");
+    let mut state = PatcherInteractionState::default();
+    sync_patcher_z_order(&mut state, "root", &patch);
+    set_patcher_interaction_state(key, state);
+    let a_rect = patch_node_rects(&patch, node.rect, &PatcherPanState::default())
+        .get("a")
+        .copied()
+        .expect("a rect");
+
+    handle_patcher_pointer_down(
+        &node,
+        a_rect.col + a_rect.width * 0.5,
+        a_rect.row + a_rect.height * 0.5,
+        KeyModifiers::NONE,
+        10.0,
+        20.0,
+    );
+
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(
+        state
+            .z_order
+            .get("root")
+            .and_then(|stack| stack.last())
+            .map(String::as_str),
+        Some("a")
     );
 }
 
@@ -813,6 +978,320 @@ fn agentic_bubble_resolve_ignores_unrelated_invalid_created_nodes() {
             .values()
             .any(|edit| edit.id == unrelated_id && edit.text == "agentic"),
         "unrelated edit should remain live but should not block bubble materialization"
+    );
+}
+
+#[test]
+fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
+    let path = temp_patcher_source_path("agentic-bubble-edit-target");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("shaped".to_string());
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.values().next().expect("edit bubble");
+    match &bubble.target {
+        AgenticBubbleTarget::EditMacro {
+            instance_node_id,
+            macro_name,
+            params,
+            source,
+        } => {
+            assert_eq!(instance_node_id, "shaped");
+            assert_eq!(macro_name, "smooth");
+            assert_eq!(params, &vec!["sig".to_string(), "amt".to_string()]);
+            assert!(source.contains("(defmacro smooth"));
+        }
+        AgenticBubbleTarget::CreateMacro => panic!("expected edit target"),
+    }
+}
+
+#[test]
+fn agentic_bubble_edit_submit_payload_includes_macro_context() {
+    let path = temp_patcher_source_path("agentic-bubble-edit-submit");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("shaped".to_string());
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    let mut state = get_patcher_interaction_state(key);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    state
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("bubble")
+        .prompt = "explain it".to_string();
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .expect("submit event");
+    let output = PATCHER_WIDGET
+        .handle_event(&node, event)
+        .expect("on-change output");
+    let Value::Map(map) = &output.args[0] else {
+        panic!("submit payload should be a map");
+    };
+    assert!(matches!(
+        &*map.get("target").expect("target").borrow(),
+        Value::Keyword(target) if target == "edit-macro"
+    ));
+    assert!(matches!(
+        &*map
+            .get("existing-macro-name")
+            .expect("existing macro name")
+            .borrow(),
+        Value::String(name) if name == "smooth"
+    ));
+    assert!(matches!(
+        &*map
+            .get("existing-macro-params")
+            .expect("existing macro params")
+            .borrow(),
+        Value::String(params) if params == "sig amt"
+    ));
+}
+
+#[test]
+fn agentic_bubble_answer_resolution_keeps_source_unchanged() {
+    let path = temp_patcher_source_path("agentic-bubble-answer");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let before = fs::read_to_string(&path).expect("read source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (1.0, 1.0),
+        AgenticBubbleTarget::EditMacro {
+            instance_node_id: "shaped".to_string(),
+            macro_name: "smooth".to_string(),
+            params: vec!["sig".to_string(), "amt".to_string()],
+            source: "(defmacro smooth (sig amt) (mix sig amt 0.5))".to_string(),
+        },
+    );
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.prompt = "what does it do?".to_string();
+    bubble.generation = 1;
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    resolve_agentic_bubble_answer(&path, &bubble_id, 1, "It crossfades toward amt.");
+
+    assert_eq!(fs::read_to_string(&path).expect("read source"), before);
+    let state = get_patcher_interaction_state(key);
+    let bubble = state
+        .agentic_bubbles
+        .get(&bubble_id)
+        .expect("answer bubble");
+    assert!(
+        matches!(&bubble.state, AgenticBubbleState::Answer { text, .. } if text.contains("crossfades"))
+    );
+}
+
+#[test]
+fn agentic_bubble_macro_edit_resolution_replaces_macro_and_keeps_instance() {
+    let path = temp_patcher_source_path("agentic-bubble-edit-resolve");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (1.0, 1.0),
+        AgenticBubbleTarget::EditMacro {
+            instance_node_id: "shaped".to_string(),
+            macro_name: "smooth".to_string(),
+            params: vec!["sig".to_string(), "amt".to_string()],
+            source: "(defmacro smooth (sig amt) (mix sig amt 0.5))".to_string(),
+        },
+    );
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.generation = 1;
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    resolve_agentic_bubble_macro_edit(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        1,
+        "smooth",
+        "(defmacro smooth (sig amt) (def wet (mix sig amt 0.75)) wet)",
+    )
+    .expect("resolve edit");
+
+    let source = fs::read_to_string(&path).expect("read source");
+    assert!(source.contains("(def wet (mix sig amt 0.75))"));
+    assert!(source.contains("(def shaped (smooth input 0.25))"));
+    let state = get_patcher_interaction_state(key);
+    assert!(!state.agentic_bubbles.contains_key(&bubble_id));
+    assert!(state.agentic_morph_nodes.contains_key("shaped"));
+}
+
+#[test]
+fn agentic_bubble_macro_edit_resolution_updates_all_registered_widgets() {
+    let path = temp_patcher_source_path("agentic-bubble-edit-multi-widget");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let mut node_a = patcher_test_node(&path);
+    node_a.stable_widget_id = Some(101);
+    let mut node_b = patcher_test_node(&path);
+    node_b.stable_widget_id = Some(202);
+    let key_a = patcher_state_key(&node_a);
+    let key_b = patcher_state_key(&node_b);
+
+    for key in [key_a, key_b] {
+        let mut state = PatcherInteractionState::default();
+        let bubble_id = allocate_agentic_bubble_with_target(
+            &mut state,
+            (1.0, 1.0),
+            AgenticBubbleTarget::EditMacro {
+                instance_node_id: "shaped".to_string(),
+                macro_name: "smooth".to_string(),
+                params: vec!["sig".to_string(), "amt".to_string()],
+                source: "(defmacro smooth (sig amt) (mix sig amt 0.5))".to_string(),
+            },
+        );
+        assert_eq!(bubble_id, "bubble-0");
+        let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+        bubble.generation = 1;
+        bubble.state = AgenticBubbleState::Pending {
+            started_at: Instant::now(),
+        };
+        set_patcher_interaction_state(key, state);
+    }
+
+    resolve_agentic_bubble_macro_edit(
+        &path,
+        PatcherIntent::Instrument,
+        "bubble-0",
+        1,
+        "smooth",
+        "(defmacro smooth (sig amt) (def wet (mix sig amt 0.9)) wet)",
+    )
+    .expect("resolve edit");
+
+    let source = fs::read_to_string(&path).expect("read source");
+    assert_eq!(source.matches("(defmacro smooth").count(), 1);
+    assert!(source.contains("(def wet (mix sig amt 0.9))"));
+    for key in [key_a, key_b] {
+        let state = get_patcher_interaction_state(key);
+        assert!(!state.agentic_bubbles.contains_key("bubble-0"));
+        assert!(state.agentic_morph_nodes.contains_key("shaped"));
+    }
+}
+
+#[test]
+fn agentic_bubble_macro_edit_rematerializes_edited_macro_layout_scope() {
+    let path = temp_patcher_dsp_path("agentic-bubble-edit-layout");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (def shaped (mix sig amt 0.5)) shaped)\n(def input (in 1))\n(def out1 (smooth input 0.25))\n(out out1)",
+    )
+    .expect("write source");
+    load_patch_from_props(&patcher_props_for_path(&path)).expect("materialize sidecar");
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).expect("read sidecar"))
+            .expect("parse sidecar");
+    json["macros"]["smooth"]["nodes"]["shaped"] = serde_json::json!({ "x": 333.0, "y": 222.0 });
+    json["macros"]["smooth"]["cables"] = serde_json::json!({});
+    fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (1.0, 1.0),
+        AgenticBubbleTarget::EditMacro {
+            instance_node_id: "out1".to_string(),
+            macro_name: "smooth".to_string(),
+            params: vec!["sig".to_string(), "amt".to_string()],
+            source: "(defmacro smooth (sig amt) (def shaped (mix sig amt 0.5)) shaped)".to_string(),
+        },
+    );
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.generation = 1;
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    resolve_agentic_bubble_macro_edit(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        1,
+        "smooth",
+        "(defmacro smooth (sig amt) (def shaped (mix sig amt 0.75)) shaped)",
+    )
+    .expect("resolve edit");
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).expect("read saved sidecar"))
+            .expect("parse saved sidecar");
+    let shaped = &saved["macros"]["smooth"]["nodes"]["shaped"];
+    assert_ne!(
+        shaped,
+        &serde_json::json!({ "x": 333.0, "y": 222.0 }),
+        "edited macro scope should use fresh auto layout rather than stale sidecar positions"
+    );
+    let cables = saved["macros"]["smooth"]["cables"]
+        .as_object()
+        .expect("macro cables");
+    assert!(
+        !cables.is_empty(),
+        "edited macro scope should persist generated segmented cable lanes"
     );
 }
 
@@ -3455,6 +3934,351 @@ fn writeback_reconnecting_unsaved_constant_to_param_edit_uses_param_name() {
 }
 
 #[test]
+fn writeback_created_param_can_feed_created_node_that_replaces_source_input() {
+    let source = r#"
+        (def value1 5.0)
+        (def phasor1 (phasor value1))
+        (def mul1 (* phasor1 320.0))
+    "#;
+    let patch = parse(source);
+    let phasor = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let mul = patch.nodes.iter().find(|node| node.id == "mul1").unwrap();
+    let phasor_to_mul = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == phasor.id && connection.to_node == mul.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(phasor_to_mul),
+        ));
+    let created_multiply = allocate_created_text_node(&mut state, "root", "*");
+    connect_output_to_input(&mut state, "root", &phasor.id, &created_multiply, 1);
+    connect_output_to_input(&mut state, "root", &created_multiply, &mul.id, 0);
+    let created_param = allocate_created_text_node(&mut state, "root", "param xyz");
+    connect_output_to_input(&mut state, "root", &created_param, &created_multiply, 0);
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param xyz)\n(def value1 5.0)\n(def phasor1 (phasor value1))\n(def mul2 (* xyz phasor1))\n(def mul1 (* mul2 320.0))"
+    );
+}
+
+#[derive(Clone, Debug)]
+struct WritebackFuzzRng(u64);
+
+impl WritebackFuzzRng {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0
+    }
+
+    fn bool(&mut self) -> bool {
+        self.next() & 1 == 1
+    }
+
+    fn usize(&mut self, max: usize) -> usize {
+        (self.next() as usize) % max
+    }
+}
+
+fn assert_writeback_fuzz_compiles(source: &str, state: &PatcherInteractionState, seed: u64) {
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, state)
+        .unwrap_or_else(|error| panic!("writeback failed for seed {seed}: {error:?}"));
+    assert!(
+        !emitted.contains("__patcher_missing_input__"),
+        "fully connected fuzz edit emitted missing input for seed {seed}:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted).unwrap_or_else(|error| {
+        panic!("compiled writeback failed for seed {seed}:\n{emitted}\n{error}")
+    });
+}
+
+#[test]
+fn writeback_fuzz_created_values_replacing_source_inputs_compile() {
+    let source = r#"
+        (def value1 5.0)
+        (def phasor1 (phasor value1))
+        (def mul1 (* phasor1 320.0))
+        (out mul1 1)
+    "#;
+    let patch = parse(source);
+    let phasor = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let mul = patch.nodes.iter().find(|node| node.id == "mul1").unwrap();
+    let phasor_to_mul = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == phasor.id && connection.to_node == mul.id)
+        .unwrap();
+
+    for seed in 0..32 {
+        let mut rng = WritebackFuzzRng::new(seed);
+        let mut state = PatcherInteractionState::default();
+        state
+            .edit_state
+            .deleted_connections
+            .insert(connection_edit_key(
+                "root",
+                &source_connection_id(phasor_to_mul),
+            ));
+
+        let chain_len = 1 + rng.usize(3);
+        let mut previous: Option<String> = None;
+        for index in 0..chain_len {
+            let op = allocate_created_text_node(&mut state, "root", "*");
+            if index == 0 {
+                let phasor_input = rng.usize(2);
+                connect_output_to_input(&mut state, "root", &phasor.id, &op, phasor_input);
+                let other_input = 1 - phasor_input;
+                if rng.bool() {
+                    let param = allocate_created_text_node(
+                        &mut state,
+                        "root",
+                        &format!("param fuzz{seed}_{index}"),
+                    );
+                    connect_output_to_input(&mut state, "root", &param, &op, other_input);
+                } else {
+                    let literal =
+                        allocate_created_text_node(&mut state, "root", &format!("{}", index + 2));
+                    connect_output_to_input(&mut state, "root", &literal, &op, other_input);
+                }
+            } else if let Some(previous_node) = previous.as_ref() {
+                let previous_input = rng.usize(2);
+                connect_output_to_input(&mut state, "root", previous_node, &op, previous_input);
+                let param = allocate_created_text_node(
+                    &mut state,
+                    "root",
+                    &format!("param chain{seed}_{index}"),
+                );
+                connect_output_to_input(&mut state, "root", &param, &op, 1 - previous_input);
+            }
+            previous = Some(op);
+        }
+        connect_output_to_input(&mut state, "root", previous.as_ref().unwrap(), &mul.id, 0);
+
+        assert_writeback_fuzz_compiles(source, &state, seed);
+    }
+}
+
+#[test]
+fn writeback_fuzz_unsaved_param_conversions_reconnect_without_stale_symbols() {
+    let source = r#"
+        (def value1 5.0)
+        (def phasor1 (phasor value1))
+        (def mul1 (* phasor1 320.0))
+        (out mul1 1)
+    "#;
+    let patch = parse(source);
+    let phasor = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let mul = patch.nodes.iter().find(|node| node.id == "mul1").unwrap();
+    let value_to_phasor = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "value1" && connection.to_node == phasor.id)
+        .unwrap();
+    let phasor_to_mul = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == phasor.id && connection.to_node == mul.id)
+        .unwrap();
+
+    for seed in 0..32 {
+        let mut rng = WritebackFuzzRng::new(seed + 1000);
+        let mut state = PatcherInteractionState::default();
+        state.edit_state.nodes.insert(
+            node_edit_key("root", "value1"),
+            PatcherNodeEdit {
+                view_key: "root".to_string(),
+                id: "value1".to_string(),
+                origin: PatcherNodeOrigin::Source {
+                    source_node_id: "value1".to_string(),
+                },
+                text: format!("param unsaved{seed}"),
+                position: (0.0, 0.0),
+            },
+        );
+        state
+            .edit_state
+            .deleted_connections
+            .insert(connection_edit_key(
+                "root",
+                &source_connection_id(value_to_phasor),
+            ));
+        state
+            .edit_state
+            .deleted_connections
+            .insert(connection_edit_key(
+                "root",
+                &source_connection_id(phasor_to_mul),
+            ));
+        connect_output_to_input(&mut state, "root", "value1", &phasor.id, 0);
+
+        if rng.bool() {
+            let created_multiply = allocate_created_text_node(&mut state, "root", "*");
+            let phasor_input = rng.usize(2);
+            connect_output_to_input(
+                &mut state,
+                "root",
+                &phasor.id,
+                &created_multiply,
+                phasor_input,
+            );
+            connect_output_to_input(
+                &mut state,
+                "root",
+                "value1",
+                &created_multiply,
+                1 - phasor_input,
+            );
+            connect_output_to_input(&mut state, "root", &created_multiply, &mul.id, 0);
+        } else {
+            connect_output_to_input(&mut state, "root", &phasor.id, &mul.id, 0);
+        }
+
+        let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state)
+            .unwrap_or_else(|error| panic!("writeback failed for seed {seed}: {error:?}"));
+        assert!(
+            !emitted.contains("value1"),
+            "stale value1 reference survived seed {seed}:\n{emitted}"
+        );
+        compile_patch_source_with_dgenlisp(&emitted).unwrap_or_else(|error| {
+            panic!("compiled writeback failed for seed {seed}:\n{emitted}\n{error}")
+        });
+    }
+}
+
+#[test]
+fn writeback_fuzz_mixed_file_and_created_macros_compile() {
+    let source = r#"
+        (defmacro fileop (input amount) (* input amount))
+        (def value1 5.0)
+        (def phasor1 (phasor value1))
+        (def mul1 (* phasor1 320.0))
+        (out mul1 1)
+    "#;
+    let root_patch = parse(source);
+    let phasor = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let mul = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "mul1")
+        .unwrap();
+    let phasor_to_mul = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == phasor.id && connection.to_node == mul.id)
+        .unwrap();
+
+    for seed in 0..24 {
+        let mut rng = WritebackFuzzRng::new(seed + 2000);
+        let mut state = PatcherInteractionState::default();
+        state
+            .edit_state
+            .deleted_connections
+            .insert(connection_edit_key(
+                "root",
+                &source_connection_id(phasor_to_mul),
+            ));
+
+        let created_macro = allocate_created_text_node(&mut state, "root", "defmacro *userop*");
+        assert!(promote_created_macro_definition(
+            &root_patch,
+            &mut state,
+            "root",
+            &created_macro,
+        ));
+        let file_macro =
+            allocate_created_text_node(&mut state, "root", &format!("fileop {}", 2 + rng.usize(5)));
+        let created_multiply = allocate_created_text_node(&mut state, "root", "*");
+        let created_param =
+            allocate_created_text_node(&mut state, "root", &format!("param macrofuzz{seed}"));
+
+        let mut chain = if rng.bool() {
+            vec![
+                file_macro.clone(),
+                created_multiply.clone(),
+                created_macro.clone(),
+            ]
+        } else {
+            vec![
+                created_macro.clone(),
+                created_multiply.clone(),
+                file_macro.clone(),
+            ]
+        };
+        if rng.bool() {
+            chain.reverse();
+        }
+
+        let first_input = if chain[0] == created_multiply {
+            rng.usize(2)
+        } else {
+            0
+        };
+        connect_output_to_input(&mut state, "root", &phasor.id, &chain[0], first_input);
+        if chain[0] == created_multiply {
+            connect_output_to_input(
+                &mut state,
+                "root",
+                &created_param,
+                &chain[0],
+                1 - first_input,
+            );
+        }
+
+        for index in 1..chain.len() {
+            let previous = chain[index - 1].clone();
+            let current = chain[index].clone();
+            let current_input = if current == created_multiply {
+                rng.usize(2)
+            } else {
+                0
+            };
+            connect_output_to_input(&mut state, "root", &previous, &current, current_input);
+            if current == created_multiply {
+                connect_output_to_input(
+                    &mut state,
+                    "root",
+                    &created_param,
+                    &current,
+                    1 - current_input,
+                );
+            }
+        }
+        connect_output_to_input(&mut state, "root", chain.last().unwrap(), &mul.id, 0);
+
+        assert_writeback_fuzz_compiles(source, &state, seed + 2000);
+    }
+}
+
+#[test]
 fn writeback_created_modulatable_param_uses_param_name_for_mod_accessor() {
     let source = r#"
         (def gate (in 1 @name gate))
@@ -5106,8 +5930,11 @@ fn patcher_hit_testing_uses_node_rects_after_pan() {
         height: 30.0,
     };
     let node_rect = *patch_node_rects(&patch, rect, &pan).get("pitch").unwrap();
+    let state = PatcherInteractionState::default();
+    let ordered_nodes = ordered_patch_nodes(&patch, &state, "root");
     let hit = hit_patcher_node(
         &patch,
+        &ordered_nodes,
         rect,
         &pan,
         node_rect.col + node_rect.width * 0.5,
@@ -5129,9 +5956,12 @@ fn patcher_output_port_hit_testing_uses_rendered_port_positions() {
     let node_rect = *patch_node_rects(&patch, rect, &pan).get("pitch").unwrap();
     let output_counts = patch_output_counts(&patch);
     let center = port_center(node_rect, 0, output_counts["pitch"], false);
+    let state = PatcherInteractionState::default();
+    let ordered_nodes = ordered_patch_nodes(&patch, &state, "root");
 
     let hit = hit_patcher_output_port(
         &patch,
+        &ordered_nodes,
         rect,
         &pan,
         &output_counts,
@@ -5163,9 +5993,12 @@ fn patcher_output_port_hit_testing_matches_rendered_circle() {
     let output_counts = patch_output_counts(&patch);
     let center = port_center(node_rect, 0, output_counts["pitch"], false);
     let radius_rows = (PORT_OUTER_DIAMETER_PX * 0.5) / 20.0;
+    let state = PatcherInteractionState::default();
+    let ordered_nodes = ordered_patch_nodes(&patch, &state, "root");
 
     let inside_rendered_circle = hit_patcher_output_port(
         &patch,
+        &ordered_nodes,
         rect,
         &pan,
         &output_counts,
@@ -5184,6 +6017,7 @@ fn patcher_output_port_hit_testing_matches_rendered_circle() {
 
     let inside_node_body_but_outside_port_circle = hit_patcher_output_port(
         &patch,
+        &ordered_nodes,
         rect,
         &pan,
         &output_counts,
@@ -5639,7 +6473,7 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
     );
     let first_segment_row = prims
         .iter()
-        .find_map(|prim| match prim {
+        .find_map(|prim| match inner_prim(prim) {
             MetalPrimitive::PatchCable(cable) if cable.is_segmented => Some(cable.segment_row),
             _ => None,
         })
@@ -5674,7 +6508,7 @@ fn segmented_cable_render_row_tracks_pan_origin_once() {
     );
     let second_segment_row = prims
         .iter()
-        .find_map(|prim| match prim {
+        .find_map(|prim| match inner_prim(prim) {
             MetalPrimitive::PatchCable(cable) if cable.is_segmented => Some(cable.segment_row),
             _ => None,
         })
@@ -5763,7 +6597,7 @@ fn segmented_cable_rendering_collapses_aligned_ports_to_vertical_curve() {
 
     let cable = prims
         .iter()
-        .find_map(|prim| match prim {
+        .find_map(|prim| match inner_prim(prim) {
             MetalPrimitive::PatchCable(cable) => Some(cable),
             _ => None,
         })
@@ -6193,8 +7027,11 @@ fn patcher_hit_testing_uses_zoomed_node_rects() {
         height: 30.0,
     };
     let node_rect = *patch_node_rects(&patch, rect, &pan).get("pitch").unwrap();
+    let state = PatcherInteractionState::default();
+    let ordered_nodes = ordered_patch_nodes(&patch, &state, "root");
     let hit = hit_patcher_node(
         &patch,
+        &ordered_nodes,
         rect,
         &pan,
         node_rect.col + node_rect.width * 0.5,
@@ -8870,23 +9707,23 @@ fn metal_render_emits_nodes_and_cables() {
     );
     let text_count = prims
         .iter()
-        .filter(|prim| matches!(prim, MetalPrimitive::ProportionalText(_)))
+        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::ProportionalText(_)))
         .count();
     let rect_count = prims
         .iter()
-        .filter(|prim| matches!(prim, MetalPrimitive::Rect(_)))
+        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::Rect(_)))
         .count();
     let rounded_count = prims
         .iter()
-        .filter(|prim| matches!(prim, MetalPrimitive::WidgetInstance { .. }))
+        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::WidgetInstance { .. }))
         .count();
     let cable_count = prims
         .iter()
-        .filter(|prim| matches!(prim, MetalPrimitive::PatchCable(_)))
+        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::PatchCable(_)))
         .count();
     let min_cable_radius = prims
         .iter()
-        .filter_map(|prim| match prim {
+        .filter_map(|prim| match inner_prim(prim) {
             MetalPrimitive::PatchCable(cable) => Some(cable.radius_px),
             _ => None,
         })
@@ -8899,6 +9736,89 @@ fn metal_render_emits_nodes_and_cables() {
         rect_count == 0,
         "patcher node chrome should use rounded widget instances, got {rect_count} rects"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_render_groups_node_sublayers_by_z_order() {
+    let patch = parse(
+        r#"
+            (def pitch (in 1 @name pitch))
+            (def sig (phasor pitch))
+            "#,
+    );
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &PatcherPanState::default(),
+        &PatcherInteractionState::default(),
+    );
+
+    let node_chrome_z = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::WidgetInstance { widget_type, .. } if widget_type == "patcher-node" => {
+                Some(effective_z(prim))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let port_z = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::WidgetInstance { widget_type, .. } if widget_type == "patcher-port" => {
+                Some(effective_z(prim))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let text_z = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::ProportionalText(text)
+                if text.text == "in" || text.text == "phasor" =>
+            {
+                Some(effective_z(prim))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let cable_z = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::PatchCable(_) => Some(effective_z(prim)),
+            _ => None,
+        })
+        .next()
+        .expect("patch cable");
+
+    assert!(node_chrome_z.contains(&0));
+    assert!(node_chrome_z.contains(&PATCHER_Z_SLOTS_PER_NODE));
+    assert!(port_z.contains(&(PatcherZSlot::Ports as i32)));
+    assert!(port_z.contains(&(PATCHER_Z_SLOTS_PER_NODE + PatcherZSlot::Ports as i32)));
+    assert!(text_z.contains(&(PatcherZSlot::Text as i32)));
+    assert!(text_z.contains(&(PATCHER_Z_SLOTS_PER_NODE + PatcherZSlot::Text as i32)));
+    assert!(cable_z > PATCHER_Z_SLOTS_PER_NODE + PatcherZSlot::Text as i32);
 }
 
 #[cfg(target_os = "macos")]
@@ -8946,7 +9866,7 @@ fn metal_render_marks_selected_cable_and_handles() {
         .iter()
         .filter(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::PatchCable(cable) if cable.color == theme::PATCHER_ERROR()
             )
         })
@@ -8955,7 +9875,7 @@ fn metal_render_marks_selected_cable_and_handles() {
         .iter()
         .filter(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::Circle(circle) if circle.color == theme::PATCHER_ERROR()
             )
         })
@@ -9043,13 +9963,13 @@ fn metal_render_endpoint_drag_replaces_original_selected_cable() {
 
     let cable_count = prims
         .iter()
-        .filter(|prim| matches!(prim, MetalPrimitive::PatchCable(_)))
+        .filter(|prim| matches!(inner_prim(prim), MetalPrimitive::PatchCable(_)))
         .count();
     let selected_cable_count = prims
         .iter()
         .filter(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::PatchCable(cable) if cable.color == theme::PATCHER_ERROR()
             )
         })
@@ -9058,7 +9978,7 @@ fn metal_render_endpoint_drag_replaces_original_selected_cable() {
         .iter()
         .filter(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::Circle(circle) if circle.color == theme::PATCHER_ERROR()
             )
         })
@@ -9121,7 +10041,7 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
         .iter()
         .filter(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::ForegroundRect(rect)
                     if rect.color == theme::PATCHER_EDIT_CURSOR()
             )
@@ -9130,6 +10050,140 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     assert_eq!(
         cursor_count, 1,
         "active patcher text edit should render exactly one foreground cursor"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
+    let path = temp_patcher_source_path("agentic-bubble-foreground-render");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    let foreground_bubble_rects = prims
+        .iter()
+        .filter(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::ForegroundRect(rect)
+                    if rect.rect.width > 10.0 && rect.rect.height > 4.0
+            )
+        })
+        .count();
+    assert_eq!(
+        foreground_bubble_rects, 1,
+        "agentic bubble body must render in the foreground layer above cables and ports"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
+    let path = temp_patcher_source_path("agentic-bubble-answer-render");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.state = AgenticBubbleState::Answer {
+        text: "This macro implements a virtual-analog TR-707-style kick drum synthesizer:\n\n1. **Envelopes**: It uses three separate decay histories triggered by 'trig'.\n2. **Pitch Modulation**: The fast envelope creates a rapid downward pitch sweep applied to both resonators."
+            .to_string(),
+        answered_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    let body_width = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::ForegroundRect(rect)
+                if rect.rect.width > 10.0 && rect.rect.height > 4.0 =>
+            {
+                Some(rect.rect.width)
+            }
+            _ => None,
+        })
+        .next()
+        .expect("answer bubble body");
+    assert!(
+        body_width > 30.0,
+        "answer bubble should use the wider answer layout"
+    );
+
+    let answer_lines = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::ProportionalText(text)
+                if text.text.contains("macro")
+                    || text.text.contains("TR-707")
+                    || text.text.contains("Envelopes")
+                    || text.text.contains("Pitch")
+                    || text.text.contains("resonators") =>
+            {
+                Some(text.text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        answer_lines.len() > 1,
+        "answer text should wrap into multiple rendered lines"
+    );
+    let max_answer_line_width = answer_lines
+        .iter()
+        .map(|line| text_width_from_char_cache(line, 13.0, 13.0 * 0.62 / 10.0))
+        .fold(0.0, f32::max);
+    assert!(
+        max_answer_line_width <= body_width - 1.3 + 0.1,
+        "answer text lines should fit within the answer bubble body"
     );
 }
 
@@ -9181,7 +10235,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     assert!(
         prims.iter().any(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::ProportionalText(text) if text.text == "biquad"
             )
         }),
@@ -9190,7 +10244,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     assert!(
         prims.iter().any(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::ProportionalText(text) if text.text == "IIR biquad filter."
             )
         }),
@@ -9199,7 +10253,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     assert!(
         prims.iter().any(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::ProportionalText(text)
                     if text.text.contains("inlets:")
                         && text.text.contains("signal signal|float")
@@ -9210,7 +10264,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     assert!(
         prims.iter().any(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::ProportionalText(text)
                     if text.text.contains("outlets:")
                         && text.text.contains("out")
@@ -9220,14 +10274,14 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     );
     let suggestion_col = prims
         .iter()
-        .find_map(|prim| match prim {
+        .find_map(|prim| match inner_prim(prim) {
             MetalPrimitive::ProportionalText(text) if text.text == "biquad" => Some(text.col),
             _ => None,
         })
         .expect("suggestion text");
     let doc_col = prims
         .iter()
-        .find_map(|prim| match prim {
+        .find_map(|prim| match inner_prim(prim) {
             MetalPrimitive::ProportionalText(text) if text.text == "IIR biquad filter." => {
                 Some(text.col)
             }
@@ -9243,7 +10297,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
             .iter()
             .filter(|prim| {
                 matches!(
-                    prim,
+                    inner_prim(prim),
                     MetalPrimitive::WidgetInstance { widget_type, instance, .. }
                         if widget_type == "patcher-node"
                             && instance.color_a == theme::PATCHER_AUTOCOMPLETE_BORDER().to_rgba()
@@ -9257,7 +10311,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
     assert!(
         prims.iter().any(|prim| {
             matches!(
-                prim,
+                inner_prim(prim),
                 MetalPrimitive::ForegroundRect(rect)
                     if rect.color == theme::PATCHER_AUTOCOMPLETE_SELECTED_BG()
             )
@@ -9313,7 +10367,7 @@ fn metal_render_wraps_selected_autocomplete_documentation() {
 
     let suggestion_col = prims
         .iter()
-        .find_map(|prim| match prim {
+        .find_map(|prim| match inner_prim(prim) {
             MetalPrimitive::ProportionalText(text) if text.text == "phase-vocoder" => {
                 Some(text.col)
             }
@@ -9322,7 +10376,7 @@ fn metal_render_wraps_selected_autocomplete_documentation() {
         .expect("suggestion text");
     let doc_lines: Vec<&str> = prims
         .iter()
-        .filter_map(|prim| match prim {
+        .filter_map(|prim| match inner_prim(prim) {
             MetalPrimitive::ProportionalText(text) if text.col > suggestion_col + 10.0 => {
                 Some(text.text.as_str())
             }
@@ -9387,7 +10441,7 @@ fn metal_render_uses_single_text_run_for_active_node_edit_with_spaces() {
 
     let label_runs: Vec<&str> = prims
         .iter()
-        .filter_map(|prim| match prim {
+        .filter_map(|prim| match inner_prim(prim) {
             MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
             _ => None,
         })
@@ -9461,11 +10515,11 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
         &PatcherInteractionState::default(),
     );
 
-    let head = prims.iter().find_map(|prim| match prim {
+    let head = prims.iter().find_map(|prim| match inner_prim(prim) {
         MetalPrimitive::ProportionalText(text) if text.text == "in" => Some(text.col),
         _ => None,
     });
-    let tail = prims.iter().find_map(|prim| match prim {
+    let tail = prims.iter().find_map(|prim| match inner_prim(prim) {
         MetalPrimitive::ProportionalText(text) if text.text == "7 8" => Some(text.col),
         _ => None,
     });

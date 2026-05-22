@@ -94,6 +94,22 @@ pub(super) fn emit_patch_writeback(
     emit_patch_writeback_result(source, intent, interaction_state).map(|result| result.source)
 }
 
+pub(super) fn replace_macro_source(
+    source: &str,
+    macro_name: &str,
+    macro_source: &str,
+) -> Result<String, WriteBackError> {
+    let mut document = SourceDocument::parse(source)?;
+    let expr =
+        parse_single_expression(macro_source).map_err(|reason| WriteBackError::InvalidEdit {
+            view_key: "root".to_string(),
+            node_id: String::new(),
+            reason,
+        })?;
+    document.replace_macro(macro_name, expr)?;
+    Ok(document.emit())
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct PatchWritebackResult {
     pub(super) source: String,
@@ -2566,6 +2582,9 @@ fn rewrite_created_value_consumers(
         .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
         .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
         .filter(|connection| {
+            created_value_node(interaction_state, view_key, &connection.to.node_id).is_none()
+        })
+        .filter(|connection| {
             !node_is_history(
                 root_patch,
                 interaction_state,
@@ -4417,6 +4436,35 @@ impl SourceDocument {
             },
         );
         self.macros.insert(macro_doc.name.clone(), macro_doc);
+        Ok(())
+    }
+
+    fn replace_macro(&mut self, name: &str, expr: Expression) -> Result<(), WriteBackError> {
+        let Some(macro_doc) = MacroDocument::from_expr(&expr) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: "replacement source did not parse as defmacro".to_string(),
+            });
+        };
+        if macro_doc.name != name {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!(
+                    "replacement macro name `{}` does not match `{name}`",
+                    macro_doc.name
+                ),
+            });
+        }
+        if !self.macros.contains_key(name) {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("missing macro `{name}`"),
+            });
+        }
+        self.macros.insert(name.to_string(), macro_doc);
         Ok(())
     }
 

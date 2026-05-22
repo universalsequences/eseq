@@ -1,0 +1,345 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 97.23762,
+        "y": 37.704998
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 12.040001
+      },
+      "audio": {
+        "x": 99.69182,
+        "y": 44.387497
+      },
+      "cutoff1": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 14.720001
+      },
+      "env": {
+        "x": 114.585175,
+        "y": 24.34
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 22.760002
+      },
+      "gate": {
+        "x": 140.65187,
+        "y": 4.0
+      },
+      "mfreq": {
+        "x": 4.0,
+        "y": 6.6800003
+      },
+      "mod#0": {
+        "x": 134.88518,
+        "y": 24.34
+      },
+      "modulated1": {
+        "x": 62.567245,
+        "y": 24.34
+      },
+      "modulated2": {
+        "x": 72.06881,
+        "y": 24.34
+      },
+      "modulated3": {
+        "x": 81.57037,
+        "y": 24.34
+      },
+      "mout": {
+        "x": 4.0,
+        "y": 9.360001
+      },
+      "op1": {
+        "x": 97.23762,
+        "y": 31.0225
+      },
+      "pitch": {
+        "x": 97.23762,
+        "y": 4.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 20.080002
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 17.400002
+      },
+      "trigger": {
+        "x": 160.43175,
+        "y": 4.0
+      },
+      "velocity": {
+        "x": 117.75285,
+        "y": 4.0
+      }
+    },
+    "cables": {
+      "*#0:0->audio:0": {
+        "segmented": true,
+        "y": 41.83625
+      },
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 16.45
+      },
+      "cutoff1:0->modulated3:0": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 17.270002
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 34.44875
+      },
+      "gain:0->mod#0:0": {
+        "segmented": true,
+        "y": 24.34
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 14.96
+      },
+      "mfreq:0->modulated2:0": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "mod#0:0->*#0:3": {
+        "segmented": true,
+        "y": 33.828747
+      },
+      "modulated1:0->op1:1": {
+        "segmented": true,
+        "y": 29.09125
+      },
+      "modulated2:0->op1:2": {
+        "segmented": true,
+        "y": 27.851248
+      },
+      "modulated3:0->op1:3": {
+        "segmented": true,
+        "y": 28.471249
+      },
+      "mout:0->modulated1:0": {
+        "segmented": true,
+        "y": 11.290001
+      },
+      "op1:0->*#0:0": {
+        "segmented": true,
+        "y": 35.153748
+      },
+      "pitch:0->op1:0": {
+        "segmented": true,
+        "y": 18.30125
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 22.010002
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 19.330002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 13.72
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 15.665
+      }
+    }
+  },
+  "macros": {
+    "op": {
+      "nodes": {
+        "add1": {
+          "x": 123.247086,
+          "y": 30.73
+        },
+        "add2": {
+          "x": 123.247086,
+          "y": 44.094997
+        },
+        "clip1": {
+          "x": 117.43209,
+          "y": 50.777496
+        },
+        "cos1": {
+          "x": 85.69069,
+          "y": 50.777496
+        },
+        "depth": {
+          "x": 102.360695,
+          "y": 4.0
+        },
+        "input": {
+          "x": 78.150696,
+          "y": 4.0
+        },
+        "input3": {
+          "x": 126.570694,
+          "y": 4.0
+        },
+        "input4": {
+          "x": 168.03069,
+          "y": 4.0
+        },
+        "key": {
+          "x": 193.40068,
+          "y": 4.0
+        },
+        "mul1": {
+          "x": 85.70569,
+          "y": 44.094997
+        },
+        "mul2": {
+          "x": 123.247086,
+          "y": 37.4125
+        },
+        "mul3": {
+          "x": 83.37069,
+          "y": 37.4125
+        },
+        "out": {
+          "x": 85.35989,
+          "y": 64.142494
+        },
+        "phasor1": {
+          "x": 84.45999,
+          "y": 10.6825
+        },
+        "phasor2": {
+          "x": 96.0514,
+          "y": 10.6825
+        },
+        "scale1": {
+          "x": 115.69209,
+          "y": 24.0475
+        },
+        "scale2": {
+          "x": 88.0021,
+          "y": 24.0475
+        },
+        "svf1": {
+          "x": 81.05069,
+          "y": 57.459995
+        },
+        "tri": {
+          "x": 151.94069,
+          "y": 4.0
+        },
+        "triangle1": {
+          "x": 95.811165,
+          "y": 17.365
+        },
+        "triangle2": {
+          "x": 84.21976,
+          "y": 30.73
+        }
+      },
+      "cables": {
+        "add1:0->mul2:0": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "add2:0->clip1:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "clip1:0->svf1:1": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "cos1:0->svf1:0": {
+          "segmented": true,
+          "y": 53.668743
+        },
+        "depth:0->mul1:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "input3:0->phasor2:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "input4:0->add2:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "input:0->add1:1": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "input:0->phasor1:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "key:0->mul2:1": {
+          "segmented": true,
+          "y": 5.93
+        },
+        "mul1:0->cos1:0": {
+          "segmented": true,
+          "y": 46.986248
+        },
+        "mul2:0->add2:0": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "mul3:0->mul1:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "phasor1:0->triangle2:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "phasor2:0->triangle1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "scale1:0->add1:0": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "scale2:0->triangle2:1": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "svf1:0->out:0": {
+          "segmented": true,
+          "y": 61.591248
+        },
+        "tri:0->triangle1:1": {
+          "segmented": true,
+          "y": 7.17
+        },
+        "triangle1:0->scale1:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "triangle1:0->scale2:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "triangle2:0->mul3:0": {
+          "segmented": true,
+          "y": 34.86125
+        }
+      }
+    }
+  }
+}

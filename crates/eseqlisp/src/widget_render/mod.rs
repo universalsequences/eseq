@@ -527,6 +527,10 @@ pub enum MetalCircleVisibleHalf {
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub enum MetalPrimitive {
+    ZLayer {
+        z_index: i32,
+        primitive: Box<MetalPrimitive>,
+    },
     Rect(MetalRectPrimitive),
     /// Rectangles that must render above foreground widget instances but below
     /// proportional text. This is for widget-local editing overlays such as
@@ -549,6 +553,30 @@ pub enum MetalPrimitive {
     PushClipRect(Rect),
     /// Restore the previous scissor rect.
     PopClipRect,
+}
+
+#[cfg(target_os = "macos")]
+pub fn z_layer(z_index: i32, primitive: MetalPrimitive) -> MetalPrimitive {
+    MetalPrimitive::ZLayer {
+        z_index,
+        primitive: Box::new(primitive),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn effective_z_index(primitive: &MetalPrimitive) -> i32 {
+    match primitive {
+        MetalPrimitive::ZLayer { z_index, .. } => *z_index,
+        _ => 0,
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn innermost_primitive(primitive: &MetalPrimitive) -> &MetalPrimitive {
+    match primitive {
+        MetalPrimitive::ZLayer { primitive, .. } => innermost_primitive(primitive),
+        primitive => primitive,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -816,6 +844,8 @@ pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
 pub fn layout_wants_animation_frames(node: &LayoutNode) -> bool {
     widget_definition(&node.widget_type)
         .is_some_and(|definition| definition.wants_animation_frames(node))
+        || sdf_widget::sdf_widget_def(&node.widget_type)
+            .is_some_and(|definition| definition.animates)
         || node.children.iter().any(layout_wants_animation_frames)
 }
 
@@ -1102,6 +1132,7 @@ fn collect_metal_primitives_recursive(
 #[cfg(target_os = "macos")]
 fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetViewport) {
     match prim {
+        MetalPrimitive::ZLayer { primitive, .. } => offset_primitive_y_mut(primitive, dy, viewport),
         MetalPrimitive::Rect(r) => r.rect.row += dy,
         MetalPrimitive::ForegroundRect(r) => r.rect.row += dy,
         MetalPrimitive::Quad(q) => q.y += dy,
@@ -1298,6 +1329,41 @@ mod tests {
         assert!((mapped_haptic_value(&props, 0.75, 0.0) - 3.875).abs() < 0.0001);
         assert!((mapped_haptic_value(&props, 1.0, 0.0) - 32.0).abs() < 0.0001);
     }
+
+    #[test]
+    fn sdf_defwidget_can_request_animation_frames() {
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "test-animated-sdf".to_string(),
+            shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0),
+            state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: true,
+        });
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "test-animated-sdf".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            props: HashMap::new(),
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        assert!(layout_wants_animation_frames(&node));
+    }
 }
 
 /// Shared rounded-rect SDF shader used by tree-row, text-input, number-picker, dropdown.
@@ -1360,8 +1426,8 @@ float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, fl
 
 float3 patcher_node_normal(float2 pos, float2 size, float radius, float eps, float ratio)
 {
-    float smin = -0.005 * ratio;
-    float smax = 0.518;
+    float smin = -0.05 * ratio;
+    float smax = 0.118;
     float right = patcher_node_smooth_rounded_rect(pos + float2(eps, 0.0), size, radius, smin, smax);
     float left = patcher_node_smooth_rounded_rect(pos - float2(eps, 0.0), size, radius, smin, smax);
     float up = patcher_node_smooth_rounded_rect(pos + float2(0.0, eps), size, radius, smin, smax);

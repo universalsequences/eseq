@@ -122,9 +122,23 @@ pub(super) struct PatcherInteractionState {
     pub(super) text_edit: Option<PatcherTextEdit>,
     pub(super) agentic_bubbles: HashMap<String, AgenticBubble>,
     pub(super) agentic_morph_nodes: HashMap<String, Instant>,
+    pub(super) z_order: HashMap<String, Vec<String>>,
     pub(super) last_pointer_model_position: Option<(f32, f32)>,
     pub(super) active_macro: Option<String>,
     pub(super) drag: Option<PatcherDragState>,
+}
+
+pub(super) const PATCHER_Z_SLOTS_PER_NODE: i32 = 10;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub(super) enum PatcherZSlot {
+    NodeChrome = 0,
+    EditSelection = 1,
+    Ports = 2,
+    Text = 3,
+    DrillIn = 4,
+    EditCursor = 5,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -133,9 +147,21 @@ pub(super) struct AgenticBubble {
     pub(super) prompt: String,
     pub(super) text_state: TextInputState,
     pub(super) position: (f32, f32),
+    pub(super) target: AgenticBubbleTarget,
     pub(super) state: AgenticBubbleState,
     pub(super) generation: u64,
     pub(super) macro_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum AgenticBubbleTarget {
+    CreateMacro,
+    EditMacro {
+        instance_node_id: String,
+        macro_name: String,
+        params: Vec<String>,
+        source: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +169,10 @@ pub(super) enum AgenticBubbleState {
     Editing,
     Pending {
         started_at: Instant,
+    },
+    Answer {
+        text: String,
+        answered_at: Instant,
     },
     Error {
         summary: String,
@@ -155,6 +185,7 @@ impl AgenticBubble {
     pub(super) fn elapsed(&self) -> Option<Duration> {
         match self.state {
             AgenticBubbleState::Pending { started_at } => Some(started_at.elapsed()),
+            AgenticBubbleState::Answer { .. } => None,
             _ => None,
         }
     }
@@ -439,6 +470,103 @@ pub(super) fn active_patcher_view_key(interaction_state: &PatcherInteractionStat
         .unwrap_or_else(|| "root".to_string())
 }
 
+pub(super) fn sync_patcher_z_order(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    patch: &Patch,
+) {
+    let live_ids = patch
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+    let stack = state.z_order.entry(view_key.to_string()).or_default();
+    stack.retain(|node_id| live_ids.contains(node_id.as_str()));
+    let present = stack.iter().map(String::as_str).collect::<HashSet<_>>();
+    let missing = patch
+        .nodes
+        .iter()
+        .filter(|node| !present.contains(node.id.as_str()))
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    stack.extend(missing);
+}
+
+pub(super) fn bring_nodes_to_front(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    node_ids: &[String],
+) {
+    if node_ids.is_empty() {
+        return;
+    }
+    let requested = node_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let stack = state.z_order.entry(view_key.to_string()).or_default();
+    let mut moved = Vec::new();
+    stack.retain(|node_id| {
+        if requested.contains(node_id.as_str()) {
+            moved.push(node_id.clone());
+            false
+        } else {
+            true
+        }
+    });
+    for node_id in node_ids {
+        if !moved.iter().any(|moved_id| moved_id == node_id) {
+            moved.push(node_id.clone());
+        }
+    }
+    stack.extend(moved);
+}
+
+pub(super) fn ordered_patch_nodes<'a>(
+    patch: &'a Patch,
+    state: &PatcherInteractionState,
+    view_key: &str,
+) -> Vec<&'a PatchNode> {
+    let by_id = patch
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut ordered = Vec::new();
+    if let Some(stack) = state.z_order.get(view_key) {
+        for node_id in stack {
+            if let Some(node) = by_id.get(node_id.as_str()) {
+                seen.insert(node.id.as_str());
+                ordered.push(*node);
+            }
+        }
+    }
+    ordered.extend(
+        patch
+            .nodes
+            .iter()
+            .filter(|node| !seen.contains(node.id.as_str())),
+    );
+    ordered
+}
+
+pub(super) fn node_z_index(
+    state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+    slot: PatcherZSlot,
+) -> i32 {
+    let stack_index = state
+        .z_order
+        .get(view_key)
+        .and_then(|stack| stack.iter().position(|id| id == node_id))
+        .unwrap_or(0);
+    stack_index as i32 * PATCHER_Z_SLOTS_PER_NODE + slot as i32
+}
+
+pub(super) fn max_node_z_index(patch: &Patch) -> i32 {
+    patch.nodes.len().saturating_sub(1) as i32 * PATCHER_Z_SLOTS_PER_NODE
+        + PatcherZSlot::EditCursor as i32
+}
+
 pub(super) fn scoped_node_key(view_key: &str, node_id: &str) -> String {
     format!("{view_key}::{node_id}")
 }
@@ -494,6 +622,7 @@ pub(super) fn allocate_created_node(
         &format!("allocate-created-node view={view_key} id={id}"),
         state,
     );
+    bring_nodes_to_front(state, view_key, std::slice::from_ref(&id));
     id
 }
 
@@ -501,9 +630,20 @@ pub(super) fn allocate_agentic_bubble(
     state: &mut PatcherInteractionState,
     position: (f32, f32),
 ) -> String {
+    allocate_agentic_bubble_with_target(state, position, AgenticBubbleTarget::CreateMacro)
+}
+
+pub(super) fn allocate_agentic_bubble_with_target(
+    state: &mut PatcherInteractionState,
+    position: (f32, f32),
+    target: AgenticBubbleTarget,
+) -> String {
     let id = format!("bubble-{}", state.edit_state.next_created_node);
     state.edit_state.next_created_node += 1;
-    let macro_name = format!("agentic-{}", id.replace('_', "-"));
+    let macro_name = match &target {
+        AgenticBubbleTarget::CreateMacro => format!("agentic-{}", id.replace('_', "-")),
+        AgenticBubbleTarget::EditMacro { macro_name, .. } => macro_name.clone(),
+    };
     state.agentic_bubbles.insert(
         id.clone(),
         AgenticBubble {
@@ -511,6 +651,7 @@ pub(super) fn allocate_agentic_bubble(
             prompt: String::new(),
             text_state: TextInputState::default(),
             position,
+            target,
             state: AgenticBubbleState::Editing,
             generation: 0,
             macro_name,

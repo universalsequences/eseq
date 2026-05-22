@@ -567,6 +567,7 @@ pub(crate) fn init_runtime(
                 ("current-project-name", Value::String(String::new())),
                 // Editor mode state (for inline instrument/effect creation/editing)
                 ("editor-active", Value::Bool(false)),
+                ("editor-canceling", Value::Bool(false)),
                 ("editor-error", Value::String(String::new())),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
