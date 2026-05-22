@@ -4172,6 +4172,51 @@ fn writeback_deleting_source_backed_top_level_node_removes_form() {
 }
 
 #[test]
+fn writeback_deleting_last_macro_instance_removes_macro_definition() {
+    let source = r#"
+        (defmacro op (input) (* input 2))
+        (def sig (in 1))
+        (def shaped (op sig))
+    "#;
+    let patch = parse(source);
+    let shaped = patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    assert_eq!(shaped.kind, NodeKind::MacroInstance);
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &shaped.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1))"
+    );
+}
+
+#[test]
+fn writeback_deleting_one_macro_instance_keeps_macro_definition_when_still_used() {
+    let source = r#"
+        (defmacro op (input) (* input 2))
+        (def sig (in 1))
+        (def shaped (op sig))
+        (def shaped2 (op sig))
+    "#;
+    let patch = parse(source);
+    let shaped = patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    assert_eq!(shaped.kind, NodeKind::MacroInstance);
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &shaped.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro op (input) (* input 2.0))\n(def sig (in 1))\n(def shaped2 (op sig))"
+    );
+}
+
+#[test]
 fn writeback_deleting_multiple_top_level_nodes_removes_expected_forms() {
     let source = r#"
         (def sig (in 1))

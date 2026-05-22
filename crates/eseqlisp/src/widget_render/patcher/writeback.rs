@@ -228,6 +228,9 @@ pub(super) fn emit_patch_writeback_result(
         &generated,
         &history_bindings,
     )?;
+    let deleted_macro_instances =
+        deleted_macro_instance_names(&effective_root_patch, interaction_state);
+    document.remove_unreferenced_candidate_macros(&deleted_macro_instances);
 
     Ok(PatchWritebackResult {
         source: document.emit(),
@@ -847,6 +850,24 @@ fn apply_node_deletions(
         document.remove_form(&form_id)?;
     }
     Ok(())
+}
+
+fn deleted_macro_instance_names(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+) -> HashSet<String> {
+    interaction_state
+        .edit_state
+        .deleted_nodes
+        .iter()
+        .filter_map(|key| {
+            let (view_key, node_id) = split_scoped_key(key);
+            patch_for_view(root_patch, &view_key)
+                .and_then(|patch| patch_node(patch, &node_id))
+                .filter(|node| node.kind == NodeKind::MacroInstance)
+                .map(|node| node.op.clone())
+        })
+        .collect()
 }
 
 fn source_expr_is_ancestor(candidate: &SourceExprId, expr: &SourceExprId) -> bool {
@@ -4104,6 +4125,66 @@ impl SourceDocument {
         Ok(())
     }
 
+    fn remove_unreferenced_candidate_macros(&mut self, candidates: &HashSet<String>) {
+        if candidates.is_empty() {
+            return;
+        }
+        let macro_names = self.macros.keys().cloned().collect::<HashSet<_>>();
+        let candidates = candidates
+            .intersection(&macro_names)
+            .cloned()
+            .collect::<HashSet<_>>();
+        if candidates.is_empty() {
+            return;
+        }
+
+        let live = self.live_macro_references_excluding_candidates(&macro_names, &candidates);
+        for name in candidates.difference(&live) {
+            self.macros.remove(name);
+            self.forms.retain(
+                |form| !matches!(&form.form, SourceForm::Macro(macro_name) if macro_name == name),
+            );
+        }
+    }
+
+    fn live_macro_references_excluding_candidates(
+        &self,
+        macro_names: &HashSet<String>,
+        candidates: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut live = HashSet::new();
+        for form in &self.forms {
+            if let SourceForm::Expr(expr) = &form.form {
+                collect_macro_call_references(expr, macro_names, &mut live);
+            }
+        }
+        for (name, macro_doc) in &self.macros {
+            if candidates.contains(name) {
+                continue;
+            }
+            for form in &macro_doc.body {
+                collect_macro_call_references(&form.expr, macro_names, &mut live);
+            }
+        }
+
+        let mut stack = live.iter().cloned().collect::<Vec<_>>();
+        while let Some(name) = stack.pop() {
+            let Some(macro_doc) = self.macros.get(&name) else {
+                continue;
+            };
+            let mut refs = HashSet::new();
+            for form in &macro_doc.body {
+                collect_macro_call_references(&form.expr, macro_names, &mut refs);
+            }
+            for referenced in refs {
+                if live.insert(referenced.clone()) {
+                    stack.push(referenced);
+                }
+            }
+        }
+        live
+    }
+
     fn insert_history_write(
         &mut self,
         scope: &SourceScopeId,
@@ -4614,6 +4695,29 @@ fn collect_scope_binding_names(expr: &Expression, names: &mut HashSet<String>) {
             if let Some(name) = symbol_at(items, 1) {
                 names.insert(name.to_string());
             }
+        }
+        _ => {}
+    }
+}
+
+fn collect_macro_call_references(
+    expr: &Expression,
+    macro_names: &HashSet<String>,
+    references: &mut HashSet<String>,
+) {
+    match expr {
+        Expression::List(items) | Expression::QuoteList(items) => {
+            if let Some(head) = symbol_at(items, 0)
+                && macro_names.contains(head)
+            {
+                references.insert(head.to_string());
+            }
+            for item in items {
+                collect_macro_call_references(item, macro_names, references);
+            }
+        }
+        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+            collect_macro_call_references(inner, macro_names, references);
         }
         _ => {}
     }
