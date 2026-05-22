@@ -2249,6 +2249,56 @@ fn writeback_root_param_rename_with_code_island_returns_blocker() {
 }
 
 #[test]
+fn writeback_constant_text_edit_to_param_rewrites_binding_references() {
+    let source = r#"
+        (def value1 5.0)
+        (def phasor1 (phasor value1))
+    "#;
+    let patch = parse(source);
+    let value = patch.nodes.iter().find(|node| node.id == "value1").unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", value, node_display_label(value));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &value.id))
+        .unwrap()
+        .text = "param xyz".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param xyz)\n(def phasor1 (phasor xyz))"
+    );
+}
+
+#[test]
+fn writeback_param_text_edit_to_constant_preserves_binding_references() {
+    let source = r#"
+        (param xyz)
+        (def phasor1 (phasor xyz))
+    "#;
+    let patch = parse(source);
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text = "5.0".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def xyz 5.0)\n(def phasor1 (phasor xyz))"
+    );
+}
+
+#[test]
 fn writeback_nested_node_text_edit_preserves_nested_structure() {
     let source = "(def result (phasor (* 25 freq) (mix xyz a b)))";
     let patch = parse(source);
@@ -3260,6 +3310,151 @@ fn writeback_generated_binding_can_depend_on_created_phasor_and_literal() {
 }
 
 #[test]
+fn writeback_created_param_replaces_deleted_constant_source_input() {
+    let source = r#"
+        (def value1 5.0)
+        (def phasor1 (phasor value1))
+        (def mul1 (* phasor1 320.0))
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def add1 (+ pitch mul1))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (def mod2 (in 6 @name mod2 @modulator 2))
+        (def mod3 (in 7 @name mod3 @modulator 3))
+        (def mod4 (in 8 @name mod4 @modulator 4))
+        (def mod5 (in 9 @name mod5 @modulator 5))
+        (def mod6 (in 10 @name mod6 @modulator 6))
+        (def ext1 (in 11 @name ext1 @modulator 7))
+        (def ext2 (in 12 @name ext2 @modulator 8))
+        (def ext3 (in 13 @name ext3 @modulator 9))
+        (def ext4 (in 14 @name ext4 @modulator 10))
+        (param attack @default 5.0 @min 0.0 @max 1000.0 @unit ms)
+        (param decay @default 120.0 @min 1.0 @max 2000.0 @unit ms)
+        (param sustain @default 0.8 @min 0.0 @max 1.0)
+        (param release @default 180.0 @min 1.0 @max 5000.0 @unit ms)
+        (param gain @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)
+        (def env (adsr gate trigger attack decay sustain release))
+        (def phase (phasor add1))
+        (def osc (scale phase 0.0 1.0 -1.0 1.0))
+        (out (* osc env velocity (mod gain)) 1 @name audio)
+    "#;
+    let patch = parse(source);
+    let value = patch.nodes.iter().find(|node| node.id == "value1").unwrap();
+    let phasor = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let value_to_phasor = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == value.id && connection.to_node == phasor.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &value.id));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(value_to_phasor),
+        ));
+    let param = allocate_created_text_node(&mut state, "root", "param xyz");
+    connect_output_to_input(&mut state, "root", &param, &phasor.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        !emitted.contains("value1"),
+        "deleted constant binding must not remain referenced:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(param xyz)"),
+        "created param should be emitted:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def phasor1 (phasor xyz))"),
+        "phasor should consume the created param symbol:\n{emitted}"
+    );
+}
+
+#[test]
+fn writeback_reconnecting_converted_param_uses_param_name_not_stale_def_name() {
+    let source = r#"
+        (def value1 (param xyz))
+        (def phasor1 (phasor __patcher_missing_input__))
+    "#;
+    let patch = parse(source);
+    let value = patch.nodes.iter().find(|node| node.id == "value1").unwrap();
+    let phasor = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", value, node_display_label(value));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &value.id))
+        .unwrap()
+        .text = "param xyz".to_string();
+    connect_output_to_input(&mut state, "root", &value.id, &phasor.id, 0);
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param xyz)\n(def phasor1 (phasor xyz))"
+    );
+}
+
+#[test]
+fn writeback_reconnecting_unsaved_constant_to_param_edit_uses_param_name() {
+    let source = r#"
+        (def value1 5.1)
+        (def phasor1 (phasor value1))
+        (def mul1 (* phasor1 320.0))
+    "#;
+    let mut state = PatcherInteractionState::default();
+    state.edit_state.nodes.insert(
+        node_edit_key("root", "value1"),
+        PatcherNodeEdit {
+            view_key: "root".to_string(),
+            id: "value1".to_string(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: "value1".to_string(),
+            },
+            text: "param xyz".to_string(),
+            position: (76.14, 4.0),
+        },
+    );
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", "value1:0->phasor1:0"));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: "value1".to_string(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: "phasor1".to_string(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param xyz)\n(def phasor1 (phasor xyz))\n(def mul1 (* phasor1 320.0))"
+    );
+}
+
+#[test]
 fn writeback_created_modulatable_param_uses_param_name_for_mod_accessor() {
     let source = r#"
         (def gate (in 1 @name gate))
@@ -4126,6 +4321,126 @@ fn writeback_cable_delete_in_root_emits_missing_input_sentinel() {
 }
 
 #[test]
+fn writeback_delete_then_readd_inline_out_connection_preserves_source() {
+    let source = "(out (phasor 1) 1)";
+    let patch = parse(source);
+    let phasor = patch.nodes.iter().find(|node| node.op == "phasor").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let phasor_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == phasor.id && connection.to_node == out.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(phasor_to_out),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: phasor.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(out (phasor 1.0) 1)"
+    );
+}
+
+#[test]
+fn writeback_delete_then_recreate_out_connection_emits_out_form() {
+    let source = r#"
+        (def sig (in 1))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &out.id));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+    let created_out = allocate_created_text_node(&mut state, "root", "out 1");
+    connect_output_to_input(&mut state, "root", &sig.id, &created_out, 0);
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1))\n(out sig 1)"
+    );
+}
+
+#[test]
+fn writeback_delete_then_recreate_out_connection_preserves_nested_source() {
+    let source = r#"
+        (def sig (in 1))
+        (out (* sig 0.5) 1)
+    "#;
+    let patch = parse(source);
+    let multiply = patch.nodes.iter().find(|node| node.op == "*").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let multiply_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == multiply.id && connection.to_node == out.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &out.id));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(multiply_to_out),
+        ));
+    let created_out = allocate_created_text_node(&mut state, "root", "out 1");
+    connect_output_to_input(&mut state, "root", &multiply.id, &created_out, 0);
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1))\n(out (* sig 0.5) 1)"
+    );
+}
+
+#[test]
 fn writeback_cable_delete_in_macro_emits_missing_input_sentinel() {
     let source = "(defmacro ap (sig) (out sig 1))";
     let patch = parse(source);
@@ -4186,6 +4501,27 @@ fn writeback_deleting_last_macro_instance_removes_macro_definition() {
         .edit_state
         .deleted_nodes
         .insert(node_edit_key("root", &shaped.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1))"
+    );
+}
+
+#[test]
+fn writeback_deleting_node_removes_existing_unreferenced_macro_definition() {
+    let source = r#"
+        (defmacro orphan (input) (* input 2))
+        (def sig (in 1))
+        (def unused (phasor sig))
+    "#;
+    let patch = parse(source);
+    let unused = patch.nodes.iter().find(|node| node.id == "unused").unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &unused.id));
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),

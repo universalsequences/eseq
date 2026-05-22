@@ -112,6 +112,7 @@ pub(super) fn emit_patch_writeback_result(
     apply_created_macro_parameter_writeback(&mut document, interaction_state)?;
 
     validate_connection_edits(&effective_root_patch, interaction_state)?;
+    apply_created_out_writeback(&mut document, &effective_root_patch, interaction_state)?;
     apply_node_deletions(&mut document, &effective_root_patch, interaction_state)?;
 
     let active_view_key = active_patcher_view_key(interaction_state);
@@ -165,6 +166,7 @@ pub(super) fn emit_patch_writeback_result(
             PatcherNodeOrigin::Created { .. } => {
                 if !created_history_edit(edit)
                     && !created_value_edit(edit)
+                    && !created_out_edit(edit)
                     && !created_macro_parameter_edit(edit)
                     && !created_macro_instance_edit(interaction_state, edit)
                 {
@@ -193,7 +195,9 @@ pub(super) fn emit_patch_writeback_result(
                         reason: "node edit targets a missing source node".to_string(),
                     }
                 })?;
-                if edit.text.trim() != node_display_label(node).trim() {
+                if edit.text.trim() != node_display_label(node).trim()
+                    || node_requires_param_form_normalization(node)
+                {
                     apply_node_text_edit(
                         &mut document,
                         &effective_root_patch,
@@ -228,9 +232,9 @@ pub(super) fn emit_patch_writeback_result(
         &generated,
         &history_bindings,
     )?;
-    let deleted_macro_instances =
-        deleted_macro_instance_names(&effective_root_patch, interaction_state);
-    document.remove_unreferenced_candidate_macros(&deleted_macro_instances);
+    let macro_prune_candidates =
+        macro_prune_candidate_names(&effective_root_patch, interaction_state);
+    document.remove_unreferenced_candidate_macros(&macro_prune_candidates);
 
     Ok(PatchWritebackResult {
         source: document.emit(),
@@ -456,9 +460,15 @@ fn validate_connection_edits(
                     connection_edit_touches_history(root_patch, interaction_state, edit);
                 let touches_created_value =
                     connection_edit_touches_created_value(interaction_state, edit);
+                let touches_created_out =
+                    connection_edit_touches_created_out(interaction_state, edit);
                 let has_source_destination =
                     connection_edit_has_source_destination(root_patch, edit);
-                if !touches_history && !touches_created_value && !has_source_destination {
+                if !touches_history
+                    && !touches_created_value
+                    && !touches_created_out
+                    && !has_source_destination
+                {
                     debug_log_writeback_event(
                         "validation-failed-created-connection",
                         created_connection_validation_details(
@@ -515,6 +525,13 @@ fn validate_connection_edits(
             &view_key,
             &connection_id,
         );
+        let has_created_connection_replacement =
+            deleted_connection_has_created_connection_replacement(
+                root_patch,
+                interaction_state,
+                &view_key,
+                &connection_id,
+            );
         let is_deletable = source_connection_is_deletable(root_patch, &view_key, &connection_id);
         let incident_to_deleted_node = deleted_connection_is_incident_to_deleted_node(
             root_patch,
@@ -524,6 +541,7 @@ fn validate_connection_edits(
         );
         if !has_history_replacement
             && !has_created_value_replacement
+            && !has_created_connection_replacement
             && !is_deletable
             && !incident_to_deleted_node
         {
@@ -751,6 +769,50 @@ fn apply_created_macro_parameter_writeback(
     Ok(())
 }
 
+fn apply_created_out_writeback(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+) -> Result<(), WriteBackError> {
+    let generated = GeneratedBindings::default();
+    let history_bindings = HistoryBindings::default();
+    let mut edits = interaction_state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| created_out_edit(edit))
+        .collect::<Vec<_>>();
+    edits.sort_by_key(|edit| (edit.view_key.clone(), edit.id.clone()));
+    for edit in edits {
+        let inbound = interaction_state
+            .edit_state
+            .connections
+            .values()
+            .filter(|connection| {
+                connection.view_key == edit.view_key
+                    && connection.to.node_id == edit.id
+                    && connection.to.input_index == 0
+            })
+            .min_by_key(|connection| connection.id.clone());
+        let value = if let Some(connection) = inbound {
+            value_reference_expr(
+                document,
+                root_patch,
+                interaction_state,
+                &generated,
+                &history_bindings,
+                &edit.view_key,
+                &connection.from,
+            )?
+        } else {
+            Expression::Symbol(MISSING_INPUT_SENTINEL.to_string())
+        };
+        let expr = created_out_expression(edit, value)?;
+        document.insert_form(&scope_for_view_key(&edit.view_key), usize::MAX, expr)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum SourceDeletionTarget {
     Form(SourceFormId),
@@ -852,21 +914,24 @@ fn apply_node_deletions(
     Ok(())
 }
 
-fn deleted_macro_instance_names(
+fn macro_prune_candidate_names(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
 ) -> HashSet<String> {
-    interaction_state
+    if interaction_state.edit_state.deleted_nodes.is_empty() {
+        return HashSet::new();
+    }
+    let newly_created = interaction_state
         .edit_state
-        .deleted_nodes
+        .created_macros
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    root_patch
+        .macros
         .iter()
-        .filter_map(|key| {
-            let (view_key, node_id) = split_scoped_key(key);
-            patch_for_view(root_patch, &view_key)
-                .and_then(|patch| patch_node(patch, &node_id))
-                .filter(|node| node.kind == NodeKind::MacroInstance)
-                .map(|node| node.op.clone())
-        })
+        .filter(|macro_patch| !newly_created.contains(macro_patch.name.as_str()))
+        .map(|macro_patch| macro_patch.name.clone())
         .collect()
 }
 
@@ -992,7 +1057,13 @@ fn created_value_edit(edit: &super::state::PatcherNodeEdit) -> bool {
     matches!(&edit.origin, PatcherNodeOrigin::Created { .. })
         && !edit.text.trim().is_empty()
         && !created_history_edit(edit)
+        && !created_out_edit(edit)
         && !created_macro_parameter_edit(edit)
+}
+
+fn created_out_edit(edit: &super::state::PatcherNodeEdit) -> bool {
+    matches!(&edit.origin, PatcherNodeOrigin::Created { .. })
+        && matches!(created_node_operator(edit).as_deref(), Ok("out"))
 }
 
 fn created_macro_parameter_edit(edit: &super::state::PatcherNodeEdit) -> bool {
@@ -1101,6 +1172,17 @@ fn connection_edit_touches_created_value(
         || created_value_node(interaction_state, &edit.view_key, &edit.to.node_id).is_some()
 }
 
+fn connection_edit_touches_created_out(
+    interaction_state: &PatcherInteractionState,
+    edit: &PatcherConnectionEdit,
+) -> bool {
+    interaction_state
+        .edit_state
+        .nodes
+        .get(&node_edit_key(&edit.view_key, &edit.to.node_id))
+        .is_some_and(created_out_edit)
+}
+
 fn connection_edit_touches_history(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
@@ -1141,6 +1223,32 @@ fn deleted_connection_has_created_value_replacement(
         .filter(|edit| edit.view_key == view_key)
         .any(|edit| {
             created_value_node(interaction_state, view_key, &edit.from.node_id).is_some()
+                && edit.to == to
+        })
+}
+
+fn deleted_connection_has_created_connection_replacement(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    connection_id: &str,
+) -> bool {
+    let Some(to) = source_connection(root_patch, view_key, connection_id)
+        .map(|connection| InputPortRef {
+            node_id: connection.to_node.clone(),
+            input_index: connection.to_input,
+        })
+        .or_else(|| connection_destination_from_id(connection_id))
+    else {
+        return false;
+    };
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .any(|edit| {
+            edit.view_key == view_key
+                && matches!(edit.origin, PatcherConnectionOrigin::Created { .. })
                 && edit.to == to
         })
 }
@@ -1412,6 +1520,14 @@ fn apply_generated_binding_writeback(
             })?;
             generated.insert(&view_key, &edit.id, name);
             materialized_nodes.insert(edit.id.clone());
+            rewrite_created_value_consumers(
+                document,
+                root_patch,
+                interaction_state,
+                &generated,
+                &view_key,
+                edit,
+            )?;
             let insertion_index = generated_def_insertion_index(
                 document,
                 root_patch,
@@ -1798,6 +1914,30 @@ fn created_value_expression(
     )
 }
 
+fn created_out_expression(
+    edit: &super::state::PatcherNodeEdit,
+    value: Expression,
+) -> Result<Expression, WriteBackError> {
+    let expr = parse_created_node_text(edit)?;
+    let Expression::List(items) = expr else {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created out node text must parse as an out form".to_string(),
+        });
+    };
+    if symbol_at(&items, 0) != Some("out") {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created out node must use the out operator".to_string(),
+        });
+    }
+    let mut rebuilt = vec![Expression::Symbol("out".to_string()), value];
+    rebuilt.extend(items.into_iter().skip(1));
+    Ok(Expression::List(rebuilt))
+}
+
 fn created_node_expression(
     document: &SourceDocument,
     root_patch: &Patch,
@@ -1973,6 +2113,9 @@ fn value_reference_expr(
             &from.node_id,
         )?));
     }
+    if let Some(name) = edited_source_param_name(interaction_state, view_key, &from.node_id) {
+        return Ok(Expression::Symbol(name));
+    }
     let Some(node) =
         patch_for_view(root_patch, view_key).and_then(|patch| patch_node(patch, &from.node_id))
     else {
@@ -1998,12 +2141,10 @@ fn node_reference_expr(
             node_id: node.id.clone(),
         })?;
     match &source.owner {
-        SourceOwner::BindingValue {
-            binding: BindingTarget::Symbol(name),
-            ..
-        } => Ok(Expression::Symbol(name.clone())),
-        SourceOwner::TopLevelForm { .. } if node.kind == NodeKind::Param => {
-            let Some(name) = node.label.split_whitespace().nth(1) else {
+        SourceOwner::TopLevelForm { .. } | SourceOwner::BindingValue { .. }
+            if node.kind == NodeKind::Param =>
+        {
+            let Some(name) = param_node_name(node) else {
                 return Err(WriteBackError::UnsupportedGeneratedBinding {
                     view_key: view_key.to_string(),
                     node_id: node.id.clone(),
@@ -2012,6 +2153,10 @@ fn node_reference_expr(
             };
             Ok(Expression::Symbol(name.to_string()))
         }
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Symbol(name),
+            ..
+        } => Ok(Expression::Symbol(name.clone())),
         SourceOwner::MacroParameter { binding, .. } => Ok(Expression::Symbol(binding.name.clone())),
         _ if node.kind == NodeKind::Constant => {
             parse_single_expression(&node.op).map_err(|reason| WriteBackError::InvalidEdit {
@@ -2043,6 +2188,25 @@ fn node_reference_expr(
             reason: "source owner cannot be referenced by generated binding".to_string(),
         }),
     }
+}
+
+fn edited_source_param_name(
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> Option<String> {
+    let edit = interaction_state
+        .edit_state
+        .nodes
+        .get(&node_edit_key(view_key, node_id))?;
+    let PatcherNodeOrigin::Source { source_node_id } = &edit.origin else {
+        return None;
+    };
+    if source_node_id != node_id {
+        return None;
+    }
+    let expr = parse_single_expression(&format!("({})", edit.text.trim())).ok()?;
+    param_name(&expr).map(str::to_string)
 }
 
 fn generated_def_insertion_index(
@@ -2360,6 +2524,9 @@ fn generated_node_consumers(
         .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
         .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
         .filter(|connection| {
+            created_value_node(interaction_state, view_key, &connection.to.node_id).is_none()
+        })
+        .filter(|connection| {
             !node_is_history(
                 root_patch,
                 interaction_state,
@@ -2492,6 +2659,9 @@ fn reorder_destination_after_new_dependency(
     let Some((dest_form, _)) = source_owner_location_for_node(dest) else {
         return Ok(());
     };
+    if source_form == dest_form {
+        return Ok(());
+    }
     if source_form.scope != dest_form.scope {
         return Ok(());
     }
@@ -2578,6 +2748,11 @@ fn apply_cable_writeback(
             interaction_state,
             &view_key,
             &connection_id,
+        ) || deleted_connection_has_created_connection_replacement(
+            root_patch,
+            interaction_state,
+            &view_key,
+            &connection_id,
         ) {
             continue;
         }
@@ -2645,6 +2820,7 @@ fn apply_cable_writeback(
     for connection in created {
         if connection_edit_touches_history(root_patch, interaction_state, connection)
             || connection_edit_touches_created_value(interaction_state, connection)
+            || connection_edit_touches_created_out(interaction_state, connection)
         {
             continue;
         }
@@ -2831,6 +3007,7 @@ fn apply_history_writeback(
             } else {
                 if generated.get(&view_key, &connection.from.node_id).is_some()
                     || generated.get(&view_key, &connection.to.node_id).is_some()
+                    || connection_edit_touches_created_out(interaction_state, connection)
                     || connection_edit_has_source_destination(root_patch, connection)
                 {
                     continue;
@@ -3058,12 +3235,10 @@ fn connection_source_expr(
         })
         .unwrap_or_else(|| scope_for_view_key(view_key));
     match &source.owner {
-        SourceOwner::BindingValue {
-            binding: BindingTarget::Symbol(name),
-            ..
-        } => Ok((Expression::Symbol(name.clone()), scope)),
-        SourceOwner::TopLevelForm { .. } if node.kind == NodeKind::Param => {
-            let Some(name) = node.label.split_whitespace().nth(1) else {
+        SourceOwner::TopLevelForm { .. } | SourceOwner::BindingValue { .. }
+            if node.kind == NodeKind::Param =>
+        {
+            let Some(name) = param_node_name(node) else {
                 return Err(WriteBackError::UnsupportedHistoryEdit {
                     view_key: view_key.to_string(),
                     history_id: String::new(),
@@ -3072,6 +3247,10 @@ fn connection_source_expr(
             };
             Ok((Expression::Symbol(name.to_string()), scope))
         }
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Symbol(name),
+            ..
+        } => Ok((Expression::Symbol(name.clone()), scope)),
         SourceOwner::MacroParameter { binding, .. } => Ok((
             Expression::Symbol(binding.name.clone()),
             binding.scope.clone(),
@@ -3265,9 +3444,20 @@ fn apply_node_text_edit(
     match &source.owner {
         SourceOwner::BindingValue {
             form_id,
+            binding,
             value_path,
-            ..
         } => {
+            if param_name(&replacement).is_some() {
+                return apply_binding_value_to_param_text_edit(
+                    document,
+                    root_patch,
+                    view_key,
+                    node,
+                    form_id,
+                    binding,
+                    replacement,
+                );
+            }
             let expr_id = SourceExprId {
                 form_id: form_id.clone(),
                 path: value_path.clone(),
@@ -3294,6 +3484,20 @@ fn apply_node_text_edit(
     }
 }
 
+fn node_requires_param_form_normalization(node: &PatchNode) -> bool {
+    node.kind == NodeKind::Param
+        && node
+            .source
+            .as_ref()
+            .is_some_and(|source| matches!(source.owner, SourceOwner::BindingValue { .. }))
+}
+
+fn param_node_name(node: &PatchNode) -> Option<&str> {
+    (node.kind == NodeKind::Param)
+        .then(|| node.label.split_whitespace().nth(1))
+        .flatten()
+}
+
 fn apply_param_text_edit(
     document: &mut SourceDocument,
     root_patch: &Patch,
@@ -3311,13 +3515,22 @@ fn apply_param_text_edit(
             reason: "param source has no symbolic name".to_string(),
         })?
         .to_string();
-    let new_name = param_name(&replacement)
-        .ok_or_else(|| WriteBackError::InvalidEdit {
-            view_key: view_key.to_string(),
-            node_id: node.id.clone(),
-            reason: "param edit must keep a symbolic parameter name".to_string(),
-        })?
-        .to_string();
+    let new_name = param_name(&replacement).map(str::to_string);
+
+    let Some(new_name) = new_name else {
+        let expr_id = SourceExprId {
+            form_id: form_id.clone(),
+            path: Default::default(),
+        };
+        return document.replace_expr(
+            &expr_id,
+            Expression::List(vec![
+                Expression::Symbol("def".to_string()),
+                Expression::Symbol(old_name),
+                replacement,
+            ]),
+        );
+    };
 
     if new_name != old_name {
         let reserved = document.reserved_names(&form_id.scope);
@@ -3362,6 +3575,80 @@ fn apply_param_text_edit(
             view_key: view_key.to_string(),
             node_id: node.id.clone(),
             reason: "param rename targets a missing patch view".to_string(),
+        })?;
+    for expr in resolved_binding_references(patch, &binding) {
+        document.replace_expr(&expr, Expression::Symbol(new_name.clone()))?;
+    }
+    Ok(())
+}
+
+fn apply_binding_value_to_param_text_edit(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    view_key: &str,
+    node: &PatchNode,
+    form_id: &SourceFormId,
+    binding: &BindingTarget,
+    replacement: Expression,
+) -> Result<(), WriteBackError> {
+    let BindingTarget::Symbol(old_name) = binding else {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "destructuring bindings cannot be converted to params".to_string(),
+        });
+    };
+    let new_name = param_name(&replacement)
+        .ok_or_else(|| WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "param edit must provide a symbolic parameter name".to_string(),
+        })?
+        .to_string();
+
+    if new_name != *old_name {
+        let reserved = document.reserved_names(&form_id.scope);
+        if reserved.contains(&new_name) {
+            return Err(WriteBackError::BindingRenameCollision {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                name: new_name,
+            });
+        }
+        if patch_for_view(root_patch, view_key).is_some_and(|patch| {
+            patch
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::CodeIsland)
+        }) {
+            return Err(WriteBackError::BindingRenameBlockedByCodeIsland {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                name: old_name.clone(),
+            });
+        }
+    }
+
+    let expr_id = SourceExprId {
+        form_id: form_id.clone(),
+        path: Default::default(),
+    };
+    document.replace_expr(&expr_id, replacement)?;
+
+    if new_name == *old_name {
+        return Ok(());
+    }
+
+    let binding = BindingId {
+        scope: form_id.scope.clone(),
+        name: old_name.clone(),
+        kind: BindingKind::Def,
+    };
+    let patch =
+        patch_for_view(root_patch, view_key).ok_or_else(|| WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "binding-to-param edit targets a missing patch view".to_string(),
         })?;
     for expr in resolved_binding_references(patch, &binding) {
         document.replace_expr(&expr, Expression::Symbol(new_name.clone()))?;
@@ -3515,7 +3802,15 @@ fn edited_expression_for_node(
     }
 
     if node.kind == NodeKind::Constant {
-        return parse_single_expression(trimmed);
+        return parse_single_expression(trimmed)
+            .or_else(|_| parse_single_expression(&format!("({trimmed})")));
+    }
+
+    if node.kind == NodeKind::Param
+        && !trimmed.starts_with("param")
+        && let Ok(expr) = parse_single_expression(trimmed)
+    {
+        return Ok(expr);
     }
 
     let edited = parse_single_expression(&format!("({trimmed})"))?;
