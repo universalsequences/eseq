@@ -481,6 +481,26 @@ fn patcher_test_node(path: &std::path::Path) -> LayoutNode {
 }
 
 #[test]
+fn reset_patcher_state_for_path_clears_registered_stable_widget_state() {
+    let path = temp_patcher_dsp_path("patcher-reset-stable-key");
+    fs::write(&path, "(out 0)").unwrap();
+    let mut node = patcher_test_node(&path);
+    node.stable_widget_id = Some(998_877);
+    let key = patcher_state_key(&node);
+
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("stale-node".to_string());
+    set_patcher_interaction_state(key, state);
+
+    reset_patcher_state_for_path(&path, PatcherIntent::Instrument);
+
+    assert!(
+        get_patcher_interaction_state(key).selected_nodes.is_empty(),
+        "mode reset should clear stable-widget keyed patcher interaction state"
+    );
+}
+
+#[test]
 fn node_size_uses_cached_proportional_character_widths() {
     let label = "Wii".to_string();
     let measurer = VariableWidthTextMeasurer;
@@ -980,76 +1000,6 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
             .any(|patch_node| patch_node.id == "mul1"),
         "saved source and sidecar should reload with emitted ids"
     );
-}
-
-#[test]
-fn patcher_payload_discards_stale_semantic_edits_once_then_recovers() {
-    let path = temp_patcher_dsp_path("patcher-stale-edit-recovery");
-    fs::write(
-        &path,
-        "(def result (* (phasor 1) 0.5))\n(out result 1 @name audio)",
-    )
-    .unwrap();
-    let node = patcher_test_node(&path);
-    let key = patcher_state_key(&node);
-    let (_path, old_patch) = load_patch_from_props(&node.props).unwrap();
-    let phasor = old_patch
-        .nodes
-        .iter()
-        .find(|patch_node| patch_node.op == "phasor")
-        .expect("nested source-backed phasor");
-
-    let mut state = PatcherInteractionState::default();
-    state.last_pointer_model_position = Some((12.0, 34.0));
-    ensure_source_node_edit(&mut state, "root", phasor, node_display_label(phasor));
-    state
-        .edit_state
-        .nodes
-        .get_mut(&node_edit_key("root", &phasor.id))
-        .unwrap()
-        .text = "phasor 2".to_string();
-    set_patcher_interaction_state(key, state);
-
-    fs::write(&path, "(def result 1)\n(out result 1 @name audio)").unwrap();
-
-    let payload = patcher_writeback_payload(&node);
-    let Value::Map(map) = payload else {
-        panic!("expected payload map");
-    };
-    assert!(matches!(
-        map.get("status").map(|value| value.borrow().clone()),
-        Some(Value::Keyword(status)) if status == "invalid"
-    ));
-    assert!(matches!(
-        map.get("diagnostic").map(|value| value.borrow().clone()),
-        Some(Value::String(diagnostic))
-            if diagnostic == "Patch source changed; discarded stale patcher edits. Retry the edit."
-    ));
-    let cleaned = get_patcher_interaction_state(key);
-    assert!(
-        cleaned.edit_state.nodes.is_empty(),
-        "stale source node edit should be discarded"
-    );
-    assert_eq!(
-        cleaned.last_pointer_model_position,
-        Some((12.0, 34.0)),
-        "non-semantic UI state should survive stale edit cleanup"
-    );
-
-    let retry_payload = patcher_writeback_payload(&node);
-    let Value::Map(retry_map) = retry_payload else {
-        panic!("expected retry payload map");
-    };
-    assert!(matches!(
-        retry_map.get("status").map(|value| value.borrow().clone()),
-        Some(Value::Keyword(status)) if status == "valid"
-    ));
-    assert!(matches!(
-        retry_map.get("source").map(|value| value.borrow().clone()),
-        Some(Value::String(source)) if source == "(def result 1.0)\n(out result 1 @name audio)"
-    ));
-
-    set_patcher_interaction_state(key, PatcherInteractionState::default());
 }
 
 #[test]

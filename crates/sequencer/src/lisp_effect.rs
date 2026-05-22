@@ -2103,10 +2103,12 @@ fn log_dgenlisp_compile_failure(kind: &str, src_path: &Path, error: &str, source
 }
 
 fn log_dgenlisp_compile_manifest(kind: &str, src_path: &Path, manifest: &str) {
+    /*
     eprintln!(
         "[dgenlisp compile manifest] kind={kind} path={}\nmanifest:\n{manifest}\n[/dgenlisp compile manifest]",
         src_path.display()
     );
+    */
 }
 
 pub fn compile_and_load_instrument(

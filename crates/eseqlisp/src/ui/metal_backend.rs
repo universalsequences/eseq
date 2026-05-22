@@ -1095,7 +1095,7 @@ fragment float4 waveform_frag(
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX: &str = "__agent-instrument-stub-bg";
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX: &str = "__agent_instrument_stub_bg";
     const AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME: &str = "agent-instrument-stub-skeleton";
-    const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 14.0;
+    const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 16.0;
 
     // ── Backend ───────────────────────────────────────────────────────────────
 

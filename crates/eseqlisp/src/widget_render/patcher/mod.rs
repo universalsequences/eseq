@@ -36,17 +36,18 @@ pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Resul
 }
 
 pub fn reset_patcher_state_for_path(path: impl AsRef<std::path::Path>, intent: PatcherIntent) {
-    let path = path.as_ref().to_string_lossy().to_string();
+    let path = path.as_ref();
+    let path_string = path.to_string_lossy().to_string();
     let intent = match intent {
         PatcherIntent::Instrument => "instrument",
         PatcherIntent::Effect => "effect",
     };
     let props = HashMap::from([
-        ("path".to_string(), Value::String(path)),
+        ("path".to_string(), Value::String(path_string)),
         ("intent".to_string(), Value::Keyword(intent.to_string())),
     ]);
     let key = state::patcher_state_key_from_parts(None, &props);
-    state::reset_patcher_widget_state(key);
+    state::reset_patcher_widget_states_for_path(path, key);
 }
 
 pub fn resolve_agentic_bubble(
@@ -969,7 +970,7 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
     let intent = patcher_intent_from_props(&node.props);
     let key = patcher_state_key(node);
-    let mut state = get_patcher_interaction_state(key);
+    let state = get_patcher_interaction_state(key);
 
     let Some(path_str) = path else {
         return map_value(vec![
@@ -1005,31 +1006,6 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
             None
         }
     };
-
-    match writeback::discard_stale_semantic_edits(&source, intent, &mut state) {
-        Ok(true) => {
-            set_patcher_interaction_state(key, state);
-            return map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                (
-                    "diagnostic",
-                    Value::String(
-                        "Patch source changed; discarded stale patcher edits. Retry the edit."
-                            .to_string(),
-                    ),
-                ),
-            ]);
-        }
-        Ok(false) => {}
-        Err(error) => {
-            return map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                ("diagnostic", Value::String(format!("{error:?}"))),
-            ]);
-        }
-    }
 
     match emit_patch_writeback_result(&source, intent, &state) {
         Ok(result) => {

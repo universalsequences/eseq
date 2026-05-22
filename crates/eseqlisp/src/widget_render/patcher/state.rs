@@ -61,7 +61,11 @@ thread_local! {
 }
 
 pub(super) fn patcher_state_key(node: &LayoutNode) -> u64 {
-    patcher_state_key_from_parts(node.stable_widget_id, &node.props)
+    let key = patcher_state_key_from_parts(node.stable_widget_id, &node.props);
+    if let Some(path) = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file")) {
+        register_patcher_path_key(path, key);
+    }
+    key
 }
 
 pub(super) fn patcher_state_key_from_parts(
@@ -281,6 +285,24 @@ pub(super) fn reset_patcher_widget_state(key: u64) {
         PATCHER_INTERACTION_STATES.with(|states| states.borrow_mut().remove(&key).is_some());
     if pan_changed || interaction_changed {
         bump_widget_state_generation();
+    }
+}
+
+pub(super) fn reset_patcher_widget_states_for_path(path: impl AsRef<Path>, fallback_key: u64) {
+    let path = path.as_ref().to_string_lossy().to_string();
+    let mut keys = PATCHER_PATH_KEYS.with(|paths| {
+        paths
+            .borrow_mut()
+            .remove(&path)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>()
+    });
+    keys.push(fallback_key);
+    keys.sort_unstable();
+    keys.dedup();
+    for key in keys {
+        reset_patcher_widget_state(key);
     }
 }
 
