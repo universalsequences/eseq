@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 #[cfg(target_os = "macos")]
-use super::super::text_input::{cursor_x_from_char_cache, selection_range as text_selection_range};
+use super::super::text_input::{
+    cursor_x_from_char_cache, selection_range as text_selection_range, text_width_from_char_cache,
+};
 use super::super::{CellBuffer, styled_cell};
 #[cfg(target_os = "macos")]
 use super::super::{
@@ -27,12 +29,16 @@ use super::metrics::{
     NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
-use super::model::{ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode};
+use super::model::{
+    ArgValue, BindingTarget, ConnectionKind, InputPortRef, NodeKind, OutputPortRef, Patch,
+    PatchConnection, PatchNode, SourceOwner,
+};
 #[cfg(target_os = "macos")]
 use super::project::OperatorPortDocumentation;
+use super::project::dgenlisp_operator_documentation;
 use super::state::{
-    PatcherDragState, PatcherInteractionState, PatcherPanState, PatcherTextEdit,
-    active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
+    AgenticBubbleState, PatcherDragState, PatcherInteractionState, PatcherPanState,
+    PatcherTextEdit, active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
     get_patcher_pan_state, patch_with_interaction_state, patcher_back_label, patcher_breadcrumb,
     patcher_state_key, set_patcher_pan_state, source_connection_id,
 };
@@ -114,6 +120,13 @@ pub(super) fn build_metal_primitives_for_patcher(
             draw_patch(
                 &mut prims,
                 &patch,
+                node.rect,
+                viewport,
+                &pan_state,
+                &interaction_state,
+            );
+            draw_agentic_bubbles(
+                &mut prims,
                 node.rect,
                 viewport,
                 &pan_state,
@@ -260,6 +273,266 @@ fn push_marquee(
         height: marquee.height,
         color: border,
     }));
+}
+
+#[cfg(target_os = "macos")]
+fn draw_agentic_bubbles(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    viewport: WidgetViewport,
+    pan_state: &PatcherPanState,
+    interaction_state: &PatcherInteractionState,
+) {
+    let origin = super::geometry::patcher_origin(rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
+    for bubble in interaction_state.agentic_bubbles.values() {
+        let x = origin.0 + bubble.position.0 * zoom;
+        let y = origin.1 + bubble.position.1 * zoom;
+        let width = 18.0 * zoom;
+        let inner_width = width - 1.3 * zoom;
+        let prompt = if bubble.prompt.trim().is_empty() {
+            "cmd+k prompt".to_string()
+        } else {
+            bubble.prompt.clone()
+        };
+        let prompt_lines = wrap_agentic_prompt_lines(&prompt, inner_width / zoom, viewport);
+        let height = ((4.0 + prompt_lines.len() as f32 * 1.18).max(5.8)) * zoom;
+        let pending_pulse = match &bubble.state {
+            AgenticBubbleState::Pending { .. } => {
+                Some(0.5 + 0.5 * (viewport.time_seconds * 4.4).sin())
+            }
+            _ => None,
+        };
+        let (fill, border, status) = match &bubble.state {
+            AgenticBubbleState::Editing => (
+                crate::backend::Color::rgba(0.22, 0.19, 0.08, 0.94),
+                theme::PATCHER_NODE_SELECTED_BORDER(),
+                "prompt",
+            ),
+            AgenticBubbleState::Pending { .. } => {
+                let pulse = pending_pulse.unwrap_or(0.0);
+                (
+                    crate::backend::Color::rgba(
+                        0.08 + 0.03 * pulse,
+                        0.14 + 0.07 * pulse,
+                        0.18 + 0.10 * pulse,
+                        0.94,
+                    ),
+                    crate::backend::Color::rgba(
+                        0.30 + 0.22 * pulse,
+                        0.74 + 0.18 * pulse,
+                        0.88 + 0.12 * pulse,
+                        1.0,
+                    ),
+                    "working",
+                )
+            }
+            AgenticBubbleState::Error { .. } => (
+                crate::backend::Color::rgba(0.22, 0.07, 0.07, 0.94),
+                theme::PATCHER_ERROR(),
+                "error",
+            ),
+        };
+        prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            rect: Rect {
+                col: x,
+                row: y,
+                width,
+                height,
+            },
+            color: fill,
+        }));
+        let border_w = 0.12 * zoom;
+        for border_rect in [
+            Rect {
+                col: x,
+                row: y,
+                width,
+                height: border_w,
+            },
+            Rect {
+                col: x,
+                row: y + height - border_w,
+                width,
+                height: border_w,
+            },
+            Rect {
+                col: x,
+                row: y,
+                width: border_w,
+                height,
+            },
+            Rect {
+                col: x + width - border_w,
+                row: y,
+                width: border_w,
+                height,
+            },
+        ] {
+            prims.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: border_rect.col,
+                y: border_rect.row,
+                width: border_rect.width,
+                height: border_rect.height,
+                color: border,
+            }));
+        }
+        let detail = match &bubble.state {
+            AgenticBubbleState::Pending { .. } => bubble
+                .elapsed()
+                .map(|elapsed| format!("{}  {:.1}s", status, elapsed.as_secs_f32()))
+                .unwrap_or_else(|| status.to_string()),
+            AgenticBubbleState::Error { summary, .. } => format!("{status}: {summary}"),
+            AgenticBubbleState::Editing => status.to_string(),
+        };
+        prims.push(MetalPrimitive::ProportionalText(
+            MetalProportionalTextPrimitive {
+                row: y + 0.65 * zoom,
+                col: x + 0.65 * zoom,
+                align_width: inner_width,
+                h_align: 0.0,
+                text: detail,
+                font_size: 11.5,
+                scale: zoom,
+                fg: theme::PATCHER_TEXT(),
+                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            },
+        ));
+        for (line_index, prompt_line) in prompt_lines.into_iter().enumerate() {
+            prims.push(MetalPrimitive::ProportionalText(
+                MetalProportionalTextPrimitive {
+                    row: y + (2.25 + line_index as f32 * 1.18) * zoom,
+                    col: x + 0.65 * zoom,
+                    align_width: inner_width,
+                    h_align: 0.0,
+                    text: prompt_line.text,
+                    font_size: 13.0,
+                    scale: zoom,
+                    fg: theme::PATCHER_NODE_TEXT(),
+                    bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                },
+            ));
+        }
+        if matches!(bubble.state, AgenticBubbleState::Editing) {
+            push_agentic_bubble_cursor(prims, bubble, x, y, inner_width, viewport, zoom);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn push_agentic_bubble_cursor(
+    prims: &mut Vec<MetalPrimitive>,
+    bubble: &super::state::AgenticBubble,
+    x: f32,
+    y: f32,
+    inner_width: f32,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    let cursor_pos = bubble
+        .text_state
+        .cursor_pos
+        .min(bubble.prompt.chars().count());
+    let lines = wrap_agentic_prompt_lines(&bubble.prompt, inner_width / zoom, viewport);
+    let cursor_line_index = lines
+        .iter()
+        .position(|line| cursor_pos >= line.start && cursor_pos <= line.end)
+        .unwrap_or_else(|| lines.len().saturating_sub(1));
+    let line_start = lines
+        .get(cursor_line_index)
+        .map(|line| line.start)
+        .unwrap_or(0);
+    let cursor_before_line =
+        cursor_x_from_char_cache(&bubble.prompt, 13.0, line_start, viewport.cell_w);
+    let cursor_before_prompt =
+        cursor_x_from_char_cache(&bubble.prompt, 13.0, cursor_pos, viewport.cell_w);
+    let cursor_x = x + 0.65 * zoom + (cursor_before_prompt - cursor_before_line).max(0.0) * zoom;
+    prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+        rect: Rect {
+            row: y + (2.1 + cursor_line_index as f32 * 1.18) * zoom,
+            col: cursor_x,
+            width: 0.08 * zoom,
+            height: 1.1 * zoom,
+        },
+        color: theme::PATCHER_EDIT_CURSOR(),
+    }));
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+struct AgenticPromptLine {
+    text: String,
+    start: usize,
+    end: usize,
+}
+
+#[cfg(target_os = "macos")]
+fn wrap_agentic_prompt_lines(
+    text: &str,
+    max_width_cells: f32,
+    viewport: WidgetViewport,
+) -> Vec<AgenticPromptLine> {
+    if text.trim().is_empty() {
+        return vec![AgenticPromptLine {
+            text: String::new(),
+            start: 0,
+            end: 0,
+        }];
+    }
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut words = Vec::<(usize, usize)>::new();
+    let mut cursor = 0usize;
+    while cursor < chars.len() {
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= chars.len() {
+            break;
+        }
+        let start = cursor;
+        while cursor < chars.len() && !chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        words.push((start, cursor));
+    }
+    let Some(&(first_start, first_end)) = words.first() else {
+        return vec![AgenticPromptLine {
+            text: String::new(),
+            start: 0,
+            end: 0,
+        }];
+    };
+    let mut lines = Vec::new();
+    let mut line_start = first_start;
+    let mut line_end = first_end;
+    for &(word_start, word_end) in words.iter().skip(1) {
+        let candidate_width = prompt_range_width(text, line_start, word_end, viewport);
+        if candidate_width > max_width_cells && line_start < line_end {
+            lines.push(agentic_prompt_line(&chars, line_start, line_end));
+            line_start = word_start;
+            line_end = word_end;
+        } else {
+            line_end = word_end;
+        }
+    }
+    lines.push(agentic_prompt_line(&chars, line_start, line_end));
+    lines
+}
+
+#[cfg(target_os = "macos")]
+fn agentic_prompt_line(chars: &[char], start: usize, end: usize) -> AgenticPromptLine {
+    AgenticPromptLine {
+        text: chars[start..end].iter().collect(),
+        start,
+        end,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prompt_range_width(text: &str, start: usize, end: usize, viewport: WidgetViewport) -> f32 {
+    let start_x = cursor_x_from_char_cache(text, 13.0, start, viewport.cell_w);
+    let end_x = cursor_x_from_char_cache(text, 13.0, end, viewport.cell_w);
+    (end_x - start_x).max(0.0)
 }
 
 #[cfg(target_os = "macos")]
@@ -432,6 +705,10 @@ pub(super) fn draw_patch(
             viewport,
             interaction_state.selected_nodes.contains(&node.id),
             interaction_state.hovered_node.as_deref() == Some(node.id.as_str()),
+            interaction_state
+                .agentic_morph_nodes
+                .get(&node.id)
+                .is_some_and(|started| started.elapsed().as_secs_f32() < 1.2),
             active_edit,
             &highlighted_inputs,
             &highlighted_outputs,
@@ -439,7 +716,155 @@ pub(super) fn draw_patch(
         );
     }
     if let Some((node_rect, edit)) = active_edit_panel {
-        push_autocomplete_panel(prims, node_rect, edit, viewport, zoom);
+        push_autocomplete_panel(prims, node_rect, edit, &patch.macros, viewport, zoom);
+    }
+    push_hovered_port_tooltip(
+        prims,
+        patch,
+        &node_rects,
+        &input_slot_counts,
+        &output_counts,
+        interaction_state,
+        viewport,
+        zoom,
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn push_hovered_port_tooltip(
+    prims: &mut Vec<MetalPrimitive>,
+    patch: &Patch,
+    node_rects: &HashMap<String, Rect>,
+    input_slot_counts: &HashMap<String, usize>,
+    output_counts: &HashMap<String, usize>,
+    interaction_state: &PatcherInteractionState,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    let tooltip = interaction_state
+        .hovered_input_port
+        .as_ref()
+        .and_then(|port| {
+            input_port_tooltip(patch, port)
+                .map(|text| (port.node_id.as_str(), true, port.input_index, text))
+        })
+        .or_else(|| {
+            interaction_state
+                .hovered_output_port
+                .as_ref()
+                .and_then(|port| {
+                    output_port_tooltip(patch, port)
+                        .map(|text| (port.node_id.as_str(), false, port.output_index, text))
+                })
+        });
+    let Some((node_id, is_input, port_index, text)) = tooltip else {
+        return;
+    };
+    let Some(node_rect) = node_rects.get(node_id).copied() else {
+        return;
+    };
+    let port_count = if is_input {
+        input_slot_counts.get(node_id).copied().unwrap_or(1)
+    } else {
+        output_counts.get(node_id).copied().unwrap_or(1)
+    };
+    let center = port_center(node_rect, port_index, port_count, is_input);
+    let font_size = 10.5;
+    let text = preview(&text, 48);
+    let fallback_char_width = font_size * 0.6 / viewport.cell_w.max(1.0);
+    let text_width_cells = (text_width_from_char_cache(&text, font_size, fallback_char_width)
+        * zoom)
+        .max(4.0 * zoom)
+        .min(32.0 * zoom);
+    let padding_x = 0.55 * zoom;
+    let padding_y = 0.35 * zoom;
+    let width = text_width_cells + padding_x * 2.0;
+    let height = 1.15 * zoom + padding_y * 2.0;
+    let row = if is_input {
+        center.1 - height - 0.45 * zoom
+    } else {
+        center.1 + 0.45 * zoom
+    };
+    let col = center.0 - width * 0.5;
+    let panel = Rect {
+        col,
+        row,
+        width,
+        height,
+    };
+    push_autocomplete_panel_chrome(
+        prims,
+        panel,
+        theme::PATCHER_AUTOCOMPLETE_BG(),
+        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        viewport,
+        zoom,
+    );
+    prims.push(MetalPrimitive::ProportionalText(
+        MetalProportionalTextPrimitive {
+            row: panel.row + padding_y + 0.1 * zoom,
+            col: panel.col + padding_x,
+            align_width: panel.width - padding_x * 2.0,
+            h_align: 0.0,
+            text,
+            font_size,
+            scale: zoom,
+            fg: theme::PATCHER_TEXT(),
+            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+        },
+    ));
+}
+
+pub(super) fn input_port_tooltip(patch: &Patch, port: &InputPortRef) -> Option<String> {
+    let node = patch.nodes.iter().find(|node| node.id == port.node_id)?;
+    let name = if node.kind == NodeKind::MacroInstance {
+        patch
+            .macros
+            .iter()
+            .find(|macro_patch| macro_patch.name == node.op)
+            .and_then(|macro_patch| macro_patch.params.get(port.input_index))
+            .cloned()
+    } else {
+        dgenlisp_operator_documentation()
+            .get(&node.op)
+            .and_then(|docs| docs.inputs.get(port.input_index))
+            .and_then(|input| input.name.clone())
+            .or_else(|| match node.args.get(port.input_index) {
+                Some(ArgValue::SymbolRef(name)) => Some(name.clone()),
+                Some(ArgValue::Literal(value)) => Some(value.clone()),
+                _ => None,
+            })
+    }
+    .unwrap_or_else(|| format!("in {}", port.input_index + 1));
+    Some(format!("in {}: {name}", port.input_index + 1))
+}
+
+pub(super) fn output_port_tooltip(patch: &Patch, port: &OutputPortRef) -> Option<String> {
+    let node = patch.nodes.iter().find(|node| node.id == port.node_id)?;
+    let name = output_reference_name(node)
+        .filter(|_| port.output_index == 0)
+        .or_else(|| node.outputs.get(port.output_index).cloned())
+        .or_else(|| {
+            dgenlisp_operator_documentation()
+                .get(&node.op)
+                .and_then(|docs| docs.outputs.get(port.output_index))
+                .and_then(|output| output.name.clone())
+        })
+        .unwrap_or_else(|| format!("out {}", port.output_index + 1));
+    Some(format!("out {}: {name}", port.output_index + 1))
+}
+
+fn output_reference_name(node: &PatchNode) -> Option<String> {
+    let source = node.source.as_ref()?;
+    match &source.owner {
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Symbol(name),
+            ..
+        } => Some(name.clone()),
+        SourceOwner::MacroParameter { binding, .. } if node.kind == NodeKind::In => {
+            Some(binding.name.clone())
+        }
+        _ => None,
     }
 }
 
@@ -448,10 +873,11 @@ fn push_autocomplete_panel(
     prims: &mut Vec<MetalPrimitive>,
     node_rect: Rect,
     edit: &PatcherTextEdit,
+    local_macros: &[super::model::MacroPatch],
     viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let suggestions = patcher_autocomplete_suggestions(edit);
+    let suggestions = patcher_autocomplete_suggestions(edit, local_macros);
     if suggestions.is_empty() {
         return;
     }
@@ -774,6 +1200,7 @@ fn push_node(
     viewport: WidgetViewport,
     selected: bool,
     hovered: bool,
+    morphing: bool,
     edit: Option<&PatcherTextEdit>,
     highlighted_inputs: &[usize],
     highlighted_outputs: &[usize],
@@ -810,6 +1237,9 @@ fn push_node(
     }
     if selected {
         border = theme::PATCHER_NODE_SELECTED_BORDER();
+    }
+    if morphing {
+        border = theme::PATCHER_CABLE();
     }
     push_node_chrome(prims, rect, bg, border, viewport, zoom);
     for &index in input_indices {

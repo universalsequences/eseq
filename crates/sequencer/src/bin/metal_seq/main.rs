@@ -36,7 +36,7 @@ use state_values::*;
 use values::*;
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -165,6 +165,16 @@ struct PendingInstrumentPreview {
     source: String,
     layout: Option<String>,
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+}
+
+struct PendingAgenticBubble {
+    path: PathBuf,
+    intent: eseqlisp::widget_render::patcher::PatcherIntent,
+    bubble_id: String,
+    generation: u64,
+    receiver: std::sync::mpsc::Receiver<
+        Result<sequencer::agent::agentic_bubble::AgenticBubbleOutput, String>,
+    >,
 }
 
 fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -> String {
@@ -1760,6 +1770,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut editor_mode: Option<String> = None;
     let mut instrument_edit_session: Option<InstrumentEditSession> = None;
     let mut pending_instrument_preview: Option<PendingInstrumentPreview> = None;
+    let mut pending_agentic_bubbles: HashMap<String, PendingAgenticBubble> = HashMap::new();
     let mut editor_effect_name: Option<String> = None; // original effect name (without .lisp)
     let mut editor_effect_slot: Option<usize> = None; // effect slot index for hot-swap
     let mut editor_effect_bus: Option<usize> = None; // bus index for bus effect hot-swap
@@ -1862,7 +1873,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             viewport_size,
             backend.agent_instrument_stub_animation_visible(),
         );
-        let frame_interval = if stub_animation_active {
+        let widget_animation_active = editor.visible_widgets_animating();
+        let frame_interval = if stub_animation_active || widget_animation_active {
             animation_frame_interval
         } else {
             idle_frame_interval
@@ -1891,6 +1903,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             editor.clear_needs_redraw();
             last_render_at = Instant::now();
             continue;
+        }
+        if widget_animation_active {
+            editor.mark_needs_redraw();
         }
 
         // 1. Poll events FIRST
@@ -7285,6 +7300,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let status = extract_string_from_payload(&payload, "status")
                             .unwrap_or_else(|| "invalid".to_string());
+                        if status == "agentic-submit" {
+                            let Some(path) = extract_string_from_payload(&payload, "path") else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Agentic bubble request missing patch path".to_string(),
+                                ));
+                                continue;
+                            };
+                            let Some(bubble_id) =
+                                extract_string_from_payload(&payload, "bubble-id")
+                            else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Agentic bubble request missing bubble id".to_string(),
+                                ));
+                                continue;
+                            };
+                            let generation = extract_usize_from_payload(&payload, "generation")
+                                .unwrap_or(0) as u64;
+                            let prompt =
+                                extract_string_from_payload(&payload, "prompt").unwrap_or_default();
+                            let macro_name = extract_string_from_payload(&payload, "macro-name")
+                                .unwrap_or_else(|| "agentic-macro".to_string());
+                            let intent = match extract_string_from_payload(&payload, "intent")
+                                .as_deref()
+                            {
+                                Some("effect") => {
+                                    eseqlisp::widget_render::patcher::PatcherIntent::Effect
+                                }
+                                _ => eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                            };
+                            let task_key = format!("{path}::{bubble_id}");
+                            eprintln!(
+                                "[agentic-bubble] host submit key={} generation={} intent={:?} macro={} prompt={:?}",
+                                task_key, generation, intent, macro_name, prompt
+                            );
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let request = sequencer::agent::agentic_bubble::AgenticBubbleRequest {
+                                prompt,
+                                suggested_macro_name: macro_name.clone(),
+                            };
+                            std::thread::spawn(move || {
+                                let result =
+                                    sequencer::agent::agentic_bubble::generate_agentic_bubble_macro(
+                                        request,
+                                    );
+                                let _ = tx.send(result);
+                            });
+                            pending_agentic_bubbles.insert(
+                                task_key,
+                                PendingAgenticBubble {
+                                    path: PathBuf::from(path),
+                                    intent,
+                                    bubble_id,
+                                    generation,
+                                    receiver: rx,
+                                },
+                            );
+                            editor.handle_host_event(HostEvent::Status(
+                                "Agentic bubble working...".to_string(),
+                            ));
+                            continue;
+                        }
                         if status == "layout" {
                             if let Some(layout) = extract_string_from_payload(&payload, "layout") {
                                 session.last_valid_layout = Some(layout);
@@ -8091,6 +8167,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                     }
+                }
+            }
+        }
+        let mut completed_agentic = Vec::new();
+        for (key, pending) in &pending_agentic_bubbles {
+            match pending.receiver.try_recv() {
+                Ok(result) => completed_agentic.push((key.clone(), result)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => completed_agentic
+                    .push((key.clone(), Err("request worker disconnected".to_string()))),
+            }
+        }
+        for (key, result) in completed_agentic {
+            let Some(pending) = pending_agentic_bubbles.remove(&key) else {
+                continue;
+            };
+            match result {
+                Ok(output) => match eseqlisp::widget_render::patcher::resolve_agentic_bubble(
+                    &pending.path,
+                    pending.intent,
+                    &pending.bubble_id,
+                    pending.generation,
+                    &output.macro_name,
+                    &output.source,
+                ) {
+                    Ok(()) => {
+                        eprintln!(
+                            "[agentic-bubble] host materialized path={} bubble={} generation={} macro={}",
+                            pending.path.display(),
+                            pending.bubble_id,
+                            pending.generation,
+                            output.macro_name
+                        );
+                        editor.refresh_runtime_side_effects();
+                        editor.mark_needs_redraw();
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Generated macro '{}'",
+                            output.macro_name
+                        )));
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[agentic-bubble] host materialize failed path={} bubble={} generation={} error={}",
+                            pending.path.display(),
+                            pending.bubble_id,
+                            pending.generation,
+                            error
+                        );
+                        eseqlisp::widget_render::patcher::fail_agentic_bubble(
+                            &pending.path,
+                            &pending.bubble_id,
+                            pending.generation,
+                            "materialize failed",
+                            error.clone(),
+                        );
+                        editor.mark_needs_redraw();
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Agentic bubble failed: {error}"
+                        )));
+                    }
+                },
+                Err(error) => {
+                    eprintln!(
+                        "[agentic-bubble] host generation failed path={} bubble={} generation={} error={}",
+                        pending.path.display(),
+                        pending.bubble_id,
+                        pending.generation,
+                        error
+                    );
+                    eseqlisp::widget_render::patcher::fail_agentic_bubble(
+                        &pending.path,
+                        &pending.bubble_id,
+                        pending.generation,
+                        "generation failed",
+                        error.clone(),
+                    );
+                    editor.mark_needs_redraw();
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Agentic bubble failed: {error}"
+                    )));
                 }
             }
         }

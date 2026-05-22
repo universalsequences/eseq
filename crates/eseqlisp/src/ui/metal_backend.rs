@@ -1392,6 +1392,12 @@ fragment float4 waveform_frag(
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 return primitives;
             }
+            if widget_render::layout_wants_animation_frames(layout) {
+                let (mut primitives, _overlay) =
+                    widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
+                Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
+                return primitives;
+            }
 
             let cache_parts = self.widget_scene_cache_parts(
                 owner_frame_key,

@@ -12,13 +12,15 @@ use super::render::*;
 use super::state::*;
 use super::writeback::{WriteBackError, emit_patch_writeback};
 use super::*;
+use crate::editor::{Editor, EditorConfig};
 use crate::layout::{LayoutNode, MeasureCtx, Rect, TextMeasurer};
+use crate::runtime::Runtime;
 use crate::theme;
 use crate::vm::Value;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn parse(source: &str) -> Patch {
     parse_patch_source(source, PatcherIntent::Instrument).unwrap()
@@ -508,6 +510,289 @@ fn node_size_uses_cached_proportional_character_widths() {
     assert_eq!(
         width, 5.8,
         "measured `Wii` should be 2.6 cells plus node padding, not 3 fixed-width characters"
+    );
+}
+
+#[test]
+fn agentic_bubble_cmd_k_creates_ephemeral_prompt_without_source_write() {
+    let path = temp_patcher_source_path("agentic-bubble-spawn");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let before = fs::read_to_string(&path).expect("read source");
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+
+    assert!(event.is_some(), "cmd+k should be consumed");
+    assert_eq!(fs::read_to_string(&path).expect("read source"), before);
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    assert_eq!(state.agentic_bubbles.len(), 1);
+    assert!(editing_agentic_bubble_id(&state).is_some());
+}
+
+#[test]
+fn agentic_bubble_cmd_k_uses_last_pointer_model_position() {
+    let path = temp_patcher_source_path("agentic-bubble-pointer-position");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    handle_patcher_pointer_moved(&node, 23.0, 31.0, 1.0, 1.0);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    let bubble = state
+        .agentic_bubbles
+        .values()
+        .next()
+        .expect("agentic bubble");
+    let pan = get_patcher_pan_state(patcher_state_key(&node));
+    let expected = screen_to_model(node.rect, &pan, (23.0, 31.0));
+    assert!((bubble.position.0 - expected.0).abs() < 0.001);
+    assert!((bubble.position.1 - expected.1).abs() < 0.001);
+}
+
+#[test]
+fn agentic_bubble_enter_emits_submit_payload_and_pending_state() {
+    let path = temp_patcher_source_path("agentic-bubble-submit");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    state
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("bubble")
+        .prompt = "warm folded sine".to_string();
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .expect("submit event");
+    let output = PATCHER_WIDGET
+        .handle_event(&node, event)
+        .expect("on-change output");
+    assert_eq!(output.args.len(), 1);
+    let Value::Map(map) = &output.args[0] else {
+        panic!("submit payload should be a map");
+    };
+    assert!(matches!(
+        &*map.get("status").expect("status").borrow(),
+        Value::Keyword(status) if status == "agentic-submit"
+    ));
+    assert!(matches!(
+        &*map.get("prompt").expect("prompt").borrow(),
+        Value::String(prompt) if prompt == "warm folded sine"
+    ));
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert!(matches!(bubble.state, AgenticBubbleState::Pending { .. }));
+}
+
+#[test]
+fn pending_agentic_bubble_requests_animation_frames() {
+    let path = temp_patcher_source_path("agentic-bubble-animation");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    assert!(!PATCHER_WIDGET.wants_animation_frames(&node));
+
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    let bubble = state.agentic_bubbles.values_mut().next().expect("bubble");
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    assert!(PATCHER_WIDGET.wants_animation_frames(&node));
+
+    let mut state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.values_mut().next().expect("bubble");
+    bubble.state = AgenticBubbleState::Error {
+        summary: "failed".to_string(),
+        raw_output: String::new(),
+        failed_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    assert!(!PATCHER_WIDGET.wants_animation_frames(&node));
+}
+
+#[test]
+fn visible_patcher_pending_bubble_marks_editor_animating() {
+    let path = temp_patcher_source_path("visible-agentic-bubble-animation");
+    fs::write(&path, "(out 0)").expect("write source");
+    let escaped_path = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 30);
+    editor
+        .runtime_mut()
+        .eval_str(&format!(
+            r#"(effect-buffer "*patcher-test*"
+  (patcher :intent :instrument :width :fill :height :fill :path "{}"))"#,
+            escaped_path
+        ))
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let patcher_buffer_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*patcher-test*")
+        .expect("patcher buffer")
+        .id;
+    editor.set_active_buffer(patcher_buffer_id);
+    editor.update_tile_rects(80, 30);
+    editor.sync_layout_to_active_leaf();
+
+    let layout = editor.widget_layout().expect("patcher layout");
+    assert_eq!(layout.widget_type, "patcher");
+    assert!(!editor.visible_widgets_animating());
+
+    let key = patcher_state_key(&layout);
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    state
+        .agentic_bubbles
+        .values_mut()
+        .next()
+        .expect("bubble")
+        .state = AgenticBubbleState::Pending {
+        started_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    assert!(editor.visible_widgets_animating());
+}
+
+#[test]
+fn agentic_bubble_resolve_writes_macro_and_keeps_instance_edit_ephemeral() {
+    let path = temp_patcher_source_path("agentic-bubble-resolve");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.prompt = "gain".to_string();
+    bubble.generation = 1;
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: std::time::Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    resolve_agentic_bubble(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        1,
+        "agentic-gain",
+        "(defmacro agentic-gain (x amount) (* x amount))",
+    )
+    .expect("resolve bubble");
+
+    let source = fs::read_to_string(&path).expect("read source");
+    assert!(source.contains("(defmacro agentic-gain"));
+    let state = get_patcher_interaction_state(key);
+    assert!(!state.agentic_bubbles.contains_key(&bubble_id));
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.text == "agentic-gain")
+    );
+}
+
+#[test]
+fn agentic_bubble_resolve_ignores_unrelated_invalid_created_nodes() {
+    let path = temp_patcher_source_path("agentic-bubble-resolve-isolated");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.prompt = "modal kick".to_string();
+    bubble.generation = 1;
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: std::time::Instant::now(),
+    };
+    let unrelated_id = allocate_created_node(&mut state, "root", (3.0, 3.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &unrelated_id))
+        .expect("unrelated edit")
+        .text = "agentic".to_string();
+    set_patcher_interaction_state(key, state);
+
+    resolve_agentic_bubble(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        1,
+        "agenticcreate-a-mini-modal-synthesis-generator-forkick-sdrums",
+        "(defmacro agenticcreate-a-mini-modal-synthesis-generator-forkick-sdrums (excitation freq q tightness) (def m1 (svf excitation freq q 1)) m1)",
+    )
+    .expect("resolve bubble should not validate unrelated created node");
+
+    let source = fs::read_to_string(&path).expect("read source");
+    assert!(
+        source.contains("(defmacro agenticcreate-a-mini-modal-synthesis-generator-forkick-sdrums")
+    );
+    let state = get_patcher_interaction_state(key);
+    assert!(!state.agentic_bubbles.contains_key(&bubble_id));
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.id == unrelated_id && edit.text == "agentic"),
+        "unrelated edit should remain live but should not block bubble materialization"
     );
 }
 
@@ -3972,6 +4257,60 @@ fn display_labels_omit_def_names_and_show_in_out_channels() {
 }
 
 #[test]
+fn macro_parameter_nodes_display_argument_names() {
+    let patch = parse("(defmacro filter-bank (input cutoff gain) (* input gain))");
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "filter-bank")
+        .expect("macro patch");
+    let labels: Vec<String> = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::In)
+        .map(node_display_label)
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            "in 1 @name input".to_string(),
+            "in 2 @name cutoff".to_string(),
+            "in 3 @name gain".to_string()
+        ]
+    );
+}
+
+#[test]
+fn port_tooltips_use_macro_parameter_and_output_names() {
+    let patch = parse(
+        "(defmacro fm-operator (carrier modulator index) (+ carrier (* modulator index)))\n\
+         (def pitch (in 1 @name pitch))\n\
+         (def fm1 (fm-operator pitch 0.5 1.0))",
+    );
+    assert_eq!(
+        input_port_tooltip(
+            &patch,
+            &InputPortRef {
+                node_id: "fm1".to_string(),
+                input_index: 2,
+            },
+        ),
+        Some("in 3: index".to_string())
+    );
+    assert_eq!(
+        output_port_tooltip(
+            &patch,
+            &OutputPortRef {
+                node_id: "pitch".to_string(),
+                output_index: 0,
+            },
+        ),
+        Some("out 1: pitch".to_string())
+    );
+}
+
+#[test]
 fn instrument_signature_modulator_inputs_are_hidden_boilerplate() {
     let patch = parse(
         r#"
@@ -5522,7 +5861,7 @@ fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
     let mut state = get_patcher_interaction_state(key);
     state.active_macro = Some("ap".to_string());
     set_patcher_interaction_state(key, state);
-    handle_patcher_pointer_moved(&node, 1.2, 0.8);
+    handle_patcher_pointer_moved(&node, 1.2, 0.8, 1.0, 1.0);
     assert!(get_patcher_interaction_state(key).hover_back_button);
 
     handle_patcher_pointer_down(&node, 1.2, 0.8, KeyModifiers::empty(), 10.0, 20.0);
@@ -6140,6 +6479,62 @@ fn patcher_text_edit_tab_autocompletes_operator_without_committing() {
             .get(&node_edit_key("root", "sig"))
             .map(|node| node.text.as_str()),
         Some("biquad 3")
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_text_edit_tab_autocompletes_local_defmacro() {
+    let path = temp_patcher_source_path("patcher-autocomplete-local-macro");
+    fs::write(
+        &path,
+        "(defmacro shape (sig amount) (* sig amount))\n(def sig (sha))",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.edit_state.nodes.insert(
+        node_edit_key("root", "sig"),
+        PatcherNodeEdit {
+            view_key: "root".to_string(),
+            id: "sig".to_string(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: "sig".to_string(),
+            },
+            text: "sha".to_string(),
+            position: (0.0, 0.0),
+        },
+    );
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: "sig".to_string(),
+        text: "sha".to_string(),
+        original_text: "sha".to_string(),
+        state: TextInputState {
+            cursor_pos: 3,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    });
+    set_patcher_interaction_state(key, state);
+
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Tab,
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some()
+    );
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(
+        state.text_edit.as_ref().map(|edit| edit.text.as_str()),
+        Some("shape ")
     );
 
     let _ = fs::remove_file(path);

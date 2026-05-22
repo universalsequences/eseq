@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod agentic_bubble;
 pub mod audition;
 pub mod catalog;
 pub mod dsp_validate;

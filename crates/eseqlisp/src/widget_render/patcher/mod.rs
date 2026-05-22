@@ -35,11 +35,125 @@ pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Resul
     writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
 }
 
+pub fn resolve_agentic_bubble(
+    path: impl AsRef<std::path::Path>,
+    intent: PatcherIntent,
+    bubble_id: &str,
+    generation: u64,
+    macro_name: &str,
+    macro_source: &str,
+) -> Result<(), String> {
+    let path = path.as_ref();
+    let keys = state::patcher_keys_for_path(path);
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    let mut wrote = false;
+    for key in keys {
+        let mut interaction = state::get_patcher_interaction_state(key);
+        let Some(bubble) = interaction.agentic_bubbles.get(bubble_id).cloned() else {
+            continue;
+        };
+        if bubble.generation != generation {
+            continue;
+        }
+        let materialized = materialize_agentic_macro_edit(
+            &mut interaction,
+            bubble.position,
+            macro_name,
+            macro_source,
+        );
+        if !wrote {
+            let emitted =
+                writeback::emit_patch_writeback(&source, intent, &materialized.writeback_state)
+                    .map_err(|error| format!("{error:?}"))?;
+            std::fs::write(path, emitted)
+                .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
+            wrote = true;
+        }
+        interaction
+            .agentic_morph_nodes
+            .insert(materialized.instance_node_id.clone(), Instant::now());
+        interaction.agentic_bubbles.remove(bubble_id);
+        state::set_patcher_interaction_state(key, interaction);
+    }
+    Ok(())
+}
+
+struct MaterializedAgenticMacro {
+    instance_node_id: String,
+    writeback_state: state::PatcherInteractionState,
+}
+
+fn materialize_agentic_macro_edit(
+    interaction: &mut state::PatcherInteractionState,
+    position: (f32, f32),
+    macro_name: &str,
+    macro_source: &str,
+) -> MaterializedAgenticMacro {
+    let node_id = state::allocate_created_node(interaction, "root", position);
+    let node_key = state::node_edit_key("root", &node_id);
+    if let Some(edit) = interaction.edit_state.nodes.get_mut(&node_key) {
+        edit.text = macro_name.to_string();
+    }
+    let macro_edit = state::PatcherMacroEdit {
+        name: macro_name.to_string(),
+        instance_node_id: node_id.clone(),
+        source: Some(macro_source.to_string()),
+    };
+    interaction
+        .edit_state
+        .created_macros
+        .insert(macro_name.to_string(), macro_edit.clone());
+
+    let mut writeback_state = state::PatcherInteractionState::default();
+    writeback_state.edit_state.next_created_node = interaction.edit_state.next_created_node;
+    if let Some(edit) = interaction.edit_state.nodes.get(&node_key).cloned() {
+        writeback_state.edit_state.nodes.insert(node_key, edit);
+    }
+    writeback_state
+        .edit_state
+        .created_macros
+        .insert(macro_name.to_string(), macro_edit);
+
+    MaterializedAgenticMacro {
+        instance_node_id: node_id,
+        writeback_state,
+    }
+}
+
+pub fn fail_agentic_bubble(
+    path: impl AsRef<std::path::Path>,
+    bubble_id: &str,
+    generation: u64,
+    summary: impl Into<String>,
+    raw_output: impl Into<String>,
+) {
+    let summary = summary.into();
+    let raw_output = raw_output.into();
+    for key in state::patcher_keys_for_path(path.as_ref()) {
+        let mut interaction = state::get_patcher_interaction_state(key);
+        if let Some(bubble) = interaction.agentic_bubbles.get_mut(bubble_id)
+            && bubble.generation == generation
+        {
+            bubble.state = state::AgenticBubbleState::Error {
+                summary: summary.clone(),
+                raw_output: raw_output.clone(),
+                failed_at: Instant::now(),
+            };
+        }
+        state::set_patcher_interaction_state(key, interaction);
+    }
+}
+
 pub fn patcher_has_text_edit(node: &crate::layout::LayoutNode) -> bool {
-    node.widget_type == "patcher"
-        && state::get_patcher_interaction_state(state::patcher_state_key(node))
-            .text_edit
-            .is_some()
+    if node.widget_type != "patcher" {
+        return false;
+    }
+    let state = state::get_patcher_interaction_state(state::patcher_state_key(node));
+    state.text_edit.is_some() || state::editing_agentic_bubble_id(&state).is_some()
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -233,7 +347,7 @@ pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
     writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
 }
 
-use display::node_display_label;
+use display::{node_display_label, preview};
 use emit::debug_log_patch_lisp;
 use interaction::{
     PatcherChangeKind, handle_patcher_double_click, handle_patcher_pointer_down,
@@ -243,14 +357,16 @@ use interaction::{
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
-    active_patcher_patch, active_patcher_view_key, debug_log_edit_event, debug_log_writeback_event,
-    delete_connection_edit_or_mark_deleted, delete_selected_nodes, get_patcher_interaction_state,
+    AgenticBubbleState, active_patcher_patch, active_patcher_view_key, allocate_agentic_bubble,
+    debug_log_edit_event, debug_log_writeback_event, delete_connection_edit_or_mark_deleted,
+    delete_selected_nodes, editing_agentic_bubble_id, get_patcher_interaction_state,
     patch_with_interaction_state, patcher_state_key, patcher_state_key_from_parts,
     set_connection_segment_edit, set_patcher_interaction_state,
 };
 use text::{
-    apply_patcher_autocomplete, cancel_patcher_text_edit, clamp_patcher_autocomplete_selection,
-    commit_patcher_text_edit, move_patcher_autocomplete_selection, patcher_autocomplete_is_open,
+    apply_patcher_autocomplete, cancel_patcher_text_edit,
+    clamp_patcher_autocomplete_selection_with_macros, commit_patcher_text_edit,
+    move_patcher_autocomplete_selection, patcher_autocomplete_is_open,
 };
 use writeback::emit_patch_writeback_result;
 
@@ -262,6 +378,7 @@ use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_stable_widget_id,
 };
 use crate::vm::Value;
+use std::time::Instant;
 
 pub struct PatcherWidget;
 
@@ -335,7 +452,7 @@ impl WidgetDefinition for PatcherWidget {
                 patcher_widget_event(handle_patcher_pointer_up(node, local_col, local_row)),
             ),
             MouseEventKind::Moved => {
-                handle_patcher_pointer_moved(node, local_col, local_row);
+                handle_patcher_pointer_moved(node, local_col, local_row, cell_w, cell_h);
                 MouseEventOutcome::Consume
             }
             MouseEventKind::ScrollUp
@@ -408,8 +525,69 @@ impl WidgetDefinition for PatcherWidget {
         let key = patcher_state_key(node);
         let mut state = get_patcher_interaction_state(key);
         let view_key = active_patcher_view_key(&state);
+        let autocomplete_macros = autocomplete_macros_for_state(node, &state, &view_key);
+        if let Ok((path, _)) = load_patch_from_props(&node.props) {
+            state::register_patcher_path_key(path, key);
+        }
+        if let Some(bubble_id) = editing_agentic_bubble_id(&state) {
+            return handle_agentic_bubble_edit_key(node, key, state, bubble_id, key_event);
+        }
         if state.text_edit.is_none() {
             return match key_event.code {
+                KeyCode::Char('r') | KeyCode::Char('R')
+                    if state
+                        .agentic_bubbles
+                        .values()
+                        .any(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. })) =>
+                {
+                    let bubble_id = state
+                        .agentic_bubbles
+                        .values()
+                        .find(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. }))
+                        .map(|bubble| bubble.id.clone())?;
+                    let payload = {
+                        let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
+                        bubble.generation = bubble.generation.wrapping_add(1);
+                        bubble.state = AgenticBubbleState::Pending {
+                            started_at: Instant::now(),
+                        };
+                        agentic_submit_payload(node, bubble)
+                    };
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(payload))
+                }
+                KeyCode::Esc
+                    if state
+                        .agentic_bubbles
+                        .values()
+                        .any(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. })) =>
+                {
+                    if let Some(bubble_id) = state
+                        .agentic_bubbles
+                        .values()
+                        .find(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. }))
+                        .map(|bubble| bubble.id.clone())
+                    {
+                        state.agentic_bubbles.remove(&bubble_id);
+                    }
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
+                KeyCode::Char('k') | KeyCode::Char('K')
+                    if key_event.modifiers.contains(KeyModifiers::SUPER) =>
+                {
+                    let pan_state = state::get_patcher_pan_state(key);
+                    let position = state.last_pointer_model_position.unwrap_or_else(|| {
+                        geometry::screen_to_model(
+                            node.rect,
+                            &pan_state,
+                            (node.rect.width * 0.5, node.rect.height * 0.5),
+                        )
+                    });
+                    allocate_agentic_bubble(&mut state, position);
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
                 KeyCode::Enter if open_selected_macro_node(node, &mut state) => {
                     set_patcher_interaction_state(key, state);
                     reset_patcher_pan(key);
@@ -485,31 +663,29 @@ impl WidgetDefinition for PatcherWidget {
             }
             KeyCode::Tab if state.text_edit.is_some() => {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    apply_patcher_autocomplete(edit);
+                    apply_patcher_autocomplete(edit, &autocomplete_macros);
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Down
-                if state
-                    .text_edit
-                    .as_ref()
-                    .is_some_and(patcher_autocomplete_is_open) =>
+                if state.text_edit.as_ref().is_some_and(|edit| {
+                    patcher_autocomplete_is_open(edit, &autocomplete_macros)
+                }) =>
             {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    move_patcher_autocomplete_selection(edit, 1);
+                    move_patcher_autocomplete_selection(edit, &autocomplete_macros, 1);
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Up
-                if state
-                    .text_edit
-                    .as_ref()
-                    .is_some_and(patcher_autocomplete_is_open) =>
+                if state.text_edit.as_ref().is_some_and(|edit| {
+                    patcher_autocomplete_is_open(edit, &autocomplete_macros)
+                }) =>
             {
                 if let Some(edit) = state.text_edit.as_mut() {
-                    move_patcher_autocomplete_selection(edit, -1);
+                    move_patcher_autocomplete_selection(edit, &autocomplete_macros, -1);
                 }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
@@ -543,7 +719,10 @@ impl WidgetDefinition for PatcherWidget {
                 match apply_text_entry_key(&edit.text, &mut edit.state, key_event, false, None)? {
                     TextEditOutcome::Changed(new_text) => {
                         edit.text = new_text;
-                        clamp_patcher_autocomplete_selection(edit);
+                        clamp_patcher_autocomplete_selection_with_macros(
+                            edit,
+                            &autocomplete_macros,
+                        );
                         set_patcher_interaction_state(key, state);
                         Some(WidgetEvent::Custom(Value::Nil))
                     }
@@ -561,6 +740,13 @@ impl WidgetDefinition for PatcherWidget {
             WidgetEvent::Custom(Value::Keyword(kind)) if kind == "semantic-change" => {
                 patcher_change_output(node, patcher_writeback_payload(node))
             }
+            WidgetEvent::Custom(Value::Map(map))
+                if map.get("status").is_some_and(|value| {
+                    matches!(&*value.borrow(), Value::Keyword(kind) if kind.starts_with("agentic-"))
+                }) =>
+            {
+                patcher_change_output(node, Value::Map(map))
+            }
             WidgetEvent::Custom(Value::Keyword(kind)) if kind == "layout-change" => {
                 patcher_change_output(node, patcher_layout_payload(node))
             }
@@ -570,6 +756,18 @@ impl WidgetDefinition for PatcherWidget {
             WidgetEvent::Custom(Value::Nil) | WidgetEvent::Custom(Value::Bool(false)) => None,
             _ => None,
         }
+    }
+
+    fn wants_animation_frames(&self, node: &LayoutNode) -> bool {
+        let state = get_patcher_interaction_state(patcher_state_key(node));
+        state
+            .agentic_bubbles
+            .values()
+            .any(|bubble| matches!(bubble.state, AgenticBubbleState::Pending { .. }))
+            || state
+                .agentic_morph_nodes
+                .values()
+                .any(|started| started.elapsed().as_secs_f32() < 1.2)
     }
 
     fn renders_own_focus(&self) -> bool {
@@ -585,6 +783,99 @@ impl WidgetDefinition for PatcherWidget {
     ) -> Vec<MetalPrimitive> {
         render::build_metal_primitives_for_patcher(node, viewport)
     }
+}
+
+fn handle_agentic_bubble_edit_key(
+    node: &LayoutNode,
+    key: u64,
+    mut state: state::PatcherInteractionState,
+    bubble_id: String,
+    key_event: WidgetKeyEvent,
+) -> Option<WidgetEvent> {
+    match key_event.code {
+        KeyCode::Enter => {
+            let payload = {
+                let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
+                let prompt = bubble.prompt.trim().to_string();
+                if prompt.is_empty() {
+                    return Some(WidgetEvent::Custom(Value::Nil));
+                }
+                bubble.generation = bubble.generation.wrapping_add(1);
+                bubble.macro_name = slug_agentic_macro_name(&prompt);
+                bubble.state = AgenticBubbleState::Pending {
+                    started_at: Instant::now(),
+                };
+                agentic_submit_payload(node, bubble)
+            };
+            set_patcher_interaction_state(key, state);
+            Some(WidgetEvent::Custom(payload))
+        }
+        KeyCode::Esc => {
+            state.agentic_bubbles.remove(&bubble_id);
+            set_patcher_interaction_state(key, state);
+            Some(WidgetEvent::Custom(Value::Nil))
+        }
+        _ => {
+            let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
+            match apply_text_entry_key(
+                &bubble.prompt,
+                &mut bubble.text_state,
+                key_event,
+                false,
+                None,
+            )? {
+                TextEditOutcome::Changed(new_text) => {
+                    bubble.prompt = new_text;
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
+                TextEditOutcome::StateOnly => {
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
+            }
+        }
+    }
+}
+
+fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> Value {
+    let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
+    let intent = match patcher_intent_from_props(&node.props) {
+        PatcherIntent::Effect => "effect",
+        PatcherIntent::Instrument => "instrument",
+    };
+    map_value(vec![
+        ("status", Value::Keyword("agentic-submit".to_string())),
+        ("path", Value::String(path.unwrap_or_default())),
+        ("intent", Value::Keyword(intent.to_string())),
+        ("bubble-id", Value::String(bubble.id.clone())),
+        ("generation", Value::Number(bubble.generation as f64)),
+        ("prompt", Value::String(bubble.prompt.clone())),
+        ("macro-name", Value::String(bubble.macro_name.clone())),
+        ("x", Value::Number(bubble.position.0 as f64)),
+        ("y", Value::Number(bubble.position.1 as f64)),
+    ])
+}
+
+fn slug_agentic_macro_name(prompt: &str) -> String {
+    let mut out = String::from("agentic");
+    let mut last_dash = false;
+    for ch in prompt.chars().flat_map(char::to_lowercase).take(64) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out == "agentic" {
+        out.push_str("-macro");
+    }
+    out
 }
 
 fn patcher_widget_event(change: PatcherChangeKind) -> WidgetEvent {
@@ -793,6 +1084,16 @@ fn debug_patch_for_state(
     Some(patch_with_interaction_state(patch, state, view_key))
 }
 
+fn autocomplete_macros_for_state(
+    node: &LayoutNode,
+    state: &state::PatcherInteractionState,
+    view_key: &str,
+) -> Vec<MacroPatch> {
+    debug_patch_for_state(node, state, view_key)
+        .map(|patch| patch.macros)
+        .unwrap_or_default()
+}
+
 fn toggle_selected_cable_segmented(
     node: &LayoutNode,
     state: &mut state::PatcherInteractionState,
@@ -883,8 +1184,24 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
     for patch_node in &patch.nodes {
         cache_char_widths(node_display_label(patch_node), NODE_FONT_SIZE, ctx);
     }
+    if let Some(tooltip) = interaction_state
+        .hovered_input_port
+        .as_ref()
+        .and_then(|port| render::input_port_tooltip(&patch, port))
+        .or_else(|| {
+            interaction_state
+                .hovered_output_port
+                .as_ref()
+                .and_then(|port| render::output_port_tooltip(&patch, port))
+        })
+    {
+        cache_char_widths(preview(&tooltip, 48), 10.5, ctx);
+    }
     if let Some(edit) = interaction_state.text_edit {
         cache_char_widths(edit.text, NODE_FONT_SIZE, ctx);
+    }
+    for bubble in interaction_state.agentic_bubbles.values() {
+        cache_char_widths(bubble.prompt.clone(), 13.0, ctx);
     }
 }
 

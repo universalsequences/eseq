@@ -708,6 +708,9 @@ pub trait WidgetDefinition: Sync {
     fn handle_event(&self, _node: &LayoutNode, _event: WidgetEvent) -> Option<EventOutput> {
         None
     }
+    fn wants_animation_frames(&self, _node: &LayoutNode) -> bool {
+        false
+    }
     #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         None
@@ -808,6 +811,12 @@ pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
             render_widget_tree(child, buf);
         }
     }
+}
+
+pub fn layout_wants_animation_frames(node: &LayoutNode) -> bool {
+    widget_definition(&node.widget_type)
+        .is_some_and(|definition| definition.wants_animation_frames(node))
+        || node.children.iter().any(layout_wants_animation_frames)
 }
 
 #[cfg(target_os = "macos")]

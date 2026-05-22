@@ -3,6 +3,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use super::super::bump_widget_state_generation;
 use super::super::text_input::TextInputState;
@@ -53,6 +55,8 @@ thread_local! {
     static PATCHER_PAN_STATES: RefCell<HashMap<u64, PatcherPanState>> =
         RefCell::new(HashMap::new());
     static PATCHER_INTERACTION_STATES: RefCell<HashMap<u64, PatcherInteractionState>> =
+        RefCell::new(HashMap::new());
+    static PATCHER_PATH_KEYS: RefCell<HashMap<String, HashSet<u64>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -106,12 +110,50 @@ pub(super) fn clamp_patcher_pan_state(state: &mut PatcherPanState) {
 pub(super) struct PatcherInteractionState {
     pub(super) selected_nodes: HashSet<String>,
     pub(super) hovered_node: Option<String>,
+    pub(super) hovered_input_port: Option<InputPortRef>,
+    pub(super) hovered_output_port: Option<OutputPortRef>,
     pub(super) hover_back_button: bool,
     pub(super) selected_cable: Option<String>,
     pub(super) edit_state: PatchEditState,
     pub(super) text_edit: Option<PatcherTextEdit>,
+    pub(super) agentic_bubbles: HashMap<String, AgenticBubble>,
+    pub(super) agentic_morph_nodes: HashMap<String, Instant>,
+    pub(super) last_pointer_model_position: Option<(f32, f32)>,
     pub(super) active_macro: Option<String>,
     pub(super) drag: Option<PatcherDragState>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AgenticBubble {
+    pub(super) id: String,
+    pub(super) prompt: String,
+    pub(super) text_state: TextInputState,
+    pub(super) position: (f32, f32),
+    pub(super) state: AgenticBubbleState,
+    pub(super) generation: u64,
+    pub(super) macro_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum AgenticBubbleState {
+    Editing,
+    Pending {
+        started_at: Instant,
+    },
+    Error {
+        summary: String,
+        raw_output: String,
+        failed_at: Instant,
+    },
+}
+
+impl AgenticBubble {
+    pub(super) fn elapsed(&self) -> Option<Duration> {
+        match self.state {
+            AgenticBubbleState::Pending { started_at } => Some(started_at.elapsed()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -129,6 +171,7 @@ pub(super) struct PatchEditState {
 pub(super) struct PatcherMacroEdit {
     pub(super) name: String,
     pub(super) instance_node_id: String,
+    pub(super) source: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -230,6 +273,24 @@ pub(super) fn set_patcher_interaction_state(key: u64, state: PatcherInteractionS
     if changed {
         bump_widget_state_generation();
     }
+}
+
+pub(super) fn register_patcher_path_key(path: impl AsRef<Path>, key: u64) {
+    let path = path.as_ref().to_string_lossy().to_string();
+    PATCHER_PATH_KEYS.with(|paths| {
+        paths.borrow_mut().entry(path).or_default().insert(key);
+    });
+}
+
+pub(super) fn patcher_keys_for_path(path: impl AsRef<Path>) -> Vec<u64> {
+    let path = path.as_ref().to_string_lossy().to_string();
+    PATCHER_PATH_KEYS.with(|paths| {
+        paths
+            .borrow()
+            .get(&path)
+            .map(|keys| keys.iter().copied().collect())
+            .unwrap_or_default()
+    })
 }
 
 pub(super) fn debug_log_edit_event(action: &str, state: &PatcherInteractionState) {
@@ -403,6 +464,40 @@ pub(super) fn allocate_created_node(
         state,
     );
     id
+}
+
+pub(super) fn allocate_agentic_bubble(
+    state: &mut PatcherInteractionState,
+    position: (f32, f32),
+) -> String {
+    let id = format!("bubble-{}", state.edit_state.next_created_node);
+    state.edit_state.next_created_node += 1;
+    let macro_name = format!("agentic-{}", id.replace('_', "-"));
+    state.agentic_bubbles.insert(
+        id.clone(),
+        AgenticBubble {
+            id: id.clone(),
+            prompt: String::new(),
+            text_state: TextInputState::default(),
+            position,
+            state: AgenticBubbleState::Editing,
+            generation: 0,
+            macro_name,
+        },
+    );
+    state.selected_nodes.clear();
+    state.selected_cable = None;
+    state.text_edit = None;
+    state.drag = None;
+    id
+}
+
+pub(super) fn editing_agentic_bubble_id(state: &PatcherInteractionState) -> Option<String> {
+    state
+        .agentic_bubbles
+        .values()
+        .find(|bubble| matches!(bubble.state, AgenticBubbleState::Editing))
+        .map(|bubble| bubble.id.clone())
 }
 
 pub(super) fn allocate_created_connection(
@@ -744,7 +839,12 @@ pub(super) fn patch_with_created_macros(
         {
             continue;
         }
-        if let Some(macro_patch) = default_created_macro_patch(&macro_edit.name) {
+        let source = macro_edit
+            .source
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| default_created_macro_source(&macro_edit.name));
+        if let Some(macro_patch) = created_macro_patch_from_source(&macro_edit.name, &source) {
             patch.macros.push(macro_patch);
         }
     }
@@ -790,15 +890,12 @@ fn macro_arities_with_created_inputs(
     macro_arities
 }
 
-fn default_created_macro_patch(name: &str) -> Option<MacroPatch> {
-    parse_patch_source(
-        &default_created_macro_source(name),
-        PatcherIntent::Instrument,
-    )
-    .ok()?
-    .macros
-    .into_iter()
-    .find(|macro_patch| macro_patch.name == name)
+fn created_macro_patch_from_source(name: &str, source: &str) -> Option<MacroPatch> {
+    parse_patch_source(source, PatcherIntent::Instrument)
+        .ok()?
+        .macros
+        .into_iter()
+        .find(|macro_patch| macro_patch.name == name)
 }
 
 pub(super) fn default_created_macro_source(name: &str) -> String {

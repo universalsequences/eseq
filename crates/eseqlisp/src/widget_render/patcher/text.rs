@@ -1,11 +1,14 @@
 use crate::layout::Rect;
+use std::collections::HashMap;
 
 #[cfg(target_os = "macos")]
 use super::super::text_input::closest_char_index_for_x;
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
+use super::model::MacroPatch;
 use super::project::{
-    OperatorDocumentation, dgenlisp_operator_documentation, dgenlisp_operator_names,
+    OperatorDocumentation, OperatorPortDocumentation, dgenlisp_operator_documentation,
+    dgenlisp_operator_names,
 };
 use super::state::{
     PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, debug_log_edit_event,
@@ -84,8 +87,11 @@ pub(super) fn begin_patcher_text_edit(
     debug_log_edit_event("begin-text-edit", state);
 }
 
-pub(super) fn patcher_autocomplete_matches(edit: &PatcherTextEdit) -> Vec<String> {
-    patcher_autocomplete_suggestions(edit)
+pub(super) fn patcher_autocomplete_matches(
+    edit: &PatcherTextEdit,
+    local_macros: &[MacroPatch],
+) -> Vec<String> {
+    patcher_autocomplete_suggestions(edit, local_macros)
         .into_iter()
         .map(|suggestion| suggestion.name)
         .collect()
@@ -93,41 +99,79 @@ pub(super) fn patcher_autocomplete_matches(edit: &PatcherTextEdit) -> Vec<String
 
 pub(super) fn patcher_autocomplete_suggestions(
     edit: &PatcherTextEdit,
+    local_macros: &[MacroPatch],
 ) -> Vec<PatcherAutocompleteSuggestion> {
     let Some(prefix) = autocomplete_prefix(&edit.text) else {
         return Vec::new();
     };
     let prefix = prefix.to_lowercase();
-    let mut matches: Vec<String> = dgenlisp_operator_names()
+    let docs = dgenlisp_operator_documentation();
+    let mut candidates: HashMap<String, Option<OperatorDocumentation>> = dgenlisp_operator_names()
         .iter()
         .filter(|name| name.to_lowercase().starts_with(&prefix))
-        .cloned()
+        .map(|name| (name.clone(), docs.get(name).cloned()))
+        .collect();
+    for macro_patch in local_macros {
+        if macro_patch.name.to_lowercase().starts_with(&prefix) {
+            candidates.insert(
+                macro_patch.name.clone(),
+                Some(local_macro_documentation(macro_patch)),
+            );
+        }
+    }
+    let mut matches: Vec<PatcherAutocompleteSuggestion> = candidates
+        .into_iter()
+        .map(|(name, documentation)| PatcherAutocompleteSuggestion {
+            name,
+            documentation,
+        })
         .collect();
     matches.sort_by(|left, right| {
-        left.to_lowercase()
-            .cmp(&right.to_lowercase())
-            .then_with(|| left.cmp(right))
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
     });
     matches.truncate(PATCHER_AUTOCOMPLETE_MAX_ITEMS);
-    let docs = dgenlisp_operator_documentation();
     matches
-        .into_iter()
-        .map(|name| PatcherAutocompleteSuggestion {
-            documentation: docs.get(&name).cloned(),
-            name,
-        })
-        .collect()
 }
 
-pub(super) fn patcher_autocomplete_is_open(edit: &PatcherTextEdit) -> bool {
-    !patcher_autocomplete_matches(edit).is_empty()
+fn local_macro_documentation(macro_patch: &MacroPatch) -> OperatorDocumentation {
+    OperatorDocumentation {
+        summary: None,
+        signatures: vec![if macro_patch.params.is_empty() {
+            format!("({})", macro_patch.name)
+        } else {
+            format!("({} {})", macro_patch.name, macro_patch.params.join(" "))
+        }],
+        inputs: macro_patch
+            .params
+            .iter()
+            .map(|param| OperatorPortDocumentation {
+                name: Some(param.clone()),
+                kind: None,
+                required: Some(true),
+                index: None,
+                summary: None,
+            })
+            .collect(),
+        outputs: Vec::new(),
+    }
+}
+
+pub(super) fn patcher_autocomplete_is_open(
+    edit: &PatcherTextEdit,
+    local_macros: &[MacroPatch],
+) -> bool {
+    !patcher_autocomplete_matches(edit, local_macros).is_empty()
 }
 
 pub(super) fn move_patcher_autocomplete_selection(
     edit: &mut PatcherTextEdit,
+    local_macros: &[MacroPatch],
     delta: isize,
 ) -> bool {
-    let matches = patcher_autocomplete_matches(edit);
+    let matches = patcher_autocomplete_matches(edit, local_macros);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
         return false;
@@ -138,8 +182,11 @@ pub(super) fn move_patcher_autocomplete_selection(
     true
 }
 
-pub(super) fn apply_patcher_autocomplete(edit: &mut PatcherTextEdit) -> bool {
-    let matches = patcher_autocomplete_matches(edit);
+pub(super) fn apply_patcher_autocomplete(
+    edit: &mut PatcherTextEdit,
+    local_macros: &[MacroPatch],
+) -> bool {
+    let matches = patcher_autocomplete_matches(edit, local_macros);
     if matches.is_empty() {
         edit.autocomplete_selected = 0;
         return false;
@@ -169,7 +216,14 @@ pub(super) fn apply_patcher_autocomplete(edit: &mut PatcherTextEdit) -> bool {
 }
 
 pub(super) fn clamp_patcher_autocomplete_selection(edit: &mut PatcherTextEdit) {
-    let len = patcher_autocomplete_matches(edit).len();
+    clamp_patcher_autocomplete_selection_with_macros(edit, &[]);
+}
+
+pub(super) fn clamp_patcher_autocomplete_selection_with_macros(
+    edit: &mut PatcherTextEdit,
+    local_macros: &[MacroPatch],
+) {
+    let len = patcher_autocomplete_matches(edit, local_macros).len();
     if len == 0 {
         edit.autocomplete_selected = 0;
     } else {

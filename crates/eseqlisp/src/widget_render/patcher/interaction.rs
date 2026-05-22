@@ -7,8 +7,8 @@ use crate::layout::LayoutNode;
 use super::display::node_display_label;
 use super::emit::debug_log_patch_lisp;
 use super::geometry::{
-    connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_node,
-    hit_patcher_output_port, hit_patcher_segmented_cable_horizontal_segment,
+    connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_input_port,
+    hit_patcher_node, hit_patcher_output_port, hit_patcher_segmented_cable_horizontal_segment,
     nearest_patcher_input_port, nearest_patcher_output_port, patch_content_size,
     patch_input_indices, patch_input_slot_counts, patch_node_rects, patch_output_counts,
     patcher_back_button_rect, patcher_breadcrumb_rect, patcher_origin, patcher_zoom, port_center,
@@ -158,6 +158,11 @@ pub(super) fn handle_patcher_pointer_down(
         return;
     };
     let hit = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    state.last_pointer_model_position = Some(screen_to_model(
+        node.rect,
+        &pan_state,
+        (local_col, local_row),
+    ));
     if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone()) {
         if hit.as_deref() == Some(edit_node_id.as_str()) {
             if let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
@@ -377,6 +382,11 @@ pub(super) fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, loc
         return;
     };
     let mut state = get_patcher_interaction_state(key);
+    state.last_pointer_model_position = Some(screen_to_model(
+        node.rect,
+        &pan_state,
+        (local_col, local_row),
+    ));
     if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone()) {
         if let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
             && let Some(edit) = &mut state.text_edit
@@ -581,6 +591,11 @@ pub(super) fn handle_patcher_pointer_up(
     );
     let mut semantic_changed = false;
     if let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) {
+        state.last_pointer_model_position = Some(screen_to_model(
+            node.rect,
+            &pan_state,
+            (local_col, local_row),
+        ));
         if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone())
             && let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
             && let Some(edit) = &mut state.text_edit
@@ -652,15 +667,54 @@ pub(super) fn handle_patcher_pointer_up(
     }
 }
 
-pub(super) fn handle_patcher_pointer_moved(node: &LayoutNode, local_col: f32, local_row: f32) {
+pub(super) fn handle_patcher_pointer_moved(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+    cell_w: f32,
+    cell_h: f32,
+) {
     let key = patcher_state_key(node);
     let Some((patch, pan_state, _view_key)) = load_interactive_patch_for_node(node) else {
         return;
     };
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
     let mut state = get_patcher_interaction_state(key);
+    state.last_pointer_model_position = Some(screen_to_model(
+        node.rect,
+        &pan_state,
+        (local_col, local_row),
+    ));
     state.hover_back_button = state.active_macro.is_some()
         && rect_contains(patcher_back_button_rect(node.rect), local_col, local_row);
     state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+    state.hovered_input_port = hit_patcher_input_port(
+        &patch,
+        node.rect,
+        &pan_state,
+        &input_indices,
+        &input_slot_counts,
+        local_col,
+        local_row,
+        cell_w,
+        cell_h,
+    );
+    state.hovered_output_port = if state.hovered_input_port.is_none() {
+        hit_patcher_output_port(
+            &patch,
+            node.rect,
+            &pan_state,
+            &output_counts,
+            local_col,
+            local_row,
+            cell_w,
+            cell_h,
+        )
+    } else {
+        None
+    };
     set_patcher_interaction_state(key, state);
 }
 
@@ -738,6 +792,7 @@ pub(super) fn promote_created_macro_definition(
         PatcherMacroEdit {
             name,
             instance_node_id: node_id.to_string(),
+            source: None,
         },
     );
     debug_log_edit_event(

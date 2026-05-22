@@ -243,6 +243,36 @@ pub(super) fn hit_patcher_output_port(
     })
 }
 
+pub(super) fn hit_patcher_input_port(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    input_indices: &HashMap<String, Vec<usize>>,
+    input_slot_counts: &HashMap<String, usize>,
+    local_col: f32,
+    local_row: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> Option<InputPortRef> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    let radius_px = PORT_OUTER_DIAMETER_PX * 0.5;
+    let threshold_px = radius_px * radius_px;
+    patch.nodes.iter().rev().find_map(|node| {
+        let node_rect = *node_rects.get(&node.id)?;
+        let input_indices = input_indices.get(&node.id)?;
+        let input_slot_count = input_slot_counts.get(&node.id).copied().unwrap_or(0);
+        input_indices.iter().find_map(|input_index| {
+            let center = port_center(node_rect, *input_index, input_slot_count, true);
+            let dx_px = (center.0 - local_col) * cell_w.max(1.0);
+            let dy_px = (center.1 - local_row) * cell_h.max(1.0);
+            (dx_px * dx_px + dy_px * dy_px <= threshold_px).then(|| InputPortRef {
+                node_id: node.id.clone(),
+                input_index: *input_index,
+            })
+        })
+    })
+}
+
 pub(super) fn nearest_patcher_output_port(
     patch: &Patch,
     rect: Rect,

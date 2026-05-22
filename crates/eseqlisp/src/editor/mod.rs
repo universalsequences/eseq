@@ -2301,6 +2301,15 @@ impl Editor {
         self.visible_binding_layout_signature = Some(signature);
     }
 
+    pub fn visible_widgets_animating(&self) -> bool {
+        self.tile_root.leaf_ids().into_iter().any(|id| {
+            self.tile_root
+                .find_leaf(id)
+                .and_then(|leaf| leaf.cached_layout.as_ref())
+                .is_some_and(|layout| crate::widget_render::layout_wants_animation_frames(layout))
+        })
+    }
+
     fn refresh_all_inactive_tile_layouts(&mut self) {
         let mut buf_indices: Vec<usize> = Vec::new();
         for id in self.tile_root.leaf_ids() {

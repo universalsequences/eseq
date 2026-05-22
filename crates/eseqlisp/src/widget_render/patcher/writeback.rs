@@ -490,13 +490,17 @@ fn apply_created_macro_writeback(
     edits.sort_by(|a, b| a.name.cmp(&b.name));
 
     for edit in edits.into_iter().rev() {
-        let expr = parse_single_expression(&default_created_macro_source(&edit.name)).map_err(
-            |reason| WriteBackError::InvalidEdit {
+        let source = edit
+            .source
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| default_created_macro_source(&edit.name));
+        let expr =
+            parse_single_expression(&source).map_err(|reason| WriteBackError::InvalidEdit {
                 view_key: "root".to_string(),
                 node_id: edit.instance_node_id.clone(),
                 reason,
-            },
-        )?;
+            })?;
         document.prepend_macro(expr)?;
     }
 
