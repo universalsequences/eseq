@@ -275,6 +275,15 @@ pub(super) fn set_patcher_interaction_state(key: u64, state: PatcherInteractionS
     }
 }
 
+pub(super) fn reset_patcher_widget_state(key: u64) {
+    let pan_changed = PATCHER_PAN_STATES.with(|states| states.borrow_mut().remove(&key).is_some());
+    let interaction_changed =
+        PATCHER_INTERACTION_STATES.with(|states| states.borrow_mut().remove(&key).is_some());
+    if pan_changed || interaction_changed {
+        bump_widget_state_generation();
+    }
+}
+
 pub(super) fn register_patcher_path_key(path: impl AsRef<Path>, key: u64) {
     let path = path.as_ref().to_string_lossy().to_string();
     PATCHER_PATH_KEYS.with(|paths| {

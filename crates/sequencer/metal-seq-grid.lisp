@@ -2,7 +2,7 @@
 ; C-p to toggle play/stop, Esc to clear step selection
 
 (load "metal-seq-themes.lisp")
-(seq-theme-mac-osx-midnight)
+(seq-theme-mac-osx-dark)
 (load "metal-seq-materials.lisp")
 
 (defstate selected-bus -1)

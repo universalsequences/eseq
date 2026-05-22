@@ -235,6 +235,213 @@ pub(super) fn emit_patch_writeback_result(
     })
 }
 
+pub(super) fn discard_stale_semantic_edits(
+    source: &str,
+    intent: PatcherIntent,
+    interaction_state: &mut PatcherInteractionState,
+) -> Result<bool, WriteBackError> {
+    let document = SourceDocument::parse(source)?;
+    let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
+    let effective_root_patch = patch_with_created_macros(root_patch, interaction_state);
+
+    let stale_node_keys = interaction_state
+        .edit_state
+        .nodes
+        .iter()
+        .filter_map(|(key, edit)| {
+            node_edit_is_stale(&document, &effective_root_patch, edit).then(|| key.clone())
+        })
+        .collect::<HashSet<_>>();
+    let stale_connection_keys = interaction_state
+        .edit_state
+        .connections
+        .iter()
+        .filter_map(|(key, edit)| {
+            connection_edit_is_stale(
+                &document,
+                &effective_root_patch,
+                interaction_state,
+                &stale_node_keys,
+                edit,
+            )
+            .then(|| key.clone())
+        })
+        .collect::<HashSet<_>>();
+    let stale_deleted_nodes = interaction_state
+        .edit_state
+        .deleted_nodes
+        .iter()
+        .filter_map(|key| {
+            let (view_key, node_id) = split_scoped_key(key);
+            patch_for_view(&effective_root_patch, &view_key)
+                .and_then(|patch| patch_node(patch, &node_id))
+                .is_none()
+                .then(|| key.clone())
+        })
+        .collect::<HashSet<_>>();
+    let stale_deleted_connections = interaction_state
+        .edit_state
+        .deleted_connections
+        .iter()
+        .filter_map(|key| {
+            let (view_key, connection_id) = split_scoped_key(key);
+            source_connection(&effective_root_patch, &view_key, &connection_id)
+                .is_none()
+                .then(|| key.clone())
+        })
+        .collect::<HashSet<_>>();
+
+    let changed = !stale_node_keys.is_empty()
+        || !stale_connection_keys.is_empty()
+        || !stale_deleted_nodes.is_empty()
+        || !stale_deleted_connections.is_empty();
+    if !changed {
+        return Ok(false);
+    }
+
+    for key in &stale_node_keys {
+        interaction_state.edit_state.nodes.remove(key);
+    }
+    for key in &stale_connection_keys {
+        interaction_state.edit_state.connections.remove(key);
+    }
+    for key in &stale_deleted_nodes {
+        interaction_state.edit_state.deleted_nodes.remove(key);
+    }
+    for key in &stale_deleted_connections {
+        interaction_state.edit_state.deleted_connections.remove(key);
+    }
+    interaction_state.selected_nodes.retain(|node_id| {
+        !stale_node_keys
+            .iter()
+            .any(|key| split_scoped_key(key).1 == *node_id)
+    });
+    if interaction_state.text_edit.as_ref().is_some_and(|edit| {
+        stale_node_keys.contains(&node_edit_key(
+            &active_patcher_view_key(interaction_state),
+            &edit.node_id,
+        ))
+    }) {
+        interaction_state.text_edit = None;
+    }
+
+    Ok(true)
+}
+
+fn node_edit_is_stale(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    edit: &super::state::PatcherNodeEdit,
+) -> bool {
+    match &edit.origin {
+        PatcherNodeOrigin::Created { .. } => false,
+        PatcherNodeOrigin::Source { source_node_id } => {
+            let Some(node) = patch_for_view(root_patch, &edit.view_key)
+                .and_then(|patch| patch_node(patch, source_node_id))
+            else {
+                return true;
+            };
+            node_source_is_stale(document, node)
+        }
+    }
+}
+
+fn connection_edit_is_stale(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    stale_node_keys: &HashSet<String>,
+    edit: &PatcherConnectionEdit,
+) -> bool {
+    match &edit.origin {
+        PatcherConnectionOrigin::Source {
+            source_connection_id,
+        } => {
+            source_connection(root_patch, &edit.view_key, source_connection_id).is_none()
+                || connection_endpoint_is_stale(
+                    document,
+                    root_patch,
+                    interaction_state,
+                    &edit.view_key,
+                    &edit.from.node_id,
+                    stale_node_keys,
+                )
+                || connection_endpoint_is_stale(
+                    document,
+                    root_patch,
+                    interaction_state,
+                    &edit.view_key,
+                    &edit.to.node_id,
+                    stale_node_keys,
+                )
+        }
+        PatcherConnectionOrigin::Created { .. } => {
+            connection_endpoint_is_stale(
+                document,
+                root_patch,
+                interaction_state,
+                &edit.view_key,
+                &edit.from.node_id,
+                stale_node_keys,
+            ) || connection_endpoint_is_stale(
+                document,
+                root_patch,
+                interaction_state,
+                &edit.view_key,
+                &edit.to.node_id,
+                stale_node_keys,
+            )
+        }
+    }
+}
+
+fn connection_endpoint_is_stale(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+    stale_node_keys: &HashSet<String>,
+) -> bool {
+    if stale_node_keys.contains(&node_edit_key(view_key, node_id)) {
+        return true;
+    }
+    if interaction_state
+        .edit_state
+        .nodes
+        .contains_key(&node_edit_key(view_key, node_id))
+    {
+        return false;
+    }
+    let Some(node) =
+        patch_for_view(root_patch, view_key).and_then(|patch| patch_node(patch, node_id))
+    else {
+        return true;
+    };
+    node_source_is_stale(document, node)
+}
+
+fn node_source_is_stale(document: &SourceDocument, node: &PatchNode) -> bool {
+    let Some(source) = node.source.as_ref() else {
+        return true;
+    };
+    source
+        .expr
+        .as_ref()
+        .is_some_and(|expr| document.expr(expr).is_none())
+        || source.call_shape.as_ref().is_some_and(|shape| {
+            document.expr(&shape.call).is_none()
+                || shape
+                    .positional_args
+                    .iter()
+                    .any(|arg| document.expr(&arg.expr).is_none())
+                || shape
+                    .attributes
+                    .iter()
+                    .any(|attr| document.expr(&attr.value).is_none())
+        })
+}
+
 fn validate_connection_edits(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
@@ -1191,6 +1398,7 @@ fn apply_generated_binding_writeback(
                 &generated,
                 &view_key,
                 edit,
+                &generated_expr,
             )?;
             pending_forms.push((
                 scope.clone(),
@@ -1254,6 +1462,7 @@ fn apply_generated_binding_writeback(
                 &generated,
                 &view_key,
                 edit,
+                &generated_expr,
             )?;
             let dependency_depth =
                 generated_binding_dependency_depth(interaction_state, &view_key, &edit.id);
@@ -1822,6 +2031,7 @@ fn generated_def_insertion_index(
     generated: &GeneratedBindings,
     view_key: &str,
     edit: &super::state::PatcherNodeEdit,
+    generated_expr: &Expression,
 ) -> Result<usize, WriteBackError> {
     let scope = scope_for_view_key(view_key);
     let mut dependency_index =
@@ -1837,6 +2047,12 @@ fn generated_def_insertion_index(
             .max()
             .map(|index| index + 1)
             .unwrap_or(0);
+    dependency_index = dependency_index.max(generated_expression_source_dependency_index(
+        root_patch,
+        view_key,
+        &scope,
+        generated_expr,
+    ));
     if generated_node_requires_instrument_modulator_inputs(interaction_state, view_key, &edit.id) {
         dependency_index = dependency_index.max(
             document
@@ -1865,6 +2081,65 @@ fn generated_def_insertion_index(
         });
     }
     Ok(dependency_index)
+}
+
+fn generated_expression_source_dependency_index(
+    root_patch: &Patch,
+    view_key: &str,
+    scope: &SourceScopeId,
+    expr: &Expression,
+) -> usize {
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return 0;
+    };
+    let mut source_bindings = HashMap::new();
+    for node in &patch.nodes {
+        let Some(source) = node.source.as_ref() else {
+            continue;
+        };
+        let Some((form_id, _)) = source_owner_location(&source.owner, source.expr.as_ref()) else {
+            continue;
+        };
+        if form_id.scope != *scope {
+            continue;
+        }
+        match &source.owner {
+            SourceOwner::BindingValue {
+                binding: BindingTarget::Symbol(name),
+                ..
+            } => {
+                source_bindings.insert(name.as_str(), form_id.index + 1);
+            }
+            SourceOwner::TopLevelForm { .. } if node.kind == NodeKind::Param => {
+                if let Some(name) = node.label.split_whitespace().nth(1) {
+                    source_bindings.insert(name, form_id.index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    expression_source_dependency_index(expr, &source_bindings)
+}
+
+fn expression_source_dependency_index(
+    expr: &Expression,
+    source_bindings: &HashMap<&str, usize>,
+) -> usize {
+    match expr {
+        Expression::Symbol(symbol) => source_bindings.get(symbol.as_str()).copied().unwrap_or(0),
+        Expression::List(items) => items
+            .iter()
+            .enumerate()
+            .filter(|(idx, item)| {
+                *idx != 0
+                    && !matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
+                    && !matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
+            })
+            .map(|(_, item)| expression_source_dependency_index(item, source_bindings))
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn generated_node_dependencies(
@@ -2141,13 +2416,10 @@ fn rewrite_node_input(
     value: Expression,
 ) -> Result<(), WriteBackError> {
     if let Some(source) = node.source.as_ref() {
-        if let Some(call_shape) = source.call_shape.as_ref()
-            && let Some(arg) = call_shape
-                .positional_args
-                .iter()
-                .find(|arg| arg.semantic_index == input_index)
-        {
-            return document.replace_expr(&arg.expr, value);
+        if let Some(call_shape) = source.call_shape.as_ref() {
+            return document
+                .replace_or_insert_call_positional_arg(&call_shape.call, input_index, value)
+                .map_err(|error| writeback_error_with_node(error, view_key, &node.id));
         }
         if node.kind == NodeKind::Out
             && input_index == 0
@@ -2159,7 +2431,9 @@ fn rewrite_node_input(
                     .iter()
                     .find(|arg| arg.semantic_index == input_index)
             {
-                return document.replace_expr(&arg.expr, value);
+                return document
+                    .replace_expr(&arg.expr, value)
+                    .map_err(|error| writeback_error_with_node(error, view_key, &node.id));
             }
             return document.replace_or_insert_macro_return(
                 &SourceExprId {
@@ -2531,13 +2805,16 @@ fn apply_history_read_connection(
         });
     }
     if let Some(source) = dest.source.as_ref() {
-        if let Some(call_shape) = source.call_shape.as_ref()
-            && let Some(arg) = call_shape
-                .positional_args
-                .iter()
-                .find(|arg| arg.semantic_index == connection.to.input_index)
-        {
-            return document.replace_expr(&arg.expr, read_expr);
+        if let Some(call_shape) = source.call_shape.as_ref() {
+            return document
+                .replace_or_insert_call_positional_arg(
+                    &call_shape.call,
+                    connection.to.input_index,
+                    read_expr,
+                )
+                .map_err(|error| {
+                    writeback_error_with_node(error, view_key, &connection.to.node_id)
+                });
         }
         if dest.kind == NodeKind::Out
             && connection.to.input_index == 0
@@ -2557,6 +2834,21 @@ fn apply_history_read_connection(
         history_id: connection.from.node_id.clone(),
         reason: "history read destination has no source-owned positional argument".to_string(),
     })
+}
+
+fn writeback_error_with_node(
+    error: WriteBackError,
+    view_key: &str,
+    node_id: &str,
+) -> WriteBackError {
+    match error {
+        WriteBackError::InvalidEdit { reason, .. } => WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node_id.to_string(),
+            reason,
+        },
+        other => other,
+    }
 }
 
 fn deleted_write_value_expr(
@@ -3234,6 +3526,37 @@ impl SourceDocument {
                 reason,
             }
         })
+    }
+
+    fn replace_or_insert_call_positional_arg(
+        &mut self,
+        call: &SourceExprId,
+        semantic_index: usize,
+        value: Expression,
+    ) -> Result<(), WriteBackError> {
+        let Some(form) = self.form_expr_mut(&call.form_id.scope, call.form_id.index) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&call.form_id.scope),
+                node_id: String::new(),
+                reason: format!("missing source form {}", call.form_id.index),
+            });
+        };
+        let Some(expr) = expr_at_path_mut(form, &call.path.0) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&call.form_id.scope),
+                node_id: String::new(),
+                reason: "source expression path does not resolve".to_string(),
+            });
+        };
+        let Expression::List(items) = expr else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&call.form_id.scope),
+                node_id: String::new(),
+                reason: "source expression path does not point to a call".to_string(),
+            });
+        };
+        replace_or_insert_positional_arg(items, semantic_index, value);
+        Ok(())
     }
 
     fn replace_or_insert_macro_return(
@@ -3936,6 +4259,66 @@ fn expr_at_path<'a>(mut expr: &'a Expression, path: &[ExprPathSegment]) -> Optio
         }
     }
     Some(expr)
+}
+
+fn expr_at_path_mut<'a>(
+    mut expr: &'a mut Expression,
+    path: &[ExprPathSegment],
+) -> Option<&'a mut Expression> {
+    for segment in path {
+        match (expr, segment) {
+            (Expression::List(items), ExprPathSegment::ListItem(index)) => {
+                expr = items.get_mut(*index)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(expr)
+}
+
+fn replace_or_insert_positional_arg(
+    items: &mut Vec<Expression>,
+    semantic_index: usize,
+    value: Expression,
+) {
+    if let Some(item_index) = positional_item_index(items, semantic_index) {
+        items[item_index] = value;
+        return;
+    }
+
+    let existing_count = positional_arg_count(items);
+    let insert_index = positional_insert_index(items);
+    let mut inserted = Vec::new();
+    for _ in existing_count..semantic_index {
+        inserted.push(Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()));
+    }
+    inserted.push(value);
+    items.splice(insert_index..insert_index, inserted);
+}
+
+fn positional_arg_count(items: &[Expression]) -> usize {
+    let mut count = 0;
+    let mut idx = 1;
+    while idx < items.len() {
+        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+            idx += 2;
+            continue;
+        }
+        count += 1;
+        idx += 1;
+    }
+    count
+}
+
+fn positional_insert_index(items: &[Expression]) -> usize {
+    let mut idx = 1;
+    while idx < items.len() {
+        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+            return idx;
+        }
+        idx += 1;
+    }
+    items.len()
 }
 
 fn replace_expr_at_path(

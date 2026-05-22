@@ -236,6 +236,13 @@ fn restore_instrument_patcher_layout_source() -> &'static str {
     "(seq-restore-instrument-patcher-layout)"
 }
 
+fn reset_instrument_patcher_state(path: &Path) {
+    eseqlisp::widget_render::patcher::reset_patcher_state_for_path(
+        path,
+        eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+    );
+}
+
 fn escape_lisp_string(value: &str) -> String {
     value
         .chars()
@@ -6694,6 +6701,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             editor.remove_buffer_by_name(&buf_name);
                             continue;
                         }
+                        reset_instrument_patcher_state(&file_path);
                         let layout_source = show_instrument_patcher_layout_source(&buf_name);
                         if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
                             let _ = app.graph_controller().delete_track(draft_track);
@@ -6907,6 +6915,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         let _ = std::fs::remove_dir_all(temp_dir);
                                     }
+                                    reset_instrument_patcher_state(&session.path);
                                     let buf_name = session.buffer_name;
                                     if let Err(error) = editor
                                         .runtime_mut()
@@ -7034,6 +7043,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.remove_buffer_by_name(&buf_name);
                                         continue;
                                     }
+                                    reset_instrument_patcher_state(&file_path);
                                     let layout_source =
                                         show_instrument_patcher_layout_source(&buf_name);
                                     if let Err(error) =
@@ -7133,6 +7143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
 
                                         let buf_name = session.buffer_name.clone();
+                                        reset_instrument_patcher_state(&session.path);
                                         if let Err(error) = editor
                                             .runtime_mut()
                                             .eval_str(restore_instrument_patcher_layout_source())
@@ -7750,6 +7761,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let cancelled_instrument_patcher = instrument_edit_session.is_some();
                         if let Some(session) = instrument_edit_session.take() {
                             pending_instrument_preview = None;
+                            reset_instrument_patcher_state(&session.path);
                             match session.mode {
                                 InstrumentEditMode::EditExisting { persisted_source } => {
                                     if let Err(error) = app.replace_custom_instrument_engine_sync(

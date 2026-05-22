@@ -983,6 +983,76 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
 }
 
 #[test]
+fn patcher_payload_discards_stale_semantic_edits_once_then_recovers() {
+    let path = temp_patcher_dsp_path("patcher-stale-edit-recovery");
+    fs::write(
+        &path,
+        "(def result (* (phasor 1) 0.5))\n(out result 1 @name audio)",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let (_path, old_patch) = load_patch_from_props(&node.props).unwrap();
+    let phasor = old_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "phasor")
+        .expect("nested source-backed phasor");
+
+    let mut state = PatcherInteractionState::default();
+    state.last_pointer_model_position = Some((12.0, 34.0));
+    ensure_source_node_edit(&mut state, "root", phasor, node_display_label(phasor));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &phasor.id))
+        .unwrap()
+        .text = "phasor 2".to_string();
+    set_patcher_interaction_state(key, state);
+
+    fs::write(&path, "(def result 1)\n(out result 1 @name audio)").unwrap();
+
+    let payload = patcher_writeback_payload(&node);
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+    assert!(matches!(
+        map.get("status").map(|value| value.borrow().clone()),
+        Some(Value::Keyword(status)) if status == "invalid"
+    ));
+    assert!(matches!(
+        map.get("diagnostic").map(|value| value.borrow().clone()),
+        Some(Value::String(diagnostic))
+            if diagnostic == "Patch source changed; discarded stale patcher edits. Retry the edit."
+    ));
+    let cleaned = get_patcher_interaction_state(key);
+    assert!(
+        cleaned.edit_state.nodes.is_empty(),
+        "stale source node edit should be discarded"
+    );
+    assert_eq!(
+        cleaned.last_pointer_model_position,
+        Some((12.0, 34.0)),
+        "non-semantic UI state should survive stale edit cleanup"
+    );
+
+    let retry_payload = patcher_writeback_payload(&node);
+    let Value::Map(retry_map) = retry_payload else {
+        panic!("expected retry payload map");
+    };
+    assert!(matches!(
+        retry_map.get("status").map(|value| value.borrow().clone()),
+        Some(Value::Keyword(status)) if status == "valid"
+    ));
+    assert!(matches!(
+        retry_map.get("source").map(|value| value.borrow().clone()),
+        Some(Value::String(source)) if source == "(def result 1.0)\n(out result 1 @name audio)"
+    ));
+
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+}
+
+#[test]
 fn semantic_save_payload_layout_reloads_saved_widget_positions_after_restart() {
     let path = temp_patcher_dsp_path("patcher-sidecar-semantic-save-reload");
     fs::write(
@@ -2090,6 +2160,33 @@ fn writeback_source_connection_edit_moves_destination_input() {
 }
 
 #[test]
+fn writeback_source_connection_edit_moves_destination_input_across_missing_gap() {
+    let source = r#"
+        (param freq)
+        (def result (phasor freq))
+    "#;
+    let patch = parse(source);
+    let connection = patch.connections.first().unwrap();
+    let mut state = PatcherInteractionState::default();
+    set_connection_segment_edit(&mut state, "root", connection, connection.segment);
+    state
+        .edit_state
+        .connections
+        .get_mut(&connection_edit_key(
+            "root",
+            &source_connection_id(connection),
+        ))
+        .unwrap()
+        .to
+        .input_index = 2;
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param freq)\n(def result (phasor __patcher_missing_input__ __patcher_missing_input__ freq))"
+    );
+}
+
+#[test]
 fn writeback_source_connection_edit_replaces_source_reference() {
     let source = r#"
         (def a (in 1))
@@ -2505,6 +2602,30 @@ fn writeback_existing_feedback_history_round_trips() {
         )
         .unwrap(),
         "(make-history h)\n(write-history h (mix sig (read-history h) alpha))"
+    );
+}
+
+#[test]
+fn writeback_history_read_into_missing_source_arg_inserts_arg() {
+    let source = r#"
+        (make-history h)
+        (def sig (in 1))
+        (def result (mix sig))
+        (write-history h sig)
+    "#;
+    let patch = parse(source);
+    let history = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::History)
+        .unwrap();
+    let mix = patch.nodes.iter().find(|node| node.id == "result").unwrap();
+    let mut state = PatcherInteractionState::default();
+    connect_output_to_input(&mut state, "root", &history.id, &mix.id, 1);
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(make-history h)\n(def sig (in 1))\n(def result (mix sig (read-history h)))\n(write-history h sig)"
     );
 }
 
@@ -3757,6 +3878,66 @@ fn writeback_cable_create_uses_semantic_arg_index_with_attributes() {
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
         "(def a (in 1))\n(def b (in 2))\n(def result (foo a @mode fast b))"
+    );
+}
+
+#[test]
+fn writeback_cable_create_inserts_missing_destination_arg_before_attributes() {
+    let source = r#"
+        (def a (in 1))
+        (def b (in 2))
+        (def result (foo a @mode fast))
+    "#;
+    let patch = parse(source);
+    let b = patch.nodes.iter().find(|node| node.id == "b").unwrap();
+    let foo = patch.nodes.iter().find(|node| node.op == "foo").unwrap();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: b.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: foo.id.clone(),
+            input_index: 1,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def a (in 1))\n(def b (in 2))\n(def result (foo a b @mode fast))"
+    );
+}
+
+#[test]
+fn writeback_cable_create_fills_missing_destination_arg_gaps() {
+    let source = r#"
+        (def a (in 1))
+        (def b (in 2))
+        (def result (foo a))
+    "#;
+    let patch = parse(source);
+    let b = patch.nodes.iter().find(|node| node.id == "b").unwrap();
+    let foo = patch.nodes.iter().find(|node| node.op == "foo").unwrap();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: b.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: foo.id.clone(),
+            input_index: 2,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def a (in 1))\n(def b (in 2))\n(def result (foo a __patcher_missing_input__ b))"
     );
 }
 
@@ -7423,6 +7604,109 @@ fn writeback_literal_into_created_phasor_in_macro_preserves_literal_node() {
             && connection.to_node == "triangle1"
             && connection.to_input == 1
     }));
+}
+
+#[test]
+fn writeback_generated_binding_into_missing_macro_non_first_input_inserts_arg() {
+    let source = "(defmacro xop (input) (def phasor1 (phasor input)) (def mul1 (* phasor1)) mul1)\n(def pitch (in 2 @name pitch))\n(def xop1 (xop pitch))\n(out xop1 1 @name audio)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "xop")
+        .unwrap();
+    let mul = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "mul1")
+        .unwrap();
+
+    let mut state = PatcherInteractionState {
+        active_macro: Some("xop".to_string()),
+        ..Default::default()
+    };
+    let rate = allocate_created_text_node(&mut state, "macro:xop", "44100");
+    let phasor = allocate_created_text_node(&mut state, "macro:xop", "phasor");
+    connect_output_to_input(&mut state, "macro:xop", &rate, &phasor, 0);
+    connect_output_to_input(&mut state, "macro:xop", &phasor, &mul.id, 1);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def value1 44100.0)"),
+        "created number should materialize as a generated binding:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def phasor2 (phasor value1))"),
+        "created phasor should reference generated number binding:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def mul1 (* phasor1 phasor2))"),
+        "generated phasor should be inserted into missing second input:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn writeback_created_binding_depending_on_late_source_input_is_inserted_after_input() {
+    let source = r#"
+        (def early (phasor 1))
+        (def trigger (in 4 @name trigger))
+        (out early 1 @name audio)
+    "#;
+    let root_patch = parse(source);
+    let trigger = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "trigger")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let value = allocate_created_text_node(&mut state, "root", "2");
+    let phasor = allocate_created_text_node(&mut state, "root", "phasor");
+    connect_output_to_input(&mut state, "root", &value, &phasor, 0);
+    connect_output_to_input(&mut state, "root", &trigger.id, &phasor, 1);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    let trigger_idx = emitted.find("(def trigger").unwrap();
+    let phasor_idx = emitted.find("(def phasor1").unwrap();
+    assert!(
+        phasor_idx > trigger_idx,
+        "generated phasor must be emitted after source input it references:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def phasor1 (phasor value1 trigger))"),
+        "generated phasor should still reference trigger by symbol:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn writeback_created_binding_with_inline_late_source_symbol_is_inserted_after_input() {
+    let source = r#"
+        (def early (phasor 1))
+        (def trigger (in 4 @name trigger))
+        (out early 1 @name audio)
+    "#;
+    let mut state = PatcherInteractionState::default();
+    let value = allocate_created_text_node(&mut state, "root", "2");
+    let phasor = allocate_created_text_node(&mut state, "root", "phasor trigger");
+    connect_output_to_input(&mut state, "root", &value, &phasor, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    let trigger_idx = emitted.find("(def trigger").unwrap();
+    let phasor_idx = emitted.find("(def phasor1").unwrap();
+    assert!(
+        phasor_idx > trigger_idx,
+        "generated phasor with inline trigger must be emitted after trigger input:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def phasor1 (phasor value1 trigger))"),
+        "generated phasor should preserve inline trigger symbol:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
 }
 
 #[test]
