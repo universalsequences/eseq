@@ -3802,6 +3802,77 @@ fn writeback_cable_create_updates_destination_semantic_arg() {
 }
 
 #[test]
+fn writeback_cable_create_moves_destination_after_new_later_dependency() {
+    let source = r#"
+        (def phase (phasor 2))
+        (def velocity (in 4 @name velocity))
+        (out phase 1 @name audio)
+    "#;
+    let patch = parse(source);
+    let velocity = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "velocity")
+        .unwrap();
+    let phasor = patch.nodes.iter().find(|node| node.id == "phase").unwrap();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: velocity.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: phasor.id.clone(),
+            input_index: 1,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def velocity (in 4 @name velocity))\n(def phase (phasor 2.0 velocity))\n(out phase 1 @name audio)"
+    );
+}
+
+#[test]
+fn writeback_cable_create_moves_destination_with_existing_dependents() {
+    let source = r#"
+        (def phase (phasor 2))
+        (def trig (ramp2trig phase))
+        (def hit (cymbal_model trig 0.5))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (out hit 1 @name audio)
+    "#;
+    let patch = parse(source);
+    let trigger = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "trigger")
+        .unwrap();
+    let phasor = patch.nodes.iter().find(|node| node.id == "phase").unwrap();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: trigger.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: phasor.id.clone(),
+            input_index: 1,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def phase (phasor 2.0 trigger))\n(def trig (ramp2trig phase))\n(def hit (cymbal_model trig 0.5))\n(out hit 1 @name audio)"
+    );
+}
+
+#[test]
 fn writeback_cable_create_uses_semantic_arg_index_with_attributes() {
     let source = r#"
         (def a (in 1))
@@ -3931,6 +4002,103 @@ fn writeback_source_cable_rewire_replaces_destination_arg_once() {
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
         "(def a (in 1))\n(def b (in 2))\n(def result (+ b 1.0))"
+    );
+}
+
+#[test]
+fn writeback_source_cable_rewire_moves_destination_after_new_later_dependency() {
+    let source = r#"
+        (def pitch (in 1 @name pitch))
+        (def phase (phasor pitch))
+        (def velocity (in 4 @name velocity))
+        (out phase 1 @name audio)
+    "#;
+    let patch = parse(source);
+    let pitch = patch.nodes.iter().find(|node| node.id == "pitch").unwrap();
+    let velocity = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "velocity")
+        .unwrap();
+    let phasor = patch.nodes.iter().find(|node| node.id == "phase").unwrap();
+    let pitch_to_phasor = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == pitch.id && connection.to_node == phasor.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(pitch_to_phasor),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: velocity.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: phasor.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def pitch (in 1 @name pitch))\n(def velocity (in 4 @name velocity))\n(def phase (phasor velocity))\n(out phase 1 @name audio)"
+    );
+}
+
+#[test]
+fn writeback_macro_cable_create_moves_destination_after_new_later_dependency() {
+    let source = r#"
+        (defmacro op (input)
+          (def phase (phasor 2))
+          (def shaped (* input 0.5))
+          phase)
+        (def sig (in 1 @name sig))
+        (def out1 (op sig))
+        (out out1 1 @name audio)
+    "#;
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "op")
+        .unwrap();
+    let shaped = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "shaped")
+        .unwrap();
+    let phasor = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phase")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "macro:op",
+        OutputPortRef {
+            node_id: shaped.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: phasor.id.clone(),
+            input_index: 1,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro op (input) (def shaped (* input 0.5)) (def phase (phasor 2.0 shaped)) phase)\n(def sig (in 1 @name sig))\n(def out1 (op sig))\n(out out1 1 @name audio)"
     );
 }
 

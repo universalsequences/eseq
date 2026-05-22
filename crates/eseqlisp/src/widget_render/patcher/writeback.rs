@@ -2451,6 +2451,74 @@ fn rewrite_node_input(
     })
 }
 
+fn reorder_destination_after_new_dependency(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    view_key: &str,
+    from: &OutputPortRef,
+    dest: &PatchNode,
+) -> Result<(), WriteBackError> {
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return Ok(());
+    };
+    let Some(source) = patch_node(patch, from.node_id.as_str()) else {
+        return Ok(());
+    };
+
+    let Some((source_form, _)) = source_owner_location_for_node(source) else {
+        return Ok(());
+    };
+    let Some((dest_form, _)) = source_owner_location_for_node(dest) else {
+        return Ok(());
+    };
+    if source_form.scope != dest_form.scope {
+        return Ok(());
+    }
+
+    let moved_forms = dependent_form_closure(patch, &dest.id, &dest_form.scope);
+    if moved_forms.iter().any(|form| form == source_form) {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: dest.id.clone(),
+            reason: "connection would move a node after one of its own dependents".to_string(),
+        });
+    }
+    document.move_forms_after_dependency_if_needed(&moved_forms, source_form)
+}
+
+fn dependent_form_closure(
+    patch: &Patch,
+    root_node_id: &str,
+    scope: &SourceScopeId,
+) -> Vec<SourceFormId> {
+    let mut stack = vec![root_node_id.to_string()];
+    let mut visited_nodes = HashSet::new();
+    let mut forms = Vec::new();
+    let mut seen_forms = HashSet::new();
+
+    while let Some(node_id) = stack.pop() {
+        if !visited_nodes.insert(node_id.clone()) {
+            continue;
+        }
+        if let Some(node) = patch_node(patch, &node_id)
+            && let Some((form_id, _)) = source_owner_location_for_node(node)
+            && &form_id.scope == scope
+            && seen_forms.insert(form_id.clone())
+        {
+            forms.push(form_id.clone());
+        }
+        for connection in patch
+            .connections
+            .iter()
+            .filter(|connection| connection.from_node == node_id)
+        {
+            stack.push(connection.to_node.clone());
+        }
+    }
+
+    forms
+}
+
 fn apply_cable_writeback(
     document: &mut SourceDocument,
     root_patch: &Patch,
@@ -2458,6 +2526,14 @@ fn apply_cable_writeback(
     generated: &GeneratedBindings,
     history_bindings: &HistoryBindings,
 ) -> Result<(), WriteBackError> {
+    // Pass 1: source-backed cables that were deleted outright.
+    //
+    // A cable deletion means "this destination inlet no longer has a source".
+    // For ordinary source-owned destination nodes we preserve the inlet slot by
+    // writing a missing-input sentinel into the destination call. Some deleted
+    // cables are intentionally ignored here because another pass owns the
+    // semantic replacement, e.g. deleting a cable as part of replacing it with
+    // a history or created-value connection.
     let mut deleted = interaction_state
         .edit_state
         .deleted_connections
@@ -2507,6 +2583,12 @@ fn apply_cable_writeback(
         )?;
     }
 
+    // Pass 2: source-backed cables whose endpoints changed.
+    //
+    // Editing an existing source cable is handled as "clear the old destination
+    // input, then write the source expression into the new destination input".
+    // Layout-only edits, such as changing a segmented cable's bend row, do not
+    // touch Lisp source and are skipped.
     let mut source_edits = interaction_state
         .edit_state
         .connections
@@ -2526,6 +2608,12 @@ fn apply_cable_writeback(
         )?;
     }
 
+    // Pass 3: new cables created by dragging an outlet onto an inlet.
+    //
+    // The interaction layer has already turned the editor gesture into a
+    // PatcherConnectionEdit. Writeback only needs to resolve the outlet into a
+    // Lisp expression, find the destination node, and replace/insert the
+    // destination input expression.
     let mut created = interaction_state
         .edit_state
         .connections
@@ -2539,6 +2627,9 @@ fn apply_cable_writeback(
         {
             continue;
         }
+        // Convert the source outlet into the expression that should appear in
+        // the destination call: a binding symbol, generated binding name,
+        // literal value, nested expression, history read, etc.
         let value = value_reference_expr(
             document,
             root_patch,
@@ -2556,12 +2647,22 @@ fn apply_cable_writeback(
                 connection_id: connection.id.clone(),
             });
         };
+        // Apply the edit to the destination node's source-owned call shape.
+        // The helper preserves semantic input indexes and inserts sentinel
+        // values for any missing positional gaps before attributes.
         rewrite_node_input(
             document,
             &connection.view_key,
             dest,
             connection.to.input_index,
             value,
+        )?;
+        reorder_destination_after_new_dependency(
+            document,
+            root_patch,
+            &connection.view_key,
+            &connection.from,
+            dest,
         )?;
     }
     Ok(())
@@ -2629,6 +2730,13 @@ fn apply_source_connection_edit_writeback(
         new_dest,
         edit.to.input_index,
         value,
+    )?;
+    reorder_destination_after_new_dependency(
+        document,
+        root_patch,
+        &edit.view_key,
+        &edit.from,
+        new_dest,
     )
 }
 
@@ -3813,6 +3921,67 @@ impl SourceDocument {
         }
     }
 
+    fn form_position(&self, form_id: &SourceFormId) -> Option<usize> {
+        match &form_id.scope {
+            SourceScopeId::Root => self
+                .forms
+                .iter()
+                .position(|form| form.original_index == Some(form_id.index)),
+            SourceScopeId::Macro { name } => self
+                .macros
+                .get(name)?
+                .body
+                .iter()
+                .position(|form| form.original_index == Some(form_id.index)),
+        }
+    }
+
+    fn move_forms_after_dependency_if_needed(
+        &mut self,
+        moved: &[SourceFormId],
+        dependency: &SourceFormId,
+    ) -> Result<(), WriteBackError> {
+        let Some(dependency_position) = self.form_position(dependency) else {
+            return Ok(());
+        };
+        let moved_indexes = moved
+            .iter()
+            .filter(|form| form.scope == dependency.scope)
+            .filter(|form| form.index != dependency.index)
+            .filter_map(|form| {
+                let position = self.form_position(form)?;
+                (position < dependency_position).then_some(form.index)
+            })
+            .collect::<HashSet<_>>();
+        if moved_indexes.is_empty() {
+            return Ok(());
+        }
+
+        match &dependency.scope {
+            SourceScopeId::Root => {
+                move_forms_after_dependency_in_scope(
+                    &mut self.forms,
+                    &moved_indexes,
+                    dependency.index,
+                    |form| form.original_index,
+                );
+            }
+            SourceScopeId::Macro { name } => {
+                let Some(macro_doc) = self.macros.get_mut(name) else {
+                    return Ok(());
+                };
+                move_forms_after_dependency_in_scope(
+                    &mut macro_doc.body,
+                    &moved_indexes,
+                    dependency.index,
+                    |form| form.original_index,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     fn emit(&self) -> String {
         self.forms
             .iter()
@@ -4079,6 +4248,45 @@ impl SourceDocument {
         ) || dgenlisp_operator_names().contains(operator)
             || self.macros.contains_key(operator)
     }
+}
+
+fn move_forms_after_dependency_in_scope<T>(
+    forms: &mut Vec<T>,
+    moved_original_indexes: &HashSet<usize>,
+    dependency_original_index: usize,
+    original_index: impl Fn(&T) -> Option<usize>,
+) {
+    // SourceFormId::index is the original parse index, not the current vector
+    // position. Resolve both ids against the current scope vector before moving.
+    if !forms
+        .iter()
+        .any(|form| original_index(form) == Some(dependency_original_index))
+    {
+        return;
+    }
+
+    let mut kept = Vec::with_capacity(forms.len());
+    let mut moved = Vec::new();
+    for form in forms.drain(..) {
+        if original_index(&form).is_some_and(|index| {
+            moved_original_indexes.contains(&index) && index != dependency_original_index
+        }) {
+            moved.push(form);
+        } else {
+            kept.push(form);
+        }
+    }
+
+    let Some(insert_at) = kept
+        .iter()
+        .position(|form| original_index(form) == Some(dependency_original_index))
+        .map(|position| position + 1)
+    else {
+        *forms = kept;
+        return;
+    };
+    kept.splice(insert_at..insert_at, moved);
+    *forms = kept;
 }
 
 impl MacroDocument {
