@@ -169,6 +169,7 @@ pub(super) struct PatcherTextEdit {
     pub(super) text: String,
     pub(super) original_text: String,
     pub(super) state: TextInputState,
+    pub(super) autocomplete_selected: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]

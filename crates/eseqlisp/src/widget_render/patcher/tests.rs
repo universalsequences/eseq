@@ -5829,6 +5829,7 @@ fn actively_edited_created_nodes_suppress_unknown_operator_diagnostics() {
             selection_anchor: None,
             selecting: false,
         },
+        autocomplete_selected: 0,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
@@ -6044,9 +6045,207 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
         text: String::new(),
         original_text: String::new(),
         state: TextInputState::default(),
+        autocomplete_selected: 0,
     });
     set_patcher_interaction_state(key, state);
     assert!(patcher_has_text_edit(&node));
+}
+
+#[test]
+fn patcher_text_edit_tab_autocompletes_operator_without_committing() {
+    let path = temp_patcher_source_path("patcher-autocomplete-tab");
+    fs::write(&path, "(def sig (bi))").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.edit_state.nodes.insert(
+        node_edit_key("root", "sig"),
+        PatcherNodeEdit {
+            view_key: "root".to_string(),
+            id: "sig".to_string(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: "sig".to_string(),
+            },
+            text: "bi".to_string(),
+            position: (0.0, 0.0),
+        },
+    );
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: "sig".to_string(),
+        text: "bi".to_string(),
+        original_text: "bi".to_string(),
+        state: TextInputState {
+            cursor_pos: 2,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    });
+    set_patcher_interaction_state(key, state);
+
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Tab,
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some(),
+        "Tab must be consumed while patcher node text edit is active"
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_ref().expect("Tab should not commit");
+    assert_eq!(edit.text, "biquad ");
+    assert_eq!(
+        state
+            .edit_state
+            .nodes
+            .get(&node_edit_key("root", "sig"))
+            .map(|node| node.text.as_str()),
+        Some("bi"),
+        "autocomplete should only edit the active text buffer; Enter still commits"
+    );
+
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Char('3'),
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some()
+    );
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Enter,
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some()
+    );
+    let state = get_patcher_interaction_state(key);
+    assert!(state.text_edit.is_none());
+    assert_eq!(
+        state
+            .edit_state
+            .nodes
+            .get(&node_edit_key("root", "sig"))
+            .map(|node| node.text.as_str()),
+        Some("biquad 3")
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_text_edit_arrow_keys_cycle_autocomplete_selection() {
+    let path = temp_patcher_source_path("patcher-autocomplete-arrows");
+    fs::write(&path, "(def sig (m))").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: "sig".to_string(),
+        text: "m".to_string(),
+        original_text: "m".to_string(),
+        state: TextInputState {
+            cursor_pos: 1,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    });
+    set_patcher_interaction_state(key, state);
+
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Down,
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some()
+    );
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(
+        state
+            .text_edit
+            .as_ref()
+            .map(|edit| edit.autocomplete_selected),
+        Some(1)
+    );
+
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Up,
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some()
+    );
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(
+        state
+            .text_edit
+            .as_ref()
+            .map(|edit| edit.autocomplete_selected),
+        Some(0)
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn patcher_text_edit_consumes_tab_even_without_autocomplete_match() {
+    let path = temp_patcher_source_path("patcher-autocomplete-tab-consume");
+    fs::write(&path, "(def sig (zzzz))").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: "sig".to_string(),
+        text: "zzzz".to_string(),
+        original_text: "zzzz".to_string(),
+        state: TextInputState {
+            cursor_pos: 4,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    });
+    set_patcher_interaction_state(key, state);
+
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Tab,
+                    modifiers: KeyModifiers::empty(),
+                },
+            )
+            .is_some()
+    );
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(
+        state.text_edit.as_ref().map(|edit| edit.text.as_str()),
+        Some("zzzz")
+    );
+
+    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -6062,6 +6261,7 @@ fn created_node_reedit_updates_same_node_edit_text() {
             selection_anchor: None,
             selecting: false,
         },
+        autocomplete_selected: 0,
     });
     commit_patcher_text_edit(&mut state, "root");
     assert_eq!(
@@ -6082,6 +6282,7 @@ fn created_node_reedit_updates_same_node_edit_text() {
             selection_anchor: None,
             selecting: false,
         },
+        autocomplete_selected: 0,
     });
     commit_patcher_text_edit(&mut state, "root");
     assert_eq!(
@@ -6272,6 +6473,7 @@ fn writeback_active_edit_inside_created_macro_updates_default_body() {
             selection_anchor: None,
             selecting: false,
         },
+        autocomplete_selected: 0,
     });
 
     assert_eq!(
@@ -7706,6 +7908,7 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
             selection_anchor: None,
             selecting: false,
         },
+        autocomplete_selected: 0,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
@@ -7754,6 +7957,213 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
+    let mut state = PatcherInteractionState::default();
+    let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: created_id,
+        text: "bi".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 2,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    });
+
+    let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &PatcherPanState::default(),
+        &state,
+    );
+
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                prim,
+                MetalPrimitive::ProportionalText(text) if text.text == "biquad"
+            )
+        }),
+        "active operator prefix should render its autocomplete suggestion"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                prim,
+                MetalPrimitive::ProportionalText(text) if text.text == "IIR biquad filter."
+            )
+        }),
+        "autocomplete documentation panel should render structured documentation from the operator manifest"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                prim,
+                MetalPrimitive::ProportionalText(text)
+                    if text.text.contains("inlets:")
+                        && text.text.contains("signal signal|float")
+            )
+        }),
+        "autocomplete documentation panel should render structured inlet signatures"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                prim,
+                MetalPrimitive::ProportionalText(text)
+                    if text.text.contains("outlets:")
+                        && text.text.contains("out")
+            )
+        }),
+        "autocomplete documentation panel should render structured outlet signatures"
+    );
+    let suggestion_col = prims
+        .iter()
+        .find_map(|prim| match prim {
+            MetalPrimitive::ProportionalText(text) if text.text == "biquad" => Some(text.col),
+            _ => None,
+        })
+        .expect("suggestion text");
+    let doc_col = prims
+        .iter()
+        .find_map(|prim| match prim {
+            MetalPrimitive::ProportionalText(text) if text.text == "IIR biquad filter." => {
+                Some(text.col)
+            }
+            _ => None,
+        })
+        .expect("documentation text");
+    assert!(
+        doc_col > suggestion_col + 10.0,
+        "selected operator documentation should render in a separate panel to the right"
+    );
+    assert!(
+        prims
+            .iter()
+            .filter(|prim| {
+                matches!(
+                    prim,
+                    MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                        if widget_type == "patcher-node"
+                            && instance.color_a == theme::PATCHER_AUTOCOMPLETE_BORDER().to_rgba()
+                            && instance.color_b == theme::PATCHER_AUTOCOMPLETE_BG().to_rgba()
+                )
+            })
+            .count()
+            >= 2,
+        "autocomplete list and selected-documentation panels should both render full bordered chrome"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                prim,
+                MetalPrimitive::ForegroundRect(rect)
+                    if rect.color == theme::PATCHER_AUTOCOMPLETE_SELECTED_BG()
+            )
+        }),
+        "autocomplete panel should render the selected row highlight"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_render_wraps_selected_autocomplete_documentation() {
+    let mut state = PatcherInteractionState::default();
+    let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: created_id,
+        text: "phas".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 4,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    });
+
+    let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 40.0,
+        },
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &PatcherPanState::default(),
+        &state,
+    );
+
+    let suggestion_col = prims
+        .iter()
+        .find_map(|prim| match prim {
+            MetalPrimitive::ProportionalText(text) if text.text == "phase-vocoder" => {
+                Some(text.col)
+            }
+            _ => None,
+        })
+        .expect("suggestion text");
+    let doc_lines: Vec<&str> = prims
+        .iter()
+        .filter_map(|prim| match prim {
+            MetalPrimitive::ProportionalText(text) if text.col > suggestion_col + 10.0 => {
+                Some(text.text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        doc_lines.iter().any(|line| line.starts_with("outlets:")),
+        "wrapped documentation should include structured outlet signatures"
+    );
+    assert!(
+        doc_lines.iter().all(|line| line.chars().count() <= 56),
+        "documentation lines should be pre-wrapped before rendering"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn metal_render_uses_single_text_run_for_active_node_edit_with_spaces() {
     let mut state = PatcherInteractionState::default();
     let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
@@ -7766,6 +8176,7 @@ fn metal_render_uses_single_text_run_for_active_node_edit_with_spaces() {
             selection_anchor: None,
             selecting: false,
         },
+        autocomplete_selected: 0,
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");

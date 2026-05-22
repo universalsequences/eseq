@@ -28,12 +28,19 @@ use super::metrics::{
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
 use super::model::{ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode};
+#[cfg(target_os = "macos")]
+use super::project::OperatorPortDocumentation;
 use super::state::{
     PatcherDragState, PatcherInteractionState, PatcherPanState, PatcherTextEdit,
     active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
     get_patcher_pan_state, patch_with_interaction_state, patcher_back_label, patcher_breadcrumb,
     patcher_state_key, set_patcher_pan_state, source_connection_id,
 };
+#[cfg(target_os = "macos")]
+use super::text::patcher_autocomplete_suggestions;
+
+#[cfg(target_os = "macos")]
+const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 9.0;
 
 pub(super) fn render_tui(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     for row_offset in 0..rect.height.round() as u16 {
@@ -398,10 +405,18 @@ pub(super) fn draw_patch(
         push_cable_handles(prims, &preview_connection, start, end, zoom);
     }
 
+    let mut active_edit_panel = None;
     for node in &patch.nodes {
         let Some(rect) = node_rects.get(&node.id).copied() else {
             continue;
         };
+        let active_edit = interaction_state
+            .text_edit
+            .as_ref()
+            .filter(|edit| edit.node_id == node.id);
+        if let Some(edit) = active_edit {
+            active_edit_panel = Some((rect, edit));
+        }
         let highlighted_inputs = highlighted_inputs_for_node(&interaction_state.drag, &node.id);
         let highlighted_outputs = highlighted_outputs_for_node(&interaction_state.drag, &node.id);
         push_node(
@@ -417,15 +432,246 @@ pub(super) fn draw_patch(
             viewport,
             interaction_state.selected_nodes.contains(&node.id),
             interaction_state.hovered_node.as_deref() == Some(node.id.as_str()),
-            interaction_state
-                .text_edit
-                .as_ref()
-                .filter(|edit| edit.node_id == node.id),
+            active_edit,
             &highlighted_inputs,
             &highlighted_outputs,
             zoom,
         );
     }
+    if let Some((node_rect, edit)) = active_edit_panel {
+        push_autocomplete_panel(prims, node_rect, edit, viewport, zoom);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn push_autocomplete_panel(
+    prims: &mut Vec<MetalPrimitive>,
+    node_rect: Rect,
+    edit: &PatcherTextEdit,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    let suggestions = patcher_autocomplete_suggestions(edit);
+    if suggestions.is_empty() {
+        return;
+    }
+    let row_height = 1.35 * zoom;
+    let padding = 0.45 * zoom;
+    let panel_width = (node_rect.width.max(18.0 * zoom)).min(28.0 * zoom);
+    let panel = Rect {
+        row: node_rect.row + node_rect.height + 0.35 * zoom,
+        col: node_rect.col,
+        width: panel_width,
+        height: padding * 2.0 + row_height * suggestions.len() as f32,
+    };
+    push_autocomplete_panel_chrome(
+        prims,
+        panel,
+        theme::PATCHER_AUTOCOMPLETE_BG(),
+        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        viewport,
+        zoom,
+    );
+    for (index, suggestion) in suggestions.iter().enumerate() {
+        let row = panel.row + padding + index as f32 * row_height;
+        if index == edit.autocomplete_selected.min(suggestions.len() - 1) {
+            prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+                rect: Rect {
+                    row,
+                    col: panel.col + 0.25 * zoom,
+                    width: panel.width - 0.5 * zoom,
+                    height: row_height,
+                },
+                color: theme::PATCHER_AUTOCOMPLETE_SELECTED_BG(),
+            }));
+        }
+        prims.push(MetalPrimitive::ProportionalText(
+            MetalProportionalTextPrimitive {
+                row: row + 0.18 * zoom,
+                col: panel.col + 0.8 * zoom,
+                align_width: panel.width - 1.6 * zoom,
+                h_align: 0.0,
+                text: suggestion.name.clone(),
+                font_size: 11.5,
+                scale: zoom,
+                fg: theme::PATCHER_NODE_TAIL_TEXT(),
+                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            },
+        ));
+    }
+    let selected_index = edit.autocomplete_selected.min(suggestions.len() - 1);
+    push_autocomplete_documentation_panel(
+        prims,
+        panel,
+        &suggestions[selected_index],
+        viewport,
+        zoom,
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn push_autocomplete_documentation_panel(
+    prims: &mut Vec<MetalPrimitive>,
+    list_panel: Rect,
+    suggestion: &super::text::PatcherAutocompleteSuggestion,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    let lines = autocomplete_doc_lines(suggestion);
+    if lines.is_empty() {
+        return;
+    }
+    let row_height = 1.08 * zoom;
+    let padding = 0.65 * zoom;
+    let panel_width = 46.0 * zoom;
+    let align_width = panel_width - 1.6 * zoom;
+    let visual_line_count =
+        autocomplete_wrapped_doc_line_count(&lines, align_width, viewport, zoom);
+    let panel = Rect {
+        row: list_panel.row,
+        col: list_panel.col + list_panel.width + 0.55 * zoom,
+        width: panel_width,
+        height: padding * 2.0 + row_height * visual_line_count as f32,
+    };
+    push_autocomplete_panel_chrome(
+        prims,
+        panel,
+        theme::PATCHER_AUTOCOMPLETE_BG(),
+        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        viewport,
+        zoom,
+    );
+    let max_chars = autocomplete_doc_wrap_chars(align_width, viewport, zoom);
+    let mut visual_index = 0;
+    for line in lines {
+        for wrapped in wrap_autocomplete_doc_line(&line, max_chars) {
+            prims.push(MetalPrimitive::ProportionalText(
+                MetalProportionalTextPrimitive {
+                    row: panel.row + padding + visual_index as f32 * row_height,
+                    col: panel.col + 0.8 * zoom,
+                    align_width,
+                    h_align: 0.0,
+                    text: wrapped,
+                    font_size: 10.0,
+                    scale: zoom,
+                    fg: theme::PATCHER_TEXT_MUTED(),
+                    bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                },
+            ));
+            visual_index += 1;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn autocomplete_doc_lines(suggestion: &super::text::PatcherAutocompleteSuggestion) -> Vec<String> {
+    let Some(documentation) = suggestion.documentation.as_ref() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    if let Some(summary) = &documentation.summary {
+        lines.push(summary.clone());
+    }
+    lines.extend(documentation.signatures.iter().cloned());
+    if !documentation.inputs.is_empty() {
+        lines.push(format!(
+            "inlets: {}",
+            format_operator_ports(&documentation.inputs)
+        ));
+    }
+    if !documentation.outputs.is_empty() {
+        lines.push(format!(
+            "outlets: {}",
+            format_operator_ports(&documentation.outputs)
+        ));
+    }
+    lines
+}
+
+#[cfg(target_os = "macos")]
+fn format_operator_ports(ports: &[OperatorPortDocumentation]) -> String {
+    ports
+        .iter()
+        .map(|port| {
+            let mut parts = Vec::new();
+            if let Some(index) = port.index {
+                parts.push(index.to_string());
+            }
+            if let Some(name) = &port.name {
+                let name = if port.required == Some(false) {
+                    format!("{name}?")
+                } else {
+                    name.clone()
+                };
+                parts.push(name);
+            }
+            if let Some(kind) = &port.kind {
+                parts.push(kind.clone());
+            }
+            if let Some(summary) = &port.summary {
+                parts.push(summary.clone());
+            }
+            parts.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[cfg(target_os = "macos")]
+fn autocomplete_wrapped_doc_line_count(
+    lines: &[String],
+    align_width: f32,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> usize {
+    let max_chars = autocomplete_doc_wrap_chars(align_width, viewport, zoom);
+    lines
+        .iter()
+        .map(|line| wrap_autocomplete_doc_line(line, max_chars).len())
+        .sum()
+}
+
+#[cfg(target_os = "macos")]
+fn autocomplete_doc_wrap_chars(align_width: f32, viewport: WidgetViewport, _zoom: f32) -> usize {
+    let width_px = align_width * viewport.cell_w;
+    let char_px = (10.0_f32 * 0.74).max(1.0);
+    ((width_px / char_px).floor() as usize).clamp(20, 56)
+}
+
+#[cfg(target_os = "macos")]
+fn wrap_autocomplete_doc_line(line: &str, max_chars: usize) -> Vec<String> {
+    if line.chars().count() <= max_chars {
+        return vec![line.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let current_len = current.chars().count();
+        let word_len = word.chars().count();
+        if current_len > 0 && current_len + 1 + word_len > max_chars {
+            lines.push(current);
+            current = String::new();
+        }
+        if word_len > max_chars {
+            if !current.is_empty() {
+                lines.push(current);
+                current = String::new();
+            }
+            let chars: Vec<char> = word.chars().collect();
+            for chunk in chars.chunks(max_chars) {
+                lines.push(chunk.iter().collect());
+            }
+            continue;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 #[cfg(target_os = "macos")]
@@ -659,6 +905,43 @@ fn push_node_chrome(
             color_c: [0.0; 4],
             color_d: [0.0; 4],
             corner_radius: normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom),
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+        },
+        is_background: false,
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn push_autocomplete_panel_chrome(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    bg: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    prims.push(MetalPrimitive::WidgetInstance {
+        widget_type: "patcher-node".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [NODE_BORDER_WIDTH_PX * zoom, 0.0, 0.0, 0.0],
+            uniform_b: [0.0; 4],
+            color_a: border.to_rgba(),
+            color_b: bg.to_rgba(),
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: normalized_corner_radius(
+                rect,
+                viewport,
+                AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX * zoom,
+            ),
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background: false,

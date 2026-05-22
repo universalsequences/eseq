@@ -248,7 +248,10 @@ use state::{
     patch_with_interaction_state, patcher_state_key, patcher_state_key_from_parts,
     set_connection_segment_edit, set_patcher_interaction_state,
 };
-use text::{cancel_patcher_text_edit, commit_patcher_text_edit};
+use text::{
+    apply_patcher_autocomplete, cancel_patcher_text_edit, clamp_patcher_autocomplete_selection,
+    commit_patcher_text_edit, move_patcher_autocomplete_selection, patcher_autocomplete_is_open,
+};
 use writeback::emit_patch_writeback_result;
 
 use super::text_input::{TextEditOutcome, apply_text_entry_key, cache_char_widths};
@@ -480,6 +483,37 @@ impl WidgetDefinition for PatcherWidget {
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
+            KeyCode::Tab if state.text_edit.is_some() => {
+                if let Some(edit) = state.text_edit.as_mut() {
+                    apply_patcher_autocomplete(edit);
+                }
+                set_patcher_interaction_state(key, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
+            KeyCode::Down
+                if state
+                    .text_edit
+                    .as_ref()
+                    .is_some_and(patcher_autocomplete_is_open) =>
+            {
+                if let Some(edit) = state.text_edit.as_mut() {
+                    move_patcher_autocomplete_selection(edit, 1);
+                }
+                set_patcher_interaction_state(key, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
+            KeyCode::Up
+                if state
+                    .text_edit
+                    .as_ref()
+                    .is_some_and(patcher_autocomplete_is_open) =>
+            {
+                if let Some(edit) = state.text_edit.as_mut() {
+                    move_patcher_autocomplete_selection(edit, -1);
+                }
+                set_patcher_interaction_state(key, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
             KeyCode::Backspace | KeyCode::Delete if state.selected_cable.is_some() => {
                 if let Some(cable_id) = state.selected_cable.clone() {
                     let changed =
@@ -509,6 +543,7 @@ impl WidgetDefinition for PatcherWidget {
                 match apply_text_entry_key(&edit.text, &mut edit.state, key_event, false, None)? {
                     TextEditOutcome::Changed(new_text) => {
                         edit.text = new_text;
+                        clamp_patcher_autocomplete_selection(edit);
                         set_patcher_interaction_state(key, state);
                         Some(WidgetEvent::Custom(Value::Nil))
                     }

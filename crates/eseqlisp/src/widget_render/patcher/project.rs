@@ -1108,6 +1108,110 @@ pub(super) fn dgenlisp_operator_names() -> &'static HashSet<String> {
     })
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct OperatorDocumentation {
+    pub(super) summary: Option<String>,
+    pub(super) signatures: Vec<String>,
+    pub(super) inputs: Vec<OperatorPortDocumentation>,
+    pub(super) outputs: Vec<OperatorPortDocumentation>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct OperatorPortDocumentation {
+    pub(super) name: Option<String>,
+    pub(super) kind: Option<String>,
+    pub(super) required: Option<bool>,
+    pub(super) index: Option<usize>,
+    pub(super) summary: Option<String>,
+}
+
+pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, OperatorDocumentation> {
+    static OPERATOR_DOCUMENTATION: OnceLock<HashMap<String, OperatorDocumentation>> =
+        OnceLock::new();
+    OPERATOR_DOCUMENTATION.get_or_init(|| {
+        let metadata: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../sequencer/tools/dgenlisp-operators.json"
+        ))
+        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let operators = metadata
+            .get("operators")
+            .and_then(serde_json::Value::as_array)
+            .expect("bundled dgenlisp-operators.json must contain an operators array");
+
+        let mut docs = HashMap::new();
+        for operator in operators {
+            let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let doc = OperatorDocumentation {
+                summary: operator
+                    .get("summary")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                signatures: operator
+                    .get("signatures")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|signatures| {
+                        signatures
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                inputs: operator_port_documentation(operator, "inputs"),
+                outputs: operator_port_documentation(operator, "outputs"),
+            };
+            docs.insert(name.to_string(), doc.clone());
+            if let Some(aliases) = operator
+                .get("aliases")
+                .and_then(serde_json::Value::as_array)
+            {
+                for alias in aliases {
+                    if let Some(alias) = alias.as_str() {
+                        docs.insert(alias.to_string(), doc.clone());
+                    }
+                }
+            }
+        }
+        docs
+    })
+}
+
+fn operator_port_documentation(
+    operator: &serde_json::Value,
+    key: &str,
+) -> Vec<OperatorPortDocumentation> {
+    operator
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|ports| {
+            ports
+                .iter()
+                .map(|port| OperatorPortDocumentation {
+                    name: port
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    kind: port
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    required: port.get("required").and_then(serde_json::Value::as_bool),
+                    index: port
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|index| index as usize),
+                    summary: port
+                        .get("summary")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, OperatorPortShape> {
     static OPERATOR_PORT_SHAPES: OnceLock<HashMap<String, OperatorPortShape>> = OnceLock::new();
     OPERATOR_PORT_SHAPES.get_or_init(|| {
