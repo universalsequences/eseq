@@ -1568,6 +1568,23 @@ struct GeneratedBindings {
     names: HashMap<(String, String, usize), String>,
 }
 
+#[derive(Debug, Clone)]
+enum GeneratedFormInsertion {
+    OriginalIndex(usize),
+    AfterCurrentForms(Vec<SourceFormId>),
+}
+
+impl GeneratedFormInsertion {
+    fn sort_index(&self) -> usize {
+        match self {
+            GeneratedFormInsertion::OriginalIndex(index) => *index,
+            GeneratedFormInsertion::AfterCurrentForms(forms) => {
+                forms.iter().map(|form| form.index + 1).max().unwrap_or(0)
+            }
+        }
+    }
+}
+
 impl GeneratedBindings {
     fn insert(&mut self, view_key: &str, node_id: &str, name: String) {
         self.insert_output(view_key, node_id, 0, name);
@@ -1695,7 +1712,13 @@ fn apply_generated_binding_writeback(
     let mut generated = GeneratedBindings::default();
     let mut allocator = GeneratedNameAllocator::new(document);
 
-    let mut pending_forms: Vec<(SourceScopeId, usize, usize, usize, Expression)> = Vec::new();
+    let mut pending_forms: Vec<(
+        SourceScopeId,
+        GeneratedFormInsertion,
+        usize,
+        usize,
+        Expression,
+    )> = Vec::new();
     let mut next_generated_def_order = 0usize;
     for view_key in writeback_views(root_patch, interaction_state) {
         let scope = scope_for_view_key(&view_key);
@@ -1859,16 +1882,17 @@ fn apply_generated_binding_writeback(
     }
 
     pending_forms.sort_by(
-        |(scope_a, index_a, depth_a, order_a, _), (scope_b, index_b, depth_b, order_b, _)| {
+        |(scope_a, insertion_a, depth_a, order_a, _),
+         (scope_b, insertion_b, depth_b, order_b, _)| {
             view_key_for_scope(scope_b)
                 .cmp(&view_key_for_scope(scope_a))
-                .then(index_b.cmp(index_a))
+                .then(insertion_b.sort_index().cmp(&insertion_a.sort_index()))
                 .then(depth_a.cmp(depth_b))
                 .then(order_b.cmp(order_a))
         },
     );
-    for (scope, index, _, _, expr) in pending_forms {
-        document.insert_form(&scope, index, expr)?;
+    for (scope, insertion, _, _, expr) in pending_forms {
+        document.insert_generated_form(&scope, &insertion, expr)?;
     }
     Ok(generated)
 }
@@ -2638,14 +2662,14 @@ fn edited_source_param_name(
 }
 
 fn generated_def_insertion_index(
-    document: &SourceDocument,
+    document: &mut SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
     view_key: &str,
     edit: &super::state::PatcherNodeEdit,
     generated_expr: &Expression,
-) -> Result<usize, WriteBackError> {
+) -> Result<GeneratedFormInsertion, WriteBackError> {
     let scope = scope_for_view_key(view_key);
     let mut dependency_index =
         generated_node_dependencies(root_patch, interaction_state, view_key, edit)
@@ -2674,26 +2698,97 @@ fn generated_def_insertion_index(
                 .unwrap_or(0),
         );
     }
-    let consumer_index =
-        generated_node_consumers(root_patch, interaction_state, view_key, edit, generated)
-            .into_iter()
-            .filter_map(|node_id| {
-                patch_for_view(root_patch, view_key)
-                    .and_then(|patch| patch_node(patch, &node_id))
-                    .and_then(|node| source_owner_location_for_node(node))
-                    .filter(|(form_id, _)| form_id.scope == scope)
-                    .map(|(form_id, _)| form_id.index)
-            })
-            .min()
-            .unwrap_or_else(|| document.scope_len(&scope));
+    let consumers =
+        generated_node_consumers(root_patch, interaction_state, view_key, edit, generated);
+    let consumer_index = consumers
+        .iter()
+        .filter_map(|node_id| {
+            patch_for_view(root_patch, view_key)
+                .and_then(|patch| patch_node(patch, node_id))
+                .and_then(|node| source_owner_location_for_node(node))
+                .filter(|(form_id, _)| form_id.scope == scope)
+                .map(|(form_id, _)| form_id.index)
+        })
+        .min()
+        .unwrap_or_else(|| document.scope_len(&scope));
     if dependency_index > consumer_index {
-        return Err(WriteBackError::UnsupportedGeneratedBinding {
-            view_key: view_key.to_string(),
-            node_id: edit.id.clone(),
-            reason: "generated binding dependencies appear after its consumers".to_string(),
-        });
+        let Some(dependency_original_index) = dependency_index.checked_sub(1) else {
+            return Ok(GeneratedFormInsertion::OriginalIndex(dependency_index));
+        };
+        let dependency_form = SourceFormId {
+            scope: scope.clone(),
+            index: dependency_original_index,
+        };
+        let moved_forms = generated_consumer_form_closure(root_patch, view_key, &scope, &consumers);
+        if moved_forms.iter().any(|form| form == &dependency_form) {
+            return Err(WriteBackError::UnsupportedGeneratedBinding {
+                view_key: view_key.to_string(),
+                node_id: edit.id.clone(),
+                reason: "generated binding dependencies appear after its consumers".to_string(),
+            });
+        }
+        document.move_forms_after_dependency_if_needed(&moved_forms, &dependency_form)?;
+        let mut insertion_dependencies = generated_source_dependency_forms(
+            root_patch,
+            interaction_state,
+            view_key,
+            &scope,
+            edit,
+        );
+        if !insertion_dependencies
+            .iter()
+            .any(|form| form == &dependency_form)
+        {
+            insertion_dependencies.push(dependency_form);
+        }
+        return Ok(GeneratedFormInsertion::AfterCurrentForms(
+            insertion_dependencies,
+        ));
     }
-    Ok(dependency_index)
+    Ok(GeneratedFormInsertion::OriginalIndex(dependency_index))
+}
+
+fn generated_source_dependency_forms(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    scope: &SourceScopeId,
+    edit: &super::state::PatcherNodeEdit,
+) -> Vec<SourceFormId> {
+    let mut forms = Vec::new();
+    let mut seen = HashSet::new();
+    for node_id in generated_node_dependencies(root_patch, interaction_state, view_key, edit) {
+        if let Some((form_id, _)) = patch_for_view(root_patch, view_key)
+            .and_then(|patch| patch_node(patch, &node_id))
+            .and_then(|node| source_owner_location_for_node(node))
+            && &form_id.scope == scope
+            && seen.insert(form_id.clone())
+        {
+            forms.push(form_id.clone());
+        }
+    }
+    forms
+}
+
+fn generated_consumer_form_closure(
+    root_patch: &Patch,
+    view_key: &str,
+    scope: &SourceScopeId,
+    consumers: &[String],
+) -> Vec<SourceFormId> {
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return Vec::new();
+    };
+    let mut forms = Vec::new();
+    let mut seen = HashSet::new();
+    for consumer in consumers {
+        for form in dependent_form_closure(patch, consumer, scope) {
+            if seen.insert(form.clone()) {
+                forms.push(form);
+            }
+        }
+    }
+    forms
 }
 
 fn generated_expression_source_dependency_index(
@@ -3951,6 +4046,46 @@ fn param_node_name(node: &PatchNode) -> Option<&str> {
         .flatten()
 }
 
+fn reorder_modulatable_param_after_instrument_modulators(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    view_key: &str,
+    node: &PatchNode,
+    form_id: &SourceFormId,
+    replacement: &Expression,
+) -> Result<(), WriteBackError> {
+    if view_key != "root" {
+        return Ok(());
+    }
+    let Expression::List(items) = replacement else {
+        return Ok(());
+    };
+    if symbol_at(items, 0) != Some("param") || !expression_has_true_attribute(items, "@mod") {
+        return Ok(());
+    }
+    let Some(dependency_original_index) =
+        document.latest_instrument_modulator_input_index(&form_id.scope)
+    else {
+        return Ok(());
+    };
+    let dependency_form = SourceFormId {
+        scope: form_id.scope.clone(),
+        index: dependency_original_index,
+    };
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return Ok(());
+    };
+    let moved_forms = dependent_form_closure(patch, &node.id, &form_id.scope);
+    if moved_forms.iter().any(|form| form == &dependency_form) {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "modulatable param would move after one of its own dependents".to_string(),
+        });
+    }
+    document.move_forms_after_dependency_if_needed(&moved_forms, &dependency_form)
+}
+
 fn apply_param_text_edit(
     document: &mut SourceDocument,
     root_patch: &Patch,
@@ -4012,7 +4147,15 @@ fn apply_param_text_edit(
         form_id: form_id.clone(),
         path: Default::default(),
     };
-    document.replace_expr(&expr_id, replacement)?;
+    document.replace_expr(&expr_id, replacement.clone())?;
+    reorder_modulatable_param_after_instrument_modulators(
+        document,
+        root_patch,
+        view_key,
+        node,
+        form_id,
+        &replacement,
+    )?;
 
     if new_name == old_name {
         return Ok(());
@@ -4086,7 +4229,15 @@ fn apply_binding_value_to_param_text_edit(
         form_id: form_id.clone(),
         path: Default::default(),
     };
-    document.replace_expr(&expr_id, replacement)?;
+    document.replace_expr(&expr_id, replacement.clone())?;
+    reorder_modulatable_param_after_instrument_modulators(
+        document,
+        root_patch,
+        view_key,
+        node,
+        form_id,
+        &replacement,
+    )?;
 
     if new_name == *old_name {
         return Ok(());
@@ -4822,14 +4973,119 @@ impl SourceDocument {
     }
 
     fn emit(&self) -> String {
-        self.forms
-            .iter()
-            .filter_map(|form| match &form.form {
-                SourceForm::Expr(expr) => Some(format_writeback_expression(expr)),
-                SourceForm::Macro(name) => self.macros.get(name).map(MacroDocument::emit),
-            })
+        self.forms_in_emit_order()
+            .into_iter()
+            .filter_map(|form| self.emit_form(form))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn emit_form(&self, form: &DocumentForm) -> Option<String> {
+        match &form.form {
+            SourceForm::Expr(expr) => Some(format_writeback_expression(expr)),
+            SourceForm::Macro(name) => self.macros.get(name).map(MacroDocument::emit),
+        }
+    }
+
+    fn forms_in_emit_order(&self) -> Vec<&DocumentForm> {
+        let macro_names = self
+            .forms
+            .iter()
+            .filter_map(|form| match &form.form {
+                SourceForm::Macro(name) if self.macros.contains_key(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if macro_names.is_empty() {
+            return self.forms.iter().collect();
+        }
+
+        let macro_name_set = macro_names.iter().cloned().collect::<HashSet<_>>();
+        let macro_position = macro_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let macro_form_by_name = self
+            .forms
+            .iter()
+            .filter_map(|form| match &form.form {
+                SourceForm::Macro(name) => Some((name.as_str(), form)),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut ordered_macro_names = Vec::new();
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        for name in &macro_names {
+            self.visit_macro_for_emit_order(
+                name,
+                &macro_name_set,
+                &macro_position,
+                &mut visiting,
+                &mut visited,
+                &mut ordered_macro_names,
+            );
+        }
+
+        let mut ordered = ordered_macro_names
+            .into_iter()
+            .filter_map(|name| macro_form_by_name.get(name.as_str()).copied())
+            .collect::<Vec<_>>();
+        ordered.extend(
+            self.forms
+                .iter()
+                .filter(|form| !matches!(form.form, SourceForm::Macro(_))),
+        );
+        ordered
+    }
+
+    fn visit_macro_for_emit_order<'a>(
+        &'a self,
+        name: &'a str,
+        macro_names: &HashSet<String>,
+        macro_position: &HashMap<&'a str, usize>,
+        visiting: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+        ordered: &mut Vec<String>,
+    ) {
+        if visited.contains(name) {
+            return;
+        }
+        if !visiting.insert(name.to_string()) {
+            return;
+        }
+
+        let mut references = HashSet::new();
+        if let Some(macro_doc) = self.macros.get(name) {
+            for form in &macro_doc.body {
+                collect_macro_call_references(&form.expr, macro_names, &mut references);
+            }
+        }
+        let mut references = references.into_iter().collect::<Vec<_>>();
+        references.sort_by_key(|reference| {
+            macro_position
+                .get(reference.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+        for reference in references {
+            if reference != name {
+                self.visit_macro_for_emit_order(
+                    &reference,
+                    macro_names,
+                    macro_position,
+                    visiting,
+                    visited,
+                    ordered,
+                );
+            }
+        }
+
+        visiting.remove(name);
+        visited.insert(name.to_string());
+        ordered.push(name.to_string());
     }
 
     fn prepend_form(
@@ -4911,6 +5167,74 @@ impl SourceDocument {
                     .unwrap_or(macro_doc.body.len());
                 macro_doc.body.insert(
                     index,
+                    MacroBodyForm {
+                        original_index: None,
+                        expr,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn insert_generated_form(
+        &mut self,
+        scope: &SourceScopeId,
+        insertion: &GeneratedFormInsertion,
+        expr: Expression,
+    ) -> Result<(), WriteBackError> {
+        match insertion {
+            GeneratedFormInsertion::OriginalIndex(index) => self.insert_form(scope, *index, expr),
+            GeneratedFormInsertion::AfterCurrentForms(forms) => {
+                self.insert_form_after_current_forms(scope, forms, expr)
+            }
+        }
+    }
+
+    fn insert_form_after_current_forms(
+        &mut self,
+        scope: &SourceScopeId,
+        dependencies: &[SourceFormId],
+        expr: Expression,
+    ) -> Result<(), WriteBackError> {
+        match scope {
+            SourceScopeId::Root => {
+                let insert_at = dependencies
+                    .iter()
+                    .filter(|dependency| dependency.scope == *scope)
+                    .filter_map(|dependency| self.form_position(dependency))
+                    .max()
+                    .map(|position| position + 1)
+                    .unwrap_or(self.forms.len());
+                self.forms.insert(
+                    insert_at,
+                    DocumentForm {
+                        original_index: None,
+                        form: SourceForm::Expr(expr),
+                    },
+                );
+                Ok(())
+            }
+            SourceScopeId::Macro { name } => {
+                let positions = dependencies
+                    .iter()
+                    .filter(|dependency| dependency.scope == *scope)
+                    .filter_map(|dependency| self.form_position(dependency))
+                    .collect::<Vec<_>>();
+                let Some(macro_doc) = self.macros.get_mut(name) else {
+                    return Err(WriteBackError::InvalidEdit {
+                        view_key: view_key_for_scope(scope),
+                        node_id: String::new(),
+                        reason: "missing macro scope for generated binding".to_string(),
+                    });
+                };
+                let insert_at = positions
+                    .into_iter()
+                    .max()
+                    .map(|position| position + 1)
+                    .unwrap_or(macro_doc.body.len());
+                macro_doc.body.insert(
+                    insert_at,
                     MacroBodyForm {
                         original_index: None,
                         expr,

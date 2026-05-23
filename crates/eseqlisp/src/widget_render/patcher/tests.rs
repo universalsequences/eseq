@@ -3659,7 +3659,7 @@ fn writeback_macro_parameter_rename_updates_header_and_resolved_references() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1))\n(defmacro ap (input g)\n  (def node (+ input g))\n  (phasor node))"
+        "(defmacro ap (input g)\n  (def node (+ input g))\n  (phasor node))\n(def sig (in 1))"
     );
 }
 
@@ -5076,6 +5076,132 @@ fn writeback_fuzz_mixed_file_and_created_macros_compile() {
 }
 
 #[test]
+fn writeback_created_macro_call_stays_after_created_macro_definition_when_file_macros_are_late() {
+    let source = r#"
+        (def value2 0.3)
+        (def value1 3.0)
+        (param idx @min 0 @max 3)
+        (def phasor1 (phasor value1))
+        (defmacro ramp-to-lfo-shapes (ramp)
+          (tuple ramp ramp ramp ramp))
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (def mod2 (in 6 @name mod2 @modulator 2))
+        (def mod3 (in 7 @name mod3 @modulator 3))
+        (def mod4 (in 8 @name mod4 @modulator 4))
+        (def mod5 (in 9 @name mod5 @modulator 5))
+        (def mod6 (in 10 @name mod6 @modulator 6))
+        (def ext1 (in 11 @name ext1 @modulator 7))
+        (def ext2 (in 12 @name ext2 @modulator 8))
+        (def ext3 (in 13 @name ext3 @modulator 9))
+        (def ext4 (in 14 @name ext4 @modulator 10))
+        (def phase (phasor pitch))
+        (def (shape1 shape2 shape3 shape4) (ramp-to-lfo-shapes phase))
+        (def osc (scale shape1 0.0 1.0 -1.0 1.0))
+        (out (* osc velocity) 1 @name audio)
+    "#;
+    let root_patch = parse(source);
+    let phasor = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let osc = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "osc")
+        .unwrap();
+    let osc_inlet = 0;
+    let shape_to_osc = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == osc.id && connection.to_input == osc_inlet)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(shape_to_osc),
+        ));
+
+    let created_macro =
+        allocate_created_text_node(&mut state, "root", "defmacro *ramp-to-trapezoid*");
+    assert!(promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        "root",
+        &created_macro,
+    ));
+    let macro_source = r#"(defmacro ramp-to-trapezoid (ramp rise fall)
+          (def r-val (max rise 0.0001))
+          (def f-val (max fall 0.0001))
+          (min (/ ramp r-val) (/ (- 1.0 ramp) f-val)))"#;
+    state
+        .edit_state
+        .created_macros
+        .get_mut("ramp-to-trapezoid")
+        .unwrap()
+        .source = Some(macro_source.to_string());
+    connect_output_to_input(&mut state, "root", &phasor.id, &created_macro, 0);
+    connect_output_to_input(&mut state, "root", "value2", &created_macro, 1);
+    connect_output_to_input(&mut state, "root", "value2", &created_macro, 2);
+    connect_output_to_input(&mut state, "root", &created_macro, &osc.id, osc_inlet);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    let macro_index = emitted
+        .find("(defmacro ramp-to-trapezoid")
+        .expect("created macro definition should be emitted");
+    let call_index = emitted
+        .find("(def ramp-to-trapezoid1 (ramp-to-trapezoid phasor1 value2 value2))")
+        .expect("created macro call should be emitted");
+    assert!(
+        macro_index < call_index,
+        "created macro definition must precede generated call:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+#[test]
+fn writeback_hoists_late_macro_definitions_before_root_calls() {
+    let source = r#"
+        (def value2 0.3)
+        (def value1 3.0)
+        (def phasor1 (phasor value1))
+        (def ramp-to-trapezoid1 (ramp-to-trapezoid phasor1 value2 value2))
+        (defmacro ramp-to-trapezoid (ramp rise fall)
+          (def r-val (max rise 0.0001))
+          (def f-val (max fall 0.0001))
+          (min (/ ramp r-val) (/ (- 1.0 ramp) f-val)))
+        (out ramp-to-trapezoid1 1)
+    "#;
+
+    let emitted = emit_patch_writeback(
+        source,
+        PatcherIntent::Instrument,
+        &PatcherInteractionState::default(),
+    )
+    .unwrap();
+
+    let macro_index = emitted
+        .find("(defmacro ramp-to-trapezoid")
+        .expect("macro definition should be emitted");
+    let call_index = emitted
+        .find("(def ramp-to-trapezoid1 (ramp-to-trapezoid phasor1 value2 value2))")
+        .expect("macro call should remain emitted");
+    assert!(
+        macro_index < call_index,
+        "macro definition must precede root call:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+#[test]
 fn writeback_created_modulatable_param_uses_param_name_for_mod_accessor() {
     let source = r#"
         (def gate (in 1 @name gate))
@@ -5458,9 +5584,9 @@ fn writeback_created_mod_from_existing_modulatable_param_follows_modulator_input
     let sub1_index = emitted
         .find("(def sub1 (- value8 modulated1))")
         .expect("source consumer should use the created mod accessor");
-    assert!(ext4_index < param_index);
-    assert!(param_index < modulated_index);
-    assert!(modulated_index < sub1_index);
+    assert!(ext4_index < param_index, "{emitted}");
+    assert!(param_index < modulated_index, "{emitted}");
+    assert!(modulated_index < sub1_index, "{emitted}");
     compile_patch_source_with_dgenlisp(&emitted).unwrap();
 }
 
@@ -5527,7 +5653,7 @@ fn writeback_generated_binding_avoids_scope_name_collisions() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(param phasor1)\n(make-history phasor2)\n(defmacro phasor3 (sig) sig)\n(def sig (in 1))\n(def phasor4 (phasor sig))\n(out phasor4 1)"
+        "(defmacro phasor3 (sig) sig)\n(param phasor1)\n(make-history phasor2)\n(def sig (in 1))\n(def phasor4 (phasor sig))\n(out phasor4 1)"
     );
 }
 
@@ -5603,7 +5729,7 @@ fn writeback_macro_generated_binding_uses_macro_local_scope() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def phasor1 (phasor 1.0))\n(defmacro ap (sig)\n  (def phasor1 (phasor sig))\n  phasor1)"
+        "(defmacro ap (sig)\n  (def phasor1 (phasor sig))\n  phasor1)\n(def phasor1 (phasor 1.0))"
     );
 }
 
