@@ -224,7 +224,14 @@ pub(super) struct OperatorPortShape {
 pub struct MacroPatch {
     pub name: String,
     pub params: Vec<String>,
+    pub outputs: Vec<String>,
     pub patch: Patch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroSignature {
+    pub params: Vec<String>,
+    pub outputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]

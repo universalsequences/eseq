@@ -221,6 +221,13 @@ impl Editor {
         let Some(node) = find_node_by_id(&layout, focused_id) else {
             return false;
         };
+        if key.code == KeyCode::Tab
+            && key.modifiers == KeyModifiers::NONE
+            && node.widget_type == "patcher"
+            && !crate::widget_render::patcher::patcher_has_text_edit(&node)
+        {
+            return self.switch_focused_patcher_to_emitted_source_buffer(&node);
+        }
         // Space bar should only be consumed by text-entry widgets (for typing).
         // All other widgets let space fall through to keybindings.
         let is_text_input = node.widget_type == "text-input"
@@ -250,6 +257,76 @@ impl Editor {
             self.mark_needs_redraw();
         }
         true
+    }
+
+    pub(super) fn handle_visible_patcher_selected_cable_shortcut(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+            || !key.modifiers.contains(KeyModifiers::SUPER)
+        {
+            return false;
+        }
+        eprintln!(
+            "[patcher cmd-y] editor received shortcut active-buffer={} focused-widget={:?}",
+            self.active_buffer().name,
+            self.active_leaf().focused_widget_id
+        );
+        if self.focused_widget_captures_text_input() {
+            eprintln!("[patcher cmd-y] ignored: focused widget is capturing text input");
+            return false;
+        }
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            eprintln!("[patcher cmd-y] ignored: no current widget layout");
+            return false;
+        };
+        let mut patchers = Vec::new();
+        collect_patcher_nodes_with_selected_cable(&layout, &mut patchers);
+        eprintln!(
+            "[patcher cmd-y] visible patchers with selected cable={}",
+            patchers.len()
+        );
+        let Some(node) = patchers.into_iter().next() else {
+            return false;
+        };
+        eprintln!(
+            "[patcher cmd-y] forwarding to patcher widget_id={} stable_id={:?} path={:?}",
+            node.widget_id,
+            node.stable_widget_id,
+            node.props
+                .get("path")
+                .or_else(|| node.props.get("file"))
+                .cloned()
+        );
+
+        let gen_before = crate::widget_render::widget_state_generation();
+        let widget_event = map_key_event(
+            &node,
+            WidgetKeyEvent {
+                code: key.code,
+                modifiers: key.modifiers,
+            },
+        );
+        let consumed = widget_event.is_some();
+        eprintln!("[patcher cmd-y] patcher map_key_event consumed={consumed}");
+        let output = widget_event.and_then(|event| handle_event(&node, event));
+        if !consumed {
+            return false;
+        }
+        let _ = self.apply_widget_output(output);
+        if crate::widget_render::widget_state_generation() != gen_before {
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+        }
+        true
+    }
+
+    fn focused_widget_captures_text_input(&self) -> bool {
+        let Some(focused_id) = self.active_leaf().focused_widget_id else {
+            return false;
+        };
+        let Some(layout) = self.runtime.current_layout.as_ref() else {
+            return false;
+        };
+        find_node_by_id_ref(layout, focused_id).is_some_and(node_captures_text_input)
     }
 
     pub(super) fn navigate_focus(&mut self, direction: KeyCode) {
@@ -554,4 +631,32 @@ pub(super) fn find_node_by_id(node: &LayoutNode, id: u64) -> Option<LayoutNode> 
         }
     }
     None
+}
+
+fn find_node_by_id_ref(node: &LayoutNode, id: u64) -> Option<&LayoutNode> {
+    if node.widget_id == id {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = find_node_by_id_ref(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn node_captures_text_input(node: &LayoutNode) -> bool {
+    matches!(node.widget_type.as_str(), "text-input" | "textbox")
+        || crate::widget_render::patcher::patcher_has_text_edit(node)
+}
+
+fn collect_patcher_nodes_with_selected_cable(node: &LayoutNode, out: &mut Vec<LayoutNode>) {
+    if node.widget_type == "patcher"
+        && crate::widget_render::patcher::patcher_has_selected_cable(node)
+    {
+        out.push(node.clone());
+    }
+    for child in &node.children {
+        collect_patcher_nodes_with_selected_cable(child, out);
+    }
 }

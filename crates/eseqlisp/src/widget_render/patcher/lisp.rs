@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
-use super::model::{ConnectionKind, NodeKind, OperatorPortShape, Patch, PatcherIntent};
+use super::model::{
+    ConnectionKind, MacroSignature, NodeKind, OperatorPortShape, Patch, PatcherIntent,
+};
 use super::project::{Projector, dgenlisp_constant_names, dgenlisp_operator_port_shapes};
 
 pub fn parse_patch_source(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
@@ -18,12 +20,55 @@ pub fn parse_patch_source(source: &str, intent: PatcherIntent) -> Result<Patch, 
             let Expression::List(items) = expr else {
                 return None;
             };
-            (symbol_at(items, 0) == Some("defmacro"))
-                .then(|| symbol_at(items, 1).map(str::to_string))
-                .flatten()
+            if symbol_at(items, 0) != Some("defmacro") {
+                return None;
+            }
+            let name = symbol_at(items, 1)?.to_string();
+            let params = match items.get(2) {
+                Some(Expression::List(params)) => params
+                    .iter()
+                    .filter_map(|expr| match expr {
+                        Expression::Symbol(name) => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            Some((
+                name,
+                MacroSignature {
+                    params,
+                    outputs: infer_macro_outputs(&items[3..]),
+                },
+            ))
         })
         .collect();
     Ok(Projector::new(macros, intent).project(&exprs))
+}
+
+fn infer_macro_outputs(body: &[Expression]) -> Vec<String> {
+    let Some(return_expr) = body.last() else {
+        return Vec::new();
+    };
+    let count = tuple_return_items(return_expr)
+        .map(|items| items.len())
+        .unwrap_or(1);
+    (0..count)
+        .map(|idx| {
+            if idx == 0 {
+                "out".to_string()
+            } else {
+                format!("out{}", idx + 1)
+            }
+        })
+        .collect()
+}
+
+fn tuple_return_items(expr: &Expression) -> Option<Vec<&Expression>> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    (symbol_at(items, 0) == Some("tuple")).then(|| items.iter().skip(1).collect())
 }
 
 pub(super) fn symbol_at(items: &[Expression], idx: usize) -> Option<&str> {
@@ -161,7 +206,7 @@ pub(super) fn default_outputs(op: &str) -> Vec<String> {
 pub(super) fn editor_node_port_shape(
     op: &str,
     kind: NodeKind,
-    macro_arities: &HashMap<String, usize>,
+    macro_signatures: &HashMap<String, MacroSignature>,
 ) -> OperatorPortShape {
     match kind {
         NodeKind::In | NodeKind::Param => OperatorPortShape {
@@ -181,8 +226,14 @@ pub(super) fn editor_node_port_shape(
             output_count: 1,
         },
         NodeKind::MacroInstance => OperatorPortShape {
-            input_count: macro_arities.get(op).copied().unwrap_or(1),
-            output_count: 1,
+            input_count: macro_signatures
+                .get(op)
+                .map(|signature| signature.params.len())
+                .unwrap_or(1),
+            output_count: macro_signatures
+                .get(op)
+                .map(|signature| signature.outputs.len())
+                .unwrap_or(1),
         },
         _ => dgenlisp_operator_port_shapes()
             .get(op)

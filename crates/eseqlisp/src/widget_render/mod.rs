@@ -977,6 +977,7 @@ pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'sta
     let mut shaders = Vec::new();
     shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
     shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
+    shaders.push(("patcher-back-chevron", None, PATCHER_BACK_CHEVRON_SHADER));
     for definition in WIDGET_DEFINITIONS {
         for &name in definition.names() {
             if let Some(fragment_shader) = definition.metal_fragment_shader(name) {
@@ -1418,6 +1419,40 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 "#;
 
 #[cfg(target_os = "macos")]
+pub const PATCHER_BACK_CHEVRON_SHADER: &str = r#"
+float patcher_chevron_segment_distance(float2 p, float2 a, float2 b)
+{
+    float2 pa = p - a;
+    float2 ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 p = float2(in.uv.x * aspect, in.uv.y);
+    float scale = min(aspect, 1.0);
+    float center_x = aspect * 0.5;
+    float2 tip = float2(center_x - 0.18 * scale, 0.50);
+    float2 upper = float2(center_x + 0.18 * scale, 0.25);
+    float2 lower = float2(center_x + 0.18 * scale, 0.75);
+
+    float d = min(
+        patcher_chevron_segment_distance(p, upper, tip),
+        patcher_chevron_segment_distance(p, tip, lower));
+    float thickness = 0.055 * scale;
+    float aa = max(fwidth(d), 0.001);
+    float mask = smoothstep(thickness + aa, thickness - aa, d);
+    if (mask < 0.002) {
+        discard_fragment();
+    }
+
+    return float4(in.color_a.rgb, in.color_a.a * mask);
+}
+"#;
+
+#[cfg(target_os = "macos")]
 pub const PATCHER_NODE_SHADER: &str = r#"
 float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, float smin, float smax)
 {
@@ -1426,8 +1461,8 @@ float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, fl
 
 float3 patcher_node_normal(float2 pos, float2 size, float radius, float eps, float ratio)
 {
-    float smin = -0.05 * ratio;
-    float smax = 0.118;
+    float smin = -0.1 * ratio;
+    float smax = 1.118;
     float right = patcher_node_smooth_rounded_rect(pos + float2(eps, 0.0), size, radius, smin, smax);
     float left = patcher_node_smooth_rounded_rect(pos - float2(eps, 0.0), size, radius, smin, smax);
     float up = patcher_node_smooth_rounded_rect(pos + float2(0.0, eps), size, radius, smin, smax);
@@ -1440,7 +1475,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float aspect = max(in.aspect, 0.001);
     float2 localPos = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
     float2 sdfSize = float2(aspect, 1.0);
-    float cornerRadius = min(in.corner_radius, min(aspect, 1.0));
+    float cornerRadius = min(in.corner_radius * 1.5, min(aspect, 1.0));
 
     float nodeDist = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
     float nodeDerivative = max(fwidth(nodeDist), 0.001);

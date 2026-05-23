@@ -18,8 +18,9 @@ use super::metrics::{
     DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS, PAN_OVERSCROLL_VIEWPORT_FACTOR,
 };
 use super::model::{
-    ArgValue, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef, MacroPatch, NodeKind,
-    OutputPortRef, Patch, PatchConnection, PatchNode, PatcherIntent,
+    ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef,
+    MacroPatch, MacroSignature, NodeKind, OutputPortRef, Patch, PatchConnection, PatchNode,
+    PatcherIntent, SourceOwner,
 };
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
@@ -894,19 +895,13 @@ pub(super) fn patcher_breadcrumb(
     }
 }
 
-pub(super) fn patcher_back_label(
-    interaction_state: &PatcherInteractionState,
-) -> Option<&'static str> {
-    interaction_state.active_macro.as_ref().map(|_| "<")
-}
-
 pub(super) fn patch_with_interaction_state(
     mut patch: Patch,
     interaction_state: &PatcherInteractionState,
     view_key: &str,
 ) -> Patch {
     patch = patch_with_created_macros(patch, interaction_state);
-    let macro_arities = macro_arities_with_created_inputs(&patch, interaction_state);
+    let macro_signatures = macro_signatures_with_visual_edits(&patch, interaction_state);
     patch.nodes.retain(|node| {
         !interaction_state
             .edit_state
@@ -932,17 +927,18 @@ pub(super) fn patch_with_interaction_state(
             && live_nodes.contains(connection.to_node.as_str())
     });
     for node in &mut patch.nodes {
+        refresh_macro_instance_outputs(node, &macro_signatures);
         let edit_key = node_edit_key(view_key, &node.id);
         if let Some(edit) = interaction_state.edit_state.nodes.get(&edit_key) {
             node.position = edit.position;
-            apply_node_text_override(node, &edit.text, &macro_arities);
+            apply_node_text_override(node, &edit.text, &macro_signatures);
         }
         if let Some(edit) = interaction_state
             .text_edit
             .as_ref()
             .filter(|edit| edit.node_id == node.id)
         {
-            apply_node_text_override(node, &edit.text, &macro_arities);
+            apply_node_text_override(node, &edit.text, &macro_signatures);
         }
     }
     for connection in &mut patch.connections {
@@ -972,7 +968,7 @@ pub(super) fn patch_with_interaction_state(
             &edit.id,
             &text,
             edit.position,
-            &macro_arities,
+            &macro_signatures,
             interaction_state
                 .text_edit
                 .as_ref()
@@ -999,6 +995,40 @@ pub(super) fn patch_with_interaction_state(
     patch
 }
 
+fn refresh_macro_instance_outputs(
+    node: &mut PatchNode,
+    macro_signatures: &HashMap<String, MacroSignature>,
+) {
+    if node.kind != NodeKind::MacroInstance {
+        return;
+    }
+    let Some(signature) = macro_signatures.get(&node.op) else {
+        return;
+    };
+    node.outputs = match destructuring_output_names(node) {
+        Some(names) if names.len() == signature.outputs.len() => names,
+        _ => signature.outputs.clone(),
+    };
+}
+
+fn destructuring_output_names(node: &PatchNode) -> Option<Vec<String>> {
+    let source = node.source.as_ref()?;
+    match &source.owner {
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Destructuring(names),
+            ..
+        } => Some(names.clone()),
+        SourceOwner::Compound { parts } => parts.iter().find_map(|owner| match owner {
+            SourceOwner::BindingValue {
+                binding: BindingTarget::Destructuring(names),
+                ..
+            } => Some(names.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 pub(super) fn patch_with_created_macros(
     mut patch: Patch,
     interaction_state: &PatcherInteractionState,
@@ -1023,15 +1053,32 @@ pub(super) fn patch_with_created_macros(
     patch
 }
 
-fn macro_arities_with_created_inputs(
+fn macro_signatures_with_visual_edits(
     patch: &Patch,
     interaction_state: &PatcherInteractionState,
-) -> HashMap<String, usize> {
-    let mut macro_arities = patch
+) -> HashMap<String, MacroSignature> {
+    let mut macro_signatures = patch
         .macros
         .iter()
-        .map(|macro_patch| (macro_patch.name.clone(), macro_patch.params.len()))
+        .map(|macro_patch| {
+            (
+                macro_patch.name.clone(),
+                MacroSignature {
+                    params: macro_patch.params.clone(),
+                    outputs: macro_patch.outputs.clone(),
+                },
+            )
+        })
         .collect::<HashMap<_, _>>();
+
+    for macro_patch in &patch.macros {
+        if let Some(output_count) = visual_macro_output_count(macro_patch, interaction_state)
+            && let Some(signature) = macro_signatures.get_mut(&macro_patch.name)
+        {
+            signature.outputs = default_output_names(output_count);
+        }
+    }
+
     for edit in interaction_state
         .edit_state
         .nodes
@@ -1054,12 +1101,116 @@ fn macro_arities_with_created_inputs(
         else {
             continue;
         };
-        macro_arities
+        macro_signatures
             .entry(macro_name.to_string())
-            .and_modify(|arity| *arity = (*arity).max(channel))
-            .or_insert(channel);
+            .and_modify(|signature| {
+                while signature.params.len() < channel {
+                    signature
+                        .params
+                        .push(format!("input{}", signature.params.len() + 1));
+                }
+            })
+            .or_insert_with(|| MacroSignature {
+                params: (0..channel)
+                    .map(|idx| format!("input{}", idx + 1))
+                    .collect(),
+                outputs: default_output_names(1),
+            });
     }
-    macro_arities
+    macro_signatures
+}
+
+fn visual_macro_output_count(
+    macro_patch: &MacroPatch,
+    interaction_state: &PatcherInteractionState,
+) -> Option<usize> {
+    let view_key = format!("macro:{}", macro_patch.name);
+    let mut edited = false;
+    let mut max_channel = 0usize;
+
+    for node in &macro_patch.patch.nodes {
+        if node.kind != NodeKind::Out {
+            continue;
+        }
+        let edit_key = node_edit_key(&view_key, &node.id);
+        if interaction_state
+            .edit_state
+            .deleted_nodes
+            .contains(&edit_key)
+        {
+            edited = true;
+            continue;
+        }
+        max_channel = max_channel.max(output_channel_from_node(node).unwrap_or(1));
+    }
+
+    for edit in interaction_state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| edit.view_key == view_key)
+    {
+        match &edit.origin {
+            PatcherNodeOrigin::Created { .. } => {
+                if let Some(channel) = output_channel_from_text(&edit.text) {
+                    edited = true;
+                    max_channel = max_channel.max(channel);
+                }
+            }
+            PatcherNodeOrigin::Source { source_node_id } => {
+                let is_source_out = macro_patch
+                    .patch
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == *source_node_id && node.kind == NodeKind::Out);
+                if !is_source_out {
+                    continue;
+                }
+                edited = true;
+                if let Some(channel) = output_channel_from_text(&edit.text) {
+                    max_channel = max_channel.max(channel);
+                }
+            }
+        }
+    }
+
+    edited.then_some(max_channel)
+}
+
+fn output_channel_from_node(node: &PatchNode) -> Option<usize> {
+    node.args
+        .first()
+        .and_then(|arg| match arg {
+            ArgValue::Literal(value) => value.parse::<usize>().ok(),
+            _ => None,
+        })
+        .filter(|channel| *channel > 0)
+}
+
+fn output_channel_from_text(text: &str) -> Option<usize> {
+    let Ok((op, inline_args)) = parse_editor_node_text(text.trim()) else {
+        return None;
+    };
+    if op != "out" {
+        return None;
+    }
+    inline_args
+        .first()
+        .and_then(|arg| arg.parse::<usize>().ok())
+        .filter(|channel| *channel > 0)
+        .or(Some(1))
+}
+
+fn default_output_names(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|idx| {
+            if idx == 0 {
+                "out".to_string()
+            } else {
+                format!("out{}", idx + 1)
+            }
+        })
+        .collect()
 }
 
 fn created_macro_patch_from_source(name: &str, source: &str) -> Option<MacroPatch> {
@@ -1077,9 +1228,9 @@ pub(super) fn default_created_macro_source(name: &str) -> String {
 fn apply_node_text_override(
     node: &mut PatchNode,
     text: &str,
-    macro_arities: &HashMap<String, usize>,
+    macro_signatures: &HashMap<String, MacroSignature>,
 ) {
-    let edited = node_from_editor_text(&node.id, text, node.position, macro_arities, false);
+    let edited = node_from_editor_text(&node.id, text, node.position, macro_signatures, false);
     node.op = edited.op;
     node.kind = edited.kind;
     node.label = edited.label;
@@ -1092,7 +1243,7 @@ pub(super) fn node_from_editor_text(
     id: &str,
     text: &str,
     position: (f32, f32),
-    macro_arities: &HashMap<String, usize>,
+    macro_signatures: &HashMap<String, MacroSignature>,
     is_editing: bool,
 ) -> PatchNode {
     let trimmed = text.trim();
@@ -1115,9 +1266,9 @@ pub(super) fn node_from_editor_text(
         Ok((op, inline_args)) => (op, inline_args, None),
         Err(error) => (trimmed.to_string(), Vec::new(), Some(error)),
     };
-    let known_macros = macro_arities.keys().cloned().collect::<HashSet<_>>();
+    let known_macros = macro_signatures.keys().cloned().collect::<HashSet<_>>();
     let kind = node_kind_for_op(&op, &known_macros);
-    let shape = editor_node_port_shape(&op, kind, macro_arities);
+    let shape = editor_node_port_shape(&op, kind, macro_signatures);
     let args = match kind {
         NodeKind::In => inline_args
             .into_iter()
@@ -1148,18 +1299,25 @@ pub(super) fn node_from_editor_text(
         kind,
         label: trimmed.to_string(),
         args,
-        outputs: (0..shape.output_count)
-            .map(|idx| {
-                if idx == 0 {
-                    "out".to_string()
-                } else {
-                    format!("out{}", idx + 1)
-                }
-            })
-            .collect(),
+        outputs: macro_signatures
+            .get(&op)
+            .filter(|_| kind == NodeKind::MacroInstance)
+            .map(|signature| signature.outputs.clone())
+            .unwrap_or_else(|| {
+                (0..shape.output_count)
+                    .map(|idx| {
+                        if idx == 0 {
+                            "out".to_string()
+                        } else {
+                            format!("out{}", idx + 1)
+                        }
+                    })
+                    .collect()
+            }),
         position,
         diagnostic: parse_diagnostic.or_else(|| {
-            let known = dgenlisp_operator_names().contains(&op) || macro_arities.contains_key(&op);
+            let known =
+                dgenlisp_operator_names().contains(&op) || macro_signatures.contains_key(&op);
             (!known
                 && !matches!(
                     kind,

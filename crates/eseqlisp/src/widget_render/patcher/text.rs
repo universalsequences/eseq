@@ -155,7 +155,18 @@ fn local_macro_documentation(macro_patch: &MacroPatch) -> OperatorDocumentation 
                 summary: None,
             })
             .collect(),
-        outputs: Vec::new(),
+        outputs: macro_patch
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| OperatorPortDocumentation {
+                name: Some(output.clone()),
+                kind: None,
+                required: Some(true),
+                index: Some(index),
+                summary: None,
+            })
+            .collect(),
     }
 }
 

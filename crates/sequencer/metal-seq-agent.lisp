@@ -7,25 +7,29 @@
 (defwidget agent-submit-icon
   :width 3.2 :height 3.2
   :paint-margin 0.3
-  :state (active)
+  :state (active canceling)
   :shader
-  (let ((bg-col (if (= active 1)
+  (let ((bg-col (if (> (+ active canceling) 0)
                   (rgba 0.98 0.98 0.99 1.0)
                   (rgba 0.90 0.91 0.93 1.0)))
-        (fg-col (rgba 0.07 0.075 0.085 1.0)))
+        (arrow-col (rgba 0.07 0.075 0.085 (- 1.0 canceling)))
+        (stop-col (rgba 0.07 0.075 0.085 canceling)))
     (sdf/layer
       (sdf/fill (sdf/circle 0.92)
         (material :color bg-col))
       (sdf/fill
         (sdf/translate 0.0 0.14
           (sdf/rounded-rect 0.05 0.46 0.025))
-        (material :color fg-col))
+        (material :color arrow-col))
       (sdf/fill
         (let ((clip (max (- (abs x) 0.58) (- (abs y) 0.62)))
               (left (max (sdf/line -0.38 -0.08 0.0 -0.42) clip))
               (right (max (sdf/line 0.38 -0.08 0.0 -0.42) clip)))
           (- (min left right) 0.045))
-        (material :color fg-col)))))
+        (material :color arrow-col))
+      (sdf/fill
+        (sdf/rounded-rect 0.34 0.34 0.04)
+        (material :color stop-col)))))
 
 (def agent-open ()
   (do
@@ -54,6 +58,13 @@
       (agent/send agent-current-conv agent-prompt)
       (set! agent-prompt ""))
     nil))
+
+(def agent-submit-current ()
+  (if (agent-busy?)
+    (if (> agent-current-conv 0)
+      (agent/cancel agent-current-conv)
+      nil)
+    (agent-send-current)))
 
 (def agent-status-label ()
   (if (> agent-current-conv 0)
@@ -293,22 +304,16 @@
               :font-size 11
               :on-change (lambda (v) (agent-set-current-model v)))
             (box :flex 1)
-            (if (agent-busy?)
-              (button "Cancel"
-                :variant :danger
-                :width 5.6
-                :height 1.35
-                :on-click |x y r| (if (> agent-current-conv 0) (agent/cancel agent-current-conv) nil))
-              (box :width 0.0 :height 0.0))
             (box :key "agent-submit"
               :width 3.4
               :height 1.34
               :h-align :center
               :v-align :end
-              :on-click |x y r| (agent-send-current)
+              :on-click |x y r| (agent-submit-current)
               (agent-submit-icon
-                :on-click |x y r| (agent-send-current)
-                :active (if (= agent-prompt "") 0 1)))))))))
+                :on-click |x y r| (agent-submit-current)
+                :active (if (or (agent-busy?) (not (= agent-prompt ""))) 1 0)
+                :canceling (if (agent-busy?) 1 0)))))))))
 
 (effect-buffer "*agent-artifacts*"
   (let ((agent-generation AGENT.generation))

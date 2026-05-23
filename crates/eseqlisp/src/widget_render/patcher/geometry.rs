@@ -195,21 +195,24 @@ pub(super) fn rect_from_points(
 }
 
 pub(super) fn port_center(rect: Rect, index: usize, count: usize, top: bool) -> (f32, f32) {
-    let count = count.max(1);
     let zoom = (rect.height / NODE_HEIGHT).max(MIN_ZOOM);
-    let edge_padding = PORT_EDGE_PADDING_CELLS * zoom;
-    let usable = (rect.width - edge_padding * 2.0).max(0.0);
-    let x = if count == 1 {
-        rect.col + edge_padding.min(rect.width * 0.5)
-    } else {
-        rect.col + edge_padding + usable * (index.min(count - 1) as f32) / ((count - 1) as f32)
-    };
+    let x = rect.col + port_x_offset(index, count, rect.width / zoom) * zoom;
     let y = if top {
         rect.row
     } else {
         rect.row + rect.height
     };
     (x, y)
+}
+
+pub(super) fn port_x_offset(index: usize, count: usize, width: f32) -> f32 {
+    let count = count.max(1);
+    let usable = (width - PORT_EDGE_PADDING_CELLS * 2.0).max(0.0);
+    if count == 1 {
+        PORT_EDGE_PADDING_CELLS.min(width * 0.5)
+    } else {
+        PORT_EDGE_PADDING_CELLS + usable * (index.min(count - 1) as f32) / ((count - 1) as f32)
+    }
 }
 
 pub(super) fn distance_squared(a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -510,6 +513,7 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
             end,
             origin.1 + segment.segment_row * zoom,
             SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
+            CABLE_HIT_RADIUS_CELLS * zoom,
             (local_col, local_row),
         )
         .then(|| source_connection_id(connection))

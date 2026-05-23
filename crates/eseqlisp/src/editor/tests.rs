@@ -1274,6 +1274,127 @@ fn scratch_mode_defaults_to_eseqlisp() {
 }
 
 #[test]
+fn valid_patcher_payload_updates_read_only_emitted_source_buffer() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = "/tmp/eseq/example/dsp.lisp";
+    let source = "(def out (out 1 0))";
+    let payload = Value::Map(HashMap::from([
+        (
+            "status".to_string(),
+            Rc::new(RefCell::new(Value::Keyword("valid".to_string()))),
+        ),
+        (
+            "path".to_string(),
+            Rc::new(RefCell::new(Value::String(path.to_string()))),
+        ),
+        (
+            "source".to_string(),
+            Rc::new(RefCell::new(Value::String(source.to_string()))),
+        ),
+    ]));
+
+    let id = editor
+        .sync_patcher_emitted_source_buffer(&[payload])
+        .expect("valid patcher payload should create emitted source buffer");
+    let buffer = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id == id)
+        .expect("emitted source buffer");
+
+    assert_eq!(
+        buffer.name,
+        crate::widget_render::patcher::emitted_source_buffer_name(path)
+    );
+    assert_eq!(buffer.text(), source);
+    assert_eq!(buffer.mode, BufferMode::DGenLisp);
+    assert!(buffer.read_only);
+    assert!(!buffer.dirty);
+}
+
+#[test]
+fn tab_from_patcher_emitted_source_buffer_returns_to_matching_patcher_buffer() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = "/tmp/eseq/example/dsp.lisp";
+    let patcher_id = editor.open_scratch_buffer("*patcher*", "");
+    let patcher_tree = Value::Map(HashMap::from([
+        (
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("patcher".to_string()))),
+        ),
+        (
+            "path".to_string(),
+            Rc::new(RefCell::new(Value::String(path.to_string()))),
+        ),
+    ]));
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(patcher_tree), Some(patcher_id));
+    let emitted_id = editor.upsert_read_only_scratch_buffer_with_mode(
+        &crate::widget_render::patcher::emitted_source_buffer_name(path),
+        "(def out (out 1 0))",
+        BufferMode::DGenLisp,
+    );
+    editor.set_active_buffer(emitted_id);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().id, patcher_id);
+}
+
+#[test]
+fn tab_from_patcher_emitted_source_buffer_uses_recorded_origin_without_widget_tree() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = "/tmp/eseq/instrument-drafts/dsp.lisp";
+    let patcher_id = editor.open_scratch_buffer("*instrument-patcher:new-instrument*", "");
+    let emitted_id = editor.upsert_read_only_scratch_buffer_with_mode(
+        &crate::widget_render::patcher::emitted_source_buffer_name(path),
+        "(def out (out 1 0))",
+        BufferMode::DGenLisp,
+    );
+    editor
+        .patcher_emitted_source_origins
+        .insert(path.to_string(), patcher_id);
+    editor.set_active_buffer(emitted_id);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().id, patcher_id);
+}
+
+#[test]
+fn upsert_patcher_emitted_source_buffer_preserves_active_buffer() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = temp_file_path("patcher-host-toggle");
+    editor.open_scratch_buffer("*instrument-patcher:test*", "");
+    let other_id = editor.open_scratch_buffer("*samples*", "");
+
+    let source_buffer_name = editor
+        .upsert_patcher_emitted_source_buffer(
+            "*instrument-patcher:test*",
+            &path,
+            "(def out (out 1 0))",
+        )
+        .expect("upsert should create emitted source buffer");
+
+    assert_eq!(editor.active_buffer().id, other_id);
+    assert_eq!(
+        source_buffer_name,
+        crate::widget_render::patcher::emitted_source_buffer_name(&path.to_string_lossy())
+    );
+    let source_buffer = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == source_buffer_name)
+        .expect("source buffer");
+    assert!(source_buffer.read_only);
+}
+
+#[test]
 fn cursor_movement_closes_completion_popup() {
     let mut runtime = Runtime::new();
     runtime.register_native("seq-step", |_args, _ctx| Ok(Value::Bool(true)));
@@ -2189,6 +2310,50 @@ fn patcher_background_double_click_consumes_local_only_event() {
         Value::Nil,
         "double-click should leave the patcher text edit active so Enter emits a patcher change"
     );
+}
+
+#[test]
+fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
+    let path = temp_file_path("patcher-visible-cable-cmd-y");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 12);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (patcher
+                    :height 10
+                    :path "{}"))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+    let patcher = first_patcher_layout_node(
+        editor
+            .runtime
+            .current_layout
+            .as_ref()
+            .expect("layout should contain patcher"),
+    )
+    .expect("patcher node");
+    crate::widget_render::patcher::select_first_patcher_cable_for_test(&patcher)
+        .expect("selected cable");
+    let initially_segmented =
+        crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher)
+            .expect("selected cable should have segmentation state");
+    editor.clear_focused_widget();
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SUPER));
+
+    let after =
+        crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher)
+            .expect("selected cable should still have segmentation state");
+    assert_ne!(after, initially_segmented);
 }
 
 #[test]

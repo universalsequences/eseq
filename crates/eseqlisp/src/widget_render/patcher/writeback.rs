@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
@@ -128,7 +128,16 @@ pub(super) fn emit_patch_writeback_result(
     apply_created_macro_parameter_writeback(&mut document, interaction_state)?;
 
     validate_connection_edits(&effective_root_patch, interaction_state)?;
-    apply_created_out_writeback(&mut document, &effective_root_patch, interaction_state)?;
+    let empty_generated = GeneratedBindings::default();
+    let empty_history_bindings = HistoryBindings::default();
+    apply_created_out_writeback(
+        &mut document,
+        &effective_root_patch,
+        interaction_state,
+        &empty_generated,
+        &empty_history_bindings,
+        CreatedOutWritebackScope::Root,
+    )?;
     apply_node_deletions(&mut document, &effective_root_patch, interaction_state)?;
 
     let active_view_key = active_patcher_view_key(interaction_state);
@@ -233,6 +242,14 @@ pub(super) fn emit_patch_writeback_result(
         &effective_root_patch,
         interaction_state,
         &history_bindings,
+    )?;
+    apply_created_out_writeback(
+        &mut document,
+        &effective_root_patch,
+        interaction_state,
+        &generated,
+        &history_bindings,
+        CreatedOutWritebackScope::Macro,
     )?;
     apply_cable_writeback(
         &mut document,
@@ -789,16 +806,19 @@ fn apply_created_out_writeback(
     document: &mut SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    scope_filter: CreatedOutWritebackScope,
 ) -> Result<(), WriteBackError> {
-    let generated = GeneratedBindings::default();
-    let history_bindings = HistoryBindings::default();
     let mut edits = interaction_state
         .edit_state
         .nodes
         .values()
         .filter(|edit| created_out_edit(edit))
+        .filter(|edit| scope_filter.includes(&edit.view_key))
         .collect::<Vec<_>>();
     edits.sort_by_key(|edit| (edit.view_key.clone(), edit.id.clone()));
+    let mut macro_returns: HashMap<String, BTreeMap<usize, Expression>> = HashMap::new();
     for edit in edits {
         let inbound = interaction_state
             .edit_state
@@ -811,22 +831,187 @@ fn apply_created_out_writeback(
             })
             .min_by_key(|connection| connection.id.clone());
         let value = if let Some(connection) = inbound {
-            value_reference_expr(
+            created_out_source_expression(
                 document,
                 root_patch,
                 interaction_state,
-                &generated,
-                &history_bindings,
+                generated,
+                history_bindings,
                 &edit.view_key,
                 &connection.from,
             )?
         } else {
             Expression::Symbol(MISSING_INPUT_SENTINEL.to_string())
         };
+        if edit.view_key.starts_with("macro:") {
+            let channel = created_out_channel(edit)?;
+            macro_returns
+                .entry(edit.view_key.clone())
+                .or_default()
+                .insert(channel, value);
+            continue;
+        }
         let expr = created_out_expression(edit, value)?;
         document.insert_form(&scope_for_view_key(&edit.view_key), usize::MAX, expr)?;
     }
+    for (view_key, mut outputs) in macro_returns {
+        add_live_source_macro_outputs(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            &view_key,
+            &mut outputs,
+        )?;
+        let scope = scope_for_view_key(&view_key);
+        let SourceScopeId::Macro { .. } = &scope else {
+            continue;
+        };
+        let max_channel = outputs.keys().copied().max().unwrap_or(0);
+        let values = (1..=max_channel)
+            .map(|channel| {
+                outputs
+                    .remove(&channel)
+                    .unwrap_or_else(|| Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()))
+            })
+            .collect::<Vec<_>>();
+        let replacement = macro_return_expression(values);
+        document.replace_macro_visual_return(&scope, replacement)?;
+    }
     Ok(())
+}
+
+fn add_live_source_macro_outputs(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    view_key: &str,
+    outputs: &mut BTreeMap<usize, Expression>,
+) -> Result<(), WriteBackError> {
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return Ok(());
+    };
+    for node in patch.nodes.iter().filter(|node| node.kind == NodeKind::Out) {
+        if interaction_state
+            .edit_state
+            .deleted_nodes
+            .contains(&node_edit_key(view_key, &node.id))
+        {
+            continue;
+        }
+        let Some(channel) = live_source_out_channel(interaction_state, view_key, node)? else {
+            continue;
+        };
+        if outputs.contains_key(&channel) {
+            continue;
+        }
+        let value = source_out_value_expression(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            view_key,
+            node,
+            patch,
+        )?;
+        outputs.insert(channel, value);
+    }
+    Ok(())
+}
+
+fn live_source_out_channel(
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node: &PatchNode,
+) -> Result<Option<usize>, WriteBackError> {
+    if let Some(edit) = interaction_state
+        .edit_state
+        .nodes
+        .get(&node_edit_key(view_key, &node.id))
+    {
+        return out_channel_from_edit(edit).map(Some);
+    }
+    Ok(output_channel_from_node(node).or(Some(1)))
+}
+
+fn source_out_value_expression(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    view_key: &str,
+    out_node: &PatchNode,
+    patch: &Patch,
+) -> Result<Expression, WriteBackError> {
+    if let Some(connection) = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| {
+            connection.view_key == view_key
+                && connection.to.node_id == out_node.id
+                && connection.to.input_index == 0
+        })
+        .min_by_key(|connection| connection.id.clone())
+    {
+        return created_out_source_expression(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            view_key,
+            &connection.from,
+        );
+    }
+    let Some(connection) = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == out_node.id && connection.to_input == 0)
+        .filter(|connection| {
+            !interaction_state
+                .edit_state
+                .deleted_connections
+                .contains(&connection_edit_key(
+                    view_key,
+                    &source_connection_id(connection),
+                ))
+        })
+    else {
+        return Ok(Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()));
+    };
+    value_reference_expr(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        history_bindings,
+        view_key,
+        &OutputPortRef {
+            node_id: connection.from_node.clone(),
+            output_index: connection.from_output,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatedOutWritebackScope {
+    Root,
+    Macro,
+}
+
+impl CreatedOutWritebackScope {
+    fn includes(self, view_key: &str) -> bool {
+        match self {
+            Self::Root => !view_key.starts_with("macro:"),
+            Self::Macro => view_key.starts_with("macro:"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1380,23 +1565,38 @@ fn source_owner_location<'a>(
 
 #[derive(Debug, Clone, Default)]
 struct GeneratedBindings {
-    names: HashMap<(String, String), String>,
+    names: HashMap<(String, String, usize), String>,
 }
 
 impl GeneratedBindings {
     fn insert(&mut self, view_key: &str, node_id: &str, name: String) {
-        self.names
-            .insert((view_key.to_string(), node_id.to_string()), name);
+        self.insert_output(view_key, node_id, 0, name);
+    }
+
+    fn insert_output(&mut self, view_key: &str, node_id: &str, output_index: usize, name: String) {
+        self.names.insert(
+            (view_key.to_string(), node_id.to_string(), output_index),
+            name,
+        );
     }
 
     fn get(&self, view_key: &str, node_id: &str) -> Option<&str> {
+        self.get_output(view_key, node_id, 0)
+    }
+
+    fn get_output(&self, view_key: &str, node_id: &str, output_index: usize) -> Option<&str> {
         self.names
-            .get(&(view_key.to_string(), node_id.to_string()))
+            .get(&(view_key.to_string(), node_id.to_string(), output_index))
             .map(String::as_str)
     }
 
     fn node_id_map(&self) -> HashMap<(String, String), String> {
-        self.names.clone()
+        self.names
+            .iter()
+            .filter_map(|((view_key, node_id, output_index), name)| {
+                (*output_index == 0).then(|| ((view_key.clone(), node_id.clone()), name.clone()))
+            })
+            .collect()
     }
 }
 
@@ -1509,6 +1709,9 @@ fn apply_generated_binding_writeback(
                 !created_macro_instance_edit(interaction_state, edit)
                     || created_macro_instance_is_connected(interaction_state, edit)
             })
+            .filter(|edit| {
+                !created_value_only_feeds_created_out(interaction_state, &view_key, &edit.id)
+            })
             .collect::<Vec<_>>();
         created_nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -1590,15 +1793,25 @@ fn apply_generated_binding_writeback(
 
         for edit in &created_nodes {
             let op = created_generated_binding_stem(edit)?;
-            let name = allocator.allocate(&scope, &op);
-            generated.insert(&view_key, &edit.id, name);
+            let output_count =
+                created_generated_output_count(root_patch, interaction_state, &view_key, edit);
+            for output_index in 0..output_count {
+                let name = allocator.allocate(&scope, &op);
+                generated.insert_output(&view_key, &edit.id, output_index, name);
+            }
         }
 
         for edit in created_nodes {
-            let name = generated
-                .get(&view_key, &edit.id)
-                .expect("created node name allocated before emission")
-                .to_string();
+            let output_count =
+                created_generated_output_count(root_patch, interaction_state, &view_key, &edit);
+            let names = (0..output_count)
+                .map(|output_index| {
+                    generated
+                        .get_output(&view_key, &edit.id, output_index)
+                        .expect("created node name allocated before emission")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
             let generated_expr = created_value_expression(
                 document,
                 root_patch,
@@ -1624,11 +1837,7 @@ fn apply_generated_binding_writeback(
                 insertion_index,
                 dependency_depth,
                 next_generated_def_order,
-                Expression::List(vec![
-                    Expression::Symbol("def".to_string()),
-                    Expression::Symbol(name),
-                    generated_expr,
-                ]),
+                generated_def_expression(names, generated_expr),
             ));
             next_generated_def_order += 1;
             rewrite_created_value_consumers(
@@ -1665,7 +1874,7 @@ fn apply_generated_binding_writeback(
 }
 
 fn materialized_created_node_binding(
-    document: &SourceDocument,
+    document: &mut SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
@@ -1723,6 +1932,89 @@ fn materialized_created_node_binding(
         }
     }
     Ok(None)
+}
+
+fn created_generated_output_count(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+) -> usize {
+    let macro_outputs = created_node_operator(edit)
+        .ok()
+        .and_then(|op| {
+            root_patch
+                .macros
+                .iter()
+                .find(|macro_patch| macro_patch.name == op)
+                .map(|macro_patch| macro_patch.outputs.len())
+        })
+        .unwrap_or(1);
+    let used_outputs = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
+        .map(|connection| connection.from.output_index + 1)
+        .max()
+        .unwrap_or(1);
+    macro_outputs.max(used_outputs).max(1)
+}
+
+fn created_value_only_feeds_created_out(
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    let outgoing = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == node_id)
+        .collect::<Vec<_>>();
+    !outgoing.is_empty()
+        && outgoing
+            .iter()
+            .all(|connection| connection_edit_touches_created_out(interaction_state, connection))
+}
+
+fn generated_def_expression(names: Vec<String>, value: Expression) -> Expression {
+    let target = if names.len() == 1 {
+        Expression::Symbol(names.into_iter().next().unwrap())
+    } else {
+        Expression::List(names.into_iter().map(Expression::Symbol).collect())
+    };
+    Expression::List(vec![Expression::Symbol("def".to_string()), target, value])
+}
+
+fn scalar_binding_destructuring_names(
+    document: &SourceDocument,
+    form_id: &SourceFormId,
+    first_name: &str,
+    count: usize,
+) -> Vec<String> {
+    let mut used = document.reserved_names(&form_id.scope);
+    used.remove(first_name);
+    let mut names = vec![first_name.to_string()];
+    for output_index in 1..count {
+        let stem = format!("{first_name}{}", output_index + 1);
+        names.push(allocate_unique_name(&mut used, &stem));
+    }
+    names
+}
+
+fn allocate_unique_name(used: &mut HashSet<String>, stem: &str) -> String {
+    if used.insert(stem.to_string()) {
+        return stem.to_string();
+    }
+    let mut suffix = 1usize;
+    loop {
+        let candidate = format!("{stem}_{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 fn materialized_created_node_outputs_match_source(
@@ -1908,7 +2200,7 @@ fn created_literal_expr(edit: &super::state::PatcherNodeEdit) -> Option<Expressi
 }
 
 fn created_value_expression(
-    document: &SourceDocument,
+    document: &mut SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
@@ -1954,8 +2246,105 @@ fn created_out_expression(
     Ok(Expression::List(rebuilt))
 }
 
+fn created_out_source_expression(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    view_key: &str,
+    from: &OutputPortRef,
+) -> Result<Expression, WriteBackError> {
+    if let Some(name) = generated.get_output(view_key, &from.node_id, from.output_index) {
+        return Ok(Expression::Symbol(name.to_string()));
+    }
+    if let Some(edit) = created_value_node(interaction_state, view_key, &from.node_id)
+        && created_literal_expr(edit).is_none()
+    {
+        return created_value_expression(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            view_key,
+            edit,
+        );
+    }
+    value_reference_expr(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        history_bindings,
+        view_key,
+        from,
+    )
+}
+
+fn created_out_channel(edit: &super::state::PatcherNodeEdit) -> Result<usize, WriteBackError> {
+    out_channel_from_edit(edit)
+}
+
+fn out_channel_from_edit(edit: &super::state::PatcherNodeEdit) -> Result<usize, WriteBackError> {
+    let expr = parse_created_node_text(edit)?;
+    let Expression::List(items) = expr else {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created out node text must parse as an out form".to_string(),
+        });
+    };
+    if symbol_at(&items, 0) != Some("out") {
+        return Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created out node must use the out operator".to_string(),
+        });
+    }
+    match items.get(1) {
+        Some(Expression::Number(value)) if value.fract() == 0.0 && *value > 0.0 => {
+            Ok(*value as usize)
+        }
+        Some(Expression::Symbol(value)) => {
+            value
+                .parse::<usize>()
+                .map_err(|_| WriteBackError::InvalidEdit {
+                    view_key: edit.view_key.clone(),
+                    node_id: edit.id.clone(),
+                    reason: "created out node channel must be a positive integer".to_string(),
+                })
+        }
+        _ => Err(WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created out node must provide an output channel".to_string(),
+        }),
+    }
+}
+
+fn output_channel_from_node(node: &PatchNode) -> Option<usize> {
+    node.args
+        .first()
+        .and_then(|arg| match arg {
+            ArgValue::Literal(value) => value.parse::<usize>().ok(),
+            _ => None,
+        })
+        .filter(|channel| *channel > 0)
+}
+
+fn macro_return_expression(values: Vec<Expression>) -> Expression {
+    if values.len() == 1 {
+        return values.into_iter().next().unwrap();
+    }
+    let mut items = Vec::with_capacity(values.len() + 1);
+    items.push(Expression::Symbol("tuple".to_string()));
+    items.extend(values);
+    Expression::List(items)
+}
+
 fn created_node_expression(
-    document: &SourceDocument,
+    document: &mut SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
@@ -2094,7 +2483,7 @@ fn created_node_required_input_count(
 }
 
 fn value_reference_expr(
-    document: &SourceDocument,
+    document: &mut SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
     generated: &GeneratedBindings,
@@ -2105,7 +2494,7 @@ fn value_reference_expr(
     if let Some(read_expr) = history_bindings.read_expr(view_key, &from.node_id) {
         return Ok(read_expr);
     }
-    if let Some(name) = generated.get(view_key, &from.node_id) {
+    if let Some(name) = generated.get_output(view_key, &from.node_id, from.output_index) {
         return Ok(Expression::Symbol(name.to_string()));
     }
     if let Some(edit) = created_value_node(interaction_state, view_key, &from.node_id)
@@ -2141,13 +2530,14 @@ fn value_reference_expr(
             reason: "generated binding source must be source-backed or generated".to_string(),
         });
     };
-    node_reference_expr(document, node, view_key)
+    node_reference_expr(document, node, view_key, from.output_index)
 }
 
 fn node_reference_expr(
-    document: &SourceDocument,
+    document: &mut SourceDocument,
     node: &PatchNode,
     view_key: &str,
+    output_index: usize,
 ) -> Result<Expression, WriteBackError> {
     let source = node
         .source
@@ -2172,7 +2562,29 @@ fn node_reference_expr(
         SourceOwner::BindingValue {
             binding: BindingTarget::Symbol(name),
             ..
-        } => Ok(Expression::Symbol(name.clone())),
+        } if output_index == 0 => Ok(Expression::Symbol(name.clone())),
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Symbol(name),
+            form_id,
+            ..
+        } => {
+            let names =
+                scalar_binding_destructuring_names(document, form_id, name, output_index + 1);
+            document.replace_def_target(form_id, BindingTarget::Destructuring(names.clone()))?;
+            Ok(Expression::Symbol(names[output_index].clone()))
+        }
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Destructuring(names),
+            ..
+        } => names
+            .get(output_index)
+            .cloned()
+            .map(Expression::Symbol)
+            .ok_or_else(|| WriteBackError::UnsupportedGeneratedBinding {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                reason: "destructuring source does not have the requested output".to_string(),
+            }),
         SourceOwner::MacroParameter { binding, .. } => Ok(Expression::Symbol(binding.name.clone())),
         _ if node.kind == NodeKind::Constant => {
             parse_single_expression(&node.op).map_err(|reason| WriteBackError::InvalidEdit {
@@ -2341,6 +2753,16 @@ fn expression_source_dependency_index(
             .unwrap_or(0),
         _ => 0,
     }
+}
+
+fn macro_body_side_effect_form(expr: &Expression) -> bool {
+    let Expression::List(items) = expr else {
+        return false;
+    };
+    matches!(
+        symbol_at(items, 0),
+        Some("def" | "make-history" | "write-history")
+    )
 }
 
 fn generated_node_dependencies(
@@ -2538,6 +2960,7 @@ fn generated_node_consumers(
         .connections
         .values()
         .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
+        .filter(|connection| !connection_edit_touches_created_out(interaction_state, connection))
         .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
         .filter(|connection| {
             created_value_node(interaction_state, view_key, &connection.to.node_id).is_none()
@@ -2572,14 +2995,15 @@ fn rewrite_created_value_consumers(
     view_key: &str,
     edit: &super::state::PatcherNodeEdit,
 ) -> Result<(), WriteBackError> {
-    let Some(name) = generated.get(view_key, &edit.id) else {
+    if generated.get(view_key, &edit.id).is_none() {
         return Ok(());
-    };
+    }
     let mut consumers = interaction_state
         .edit_state
         .connections
         .values()
         .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
+        .filter(|connection| !connection_edit_touches_created_out(interaction_state, connection))
         .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
         .filter(|connection| {
             created_value_node(interaction_state, view_key, &connection.to.node_id).is_none()
@@ -2609,7 +3033,16 @@ fn rewrite_created_value_consumers(
             view_key,
             dest,
             connection.to.input_index,
-            Expression::Symbol(name.to_string()),
+            Expression::Symbol(
+                generated
+                    .get_output(view_key, &edit.id, connection.from.output_index)
+                    .unwrap_or_else(|| {
+                        generated
+                            .get(view_key, &edit.id)
+                            .expect("generated binding has output zero")
+                    })
+                    .to_string(),
+            ),
         )?;
     }
     Ok(())
@@ -3026,6 +3459,7 @@ fn apply_history_writeback(
             } else {
                 if generated.get(&view_key, &connection.from.node_id).is_some()
                     || generated.get(&view_key, &connection.to.node_id).is_some()
+                    || connection_edit_touches_created_value(interaction_state, connection)
                     || connection_edit_touches_created_out(interaction_state, connection)
                     || connection_edit_has_source_destination(root_patch, connection)
                 {
@@ -3213,7 +3647,7 @@ fn connection_source_expr(
     view_key: &str,
     from: &OutputPortRef,
 ) -> Result<(Expression, SourceScopeId), WriteBackError> {
-    if let Some(name) = generated.get(view_key, &from.node_id) {
+    if let Some(name) = generated.get_output(view_key, &from.node_id, from.output_index) {
         return Ok((
             Expression::Symbol(name.to_string()),
             scope_for_view_key(view_key),
@@ -3971,6 +4405,41 @@ impl SourceDocument {
         })
     }
 
+    fn replace_def_target(
+        &mut self,
+        form_id: &SourceFormId,
+        target: BindingTarget,
+    ) -> Result<(), WriteBackError> {
+        let Some(form) = self.form_expr_mut(&form_id.scope, form_id.index) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&form_id.scope),
+                node_id: String::new(),
+                reason: format!("missing source form {}", form_id.index),
+            });
+        };
+        let Expression::List(items) = form else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&form_id.scope),
+                node_id: String::new(),
+                reason: "binding source form is not a list".to_string(),
+            });
+        };
+        if symbol_at(items, 0) != Some("def") || items.len() < 3 {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(&form_id.scope),
+                node_id: String::new(),
+                reason: "binding source form is not a def".to_string(),
+            });
+        }
+        items[1] = match target {
+            BindingTarget::Symbol(name) => Expression::Symbol(name),
+            BindingTarget::Destructuring(names) => {
+                Expression::List(names.into_iter().map(Expression::Symbol).collect())
+            }
+        };
+        Ok(())
+    }
+
     fn replace_or_insert_call_positional_arg(
         &mut self,
         call: &SourceExprId,
@@ -4044,6 +4513,41 @@ impl SourceDocument {
                 expr: replacement,
             },
         );
+        Ok(())
+    }
+
+    fn replace_macro_visual_return(
+        &mut self,
+        scope: &SourceScopeId,
+        replacement: Expression,
+    ) -> Result<(), WriteBackError> {
+        let SourceScopeId::Macro { name } = scope else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(scope),
+                node_id: String::new(),
+                reason: "visual macro return replacement requires a macro scope".to_string(),
+            });
+        };
+        let Some(macro_doc) = self.macros.get_mut(name) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(scope),
+                node_id: String::new(),
+                reason: "missing macro scope for visual return replacement".to_string(),
+            });
+        };
+        if let Some(index) = macro_doc
+            .body
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, form)| (!macro_body_side_effect_form(&form.expr)).then_some(index))
+        {
+            macro_doc.body.remove(index);
+        }
+        macro_doc.body.push(MacroBodyForm {
+            original_index: None,
+            expr: replacement,
+        });
         Ok(())
     }
 
@@ -4743,18 +5247,28 @@ impl MacroDocument {
     }
 
     fn emit(&self) -> String {
-        let mut items = vec![
-            Expression::Symbol("defmacro".to_string()),
-            Expression::Symbol(self.name.clone()),
-            Expression::List(self.params.clone()),
-        ];
         let body = if self.body.is_empty() {
             vec![self.default_return_expression()]
         } else {
             self.body.iter().map(|form| form.expr.clone()).collect()
         };
-        items.extend(body);
-        format_writeback_expression(&Expression::List(items))
+        if body.len() <= 1 {
+            let mut items = vec![
+                Expression::Symbol("defmacro".to_string()),
+                Expression::Symbol(self.name.clone()),
+                Expression::List(self.params.clone()),
+            ];
+            items.extend(body);
+            return format_writeback_expression(&Expression::List(items));
+        }
+
+        let params = format_writeback_expression(&Expression::List(self.params.clone()));
+        let body = body
+            .iter()
+            .map(|expr| format!("  {}", format_writeback_expression(expr)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("(defmacro {} {params}\n{body})", self.name)
     }
 
     fn ensure_valid_body(&mut self) {

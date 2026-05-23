@@ -2125,6 +2125,803 @@ fn projects_destructuring_def_outputs() {
 }
 
 #[test]
+fn defmacro_tuple_return_projects_multiple_subpatch_outlets() {
+    let patch = parse(
+        r#"
+            (defmacro multi (a)
+              (tuple (* a 2) (* a 3)))
+            (def sig (in 1))
+            (def out1 (multi sig))
+            "#,
+    );
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "multi")
+        .expect("multi macro");
+    assert_eq!(
+        macro_patch.outputs,
+        vec!["out".to_string(), "out2".to_string()]
+    );
+    assert_eq!(
+        macro_patch
+            .patch
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Out)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn destructured_macro_instance_uses_destructuring_names_as_outputs() {
+    let patch = parse(
+        r#"
+            (defmacro multi (a)
+              (tuple (* a 2) (* a 3)))
+            (def sig (in 1))
+            (def (x y) (multi sig))
+            "#,
+    );
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::MacroInstance && node.op == "multi")
+        .expect("multi instance");
+    assert_eq!(node.outputs, vec!["x".to_string(), "y".to_string()]);
+}
+
+#[test]
+fn scalar_macro_instance_keeps_single_output() {
+    let patch = parse(
+        r#"
+            (defmacro single (a) (* a 2))
+            (def sig (in 1))
+            (def x (single sig))
+            "#,
+    );
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::MacroInstance && node.op == "single")
+        .expect("single instance");
+    assert_eq!(node.outputs, vec!["out".to_string()]);
+}
+
+#[test]
+fn multi_output_macro_nodes_have_visible_nonzero_port_rects() {
+    let patch = parse(
+        r#"
+            (defmacro multi (a)
+              (tuple (* a 2) (* a 3)))
+            (def sig (in 1))
+            (def (x y) (multi sig))
+            "#,
+    );
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 80.0,
+        height: 30.0,
+    };
+    let pan = PatcherPanState::default();
+    let root_rects = patch_node_rects(&patch, rect, &pan);
+    let root_outputs = patch_output_counts(&patch);
+    let instance = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::MacroInstance)
+        .unwrap();
+    let instance_rect = root_rects.get(&instance.id).unwrap();
+    assert!(instance_rect.width > 0.0 && instance_rect.height > 0.0);
+    assert_eq!(root_outputs.get(&instance.id), Some(&2));
+    for output_index in 0..2 {
+        let center = port_center(*instance_rect, output_index, 2, false);
+        assert!(center.0.is_finite() && center.1.is_finite());
+    }
+
+    let macro_patch = &patch.macros[0].patch;
+    let macro_rects = patch_node_rects(macro_patch, rect, &pan);
+    let out_nodes = macro_patch
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Out)
+        .collect::<Vec<_>>();
+    assert_eq!(out_nodes.len(), 2);
+    for node in out_nodes {
+        let node_rect = macro_rects.get(&node.id).unwrap();
+        assert!(node_rect.width > 0.0 && node_rect.height > 0.0);
+    }
+}
+
+#[test]
+fn created_macro_instance_uses_macro_signature_output_count() {
+    let source = r#"
+            (defmacro multi (a)
+              (tuple (* a 2) (* a 3)))
+            (def sig (in 1))
+            (out sig 1)
+        "#;
+    let root_patch = parse(source);
+    let mut state = PatcherInteractionState::default();
+    let created = allocate_created_text_node(&mut state, "root", "multi");
+
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    let node = patch.nodes.iter().find(|node| node.id == created).unwrap();
+    assert_eq!(node.outputs, vec!["out".to_string(), "out2".to_string()]);
+}
+
+#[test]
+fn root_macro_instance_reflects_unsaved_created_macro_out_nodes() {
+    let source =
+        "(defmacro xyz (input) input)\n(def sig (in 1))\n(def result (xyz sig))\n(out result 1)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "xyz")
+        .unwrap();
+    let input = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let original_out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:xyz", &original_out.id));
+    let times1 = allocate_created_text_node(&mut state, "macro:xyz", "* 1");
+    let times2 = allocate_created_text_node(&mut state, "macro:xyz", "* 2");
+    let out1 = allocate_created_text_node(&mut state, "macro:xyz", "out 1");
+    let out2 = allocate_created_text_node(&mut state, "macro:xyz", "out 2");
+    for target in [&times1, &times2] {
+        allocate_created_connection(
+            &mut state,
+            "macro:xyz",
+            OutputPortRef {
+                node_id: input.id.clone(),
+                output_index: 0,
+            },
+            InputPortRef {
+                node_id: target.clone(),
+                input_index: 0,
+            },
+        );
+    }
+    allocate_created_connection(
+        &mut state,
+        "macro:xyz",
+        OutputPortRef {
+            node_id: times1,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out1,
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:xyz",
+        OutputPortRef {
+            node_id: times2,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out2,
+            input_index: 0,
+        },
+    );
+
+    let root = patch_with_interaction_state(root_patch, &state, "root");
+    let xyz = root
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::MacroInstance && node.op == "xyz")
+        .unwrap();
+    assert_eq!(
+        xyz.outputs,
+        vec!["out".to_string(), "out2".to_string()],
+        "root macro instance should reflect unsaved visual macro outlets"
+    );
+}
+
+#[test]
+fn debug_emit_macro_view_serializes_multiple_outlets_as_tuple() {
+    let patch = parse(
+        r#"
+            (defmacro multi (a)
+              (tuple (* a 2) (* a 3)))
+            (def sig (in 1))
+            (def (x y) (multi sig))
+            "#,
+    );
+    let emitted = emit_patch_debug_lisp_for_view("macro:multi", &patch.macros[0].patch);
+    assert_eq!(emitted, "(defmacro multi (a)\n  (tuple (* a 2) (* a 3)))");
+}
+
+#[test]
+fn writeback_source_destructured_macro_outlet_uses_matching_symbol() {
+    let source = r#"
+            (defmacro multi (a) (tuple (* a 2) (* a 3)))
+            (def sig (in 1))
+            (def (x y) (multi sig))
+            (def sum (+ x y))
+            (out sum 1)
+        "#;
+    let root_patch = parse(source);
+    let multi = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::MacroInstance && node.op == "multi")
+        .unwrap();
+    let sum = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "sum")
+        .unwrap();
+    let x_to_sum = root_patch
+        .connections
+        .iter()
+        .find(|connection| {
+            connection.from_node == multi.id
+                && connection.to_node == sum.id
+                && connection.to_input == 0
+        })
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(x_to_sum)));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: multi.id.clone(),
+            output_index: 1,
+        },
+        InputPortRef {
+            node_id: sum.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro multi (a) (tuple (* a 2.0) (* a 3.0)))\n(def sig (in 1))\n(def (x y) (multi sig))\n(def sum (+ y y))\n(out sum 1)"
+    );
+}
+
+#[test]
+fn writeback_created_multi_output_macro_instance_emits_destructuring_def() {
+    let source = r#"
+            (defmacro multi (a) (tuple (* a 2) (* a 3)))
+            (def sig (in 1))
+            (def sum (+ sig sig))
+            (out sum 1)
+        "#;
+    let root_patch = parse(source);
+    let sig = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "sig")
+        .unwrap();
+    let sum = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "sum")
+        .unwrap();
+    let sig_to_sum = root_patch
+        .connections
+        .iter()
+        .filter(|connection| connection.from_node == sig.id && connection.to_node == sum.id)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(sig_to_sum.len(), 2);
+
+    let mut state = PatcherInteractionState::default();
+    let multi = allocate_created_text_node(&mut state, "root", "multi");
+    for connection in &sig_to_sum {
+        state
+            .edit_state
+            .deleted_connections
+            .insert(connection_edit_key(
+                "root",
+                &source_connection_id(connection),
+            ));
+    }
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: sig.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: multi.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: multi.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: sum.id.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: multi,
+            output_index: 1,
+        },
+        InputPortRef {
+            node_id: sum.id.clone(),
+            input_index: 1,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro multi (a) (tuple (* a 2.0) (* a 3.0)))\n(def sig (in 1))\n(def (multi1 multi2) (multi sig))\n(def sum (+ multi1 multi2))\n(out sum 1)"
+    );
+}
+
+#[test]
+fn writeback_scalar_macro_binding_expands_to_destructuring_when_second_outlet_is_used() {
+    let source = r#"
+            (defmacro multi (a) (tuple (* a 2) (* a 3)))
+            (def sig (in 1))
+            (def foo (multi sig))
+            (def sum (+ foo foo))
+            (out sum 1)
+        "#;
+    let root_patch = parse(source);
+    let foo = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::MacroInstance && node.id == "foo")
+        .unwrap();
+    let sum = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "sum")
+        .unwrap();
+    let foo_to_sum_1 = root_patch
+        .connections
+        .iter()
+        .find(|connection| {
+            connection.from_node == foo.id
+                && connection.to_node == sum.id
+                && connection.to_input == 1
+        })
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(foo_to_sum_1),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: foo.id.clone(),
+            output_index: 1,
+        },
+        InputPortRef {
+            node_id: sum.id.clone(),
+            input_index: 1,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro multi (a) (tuple (* a 2.0) (* a 3.0)))\n(def sig (in 1))\n(def (foo foo2) (multi sig))\n(def sum (+ foo foo2))\n(out sum 1)"
+    );
+}
+
+#[test]
+fn writeback_created_macro_out_nodes_emit_tuple_return_from_created_upstream_nodes() {
+    let source = "(defmacro multi (input) input)\n(def sig (in 1))\n(def m (multi sig))\n(out m 1)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "multi")
+        .unwrap();
+    let input = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let original_out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:multi", &original_out.id));
+    let mul1 = allocate_created_text_node(&mut state, "macro:multi", "* 1");
+    let mul3 = allocate_created_text_node(&mut state, "macro:multi", "* 3");
+    let out1 = allocate_created_text_node(&mut state, "macro:multi", "out 1");
+    let out2 = allocate_created_text_node(&mut state, "macro:multi", "out 2");
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: input.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: mul1.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: input.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: mul3.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: mul1,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out1,
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: mul3,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out2,
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro multi (input) (tuple (* input 1.0) (* input 3.0)))\n(def sig (in 1))\n(def m (multi sig))\n(out m 1)"
+    );
+}
+
+#[test]
+fn writeback_created_macro_out_preserves_source_out_when_expanding_scalar_macro() {
+    let source = "(defmacro sqa (input) (* input 1.0))\n(def pitch (in 1))\n(def sqa1 (sqa pitch))\n(def phase (phasor sqa1))\n(out phase 1)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "sqa")
+        .unwrap();
+    let input = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let sqa = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::MacroInstance && node.op == "sqa")
+        .unwrap();
+    let phase = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phase")
+        .unwrap();
+    let sqa_to_phase = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sqa.id && connection.to_node == phase.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    let times2 = allocate_created_text_node(&mut state, "macro:sqa", "* 2");
+    let out2 = allocate_created_text_node(&mut state, "macro:sqa", "out 2");
+    allocate_created_connection(
+        &mut state,
+        "macro:sqa",
+        OutputPortRef {
+            node_id: input.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: times2.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:sqa",
+        OutputPortRef {
+            node_id: times2,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out2,
+            input_index: 0,
+        },
+    );
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sqa_to_phase),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: sqa.id.clone(),
+            output_index: 1,
+        },
+        InputPortRef {
+            node_id: phase.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro sqa (input) (tuple (* input 1.0) (* input 2.0)))\n(def pitch (in 1))\n(def (sqa1 sqa12) (sqa pitch))\n(def phase (phasor sqa12))\n(out phase 1)"
+    );
+}
+
+#[test]
+fn writeback_created_macro_sparse_out_channels_emit_placeholder_tuple_slots() {
+    let source =
+        "(defmacro sparse (input) input)\n(def sig (in 1))\n(def m (sparse sig))\n(out m 1)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "sparse")
+        .unwrap();
+    let input = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let original_out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:sparse", &original_out.id));
+    let times3 = allocate_created_text_node(&mut state, "macro:sparse", "* 3");
+    let out3 = allocate_created_text_node(&mut state, "macro:sparse", "out 3");
+    allocate_created_connection(
+        &mut state,
+        "macro:sparse",
+        OutputPortRef {
+            node_id: input.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: times3.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:sparse",
+        OutputPortRef {
+            node_id: times3,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out3,
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro sparse (input) (tuple __patcher_missing_input__ __patcher_missing_input__ (* input 3.0)))\n(def sig (in 1))\n(def m (sparse sig))\n(out m 1)"
+    );
+}
+
+#[test]
+fn writeback_created_macro_out_nodes_emit_tuple_ordered_by_channel_not_creation_order() {
+    let source = "(defmacro multi (input) input)\n(def sig (in 1))\n(def m (multi sig))\n(out m 1)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "multi")
+        .unwrap();
+    let input = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let original_out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:multi", &original_out.id));
+    let times4 = allocate_created_text_node(&mut state, "macro:multi", "* 4");
+    let times2 = allocate_created_text_node(&mut state, "macro:multi", "* 2");
+    let out2 = allocate_created_text_node(&mut state, "macro:multi", "out 2");
+    let out1 = allocate_created_text_node(&mut state, "macro:multi", "out 1");
+    for target in [&times4, &times2] {
+        allocate_created_connection(
+            &mut state,
+            "macro:multi",
+            OutputPortRef {
+                node_id: input.id.clone(),
+                output_index: 0,
+            },
+            InputPortRef {
+                node_id: target.clone(),
+                input_index: 0,
+            },
+        );
+    }
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: times4,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out2,
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: times2,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out1,
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro multi (input) (tuple (* input 2.0) (* input 4.0)))\n(def sig (in 1))\n(def m (multi sig))\n(out m 1)"
+    );
+}
+
+#[test]
+fn writeback_created_macro_out_source_shared_with_created_consumer_materializes_once() {
+    let source = "(defmacro multi (input) input)\n(def sig (in 1))\n(def m (multi sig))\n(out m 1)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "multi")
+        .unwrap();
+    let input = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let original_out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:multi", &original_out.id));
+    let shared = allocate_created_text_node(&mut state, "macro:multi", "* 2");
+    let plus = allocate_created_text_node(&mut state, "macro:multi", "+ 1");
+    let out1 = allocate_created_text_node(&mut state, "macro:multi", "out 1");
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: input.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: shared.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: shared.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out1,
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "macro:multi",
+        OutputPortRef {
+            node_id: shared,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: plus,
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro multi (input)\n  (def mul1 (* input 2.0))\n  (def add1 (+ mul1 1.0))\n  mul1)\n(def sig (in 1))\n(def m (multi sig))\n(out m 1)"
+    );
+}
+
+#[test]
 fn collapses_history_read_and_write_into_make_history_node() {
     let patch = parse(
         r#"
@@ -2504,7 +3301,7 @@ fn writeback_emits_unchanged_macro_as_complete_normalized_defmacro() {
             &PatcherInteractionState::default()
         )
         .unwrap(),
-        "(defmacro ap (sig g) (def node (+ sig g)) node)"
+        "(defmacro ap (sig g)\n  (def node (+ sig g))\n  node)"
     );
 }
 
@@ -2827,7 +3624,7 @@ fn writeback_macro_node_text_edit_rewrites_inside_defmacro() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(defmacro ap (sig g) (def node (mix sig g)) node)"
+        "(defmacro ap (sig g)\n  (def node (mix sig g))\n  node)"
     );
 }
 
@@ -2862,7 +3659,7 @@ fn writeback_macro_parameter_rename_updates_header_and_resolved_references() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1))\n(defmacro ap (input g) (def node (+ input g)) (phasor node))"
+        "(def sig (in 1))\n(defmacro ap (input g)\n  (def node (+ input g))\n  (phasor node))"
     );
 }
 
@@ -3449,7 +4246,7 @@ fn writeback_created_macro_history_emits_inside_defmacro() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(defmacro ap (sig) (make-history history1) (write-history history1 sig) (read-history history1))"
+        "(defmacro ap (sig)\n  (make-history history1)\n  (write-history history1 sig)\n  (read-history history1))"
     );
 }
 
@@ -4557,6 +5354,116 @@ fn writeback_created_node_depending_on_mod_accessor_follows_modulator_inputs() {
     assert!(modulated_index < op_index);
 }
 
+fn badmallet_modulatable_param_source() -> &'static str {
+    r#"
+        (param marimbamix)
+        (def value8 1.0)
+        (def sub1 (- value8 marimbamix))
+        (def mul1 (* marimbamix 0.5))
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (def mod2 (in 6 @name mod2 @modulator 2))
+        (def mod3 (in 7 @name mod3 @modulator 3))
+        (def mod4 (in 8 @name mod4 @modulator 4))
+        (def mod5 (in 9 @name mod5 @modulator 5))
+        (def mod6 (in 10 @name mod6 @modulator 6))
+        (def ext1 (in 11 @name ext1 @modulator 7))
+        (def ext2 (in 12 @name ext2 @modulator 8))
+        (def ext3 (in 13 @name ext3 @modulator 9))
+        (def ext4 (in 14 @name ext4 @modulator 10))
+        (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+        (def add1 (+ sub1 mul1))
+        (out (* add1 velocity (mod gain)) 1 @name audio)
+    "#
+}
+
+#[test]
+fn writeback_existing_param_made_modulatable_follows_modulator_inputs() {
+    let source = badmallet_modulatable_param_source();
+    let patch = parse(source);
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "marimbamix")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text = "param marimbamix @min 0 @max 1 @mod true @mod-mode additive".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    let ext4_index = emitted
+        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+        .expect("instrument modulator inputs should be present");
+    let param_index = emitted
+        .find("(param marimbamix @min 0.0 @max 1.0 @mod true @mod-mode additive)")
+        .expect("edited modulatable param should be present");
+    assert!(ext4_index < param_index);
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+#[test]
+fn writeback_created_mod_from_existing_modulatable_param_follows_modulator_inputs() {
+    let source = badmallet_modulatable_param_source();
+    let patch = parse(source);
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "marimbamix")
+        .unwrap();
+    let sub1 = patch.nodes.iter().find(|node| node.id == "sub1").unwrap();
+    let param_to_sub1 = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == param.id && connection.to_node == sub1.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text = "param marimbamix @min 0 @max 1 @mod true @mod-mode additive".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(param_to_sub1),
+        ));
+    let mod_node = allocate_created_text_node(&mut state, "root", "mod");
+    connect_output_to_input(&mut state, "root", &param.id, &mod_node, 0);
+    connect_output_to_input(&mut state, "root", &mod_node, &sub1.id, 1);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    let ext4_index = emitted
+        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+        .expect("instrument modulator inputs should be present");
+    let param_index = emitted
+        .find("(param marimbamix @min 0.0 @max 1.0 @mod true @mod-mode additive)")
+        .expect("edited modulatable param should be present");
+    let modulated_index = emitted
+        .find("(def modulated1 (mod marimbamix))")
+        .expect("created mod accessor should be present");
+    let sub1_index = emitted
+        .find("(def sub1 (- value8 modulated1))")
+        .expect("source consumer should use the created mod accessor");
+    assert!(ext4_index < param_index);
+    assert!(param_index < modulated_index);
+    assert!(modulated_index < sub1_index);
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
 #[test]
 fn writeback_generated_binding_avoids_scope_name_collisions() {
     let source = r#"
@@ -4696,7 +5603,7 @@ fn writeback_macro_generated_binding_uses_macro_local_scope() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def phasor1 (phasor 1.0))\n(defmacro ap (sig) (def phasor1 (phasor sig)) phasor1)"
+        "(def phasor1 (phasor 1.0))\n(defmacro ap (sig)\n  (def phasor1 (phasor sig))\n  phasor1)"
     );
 }
 
@@ -5117,7 +6024,7 @@ fn writeback_macro_cable_create_moves_destination_after_new_later_dependency() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(defmacro op (input) (def shaped (* input 0.5)) (def phase (phasor 2.0 shaped)) phase)\n(def sig (in 1 @name sig))\n(def out1 (op sig))\n(out out1 1 @name audio)"
+        "(defmacro op (input)\n  (def shaped (* input 0.5))\n  (def phase (phasor 2.0 shaped))\n  phase)\n(def sig (in 1 @name sig))\n(def out1 (op sig))\n(out out1 1 @name audio)"
     );
 }
 
@@ -6309,6 +7216,179 @@ fn segmented_horizontal_segment_hit_is_used_for_dragging() {
 }
 
 #[test]
+fn segmented_horizontal_segment_hit_uses_tight_cable_radius() {
+    let mut patch = parse(
+        r#"
+            (def pitch (in 1 @name pitch))
+            (def sig (phasor pitch))
+            "#,
+    );
+    let pan = PatcherPanState::default();
+    let rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 80.0,
+        height: 30.0,
+    };
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let to_node = patch.connections.first().unwrap().to_node.clone();
+    patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == to_node)
+        .unwrap()
+        .position
+        .0 += 12.0;
+    let node_rects = patch_node_rects(&patch, rect, &pan);
+    let (start, end) = connection_endpoints(
+        patch.connections.first().unwrap(),
+        &node_rects,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+    )
+    .unwrap();
+    let origin = patcher_origin(rect, &pan);
+    let zoom = patcher_zoom(&pan);
+    let rendered_segment_row = (start.1 + end.1) * 0.5;
+    let segment_row = (rendered_segment_row - origin.1) / zoom;
+    patch.connections[0].segment = Some(CableSegmentInfo {
+        is_segmented: true,
+        segment_row,
+    });
+    let midpoint_col = (start.0 + end.0) * 0.5;
+
+    assert_eq!(
+        hit_patcher_segmented_cable_horizontal_segment(
+            &patch,
+            rect,
+            &pan,
+            &input_indices,
+            &input_slot_counts,
+            &output_counts,
+            midpoint_col,
+            rendered_segment_row + CABLE_HIT_RADIUS_CELLS * zoom + 0.01,
+        ),
+        None
+    );
+}
+
+#[test]
+fn node_drag_wins_over_segmented_cable_hit_inside_node_body() {
+    let path = temp_patcher_source_path("patcher-node-wins-over-cable");
+    fs::write(
+        &path,
+        "(def pitch (in 1 @name pitch))\n(out pitch 1 @name audio)",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let pan = PatcherPanState::default();
+    set_patcher_pan_state(key, pan.clone());
+    let mut state = PatcherInteractionState::default();
+    let target_node_id = root_patch
+        .connections
+        .first()
+        .expect("source connection")
+        .to_node
+        .clone();
+    let target_node = root_patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == target_node_id)
+        .unwrap();
+    set_node_edit_position(
+        &mut state,
+        "root",
+        target_node,
+        (target_node.position.0 + 12.0, target_node.position.1),
+        node_display_label(target_node),
+    );
+    let edited_patch = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    let node_rects = patch_node_rects(&edited_patch, node.rect, &pan);
+    let input_indices = patch_input_indices(&edited_patch);
+    let input_slot_counts = patch_input_slot_counts(&edited_patch, &input_indices);
+    let output_counts = patch_output_counts(&edited_patch);
+    let connection = edited_patch.connections.first().expect("source connection");
+    let (_start, end) = connection_endpoints(
+        connection,
+        &node_rects,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+    )
+    .unwrap();
+    let target_rect = node_rects.get(&connection.to_node).copied().unwrap();
+    let zoom = patcher_zoom(&pan);
+    let origin = patcher_origin(node.rect, &pan);
+    let segment_screen_row = target_rect.row + target_rect.height * 0.5;
+    let segment_row = (segment_screen_row - origin.1) / zoom;
+    set_connection_segment_edit(
+        &mut state,
+        "root",
+        connection,
+        Some(CableSegmentInfo {
+            is_segmented: true,
+            segment_row,
+        }),
+    );
+    set_patcher_interaction_state(key, state);
+    let hit_col = end.0 - SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom - 0.01;
+
+    assert_eq!(
+        hit_patcher_node(
+            &edited_patch,
+            &ordered_patch_nodes(&edited_patch, &get_patcher_interaction_state(key), "root"),
+            node.rect,
+            &pan,
+            hit_col,
+            segment_screen_row,
+        )
+        .as_deref(),
+        Some(connection.to_node.as_str())
+    );
+    assert_eq!(
+        hit_patcher_segmented_cable_horizontal_segment(
+            &patch_with_interaction_state(
+                root_patch.clone(),
+                &get_patcher_interaction_state(key),
+                "root",
+            ),
+            node.rect,
+            &pan,
+            &input_indices,
+            &input_slot_counts,
+            &output_counts,
+            hit_col,
+            segment_screen_row,
+        )
+        .as_deref(),
+        Some(source_connection_id(connection).as_str())
+    );
+
+    handle_patcher_pointer_down(
+        &node,
+        hit_col,
+        segment_screen_row,
+        KeyModifiers::empty(),
+        10.0,
+        20.0,
+    );
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        matches!(state.drag, Some(PatcherDragState::Nodes { .. })),
+        "{:?}",
+        state.drag
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn segment_row_drag_clamps_normal_and_wraparound_cases() {
     let normal = super::super::cable::segment_row_for_drag(
         (10.0, 10.0),
@@ -6373,6 +7453,15 @@ fn super_y_toggles_selected_cable_segmentation() {
         },
     );
 
+    let initial_state = get_patcher_interaction_state(key);
+    let initial_patch = patch_with_interaction_state(patch.clone(), &initial_state, "root");
+    let initially_segmented = initial_patch
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == selected_cable)
+        .and_then(|connection| connection.segment.as_ref())
+        .is_some_and(|segment| segment.is_segmented);
+
     assert!(
         PATCHER_WIDGET
             .key_event(
@@ -6382,7 +7471,7 @@ fn super_y_toggles_selected_cable_segmentation() {
                     modifiers: KeyModifiers::SUPER,
                 },
             )
-            .is_none()
+            .is_some()
     );
 
     let state = get_patcher_interaction_state(key);
@@ -6393,7 +7482,7 @@ fn super_y_toggles_selected_cable_segmentation() {
         .find(|connection| source_connection_id(connection) == selected_cable)
         .and_then(|connection| connection.segment)
         .unwrap();
-    assert!(segment.is_segmented);
+    assert_ne!(segment.is_segmented, initially_segmented);
 }
 
 #[test]
@@ -7242,7 +8331,7 @@ fn defmacro_becomes_read_only_subpatch() {
         macro_patch
             .nodes
             .iter()
-            .any(|node| node.kind == NodeKind::In && node_display_label(node) == "in 1"),
+            .any(|node| node.kind == NodeKind::In && node_display_label(node).starts_with("in 1")),
         "{:#?}",
         macro_patch.nodes
     );
@@ -8475,7 +9564,7 @@ fn writeback_replacing_created_macro_default_body_with_chain_compiles() {
     let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
     assert_eq!(
         emitted,
-        "(defmacro op (input) (def phasor1 (phasor input)) (def triangle1 (triangle phasor1)) triangle1)\n(def sig (in 1))\n(out sig 1)"
+        "(defmacro op (input)\n  (def phasor1 (phasor input))\n  (def triangle1 (triangle phasor1))\n  triangle1)\n(def sig (in 1))\n(out sig 1)"
     );
     compile_patch_source_with_dgenlisp(&emitted)
         .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
@@ -8862,7 +9951,7 @@ fn writeback_macro_created_node_after_generated_binding_preserves_dependency() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(defmacro op (input) (def phasor1 (phasor input)) (def triangle1 (triangle phasor1)) triangle1)"
+        "(defmacro op (input)\n  (def phasor1 (phasor input))\n  (def triangle1 (triangle phasor1))\n  triangle1)"
     );
 }
 
@@ -9145,7 +10234,7 @@ fn writeback_macro_followup_edit_ignores_stale_materialized_created_node() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(defmacro op (input) (def phasor1 (phasor input)) (def triangle1 (triangle phasor1)) triangle1)"
+        "(defmacro op (input)\n  (def phasor1 (phasor input))\n  (def triangle1 (triangle phasor1))\n  triangle1)"
     );
 }
 
@@ -10050,6 +11139,65 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     assert_eq!(
         cursor_count, 1,
         "active patcher text edit should render exactly one foreground cursor"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_render_macro_back_button_uses_shader_chevron_not_text_glyph() {
+    let path = temp_patcher_source_path("macro-back-chevron-render");
+    fs::write(
+        &path,
+        r#"
+            (defmacro ap (x)
+              (phasor x))
+            (def z (ap input))
+        "#,
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let state = PatcherInteractionState {
+        active_macro: Some("ap".to_string()),
+        ..Default::default()
+    };
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, .. }
+                    if widget_type == "patcher-back-chevron"
+            )
+        }),
+        "macro back button should render a shader-backed chevron"
+    );
+    assert!(
+        !prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::ProportionalText(text) if text.text == "<"
+            )
+        }),
+        "macro back button should not render the old ASCII chevron text glyph"
     );
 }
 

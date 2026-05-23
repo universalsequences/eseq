@@ -12,9 +12,9 @@ use super::lisp::{
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
-    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch, NodeKind, NodeSource,
-    OperatorPortShape, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue,
-    SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
+    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch, MacroSignature,
+    NodeKind, NodeSource, OperatorPortShape, Patch, PatchConnection, PatchNode, PatcherIntent,
+    SourceArgValue, SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
 };
 
 pub(super) struct Projector {
@@ -25,18 +25,21 @@ pub(super) struct Projector {
     op_occurrences: HashMap<String, usize>,
     used_ids: HashSet<String>,
     known_ops: &'static HashSet<String>,
-    known_macros: HashSet<String>,
+    macro_signatures: HashMap<String, MacroSignature>,
     scope: SourceScopeId,
     intent: PatcherIntent,
 }
 
 impl Projector {
-    pub(super) fn new(known_macros: HashSet<String>, intent: PatcherIntent) -> Self {
-        Self::new_in_scope(known_macros, SourceScopeId::Root, intent)
+    pub(super) fn new(
+        macro_signatures: HashMap<String, MacroSignature>,
+        intent: PatcherIntent,
+    ) -> Self {
+        Self::new_in_scope(macro_signatures, SourceScopeId::Root, intent)
     }
 
     fn new_in_scope(
-        known_macros: HashSet<String>,
+        macro_signatures: HashMap<String, MacroSignature>,
         scope: SourceScopeId,
         intent: PatcherIntent,
     ) -> Self {
@@ -48,7 +51,7 @@ impl Projector {
             op_occurrences: HashMap::new(),
             used_ids: HashSet::new(),
             known_ops: dgenlisp_operator_names(),
-            known_macros,
+            macro_signatures,
             scope,
             intent,
         }
@@ -342,7 +345,7 @@ impl Projector {
 
         let body = if items.len() > 3 { &items[3..] } else { &[] };
         let mut projector = Projector::new_in_scope(
-            self.known_macros.clone(),
+            self.macro_signatures.clone(),
             SourceScopeId::Macro {
                 name: name.to_string(),
             },
@@ -380,6 +383,7 @@ impl Projector {
                 }),
             });
         }
+        let outputs = infer_macro_outputs(body);
         for (idx, expr) in body.iter().enumerate() {
             let form_id = projector.form_id(idx);
             if idx + 1 == body.len() {
@@ -393,8 +397,21 @@ impl Projector {
         self.patch.macros.push(MacroPatch {
             name: name.to_string(),
             params: param_names,
+            outputs: outputs.clone(),
             patch,
         });
+        self.macro_signatures.insert(
+            name.to_string(),
+            MacroSignature {
+                params: self
+                    .patch
+                    .macros
+                    .last()
+                    .map(|macro_patch| macro_patch.params.clone())
+                    .unwrap_or_default(),
+                outputs,
+            },
+        );
     }
 
     fn is_hidden_instrument_modulator_def(&self, name: &str, expr: &Expression) -> bool {
@@ -419,49 +436,75 @@ impl Projector {
         }
 
         let source_expr = self.root_expr(form_id.clone());
-        let Some((from_node, from_output)) = self.project_value(
-            expr,
-            Some("return".to_string()),
-            None,
-            source_expr,
-            SourceOwner::TopLevelForm {
-                form_id: form_id.clone(),
-            },
-        ) else {
+        let return_values = tuple_return_items(expr).unwrap_or_else(|| vec![expr]);
+        if return_values.is_empty() {
             self.add_code_island(
                 expr,
                 "macro return value is not visual patch syntax",
                 form_id,
             );
             return;
-        };
-        let id = self.unique_id("out");
-        self.patch.nodes.push(PatchNode {
-            id: id.clone(),
-            op: "out".to_string(),
-            kind: NodeKind::Out,
-            label: "out 1".to_string(),
-            args: vec![ArgValue::Literal("1".to_string())],
-            outputs: Vec::new(),
-            position: (0.0, 0.0),
-            diagnostic: None,
-            source: Some(NodeSource {
-                owner: SourceOwner::TopLevelForm {
+        }
+        let is_tuple_return = tuple_return_items(expr).is_some();
+        for (idx, value) in return_values.into_iter().enumerate() {
+            let value_expr = if is_tuple_return {
+                self.child_expr(&source_expr, idx + 1)
+            } else {
+                source_expr.clone()
+            };
+            let Some((from_node, from_output)) = self.project_value(
+                value,
+                Some(if idx == 0 {
+                    "return".to_string()
+                } else {
+                    format!("return{}", idx + 1)
+                }),
+                None,
+                value_expr,
+                SourceOwner::TopLevelForm {
                     form_id: form_id.clone(),
                 },
-                expr: None,
-                call_shape: None,
-            }),
-        });
-        self.patch.connections.push(PatchConnection {
-            from_node,
-            from_output,
-            to_node: id,
-            to_input: 0,
-            kind: ConnectionKind::Forward,
-            segment: None,
-            source: None,
-        });
+            ) else {
+                self.add_code_island(
+                    expr,
+                    "macro return value is not visual patch syntax",
+                    form_id,
+                );
+                return;
+            };
+            let out_id_base = if idx == 0 {
+                "out".to_string()
+            } else {
+                format!("out{}", idx + 1)
+            };
+            let id = self.unique_id(&out_id_base);
+            self.patch.nodes.push(PatchNode {
+                id: id.clone(),
+                op: "out".to_string(),
+                kind: NodeKind::Out,
+                label: format!("out {}", idx + 1),
+                args: vec![ArgValue::Literal((idx + 1).to_string())],
+                outputs: Vec::new(),
+                position: (0.0, 0.0),
+                diagnostic: None,
+                source: Some(NodeSource {
+                    owner: SourceOwner::TopLevelForm {
+                        form_id: form_id.clone(),
+                    },
+                    expr: None,
+                    call_shape: None,
+                }),
+            });
+            self.patch.connections.push(PatchConnection {
+                from_node,
+                from_output,
+                to_node: id,
+                to_input: 0,
+                kind: ConnectionKind::Forward,
+                segment: None,
+                source: None,
+            });
+        }
     }
 
     fn project_value(
@@ -651,7 +694,12 @@ impl Projector {
                 .map(|(node_id, _)| node_id);
         }
 
-        let kind = node_kind_for_op(&op, &self.known_macros);
+        let known_macros = self
+            .macro_signatures
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let kind = node_kind_for_op(&op, &known_macros);
         let id = stable_id.unwrap_or_else(|| self.stable_id_for_call(items, None));
         let call_shape = self.call_source_shape(&source_expr, items);
         let mut node = PatchNode {
@@ -660,7 +708,7 @@ impl Projector {
             kind,
             label: node_label(&op, items, def_name.as_deref()),
             args: Vec::new(),
-            outputs: default_outputs(&op),
+            outputs: self.default_outputs_for_node(&op, kind),
             position: (0.0, 0.0),
             diagnostic: self.operator_diagnostic(&op, kind),
             source: Some(NodeSource {
@@ -768,6 +816,18 @@ impl Projector {
         let id = node.id.clone();
         self.patch.nodes.push(node);
         Some(id)
+    }
+
+    fn default_outputs_for_node(&self, op: &str, kind: NodeKind) -> Vec<String> {
+        if kind == NodeKind::MacroInstance {
+            return self
+                .macro_signatures
+                .get(op)
+                .map(|signature| signature.outputs.clone())
+                .filter(|outputs| !outputs.is_empty())
+                .unwrap_or_else(|| default_outputs(op));
+        }
+        default_outputs(op)
     }
 
     fn flush_pending_constant_args(
@@ -1048,6 +1108,31 @@ fn instrument_input_signature(expr: &Expression) -> Option<(usize, &str, usize)>
         _ => return None,
     };
     Some((channel, name, modulator))
+}
+
+fn infer_macro_outputs(body: &[Expression]) -> Vec<String> {
+    let Some(return_expr) = body.last() else {
+        return Vec::new();
+    };
+    let count = tuple_return_items(return_expr)
+        .map(|items| items.len())
+        .unwrap_or(1);
+    (0..count)
+        .map(|idx| {
+            if idx == 0 {
+                "out".to_string()
+            } else {
+                format!("out{}", idx + 1)
+            }
+        })
+        .collect()
+}
+
+fn tuple_return_items(expr: &Expression) -> Option<Vec<&Expression>> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    (symbol_at(items, 0) == Some("tuple")).then(|| items.iter().skip(1).collect())
 }
 
 pub(super) fn assign_layout(patch: &mut Patch) {

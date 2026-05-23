@@ -4883,6 +4883,138 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_agent_busy_state_uses_submit_button_as_cancel() {
+        use eseqlisp::layout::LayoutNode;
+
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        fn node_text(node: &LayoutNode) -> Option<&str> {
+            match node.props.get("text") {
+                Some(Value::String(text)) => Some(text.as_str()),
+                _ => None,
+            }
+        }
+
+        fn find_button_by_text<'a>(node: &'a LayoutNode, text: &str) -> Option<&'a LayoutNode> {
+            if node.widget_type == "button" && node_text(node) == Some(text) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_button_by_text(child, text))
+        }
+
+        fn find_widget_by_type<'a>(
+            node: &'a LayoutNode,
+            widget_type: &str,
+        ) -> Option<&'a LayoutNode> {
+            if node.widget_type == widget_type {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_widget_by_type(child, widget_type))
+        }
+
+        fn prop_number(node: &LayoutNode, prop: &str) -> Option<f64> {
+            match node.props.get(prop)? {
+                Value::Number(value) => Some(*value),
+                _ => None,
+            }
+        }
+
+        let mut editor =
+            eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        editor.set_layout_viewport(92, 24);
+        register_agent_test_natives(editor.runtime_mut());
+        let cancel_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+        editor
+            .runtime_mut()
+            .register_native("agent/status", |_args, _ctx| {
+                Ok(Value::Symbol("streaming".to_string()))
+            });
+        let captured_cancel_calls = cancel_calls.clone();
+        editor
+            .runtime_mut()
+            .register_native("agent/cancel", move |args, _ctx| {
+                let Some(Value::Number(conv_id)) = args.first() else {
+                    return Err("agent/cancel: expected conv-id".to_string());
+                };
+                captured_cancel_calls.lock().unwrap().push(*conv_id as i64);
+                Ok(Value::Nil)
+            });
+        editor.runtime_mut().register_reactive(
+            "AGENT",
+            vec![("generation", Value::Number(0.0))],
+            false,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "mac-osx-dark.lisp")"#)
+            .expect("load theme");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "metal-seq-agent.lisp")"#)
+            .expect("load agent lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(set! agent-current-conv 1)")
+            .expect("select test conversation");
+        editor
+            .runtime_mut()
+            .eval_str("(agent-submit-current)")
+            .expect("busy submit should cancel the active request");
+        assert_eq!(
+            *cancel_calls.lock().unwrap(),
+            vec![1],
+            "busy submit affordance should route to agent/cancel"
+        );
+        editor.refresh_runtime_side_effects();
+
+        let agent_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*agent*")
+            .expect("agent buffer")
+            .id;
+        editor.set_active_buffer(agent_id);
+        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("agent layout");
+
+        assert!(
+            find_button_by_text(&layout, "Cancel").is_none(),
+            "busy agent composer should not render a separate Cancel button"
+        );
+
+        let submit = find_layout_node_by_stable_key(&layout, "agent-submit")
+            .expect("agent submit affordance");
+        assert!(
+            submit.rect.width > 0.0 && submit.rect.height > 0.0,
+            "agent submit/cancel affordance should remain visible while busy: {:?}",
+            submit.rect
+        );
+
+        let icon = find_widget_by_type(&layout, "agent-submit-icon").expect("agent submit icon");
+        assert_eq!(prop_number(icon, "canceling"), Some(1.0));
+        assert_eq!(prop_number(icon, "active"), Some(1.0));
+    }
+
+    #[test]
     fn metal_seq_agent_transcript_uses_virtualized_message_stack() {
         use eseqlisp::layout::LayoutNode;
 

@@ -74,6 +74,14 @@
     0.80 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)
     0.15 (seq-patcher-bottom-bar-layout-spec)))
 
+(def seq-instrument-patcher-source-layout-spec (patcher-buffer source-buffer)
+  (list :rows :gap 1
+    0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+    0.80 (list :cols :gap 1
+      0.62 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)
+      0.38 (list :buf source-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))
+    0.15 (seq-patcher-bottom-bar-layout-spec)))
+
 (def seq-apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
   (do
     (set-layout (seq-lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
@@ -93,6 +101,12 @@
   (do
     (set! remembered-step-panel-buffer (seq-current-step-buffer))
     (set-layout (seq-instrument-patcher-layout-spec patcher-buffer))
+    (host-command "refresh-mixer-ui" (dict))))
+
+(def seq-apply-instrument-patcher-source-layout (patcher-buffer source-buffer)
+  (do
+    (set! remembered-step-panel-buffer (seq-current-step-buffer))
+    (set-layout (seq-instrument-patcher-source-layout-spec patcher-buffer source-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def seq-restore-instrument-patcher-layout ()
@@ -200,9 +214,11 @@
           (seq-apply-fx-layout))))))
 
 (def seq-toggle-main-or-piano-roll ()
-  (if (seq-piano-roll-open?)
-    (seq-close-piano-roll)
-    (seq-open-piano-roll-preferred)))
+  (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))
+    (host-command "toggle-instrument-patcher-source" (dict))
+    (if (seq-piano-roll-open?)
+      (seq-close-piano-roll)
+      (seq-open-piano-roll-preferred))))
 
 (def seq-show-fx-lower-panel ()
   (if (= lower-panel-buffer "*piano-roll*")

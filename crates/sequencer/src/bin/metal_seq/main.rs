@@ -253,6 +253,17 @@ fn show_instrument_patcher_layout_source(buffer_name: &str) -> String {
     format!("(seq-apply-instrument-patcher-layout \"{buffer_name}\")")
 }
 
+fn show_instrument_patcher_source_layout_source(
+    patcher_buffer_name: &str,
+    source_buffer_name: &str,
+) -> String {
+    let patcher_buffer_name = escape_lisp_string(patcher_buffer_name);
+    let source_buffer_name = escape_lisp_string(source_buffer_name);
+    format!(
+        "(seq-apply-instrument-patcher-source-layout \"{patcher_buffer_name}\" \"{source_buffer_name}\")"
+    )
+}
+
 fn restore_instrument_patcher_layout_source() -> &'static str {
     "(seq-restore-instrument-patcher-layout)"
 }
@@ -1501,8 +1512,9 @@ mod tests {
         build_custom_instrument_ui_source_with_overlay, escape_lisp_string,
         instrument_patcher_buffer_source, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
-        show_instrument_patcher_layout_source, ActiveDeleteTarget, FxDeleteChain, Runtime, Value,
-        AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
+        show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
+        ActiveDeleteTarget, FxDeleteChain, Runtime, Value, AGENT_INSTRUMENT_STUB_UI,
+        NEW_INSTRUMENT_STARTER_DSP,
     };
     use eseqlisp::parser::{ASTParser, Parser};
     use std::path::Path;
@@ -1623,6 +1635,19 @@ mod tests {
         assert_eq!(
             source,
             "(seq-apply-instrument-patcher-layout \"*instrument-patcher:digitone*\")"
+        );
+    }
+
+    #[test]
+    fn instrument_patcher_source_layout_includes_patcher_and_source_buffers() {
+        let source = show_instrument_patcher_source_layout_source(
+            "*instrument-patcher:digitone*",
+            "*patcher-emitted:instruments/digitone/dsp.lisp*",
+        );
+
+        assert_eq!(
+            source,
+            "(seq-apply-instrument-patcher-source-layout \"*instrument-patcher:digitone*\" \"*patcher-emitted:instruments/digitone/dsp.lisp*\")"
         );
     }
 
@@ -7487,6 +7512,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
+                    }
+
+                    "toggle-instrument-patcher-source" => {
+                        let Some(session) = instrument_edit_session.as_ref() else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "No instrument edit session is active".to_string(),
+                            ));
+                            continue;
+                        };
+                        let source_buffer_name =
+                            eseqlisp::widget_render::patcher::emitted_source_buffer_name(
+                                &session.path.to_string_lossy(),
+                            );
+                        let layout_source =
+                            if editor_has_visible_buffer(&editor, &source_buffer_name) {
+                                show_instrument_patcher_layout_source(&session.buffer_name)
+                            } else {
+                                let source_buffer_name = match editor
+                                    .upsert_patcher_emitted_source_buffer(
+                                        &session.buffer_name,
+                                        &session.path,
+                                        &session.last_valid_source,
+                                    ) {
+                                    Ok(name) => name,
+                                    Err(error) => {
+                                        editor.handle_host_event(HostEvent::Error(error));
+                                        continue;
+                                    }
+                                };
+                                show_instrument_patcher_source_layout_source(
+                                    &session.buffer_name,
+                                    &source_buffer_name,
+                                )
+                            };
+                        match editor.runtime_mut().eval_str(&layout_source) {
+                            Ok(_) => editor.refresh_runtime_side_effects(),
+                            Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to show patch source layout: {error:?}"
+                            ))),
+                        }
                     }
 
                     "enter-new-effect-editor" => {

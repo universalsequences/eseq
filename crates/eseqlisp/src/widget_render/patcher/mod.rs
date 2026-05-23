@@ -35,6 +35,116 @@ pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Resul
     writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
 }
 
+pub fn emitted_source_buffer_name(path: &str) -> String {
+    format!("*patcher-emitted:{path}*")
+}
+
+pub fn emitted_source_path_from_buffer_name(name: &str) -> Option<String> {
+    name.strip_prefix("*patcher-emitted:")
+        .and_then(|path| path.strip_suffix('*'))
+        .map(str::to_string)
+}
+
+pub struct EmittedSourceBufferSnapshot {
+    pub path: String,
+    pub buffer_name: String,
+    pub source: String,
+}
+
+pub fn emitted_source_buffer_snapshot(
+    node: &crate::layout::LayoutNode,
+) -> Result<EmittedSourceBufferSnapshot, String> {
+    if node.widget_type != "patcher" {
+        return Err("focused widget is not a patcher".to_string());
+    }
+    let payload = patcher_writeback_payload(node);
+    let Value::Map(map) = payload else {
+        return Err("patcher did not produce a writeback payload".to_string());
+    };
+    let status = map.get("status").and_then(|value| match &*value.borrow() {
+        Value::Keyword(status) | Value::String(status) => Some(status.clone()),
+        _ => None,
+    });
+    if status.as_deref() != Some("valid") {
+        let diagnostic = map
+            .get("diagnostic")
+            .and_then(|value| match &*value.borrow() {
+                Value::String(diagnostic) => Some(diagnostic.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "patcher emitted source is invalid".to_string());
+        return Err(diagnostic);
+    }
+    let path = map
+        .get("path")
+        .and_then(|value| match &*value.borrow() {
+            Value::String(path) if !path.is_empty() => Some(path.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| "patcher emitted source payload did not include a path".to_string())?;
+    let source = map
+        .get("source")
+        .and_then(|value| match &*value.borrow() {
+            Value::String(source) => Some(source.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| "patcher emitted source payload did not include source".to_string())?;
+    Ok(EmittedSourceBufferSnapshot {
+        buffer_name: emitted_source_buffer_name(&path),
+        path,
+        source,
+    })
+}
+
+pub(crate) fn patcher_has_selected_cable(node: &crate::layout::LayoutNode) -> bool {
+    if node.widget_type != "patcher" {
+        return false;
+    }
+    let interaction = state::get_patcher_interaction_state(state::patcher_state_key(node));
+    interaction.text_edit.is_none() && interaction.selected_cable.is_some()
+}
+
+#[cfg(test)]
+pub(crate) fn select_first_patcher_cable_for_test(
+    node: &crate::layout::LayoutNode,
+) -> Option<String> {
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return None;
+    };
+    let key = state::patcher_state_key(node);
+    let mut interaction = state::get_patcher_interaction_state(key);
+    let patch = active_patcher_patch(&root_patch, &interaction);
+    let selected = patch.connections.first().map(state::source_connection_id)?;
+    interaction.selected_cable = Some(selected.clone());
+    state::set_patcher_interaction_state(key, interaction);
+    Some(selected)
+}
+
+#[cfg(test)]
+pub(crate) fn selected_patcher_cable_is_segmented_for_test(
+    node: &crate::layout::LayoutNode,
+) -> Option<bool> {
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return None;
+    };
+    let key = state::patcher_state_key(node);
+    let interaction = state::get_patcher_interaction_state(key);
+    let selected = interaction.selected_cable.as_deref()?;
+    let patch = active_patcher_patch(&root_patch, &interaction);
+    let patch =
+        patch_with_interaction_state(patch, &interaction, &active_patcher_view_key(&interaction));
+    patch
+        .connections
+        .iter()
+        .find(|connection| state::source_connection_id(connection) == selected)
+        .map(|connection| {
+            connection
+                .segment
+                .as_ref()
+                .is_some_and(|segment| segment.is_segmented)
+        })
+}
+
 pub fn reset_patcher_state_for_path(path: impl AsRef<std::path::Path>, intent: PatcherIntent) {
     let path = path.as_ref();
     let path_string = path.to_string_lossy().to_string();
@@ -644,6 +754,23 @@ impl WidgetDefinition for PatcherWidget {
         }
         if state.text_edit.is_none() {
             return match key_event.code {
+                KeyCode::Char('y') | KeyCode::Char('Y')
+                    if state.selected_cable.is_some()
+                        && key_event.modifiers.contains(KeyModifiers::SUPER) =>
+                {
+                    eprintln!(
+                        "[patcher cmd-y] widget received selected_cable={:?} view_key={view_key}",
+                        state.selected_cable
+                    );
+                    if toggle_selected_cable_segmented(node, &mut state, &view_key) {
+                        eprintln!("[patcher cmd-y] widget toggled selected cable segmentation");
+                        set_patcher_interaction_state(key, state);
+                        Some(patcher_widget_event(PatcherChangeKind::Layout))
+                    } else {
+                        eprintln!("[patcher cmd-y] widget could not toggle selected cable");
+                        None
+                    }
+                }
                 KeyCode::Char('r') | KeyCode::Char('R')
                     if state
                         .agentic_bubbles
@@ -732,18 +859,6 @@ impl WidgetDefinition for PatcherWidget {
             };
         }
         match key_event.code {
-            KeyCode::Char('y') | KeyCode::Char('Y')
-                if state.text_edit.is_none()
-                    && state.selected_cable.is_some()
-                    && key_event.modifiers.contains(KeyModifiers::SUPER) =>
-            {
-                if toggle_selected_cable_segmented(node, &mut state, &view_key) {
-                    set_patcher_interaction_state(key, state);
-                    Some(patcher_widget_event(PatcherChangeKind::Layout))
-                } else {
-                    None
-                }
-            }
             KeyCode::Enter if state.text_edit.is_some() => {
                 let committed_node_id = state.text_edit.as_ref().map(|edit| edit.node_id.clone());
                 let changed = commit_patcher_text_edit(&mut state, &view_key);

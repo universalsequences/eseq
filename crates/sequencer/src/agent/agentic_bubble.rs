@@ -13,7 +13,9 @@ DGenLisp defmacros are not Common Lisp macros. The macro body is ordinary \
 DGenLisp DSP code evaluated directly by the host. Do not generate quoted code. \
 Never use backquote, quote, unquote, let, lambda, or do. Use one or more local \
 `(def name expr)` forms when intermediate values are needed, then end with the \
-single result expression. For filters, use numeric modes such as `(svf input \
+result expression. Return a single signal by default; when the request naturally \
+needs multiple patcher outlets, make the final expression `(tuple out1 out2 ...)`. \
+For filters, use numeric modes such as `(svf input \
 cutoff q 1)` for band-pass; do not use keyword modes such as `:bp`. Example: \
 `(defmacro formant_bank (input f1 q1 g1 f2 q2 g2) (def b1 (svf input f1 q1 1)) \
 (def b2 (svf input f2 q2 1)) (+ (* b1 g1) (* b2 g2)))`.";
@@ -169,7 +171,10 @@ Output contract:
   as `agentic`, `generated`, or `macro` unless they are genuinely part of the
   audio concept.
 - Choose explicit parameters for every external signal/control the helper needs.
-- Output one signal/value unless the user explicitly asks for a tuple-like result.
+- Output one signal/value by default. If the prompt asks for multiple results,
+  parallel variants, stereo left/right, dry/wet taps, analysis plus processed
+  signal, phase plus waveform, or otherwise implies several patcher outlets,
+  return `(tuple out1 out2 ...)` as the final body form.
 - Keep the macro small enough to be readable in a patcher node."
     };
     format!(
@@ -183,6 +188,8 @@ Macro syntax:
 - This is the same DSP dialect used by saved instrument `dsp.lisp` files, not the
   UI Lisp dialect and not Common Lisp.
 - A macro body can contain multiple body forms. The last body form is the result.
+- If the last body form is `(tuple a b c)`, the patcher exposes one outlet for
+  each tuple item. Do not wrap a single output in `tuple`.
 - Use local `(def local_name expr)` forms for named intermediate signals.
 - Local `(def ...)` and `make-history` names inside macros are scoped by the host.
 - Do not use a top-level wrapper such as `(instrument ...)`, `(synth ...)`,
@@ -207,6 +214,12 @@ Valid DGenLisp macro examples:
   (make-history h)
   (def y (mix sig (read-history h) amt))
   (write-history h y))`
+
+`(defmacro split-drive (input drive mix_amt)
+  (def dry input)
+  (def wet (tanh (* input drive)))
+  (def blended (mix dry wet mix_amt))
+  (tuple blended wet))`
 
 Invalid Common Lisp style. Never do this:
 `(defmacro bad (input f q)
@@ -241,7 +254,7 @@ fn user_prompt(request: &AgenticBubbleRequest, validation_error: Option<&str>) -
         );
     }
     format!(
-        "Prompt: {}\nProduce a defmacro. Choose the macro name yourself. Suggested fallback name if needed: {}. Choose a clear parameter list. Output a single signal unless the prompt explicitly requires otherwise.\n{}{}",
+        "Prompt: {}\nProduce a defmacro. Choose the macro name yourself. Suggested fallback name if needed: {}. Choose a clear parameter list. Output one signal by default, but use a final `(tuple ...)` when the prompt naturally needs multiple patcher outlets.\n{}{}",
         request.prompt.trim(),
         request.suggested_macro_name,
         DGENLISP_DEFMACRO_CONTRACT,
@@ -383,6 +396,7 @@ fn extract_lisp_source(raw: &str) -> String {
 
 fn validate_known_operators(body: &[Expression], params: &[Expression]) -> Result<(), String> {
     let mut allowed = dgen_operator_names();
+    allowed.insert("tuple".to_string());
     for param in params {
         if let Expression::Symbol(name) = param {
             allowed.insert(name.clone());
@@ -583,6 +597,19 @@ mod tests {
     }
 
     #[test]
+    fn validates_tuple_return_for_multi_output_macro() {
+        let source = "\
+(defmacro split-drive (input drive mix_amt)
+  (def dry input)
+  (def wet (tanh (* input drive)))
+  (def blended (mix dry wet mix_amt))
+  (tuple blended wet))";
+        let (name, validated) = validate_macro_response(source).expect("valid macro");
+        assert_eq!(name, "split-drive");
+        assert!(validated.contains("(tuple blended wet)"));
+    }
+
+    #[test]
     fn accepts_model_chosen_macro_name() {
         let (name, _) = validate_macro_response("(defmacro other (x) x)").expect("valid macro");
         assert_eq!(name, "other");
@@ -604,9 +631,24 @@ mod tests {
             assert!(prompt.contains("(svf input cutoff q 1)"));
         }
         assert!(system.contains("Available DGenLisp names from the bundled operator documentation"));
+        assert!(system.contains("final expression `(tuple out1 out2 ...)`"));
+        assert!(system.contains("one outlet for"));
+        assert!(user.contains("multiple patcher outlets"));
         assert!(system.contains("polyblep_saw"));
         assert!(!system.contains("such as +, -, *, /, sin"));
         assert!(!system.contains("Use only common DGenLisp primitives"));
+    }
+
+    #[test]
+    fn prompt_recommends_tuple_when_request_implies_multiple_outputs() {
+        let request = AgenticBubbleRequest {
+            prompt: "make a helper that returns dry, wet, and mixed outputs".to_string(),
+            suggested_macro_name: "split-drive".to_string(),
+            follow_up: None,
+        };
+        let user = user_prompt(&request, None);
+        assert!(user.contains("use a final `(tuple ...)`"));
+        assert!(user.contains("multiple patcher outlets"));
     }
 
     #[test]

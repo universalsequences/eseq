@@ -44,12 +44,22 @@ fn emit_patch_debug_lisp_body(patch: &Patch, context: EmitContext) -> String {
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect::<HashMap<_, _>>();
+    let macro_tuple_return = (context == EmitContext::Macro)
+        .then(|| macro_tuple_return_expr(patch, &nodes, &inbound))
+        .flatten();
+    let tuple_return_source_ids = macro_tuple_return
+        .as_ref()
+        .map(|(_, source_ids)| source_ids.clone())
+        .unwrap_or_default();
     let mut emitted = Vec::new();
     let mut emitted_node_ids = HashSet::new();
     let mut top_level = patch.nodes.iter().collect::<Vec<_>>();
     top_level.sort_by_key(|node| source_order(node).unwrap_or((usize::MAX, usize::MAX)));
     for node in top_level {
         if !should_emit_top_level(node) {
+            continue;
+        }
+        if tuple_return_source_ids.contains(node.id.as_str()) {
             continue;
         }
         if emitted_node_ids.contains(node.id.as_str()) {
@@ -62,10 +72,54 @@ fn emit_patch_debug_lisp_body(patch: &Patch, context: EmitContext) -> String {
             emitted.push(form);
         }
     }
+    if let Some((return_expr, _)) = macro_tuple_return {
+        emitted.push(return_expr);
+    }
     if emitted.is_empty() {
         return ";; patcher debug emit: no source-backed top-level forms".to_string();
     }
     emitted.join("\n")
+}
+
+fn macro_tuple_return_expr(
+    patch: &Patch,
+    nodes: &HashMap<&str, &PatchNode>,
+    inbound: &HashMap<(String, usize), &PatchConnection>,
+) -> Option<(String, HashSet<String>)> {
+    let mut outs = patch
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Out)
+        .collect::<Vec<_>>();
+    if outs.len() <= 1 {
+        return None;
+    }
+    outs.sort_by_key(|node| {
+        node.args
+            .first()
+            .and_then(|arg| match arg {
+                ArgValue::Literal(value) => value.parse::<usize>().ok(),
+                _ => None,
+            })
+            .unwrap_or(usize::MAX)
+    });
+    let mut parts = vec!["tuple".to_string()];
+    let mut return_source_ids = HashSet::new();
+    for out in outs {
+        let connection = inbound.get(&(out.id.clone(), 0))?;
+        let source_node = nodes.get(connection.from_node.as_str())?;
+        if same_top_level_form(out, source_node) {
+            return_source_ids.insert(source_node.id.clone());
+        }
+        parts.push(emit_connected_source_node(
+            source_node,
+            connection,
+            nodes,
+            inbound,
+            &mut HashSet::new(),
+        ));
+    }
+    Some((format!("({})", parts.join(" ")), return_source_ids))
 }
 
 pub(super) fn debug_log_patch_lisp(view_key: &str, patch: &Patch) {

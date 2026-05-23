@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use super::display::node_size_for_ports;
-use super::geometry::{patch_input_indices, patch_input_slot_counts, patch_output_counts};
+use super::geometry::{
+    patch_input_indices, patch_input_slot_counts, patch_output_counts, port_x_offset,
+};
 use super::metrics::{LAYER_SPACING, NODE_COLUMN_GAP, VIEW_PADDING_X, VIEW_PADDING_Y};
 use super::model::{CableSegmentInfo, ConnectionKind, NodeKind, Patch};
 
@@ -1249,15 +1251,4 @@ fn is_local_source_candidate(idx: usize, patch: &Patch, edges: &[LayoutEdge]) ->
 
 fn node_center_x(idx: usize, patch: &Patch, nodes: &[WorkNode]) -> f32 {
     patch.nodes[idx].position.0 + nodes[idx].width * 0.5
-}
-
-fn port_x_offset(index: usize, count: usize, width: f32) -> f32 {
-    let count = count.max(1);
-    let edge_padding = super::metrics::PORT_EDGE_PADDING_CELLS;
-    let usable = (width - edge_padding * 2.0).max(0.0);
-    if count == 1 {
-        edge_padding.min(width * 0.5)
-    } else {
-        edge_padding + usable * (index.min(count - 1) as f32) / ((count - 1) as f32)
-    }
 }

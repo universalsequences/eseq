@@ -455,6 +455,24 @@ pub(crate) fn handle_metal_command_shortcut(
 
     if editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
+        && !focused_widget_captures_text_input(editor)
+        && matches!((key.code, key.modifiers), (KeyCode::Tab, KeyModifiers::NONE))
+        && editor
+            .runtime_mut()
+            .eval_str(r#"(or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))"#)
+            .ok()
+            .flatten()
+            .is_some_and(|value| matches!(value, eseqlisp::vm::Value::Bool(true)))
+    {
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-main-or-piano-roll)");
+        editor.refresh_runtime_side_effects();
+        return true;
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
         && active_buffer_accepts_global_ui_shortcuts(editor)
         && editor.focused_widget_id().is_none()
         && !focused_widget_captures_text_input(editor)

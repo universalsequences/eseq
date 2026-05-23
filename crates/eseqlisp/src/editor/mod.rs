@@ -283,6 +283,7 @@ pub struct Editor {
     should_quit: bool,
     last_exit: EditorExit,
     next_buffer_id: BufferId,
+    patcher_emitted_source_origins: HashMap<String, BufferId>,
     save_prompt: Option<SavePrompt>,
     completion: Option<CompletionState>,
     last_mouse_precise: Option<(f32, f32)>,
@@ -387,6 +388,7 @@ impl Editor {
             should_quit: false,
             last_exit: EditorExit::Closed,
             next_buffer_id: 1,
+            patcher_emitted_source_origins: HashMap::new(),
             save_prompt: None,
             completion: None,
             last_mouse_precise: None,
@@ -2373,6 +2375,43 @@ impl Editor {
         }
     }
 
+    fn upsert_read_only_scratch_buffer_with_mode(
+        &mut self,
+        name: &str,
+        text: &str,
+        mode: BufferMode,
+    ) -> BufferId {
+        if let Some(idx) = self.buffers.iter().position(|buffer| buffer.name == name) {
+            let id = self.buffers[idx].id;
+            let cursor = self.buffers[idx].cursor;
+            let scroll_top = self.buffers[idx].scroll_top;
+            self.buffers[idx].set_text(text);
+            self.buffers[idx].set_mode(mode);
+            self.buffers[idx].read_only = true;
+            self.buffers[idx].dirty = false;
+            let cursor_row = cursor
+                .0
+                .min(self.buffers[idx].lines.len().saturating_sub(1));
+            let cursor_col = cursor
+                .1
+                .min(self.buffers[idx].lines[cursor_row].chars().count());
+            self.buffers[idx].cursor = (cursor_row, cursor_col);
+            self.buffers[idx].scroll_top =
+                scroll_top.min(self.buffers[idx].lines.len().saturating_sub(1));
+            id
+        } else {
+            let id = self.alloc_buffer_id();
+            let mut buffer = Buffer::new(id, name);
+            buffer.set_text(text);
+            buffer.set_mode(mode);
+            buffer.read_only = true;
+            buffer.dirty = false;
+            self.buffers.push(buffer);
+            self.track_new_buffer(id, false);
+            id
+        }
+    }
+
     pub fn create_scratch_buffer(&mut self, name: &str, text: &str, mode: BufferMode) -> BufferId {
         let id = self.alloc_buffer_id();
         let mut buffer = Buffer::new(id, name);
@@ -2508,6 +2547,14 @@ impl Editor {
         let current_idx = self.buffers.iter().position(|b| b.name == current_name);
         let new_idx = self.buffers.iter().position(|b| b.name == new_name);
         if let (Some(cur), Some(new)) = (current_idx, new_idx) {
+            let active_tile = self.active_tile;
+            let swapping_active_tile = self
+                .tile_root
+                .find_leaf(active_tile)
+                .is_some_and(|leaf| leaf.buffer_idx == cur);
+            if swapping_active_tile {
+                self.save_current_widget_tree();
+            }
             if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(cur) {
                 leaf.buffer_idx = new;
                 if widget_only_scratch_buffer_should_show_ui(&self.buffers[new]) {
@@ -2521,7 +2568,14 @@ impl Editor {
                 leaf.highlight_cache = None;
                 leaf.widget_scroll_top = 0.0;
                 leaf.widget_scroll_left = 0.0;
-                self.refresh_inactive_tile_layouts_for_buffer(new);
+                if swapping_active_tile {
+                    self.record_buffer_access_by_idx(new);
+                    self.sync_runtime_context();
+                    self.restore_buffer_widget_tree();
+                } else {
+                    self.refresh_inactive_tile_layouts_for_buffer(new);
+                }
+                self.mark_needs_redraw();
                 return true;
             }
         }
@@ -2536,12 +2590,40 @@ impl Editor {
             .map(|b| b.lines.join("\n"))
     }
 
+    pub fn upsert_patcher_emitted_source_buffer(
+        &mut self,
+        patcher_buffer_name: &str,
+        patcher_path: &std::path::Path,
+        emitted_source: &str,
+    ) -> Result<String, String> {
+        let Some(patcher_buffer_id) = self
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == patcher_buffer_name)
+            .map(|buffer| buffer.id)
+        else {
+            return Err(format!("No patcher buffer named '{patcher_buffer_name}'"));
+        };
+        let path = patcher_path.to_string_lossy().to_string();
+        let emitted_buffer_name = crate::widget_render::patcher::emitted_source_buffer_name(&path);
+        self.upsert_read_only_scratch_buffer_with_mode(
+            &emitted_buffer_name,
+            emitted_source,
+            BufferMode::DGenLisp,
+        );
+        self.patcher_emitted_source_origins
+            .insert(path, patcher_buffer_id);
+        Ok(emitted_buffer_name)
+    }
+
     /// Remove a buffer by name. Returns true if found and removed.
     pub fn remove_buffer_by_name(&mut self, name: &str) -> bool {
         if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
             let removed_id = self.buffers[idx].id;
             self.buffers.remove(idx);
             self.buffer_recency.retain(|id| *id != removed_id);
+            self.patcher_emitted_source_origins
+                .retain(|_, buffer_id| *buffer_id != removed_id);
             // Fix up any tile leaf buffer indices that pointed past the removed slot
             Self::fix_leaf_indices(&mut self.tile_root, idx);
             true
@@ -2705,6 +2787,10 @@ impl Editor {
             return;
         }
 
+        if self.handle_patcher_emitted_source_tab(key) {
+            return;
+        }
+
         if self.handle_completion_key(key) {
             return;
         }
@@ -2724,6 +2810,10 @@ impl Editor {
         // Focused widget keys take priority over global bindings
         // (so Enter/arrows work in number-pickers, dropdowns, etc.)
         if self.handle_focused_widget_key(key) {
+            return;
+        }
+
+        if self.handle_visible_patcher_selected_cable_shortcut(key) {
             return;
         }
 
@@ -5185,6 +5275,7 @@ impl Editor {
         let Some(output) = output else {
             return false;
         };
+        self.sync_patcher_emitted_source_buffer(&output.args);
         self.sync_runtime_source_context();
         let result = self.runtime.invoke(output.callback, output.args);
         if let Some(status) = self.runtime.take_status_message() {
@@ -5198,6 +5289,100 @@ impl Editor {
         self.completion = None;
         self.mark_needs_redraw();
         true
+    }
+
+    fn sync_patcher_emitted_source_buffer(&mut self, args: &[Value]) -> Option<BufferId> {
+        let Value::Map(map) = args.first()? else {
+            return None;
+        };
+        let status = map.get("status").and_then(|value| match &*value.borrow() {
+            Value::Keyword(status) | Value::String(status) => Some(status.clone()),
+            _ => None,
+        })?;
+        if status != "valid" {
+            return None;
+        }
+        let source = map.get("source").and_then(|value| match &*value.borrow() {
+            Value::String(source) => Some(source.clone()),
+            _ => None,
+        })?;
+        let path = map.get("path").and_then(|value| match &*value.borrow() {
+            Value::String(path) if !path.is_empty() => Some(path.clone()),
+            _ => None,
+        })?;
+        let name = crate::widget_render::patcher::emitted_source_buffer_name(&path);
+        let id =
+            self.upsert_read_only_scratch_buffer_with_mode(&name, &source, BufferMode::DGenLisp);
+        if self
+            .active_buffer()
+            .widget_tree
+            .as_ref()
+            .is_some_and(|tree| widget_tree_contains_patcher_path(tree, &path))
+        {
+            self.patcher_emitted_source_origins
+                .insert(path, self.active_buffer().id);
+        }
+        Some(id)
+    }
+
+    fn switch_focused_patcher_to_emitted_source_buffer(
+        &mut self,
+        node: &crate::layout::LayoutNode,
+    ) -> bool {
+        match crate::widget_render::patcher::emitted_source_buffer_snapshot(node) {
+            Ok(snapshot) => {
+                let origin_buffer_id = self.active_buffer().id;
+                let id = self.upsert_read_only_scratch_buffer_with_mode(
+                    &snapshot.buffer_name,
+                    &snapshot.source,
+                    BufferMode::DGenLisp,
+                );
+                self.patcher_emitted_source_origins
+                    .insert(snapshot.path, origin_buffer_id);
+                self.set_active_buffer(id);
+            }
+            Err(error) => {
+                self.minibuffer = Some(format!("Patch emitted source unavailable: {error}"));
+                self.mark_needs_redraw();
+            }
+        }
+        true
+    }
+
+    fn handle_patcher_emitted_source_tab(&mut self, key: KeyEvent) -> bool {
+        if key.code != KeyCode::Tab || key.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+        let Some(path) = crate::widget_render::patcher::emitted_source_path_from_buffer_name(
+            &self.active_buffer().name,
+        ) else {
+            return false;
+        };
+        let Some(buffer_id) = self.patcher_buffer_id_for_path(&path) else {
+            self.minibuffer = Some(format!("No patcher buffer found for {path}"));
+            self.mark_needs_redraw();
+            return true;
+        };
+        self.set_active_buffer(buffer_id);
+        true
+    }
+
+    fn patcher_buffer_id_for_path(&self, path: &str) -> Option<BufferId> {
+        if let Some(buffer_id) = self
+            .patcher_emitted_source_origins
+            .get(path)
+            .copied()
+            .filter(|buffer_id| self.buffers.iter().any(|buffer| buffer.id == *buffer_id))
+        {
+            return Some(buffer_id);
+        }
+        self.buffers.iter().find_map(|buffer| {
+            buffer
+                .widget_tree
+                .as_ref()
+                .is_some_and(|tree| widget_tree_contains_patcher_path(tree, path))
+                .then_some(buffer.id)
+        })
     }
 
     fn copy_active_region(&mut self) -> bool {
@@ -5596,6 +5781,34 @@ fn max_layout_bottom(node: &crate::layout::LayoutNode) -> f32 {
         })
 }
 
+fn widget_tree_contains_patcher_path(value: &Value, path: &str) -> bool {
+    match value {
+        Value::Map(map) => {
+            let is_matching_patcher = map.get("type").is_some_and(
+                |value| matches!(&*value.borrow(), Value::String(kind) if kind == "patcher"),
+            ) && ["path", "file"].iter().any(|key| {
+                map.get(*key).is_some_and(|value| {
+                    matches!(
+                        &*value.borrow(),
+                        Value::String(value) | Value::Keyword(value) | Value::Symbol(value)
+                            if value == path
+                    )
+                })
+            });
+            is_matching_patcher
+                || map.values().any(|value| {
+                    let value = value.borrow();
+                    widget_tree_contains_patcher_path(&value, path)
+                })
+        }
+        Value::List(items) => items.iter().any(|item| {
+            let item = item.borrow();
+            widget_tree_contains_patcher_path(&item, path)
+        }),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Editor, EditorConfig, VimInputMode, key_str};
@@ -5629,6 +5842,20 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    fn first_patcher_layout_node(
+        node: &crate::layout::LayoutNode,
+    ) -> Option<crate::layout::LayoutNode> {
+        if node.widget_type == "patcher" {
+            return Some(node.clone());
+        }
+        for child in &node.children {
+            if let Some(found) = first_patcher_layout_node(child) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     // Tests are included from the original file — they reference super:: helpers above.

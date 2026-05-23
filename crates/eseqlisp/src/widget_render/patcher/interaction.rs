@@ -295,19 +295,21 @@ pub(super) fn handle_patcher_pointer_down(
         set_patcher_interaction_state(key, state);
         return;
     }
-    if let Some(cable_id) = hit_patcher_segmented_cable_horizontal_segment(
-        &patch,
-        node.rect,
-        &pan_state,
-        &input_indices,
-        &input_slot_counts,
-        &output_counts,
-        local_col,
-        local_row,
-    ) && let Some(connection) = patch
-        .connections
-        .iter()
-        .find(|connection| source_connection_id(connection) == cable_id)
+    if hit.is_none()
+        && let Some(cable_id) = hit_patcher_segmented_cable_horizontal_segment(
+            &patch,
+            node.rect,
+            &pan_state,
+            &input_indices,
+            &input_slot_counts,
+            &output_counts,
+            local_col,
+            local_row,
+        )
+        && let Some(connection) = patch
+            .connections
+            .iter()
+            .find(|connection| source_connection_id(connection) == cable_id)
         && let Some((start, end)) = connection_endpoints(
             connection,
             &patch_node_rects(&patch, node.rect, &pan_state),

@@ -42,8 +42,8 @@ use super::state::{
     PatcherInteractionState, PatcherPanState, PatcherTextEdit, PatcherZSlot, active_patcher_patch,
     active_patcher_view_key, get_patcher_interaction_state, get_patcher_pan_state,
     max_node_z_index, node_z_index, ordered_patch_nodes, patch_with_interaction_state,
-    patcher_back_label, patcher_breadcrumb, patcher_state_key, set_patcher_pan_state,
-    source_connection_id, sync_patcher_z_order,
+    patcher_breadcrumb, patcher_state_key, set_patcher_pan_state, source_connection_id,
+    sync_patcher_z_order,
 };
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
@@ -532,9 +532,9 @@ fn push_back_button(
     viewport: WidgetViewport,
     interaction_state: &PatcherInteractionState,
 ) {
-    let Some(label) = patcher_back_label(interaction_state) else {
+    if interaction_state.active_macro.is_none() {
         return;
-    };
+    }
     let button_rect = patcher_back_button_rect(rect);
     let border = if interaction_state.hover_back_button {
         theme::PATCHER_BACK_BUTTON_HOVER_BORDER()
@@ -560,23 +560,54 @@ fn push_back_button(
         15.0,
         false,
     );
-    prims.push(MetalPrimitive::ProportionalText(
-        MetalProportionalTextPrimitive {
-            row: button_rect.row + 0.24,
-            col: button_rect.col + 0.7,
-            align_width: button_rect.width - 1.1,
-            h_align: 0.0,
-            text: label.to_string(),
-            font_size: 11.0,
-            scale: 1.0,
-            fg: if interaction_state.hover_back_button {
-                theme::PATCHER_BACK_BUTTON_HOVER_TEXT()
-            } else {
-                theme::PATCHER_BACK_BUTTON_TEXT()
-            },
-            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+    push_back_chevron_icon(
+        prims,
+        button_rect,
+        viewport,
+        interaction_state.hover_back_button,
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn push_back_chevron_icon(
+    prims: &mut Vec<MetalPrimitive>,
+    button_rect: Rect,
+    viewport: WidgetViewport,
+    hovered: bool,
+) {
+    let icon_rect = Rect {
+        row: button_rect.row + 0.29,
+        col: button_rect.col + 0.56,
+        width: 0.92,
+        height: button_rect.height - 0.58,
+    };
+    let (ndc_min, ndc_max) = ndc_bounds(icon_rect, viewport);
+    let px_w = icon_rect.width * viewport.cell_w;
+    let px_h = icon_rect.height * viewport.cell_h;
+    let color = if hovered {
+        theme::PATCHER_BACK_BUTTON_HOVER_TEXT()
+    } else {
+        theme::PATCHER_BACK_BUTTON_TEXT()
+    };
+    prims.push(MetalPrimitive::WidgetInstance {
+        widget_type: "patcher-back-chevron".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [0.0; 4],
+            uniform_b: [0.0; 4],
+            color_a: color.to_rgba(),
+            color_b: [0.0; 4],
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: 0.0,
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
-    ));
+        is_background: false,
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -899,6 +930,17 @@ pub(super) fn output_port_tooltip(patch: &Patch, port: &OutputPortRef) -> Option
     let name = output_reference_name(node)
         .filter(|_| port.output_index == 0)
         .or_else(|| node.outputs.get(port.output_index).cloned())
+        .or_else(|| {
+            if node.kind != NodeKind::MacroInstance {
+                return None;
+            }
+            patch
+                .macros
+                .iter()
+                .find(|macro_patch| macro_patch.name == node.op)
+                .and_then(|macro_patch| macro_patch.outputs.get(port.output_index))
+                .cloned()
+        })
         .or_else(|| {
             dgenlisp_operator_documentation()
                 .get(&node.op)

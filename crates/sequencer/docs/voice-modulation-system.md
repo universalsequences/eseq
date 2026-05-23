@@ -38,6 +38,8 @@ All instruments should assume these inputs:
 - `in 6`: `mod2`
 - `in 7`: `mod3`
 - `in 8`: `mod4`
+- `in 9`: `mod5`
+- `in 10`: `mod6`
 
 Signal conventions:
 
@@ -45,9 +47,7 @@ Signal conventions:
 - `pitch_hz`: Hz
 - `velocity`: `0..1`
 - `trigger`: pulse on note-on
-- `mod1..mod4`: bipolar `-1..1`
-- `clock_phase`: unipolar `0..1`
-- `clock_pulse`: `0/1`
+- `mod1..mod6`: unipolar `0..1`
 
 ## Native Modulator Node
 
@@ -67,8 +67,8 @@ MVP output contract:
 - `out 2`: `mod2`
 - `out 3`: `mod3`
 - `out 4`: `mod4`
-- `out 5`: `clock_phase`
-- `out 6`: `clock_pulse`
+- `out 5`: `mod5`
+- `out 6`: `mod6`
 
 MVP internal source mapping:
 
@@ -76,8 +76,8 @@ MVP internal source mapping:
 - `mod2`: secondary envelope
 - `mod3`: stepped random
 - `mod4`: slow drift
-- `clock_phase`: cycle phase
-- `clock_pulse`: note trigger placeholder until transport clock wiring lands
+- `mod5`: second cyclic modulation source
+- `mod6`: third cyclic modulation source
 
 ## Preset Model
 

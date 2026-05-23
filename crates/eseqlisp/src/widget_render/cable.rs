@@ -202,6 +202,7 @@ pub fn segmented_horizontal_segment_hit(
     end: (f32, f32),
     segment_row: f32,
     corner_radius: f32,
+    hit_radius: f32,
     point: (f32, f32),
 ) -> bool {
     if !should_render_segmented_cable(start, end) {
@@ -220,7 +221,7 @@ pub fn segmented_horizontal_segment_hit(
     };
     point.0 >= start_x.min(end_x)
         && point.0 <= start_x.max(end_x)
-        && (point.1 - segment_row).abs() < corner_radius
+        && (point.1 - segment_row).abs() <= hit_radius
 }
 
 fn distance_to_segmented_path_y_up(
@@ -515,7 +516,7 @@ mod tests {
             distance_to_cable_px(start, end, point)
         );
         assert!(!segmented_horizontal_segment_hit(
-            start, end, 34.0, 0.7, point
+            start, end, 34.0, 0.7, 0.4, point
         ));
     }
 

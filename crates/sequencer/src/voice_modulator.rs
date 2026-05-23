@@ -113,6 +113,10 @@ fn shape_value(shape: usize, phase: f32, pulse_width: f32) -> f32 {
     }
 }
 
+fn bipolar_to_unipolar(value: f32) -> f32 {
+    ((value.clamp(-1.0, 1.0) + 1.0) * 0.5).clamp(0.0, 1.0)
+}
+
 fn synced_rate_hz(div_idx: usize, bpm: f32) -> f32 {
     let beats = SyncDivision::from_index(div_idx).to_beats() as f32;
     (bpm.max(20.0) / 60.0) / beats.max(0.0001)
@@ -989,15 +993,20 @@ unsafe extern "C" fn voice_modulator_process(
             (next_rand(&mut rng_state) * 0.08 - drift) * (drift_rate / sample_rate).clamp(0.0, 1.0);
         drift = drift.clamp(-1.0, 1.0);
 
-        *out_mod1.add(i) =
-            (shape_value(lfo1_shape, lfo1_phase, lfo1_pw) * mod1_depth).clamp(-1.0, 1.0);
-        *out_mod2.add(i) = ((env2 * 2.0 - 1.0) * mod2_depth).clamp(-1.0, 1.0);
-        *out_mod3.add(i) = (rand_smooth * mod3_depth).clamp(-1.0, 1.0);
-        *out_mod4.add(i) = ((drift * (0.4 + velocity * 0.6)) * mod4_depth).clamp(-1.0, 1.0);
-        *out_mod5.add(i) =
-            (shape_value(lfo2_shape, lfo2_phase, lfo2_pw) * mod5_depth).clamp(-1.0, 1.0);
-        *out_mod6.add(i) =
-            (shape_value(lfo3_shape, lfo3_phase, lfo3_pw) * mod6_depth).clamp(-1.0, 1.0);
+        let drift_source = (drift * (0.4 + velocity * 0.6)).clamp(-1.0, 1.0);
+
+        *out_mod1.add(i) = (bipolar_to_unipolar(shape_value(lfo1_shape, lfo1_phase, lfo1_pw))
+            * mod1_depth)
+            .clamp(0.0, 1.0);
+        *out_mod2.add(i) = (env2 * mod2_depth).clamp(0.0, 1.0);
+        *out_mod3.add(i) = (bipolar_to_unipolar(rand_smooth) * mod3_depth).clamp(0.0, 1.0);
+        *out_mod4.add(i) = (bipolar_to_unipolar(drift_source) * mod4_depth).clamp(0.0, 1.0);
+        *out_mod5.add(i) = (bipolar_to_unipolar(shape_value(lfo2_shape, lfo2_phase, lfo2_pw))
+            * mod5_depth)
+            .clamp(0.0, 1.0);
+        *out_mod6.add(i) = (bipolar_to_unipolar(shape_value(lfo3_shape, lfo3_phase, lfo3_pw))
+            * mod6_depth)
+            .clamp(0.0, 1.0);
 
         prev_gate = gate;
     }
@@ -1065,6 +1074,46 @@ pub fn modulator_slot_label(slot: usize, fallback_name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn render_voice_modulator(
+        state: &mut [f32; STATE_SIZE],
+        frames: usize,
+    ) -> [[f32; 64]; NUM_OUTPUTS] {
+        assert!(frames <= 64);
+
+        let gate = [1.0f32; 64];
+        let pitch = [440.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let trigger = [0.0f32; 64];
+        let inputs = [
+            gate.as_ptr() as *mut f32,
+            pitch.as_ptr() as *mut f32,
+            velocity.as_ptr() as *mut f32,
+            trigger.as_ptr() as *mut f32,
+        ];
+
+        let mut outputs = [[0.0f32; 64]; NUM_OUTPUTS];
+        let output_ptrs = [
+            outputs[0].as_mut_ptr(),
+            outputs[1].as_mut_ptr(),
+            outputs[2].as_mut_ptr(),
+            outputs[3].as_mut_ptr(),
+            outputs[4].as_mut_ptr(),
+            outputs[5].as_mut_ptr(),
+        ];
+
+        unsafe {
+            voice_modulator_process(
+                inputs.as_ptr(),
+                output_ptrs.as_ptr(),
+                frames as c_int,
+                state.as_mut_ptr().cast(),
+                std::ptr::null_mut(),
+            );
+        }
+
+        outputs
+    }
+
     #[test]
     fn synced_lfo_divisions_are_calibrated_to_quarter_note_beats() {
         let bpm = 120.0;
@@ -1120,5 +1169,47 @@ mod tests {
         assert!(!runtime_indices.contains(&PARAM_RESET_COUNTER));
         assert!(PARAM_BPM < STATE_SIZE);
         assert!(PARAM_RESET_COUNTER < STATE_SIZE);
+    }
+
+    #[test]
+    fn built_in_modulator_outputs_are_unipolar() {
+        let mut state = [0.0f32; STATE_SIZE];
+        unsafe {
+            voice_modulator_init(state.as_mut_ptr().cast(), 48_000, 64, std::ptr::null());
+        }
+
+        let outputs = render_voice_modulator(&mut state, 64);
+
+        for (output_idx, output) in outputs.iter().enumerate() {
+            for (frame_idx, value) in output.iter().take(64).enumerate() {
+                assert!(
+                    (0.0..=1.0).contains(value),
+                    "mod output {} frame {} should be unipolar, got {}",
+                    output_idx + 1,
+                    frame_idx,
+                    value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modulator_depth_zero_outputs_zero_not_center_bias() {
+        let mut state = [0.0f32; STATE_SIZE];
+        unsafe {
+            voice_modulator_init(state.as_mut_ptr().cast(), 48_000, 64, std::ptr::null());
+        }
+        state[PARAM_MOD1_DEPTH] = 0.0;
+        state[PARAM_MOD2_DEPTH] = 0.0;
+        state[PARAM_MOD3_DEPTH] = 0.0;
+        state[PARAM_MOD4_DEPTH] = 0.0;
+        state[PARAM_MOD5_DEPTH] = 0.0;
+        state[PARAM_MOD6_DEPTH] = 0.0;
+
+        let outputs = render_voice_modulator(&mut state, 64);
+
+        for output in &outputs {
+            assert_eq!(&output[..64], &[0.0; 64]);
+        }
     }
 }

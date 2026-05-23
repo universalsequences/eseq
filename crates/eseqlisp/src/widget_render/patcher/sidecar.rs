@@ -319,6 +319,7 @@ fn root_patch_with_interaction(
             super::model::MacroPatch {
                 name: macro_patch.name,
                 params: macro_patch.params,
+                outputs: macro_patch.outputs,
                 patch,
             }
         })
