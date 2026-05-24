@@ -31,7 +31,7 @@
 
 (defwidget transport-master-meter
   :width 10.5 :height 0.34
-  :paint-margin 0.12
+  :paint-margin 0.012
   :state (level)
   :bindable (level)
   :shader
@@ -358,27 +358,37 @@
               :text-color (rgba 0.85 0.85 0.85 1)
               :on-change (lambda (v) (seq-set-bpm v))
               :width 7 :height 1.2)))
-        (v-stack :gap 0.05 :align :center :padding 0.18
+        (v-stack :gap 0.08 :padding 0.05
+          (label "L"
+            :font-size 5 :width 0.9
+            :color '(rgba 0.63 0.88 0.41 1)
+            :bg :transparent)         
+          
+          (label "R"
+            :font-size 5 :width 0.9
+            :color '(rgba 0.63 0.88 0.41 1)
+            :bg :transparent)          )
+        
+        
+        (v-stack :gap 0.08 :padding 0.05
+          (h-stack :gap 0.25 
+            
+            (v-stack
+              (box :height 0.2)
+              (subtree :key "master-meter-l"
+                (transport-master-meter :level (bind-seq "master-peak-l")))))
           (h-stack :gap 0.25 :align :center
-            (label "L"
-              :font-size 8 :width 0.9
-              :color '(rgba 0.63 0.88 0.41 1)
-              :bg :transparent)
-            (subtree :key "master-meter-l"
-              (transport-master-meter :level (bind-seq "master-peak-l"))))
-          (h-stack :gap 0.25 :align :center
-            (label "R"
-              :font-size 8 :width 0.9
-              :color '(rgba 0.63 0.88 0.41 1)
-              :bg :transparent)
-            (subtree :key "master-meter-r"
-              (transport-master-meter :level (bind-seq "master-peak-r")))))
+            
+            (v-stack (box :height 0.1)
+              (subtree :key "master-meter-r"
+                (transport-master-meter :level (bind-seq "master-peak-r"))))))
         (subtree :key "transport-cpu"
           (h-stack :gap 0 :align :center :padding 0.3
-            (label "cpu"
-              :font-size 12 :width 2.5
-              :color '(rgba 0.30 0.30 0.32 1)
-              :bg :transparent)
+            (box :height 1.3
+              (label "cpu"
+                :font-size 12 :width 2.5
+                :color '(rgba 0.30 0.30 0.32 1)
+                :bg :transparent))
             (number-label :value (bind-seq "cpu-load-pct")
               :decimals 0 :min-integer-digits 2 :suffix "%"
               :font-size 12 :width 4.5 :height 1

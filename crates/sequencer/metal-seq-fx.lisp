@@ -88,7 +88,7 @@
             (str "audio-fx-enabled-" (get fx :slot-idx)))))
       (label title :font-size 11 :color :white :bg :transparent)
       (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
-        (box :bg :dark-gray :width 4 :height 1.0 :align :center
+        (box :width 4 :height 1.0 :align :center
           :on-click (lambda (info)
             (do
               (fx-clear-selected-effect)
@@ -1070,21 +1070,21 @@
           (box :width 1.55 :height 1.0))))))
 
 (defwidget fx-mini-save-icon
-  :width 1.5 :height 0.8
+  :width 1.8 :height 0.8
   :paint-margin 0.2
   :state (active)
   :shader
   (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
         (bg-col (if (= active 1)
           (rgba 0.00 0.35 0.82 1.0)
-          (rgba 0.28 0.28 0.30 1.0))))
+          (rgba 0.08 0.08 0.01 1.0))))
     (sdf/layer
       (sdf/fill
         (sdf/rounded-rect width height 0.5)
         (material :color bg-col))
       (sdf/fill
         (sdf/translate 0.0 -0.42
-          (sdf/rounded-rect 0.30 0.20 0.08))
+          (sdf/rounded-rect 0.50 0.20 0.08))
         (material :color fg-col))
       (sdf/fill
         (sdf/translate 0.16 -0.42
@@ -1092,7 +1092,7 @@
         (material :color bg-col))
       (sdf/fill
         (sdf/translate 0.0 0.27
-          (sdf/rounded-rect 0.34 0.22 0.08))
+          (sdf/rounded-rect 0.54 0.22 0.08))
         (material :color fg-col)))))
 
 (def fx-panel (title params fx)
@@ -2432,39 +2432,44 @@
     (sampler-panel inst)
     (if (= (get inst :type) "modulator")
       (modulator-panel inst)
-    (box
-      (v-stack :debug-name "instrument-panel-vstack" :gap 0
-        (box :debug-name "instrument-header-box" :height 0.75 :padding 0 :v-align :center :h-align :start
-          (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center
-            (fx-panel-header-leading-spacer)
-            (fx-enabled-toggle (enabled-param (get inst :synth)) false "instrument-enabled")
+      (box
+        (v-stack :debug-name "instrument-panel-vstack" :gap 0
+          (box :debug-name "instrument-header-box" :height 0.75 :padding 0 :v-align :center :h-align :start :width :fill
+            (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center :width :fill
+              (fx-panel-header-leading-spacer)
+              (fx-enabled-toggle (enabled-param (get inst :synth)) false "instrument-enabled")
               (h-stack :v-align :center :height 0.75 :gap 2 :padding 0.1
                 (label (substring (get inst :display-name) 0 12)
                   :font-size 11  :color :white :bg :transparent)
-                  (instrument-synth-button)
-                  (instrument-mods-toggle-button))
-            
-            (box :debug-name "instrument-edit-button" :bg :dark-gray :width 1.2 :height 0.9 :align :center
-              :on-click |x y r|
-              (host-command "enter-edit-instrument"
-                (dict :name SEQ.sidebar-instrument-name))
-              (label "edit" :font-size 11 :color :dim :bg :transparent))
-            (box :debug-name "instrument-preset-button" :padding 0.3 :width 4 :align :center
-              (v-stack
-                (box :width 1 :height 0.1)
-                (fx-mini-save-icon
-                  :on-click |x y r| (sbrowser-enter-preset-save)
-                  :active 0)))))
-        (fx-panel-body "instrument-content-box"
-          (instrument-synth-panel-body inst)))
-      :debug-name "instrument-panel"
-      :background "fx-panel-bg"
-      :color :instrument-panel-bg
-      :header :fx-panel-header-bg
-      :selected-header :fx-panel-header-selected-bg
-      :padding 0
-      :height fx-fixed-panel-height
-      :selected 0))))
+                (instrument-synth-button)
+                (instrument-mods-toggle-button))
+              (box :flex 1 :height 0.15)
+              (v-stack 
+                (box :width 1 :height 0.15)
+                (button "edit" 
+                  :background-color :black
+                  :debug-name "instrument-edit-button" 
+                  :font-size 11  
+                  :on-click |x y r|
+                  (host-command "enter-edit-instrument"
+                    (dict :name SEQ.sidebar-instrument-name))
+                  ))
+              (box :debug-name "instrument-preset-button" :padding 0.0 :width 4 :align :center
+                (v-stack
+                  (box :width 1 :height 0.1)
+                  (fx-mini-save-icon
+                    :on-click |x y r| (sbrowser-enter-preset-save)
+                    :active 0)))))
+          (fx-panel-body "instrument-content-box"
+            (instrument-synth-panel-body inst)))
+        :debug-name "instrument-panel"
+        :background "fx-panel-bg"
+        :color :instrument-panel-bg
+        :header :fx-panel-header-bg
+        :selected-header :fx-panel-header-selected-bg
+        :padding 0
+        :height fx-fixed-panel-height
+        :selected 0))))
 
 (defwidget black
   :width 2 :height 2

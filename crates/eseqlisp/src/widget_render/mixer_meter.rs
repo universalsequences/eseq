@@ -143,6 +143,7 @@ impl WidgetDefinition for MixerMeterWidget {
                     h_align: 0.0,
                     text: text.to_string(),
                     font_size,
+                    scale: 1.0,
                     fg: label_color,
                     bg: theme::BG(),
                 },

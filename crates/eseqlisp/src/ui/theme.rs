@@ -106,6 +106,45 @@ pub struct Theme {
     pub widget_toggle_off: Color,
     pub widget_toggle_knob_on: Color,
     pub widget_toggle_knob_off: Color,
+    pub patcher_bg: Color,
+    pub patcher_grid_minor: Color,
+    pub patcher_grid_major: Color,
+    pub patcher_text: Color,
+    pub patcher_text_muted: Color,
+    pub patcher_error: Color,
+    pub patcher_cable: Color,
+    pub patcher_feedback_cable: Color,
+    pub patcher_marquee_fill: Color,
+    pub patcher_marquee_border: Color,
+    pub patcher_node_bg: Color,
+    pub patcher_node_border: Color,
+    pub patcher_node_text: Color,
+    pub patcher_node_tail_text: Color,
+    pub patcher_io_node_bg: Color,
+    pub patcher_io_node_border: Color,
+    pub patcher_io_node_text: Color,
+    pub patcher_param_node_bg: Color,
+    pub patcher_param_node_border: Color,
+    pub patcher_param_node_text: Color,
+    pub patcher_code_node_bg: Color,
+    pub patcher_code_node_border: Color,
+    pub patcher_code_node_text: Color,
+    pub patcher_node_hover_border: Color,
+    pub patcher_node_selected_border: Color,
+    pub patcher_port_input: Color,
+    pub patcher_port_output: Color,
+    pub patcher_edit_selection: Color,
+    pub patcher_edit_cursor: Color,
+    pub patcher_alignment_guide: Color,
+    pub patcher_autocomplete_bg: Color,
+    pub patcher_autocomplete_border: Color,
+    pub patcher_autocomplete_selected_bg: Color,
+    pub patcher_back_button_bg: Color,
+    pub patcher_back_button_hover_bg: Color,
+    pub patcher_back_button_border: Color,
+    pub patcher_back_button_hover_border: Color,
+    pub patcher_back_button_text: Color,
+    pub patcher_back_button_hover_text: Color,
     pub border_active: Color,
     pub border_inactive: Color,
 }
@@ -530,6 +569,197 @@ theme_slots!(
         WIDGET_TOGGLE_KNOB_OFF,
         Color::from_hex(0xf1, 0xf3, 0xf7)
     ),
+    (patcher_bg, PATCHER_BG, Color::from_hex(0x12, 0x12, 0x13)),
+    (
+        patcher_grid_minor,
+        PATCHER_GRID_MINOR,
+        Color::rgba(0.24, 0.24, 0.26, 0.34)
+    ),
+    (
+        patcher_grid_major,
+        PATCHER_GRID_MAJOR,
+        Color::rgba(0.34, 0.34, 0.37, 0.46)
+    ),
+    (
+        patcher_text,
+        PATCHER_TEXT,
+        Color::from_hex(0xe0, 0xe0, 0xe0)
+    ),
+    (
+        patcher_text_muted,
+        PATCHER_TEXT_MUTED,
+        Color::from_hex(0xa8, 0xac, 0xb8)
+    ),
+    (
+        patcher_error,
+        PATCHER_ERROR,
+        Color::from_hex(0xff, 0x6b, 0x73)
+    ),
+    (
+        patcher_cable,
+        PATCHER_CABLE,
+        Color::rgba(0.74, 0.75, 0.84, 0.92)
+    ),
+    (
+        patcher_feedback_cable,
+        PATCHER_FEEDBACK_CABLE,
+        Color::rgba(1.0, 0.59, 0.04, 0.88)
+    ),
+    (
+        patcher_marquee_fill,
+        PATCHER_MARQUEE_FILL,
+        Color::rgba(0.22, 0.48, 1.0, 0.12)
+    ),
+    (
+        patcher_marquee_border,
+        PATCHER_MARQUEE_BORDER,
+        Color::rgba(0.38, 0.62, 1.0, 0.72)
+    ),
+    (
+        patcher_node_bg,
+        PATCHER_NODE_BG,
+        Color::from_hex(0x16, 0x16, 0x1a)
+    ),
+    (
+        patcher_node_border,
+        PATCHER_NODE_BORDER,
+        Color::from_hex(0x40, 0x40, 0x4a)
+    ),
+    (
+        patcher_node_text,
+        PATCHER_NODE_TEXT,
+        Color::from_hex(0x4c, 0xe0, 0x72)
+    ),
+    (
+        patcher_node_tail_text,
+        PATCHER_NODE_TAIL_TEXT,
+        Color::from_hex(0xf2, 0xf2, 0xf4)
+    ),
+    (
+        patcher_io_node_bg,
+        PATCHER_IO_NODE_BG,
+        Color::from_hex(0x18, 0x19, 0x1e)
+    ),
+    (
+        patcher_io_node_border,
+        PATCHER_IO_NODE_BORDER,
+        Color::from_hex(0x44, 0x45, 0x50)
+    ),
+    (
+        patcher_io_node_text,
+        PATCHER_IO_NODE_TEXT,
+        Color::from_hex(0x4c, 0xe0, 0x72)
+    ),
+    (
+        patcher_param_node_bg,
+        PATCHER_PARAM_NODE_BG,
+        Color::from_hex(0x19, 0x19, 0x22)
+    ),
+    (
+        patcher_param_node_border,
+        PATCHER_PARAM_NODE_BORDER,
+        Color::from_hex(0x3b, 0x69, 0xb1)
+    ),
+    (
+        patcher_param_node_text,
+        PATCHER_PARAM_NODE_TEXT,
+        Color::from_hex(0x6d, 0xae, 0xff)
+    ),
+    (
+        patcher_code_node_bg,
+        PATCHER_CODE_NODE_BG,
+        Color::from_hex(0x24, 0x16, 0x18)
+    ),
+    (
+        patcher_code_node_border,
+        PATCHER_CODE_NODE_BORDER,
+        Color::from_hex(0xff, 0x5a, 0x65)
+    ),
+    (
+        patcher_code_node_text,
+        PATCHER_CODE_NODE_TEXT,
+        Color::from_hex(0xff, 0x8a, 0x92)
+    ),
+    (
+        patcher_node_hover_border,
+        PATCHER_NODE_HOVER_BORDER,
+        Color::from_hex(0x78, 0x7c, 0x8e)
+    ),
+    (
+        patcher_node_selected_border,
+        PATCHER_NODE_SELECTED_BORDER,
+        Color::from_hex(0x4a, 0x8d, 0xff)
+    ),
+    (
+        patcher_port_input,
+        PATCHER_PORT_INPUT,
+        Color::from_hex(0xff, 0xee, 0x00)
+    ),
+    (
+        patcher_port_output,
+        PATCHER_PORT_OUTPUT,
+        Color::from_hex(0xff, 0x9f, 0x0a)
+    ),
+    (
+        patcher_edit_selection,
+        PATCHER_EDIT_SELECTION,
+        Color::rgba(0.29, 0.55, 1.0, 0.35)
+    ),
+    (
+        patcher_edit_cursor,
+        PATCHER_EDIT_CURSOR,
+        Color::from_hex(0xff, 0xff, 0xff)
+    ),
+    (
+        patcher_alignment_guide,
+        PATCHER_ALIGNMENT_GUIDE,
+        Color::rgba(0.38, 0.62, 1.0, 0.86)
+    ),
+    (
+        patcher_autocomplete_bg,
+        PATCHER_AUTOCOMPLETE_BG,
+        Color::rgba(0.11, 0.11, 0.14, 0.96)
+    ),
+    (
+        patcher_autocomplete_border,
+        PATCHER_AUTOCOMPLETE_BORDER,
+        Color::from_hex(0x40, 0x40, 0x4a)
+    ),
+    (
+        patcher_autocomplete_selected_bg,
+        PATCHER_AUTOCOMPLETE_SELECTED_BG,
+        Color::rgba(0.22, 0.39, 0.68, 0.72)
+    ),
+    (
+        patcher_back_button_bg,
+        PATCHER_BACK_BUTTON_BG,
+        Color::from_hex(0x14, 0x15, 0x1a)
+    ),
+    (
+        patcher_back_button_hover_bg,
+        PATCHER_BACK_BUTTON_HOVER_BG,
+        Color::from_hex(0x1e, 0x25, 0x36)
+    ),
+    (
+        patcher_back_button_border,
+        PATCHER_BACK_BUTTON_BORDER,
+        Color::from_hex(0x44, 0x45, 0x50)
+    ),
+    (
+        patcher_back_button_hover_border,
+        PATCHER_BACK_BUTTON_HOVER_BORDER,
+        Color::from_hex(0x6d, 0xae, 0xff)
+    ),
+    (
+        patcher_back_button_text,
+        PATCHER_BACK_BUTTON_TEXT,
+        Color::from_hex(0xa8, 0xac, 0xb8)
+    ),
+    (
+        patcher_back_button_hover_text,
+        PATCHER_BACK_BUTTON_HOVER_TEXT,
+        Color::from_hex(0xd7, 0xe6, 0xff)
+    ),
     (
         border_active,
         BORDER_ACTIVE,
@@ -689,4 +919,19 @@ fn normalize_name(name: &str) -> String {
         .to_ascii_lowercase()
         .replace('-', "_")
         .replace(' ', "_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patcher_theme_slots_are_named_colors() {
+        assert_eq!(named_color("patcher-bg"), Some(PATCHER_BG()));
+        assert_eq!(named_color("patcher_node_text"), Some(PATCHER_NODE_TEXT()));
+        assert_eq!(
+            named_color("patcher back button hover border"),
+            Some(PATCHER_BACK_BUTTON_HOVER_BORDER())
+        );
+    }
 }

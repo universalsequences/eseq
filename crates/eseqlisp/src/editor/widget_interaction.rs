@@ -729,6 +729,7 @@ impl Editor {
                     return true;
                 };
                 if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id) {
+                    let (cell_w, cell_h) = self.runtime.layout_cell_dims();
                     let widget_event = map_mouse_event(
                         &node,
                         mouse.kind,
@@ -737,6 +738,8 @@ impl Editor {
                         None,
                         None,
                         mouse.modifiers,
+                        cell_w,
+                        cell_h,
                     );
                     let output = match widget_event {
                         MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
@@ -808,6 +811,21 @@ impl Editor {
             )
         };
         if self.apply_widget_output(output) {
+            true
+        } else if widget_render::widget_state_generation() != gen_before {
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+            true
+        } else if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) && self
+            .widget_node_at_local(local_col, local_row)
+            .is_some_and(|node| captures_scroll_gesture(&node))
+        {
             true
         } else if matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Moved) {
             let has_widget = self.widget_node_at_local(local_col, local_row).is_some();
@@ -1036,7 +1054,10 @@ impl Editor {
         if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) {
             crate::widget_render::scroll::set_current_event_scroll_offset(None);
             let output = handle_event(&node, widget_event);
-            return self.apply_widget_output(output);
+            let _ = self.apply_widget_output(output);
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+            return true;
         }
         let Some(double_click_node) = self
             .runtime
@@ -1055,7 +1076,10 @@ impl Editor {
         };
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         let output = handle_event(&double_click_node, widget_event);
-        self.apply_widget_output(output)
+        let _ = self.apply_widget_output(output);
+        self.runtime.invalidate_layout_deferred();
+        self.mark_needs_redraw();
+        true
     }
 
     fn is_double_click_candidate(
@@ -1066,15 +1090,33 @@ impl Editor {
     ) -> bool {
         const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
         const DOUBLE_CLICK_SLOP: f32 = 1.5;
-        self.active_leaf()
-            .last_widget_click
-            .as_ref()
-            .is_some_and(|click| {
-                click.widget_id == widget_id
-                    && click.at.elapsed() <= DOUBLE_CLICK_WINDOW
-                    && (click.precise_col - precise_col).abs() <= DOUBLE_CLICK_SLOP
-                    && (click.precise_row - precise_row).abs() <= DOUBLE_CLICK_SLOP
-            })
+        let probe_enabled = std::env::var_os("ESEQLISP_DOUBLE_CLICK_PROBE").is_some();
+        let Some(click) = self.active_leaf().last_widget_click.as_ref() else {
+            if probe_enabled {
+                eprintln!("double-click probe: no previous widget click");
+            }
+            return false;
+        };
+        let elapsed = click.at.elapsed();
+        let delta_col = (click.precise_col - precise_col).abs();
+        let delta_row = (click.precise_row - precise_row).abs();
+        let same_widget = click.widget_id == widget_id;
+        let within_window = elapsed <= DOUBLE_CLICK_WINDOW;
+        let within_slop = delta_col <= DOUBLE_CLICK_SLOP && delta_row <= DOUBLE_CLICK_SLOP;
+        let candidate = same_widget && within_window && within_slop;
+        if probe_enabled {
+            eprintln!(
+                "double-click probe: elapsed_ms={} same_widget={} delta_col={:.3} delta_row={:.3} within_window={} within_slop={} candidate={}",
+                elapsed.as_millis(),
+                same_widget,
+                delta_col,
+                delta_row,
+                within_window,
+                within_slop,
+                candidate,
+            );
+        }
+        candidate
     }
 
     pub(super) fn remember_widget_click(
@@ -1492,8 +1534,9 @@ impl Editor {
             .and_then(|gesture| gesture.gesture_data.as_ref())
             .or(explicit_gesture);
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let outcome = map_mouse_event(
-            node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers,
+            node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers, cell_w, cell_h,
         );
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         match outcome {
@@ -1630,11 +1673,18 @@ impl Editor {
         };
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
+        let gen_before = widget_render::widget_state_generation();
         let Some(widget_event) = map_magnify_event(&node, scrolled_col, scrolled_row, delta) else {
             return;
         };
         let output = handle_event(&node, widget_event);
-        let _ = self.apply_widget_output(output);
+        if !self.apply_widget_output(output) {
+            self.mark_needs_redraw();
+        }
+        if widget_render::widget_state_generation() != gen_before {
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+        }
     }
 
     pub(super) fn handle_touchpad_scroll_impl(

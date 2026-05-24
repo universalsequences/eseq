@@ -518,6 +518,8 @@ impl WidgetDefinition for KnobNumberWidget {
         _drag_start: Option<(f32, f32)>,
         gesture: Option<&Value>,
         _modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -967,6 +969,7 @@ impl WidgetDefinition for KnobNumberWidget {
                     h_align: 0.0,
                     text: label.clone(),
                     font_size: label_size,
+                    scale: 1.0,
                     fg: label_color,
                     bg: Color {
                         r: 0.0,
@@ -1025,6 +1028,7 @@ impl WidgetDefinition for KnobNumberWidget {
                     h_align,
                     text: display_text.clone(),
                     font_size: value_font_size,
+                    scale: 1.0,
                     fg,
                     bg: Color {
                         r: 0.0,

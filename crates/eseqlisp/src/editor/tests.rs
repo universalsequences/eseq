@@ -1274,6 +1274,127 @@ fn scratch_mode_defaults_to_eseqlisp() {
 }
 
 #[test]
+fn valid_patcher_payload_updates_read_only_emitted_source_buffer() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = "/tmp/eseq/example/dsp.lisp";
+    let source = "(def out (out 1 0))";
+    let payload = Value::Map(HashMap::from([
+        (
+            "status".to_string(),
+            Rc::new(RefCell::new(Value::Keyword("valid".to_string()))),
+        ),
+        (
+            "path".to_string(),
+            Rc::new(RefCell::new(Value::String(path.to_string()))),
+        ),
+        (
+            "source".to_string(),
+            Rc::new(RefCell::new(Value::String(source.to_string()))),
+        ),
+    ]));
+
+    let id = editor
+        .sync_patcher_emitted_source_buffer(&[payload])
+        .expect("valid patcher payload should create emitted source buffer");
+    let buffer = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id == id)
+        .expect("emitted source buffer");
+
+    assert_eq!(
+        buffer.name,
+        crate::widget_render::patcher::emitted_source_buffer_name(path)
+    );
+    assert_eq!(buffer.text(), source);
+    assert_eq!(buffer.mode, BufferMode::DGenLisp);
+    assert!(buffer.read_only);
+    assert!(!buffer.dirty);
+}
+
+#[test]
+fn tab_from_patcher_emitted_source_buffer_returns_to_matching_patcher_buffer() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = "/tmp/eseq/example/dsp.lisp";
+    let patcher_id = editor.open_scratch_buffer("*patcher*", "");
+    let patcher_tree = Value::Map(HashMap::from([
+        (
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("patcher".to_string()))),
+        ),
+        (
+            "path".to_string(),
+            Rc::new(RefCell::new(Value::String(path.to_string()))),
+        ),
+    ]));
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(patcher_tree), Some(patcher_id));
+    let emitted_id = editor.upsert_read_only_scratch_buffer_with_mode(
+        &crate::widget_render::patcher::emitted_source_buffer_name(path),
+        "(def out (out 1 0))",
+        BufferMode::DGenLisp,
+    );
+    editor.set_active_buffer(emitted_id);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().id, patcher_id);
+}
+
+#[test]
+fn tab_from_patcher_emitted_source_buffer_uses_recorded_origin_without_widget_tree() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = "/tmp/eseq/instrument-drafts/dsp.lisp";
+    let patcher_id = editor.open_scratch_buffer("*instrument-patcher:new-instrument*", "");
+    let emitted_id = editor.upsert_read_only_scratch_buffer_with_mode(
+        &crate::widget_render::patcher::emitted_source_buffer_name(path),
+        "(def out (out 1 0))",
+        BufferMode::DGenLisp,
+    );
+    editor
+        .patcher_emitted_source_origins
+        .insert(path.to_string(), patcher_id);
+    editor.set_active_buffer(emitted_id);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().id, patcher_id);
+}
+
+#[test]
+fn upsert_patcher_emitted_source_buffer_preserves_active_buffer() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = temp_file_path("patcher-host-toggle");
+    editor.open_scratch_buffer("*instrument-patcher:test*", "");
+    let other_id = editor.open_scratch_buffer("*samples*", "");
+
+    let source_buffer_name = editor
+        .upsert_patcher_emitted_source_buffer(
+            "*instrument-patcher:test*",
+            &path,
+            "(def out (out 1 0))",
+        )
+        .expect("upsert should create emitted source buffer");
+
+    assert_eq!(editor.active_buffer().id, other_id);
+    assert_eq!(
+        source_buffer_name,
+        crate::widget_render::patcher::emitted_source_buffer_name(&path.to_string_lossy())
+    );
+    let source_buffer = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == source_buffer_name)
+        .expect("source buffer");
+    assert!(source_buffer.read_only);
+}
+
+#[test]
 fn cursor_movement_closes_completion_popup() {
     let mut runtime = Runtime::new();
     runtime.register_native("seq-step", |_args, _ctx| Ok(Value::Bool(true)));
@@ -2155,6 +2276,87 @@ fn tree_double_click_activates_leaf() {
 }
 
 #[test]
+fn patcher_background_double_click_consumes_local_only_event() {
+    let path = temp_file_path("patcher-double-click-create");
+    std::fs::write(&path, "(+ 1 2)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 12);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (def last-event (state nil))
+                (effect
+                  (patcher
+                    :height 10
+                    :path "{}"
+                    :on-change (lambda (event) (set! last-event event))))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+
+    let click = mouse_event(MouseEventKind::Down(MouseButton::Left), 20, 5);
+    editor.handle_mouse_precise(click, 0, 0, 40, 12, 20.0, 5.0);
+    editor.handle_mouse_precise(click, 0, 0, 40, 12, 20.0, 5.0);
+    editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_ne!(
+        editor.runtime.eval_str("last-event").unwrap().unwrap(),
+        Value::Nil,
+        "double-click should leave the patcher text edit active so Enter emits a patcher change"
+    );
+}
+
+#[test]
+fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
+    let path = temp_file_path("patcher-visible-cable-cmd-y");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 12);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (patcher
+                    :height 10
+                    :path "{}"))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+    let patcher = first_patcher_layout_node(
+        editor
+            .runtime
+            .current_layout
+            .as_ref()
+            .expect("layout should contain patcher"),
+    )
+    .expect("patcher node");
+    crate::widget_render::patcher::select_first_patcher_cable_for_test(&patcher)
+        .expect("selected cable");
+    let initially_segmented =
+        crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher)
+            .expect("selected cable should have segmentation state");
+    editor.clear_focused_widget();
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SUPER));
+
+    let after =
+        crate::widget_render::patcher::selected_patcher_cable_is_segmented_for_test(&patcher)
+            .expect("selected cable should still have segmentation state");
+    assert_ne!(after, initially_segmented);
+}
+
+#[test]
 fn tree_sample_drag_drops_on_compatible_box_target() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -3013,6 +3215,120 @@ fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
     );
 
     assert_eq!(editor.active_buffer().cursor, (0, 2));
+}
+
+#[test]
+fn metal_tiled_widget_click_uses_fractional_layout_viewport_without_relayout() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def clicked (state false))
+                (effect
+                  (button "hit"
+                    :width 4
+                    :height 1
+                    :on-click (lambda (info) (set! clicked true))))
+            "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+
+    let tile_id = editor.active_tile;
+    if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.show_border = true;
+        leaf.show_status = false;
+        leaf.border_width_px = 0.25;
+    }
+    editor.cached_tile_rects = vec![(
+        tile_id,
+        crate::layout::Rect {
+            col: 3.25,
+            row: 10.5,
+            width: 20.0,
+            height: 8.0,
+        },
+    )];
+    editor.set_layout_viewport_exact(19.5, 7.5);
+    editor.runtime.drain_rendered_layouts();
+    let layout_revision = editor.widget_layout_revision();
+
+    let precise_col: f32 = 3.25 + 0.25 + 0.5;
+    let precise_row: f32 = 10.5 + 0.25 + 0.5;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+
+    assert_eq!(editor.widget_layout_revision(), layout_revision);
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "routing a Metal tile click must not relayout from fractional viewport to floored viewport"
+    );
+    assert_eq!(
+        editor.runtime.eval_str("clicked").unwrap().unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn metal_tiled_fill_widget_does_not_scroll_horizontally_from_floored_content_width() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect
+                  (box :width :fill :height :fill
+                    (label "fits")))
+            "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+
+    let tile_id = editor.active_tile;
+    if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.show_border = true;
+        leaf.show_status = false;
+        leaf.border_width_px = 0.25;
+    }
+    editor.cached_tile_rects = vec![(
+        tile_id,
+        crate::layout::Rect {
+            col: 3.25,
+            row: 10.5,
+            width: 20.0,
+            height: 8.0,
+        },
+    )];
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::ScrollRight, 10, 12),
+        4.0,
+        12.0,
+        0,
+    );
+
+    let layout = editor.widget_layout().expect("widget layout");
+    assert_eq!(layout.rect.width, 19.5);
+    assert_eq!(
+        crate::ui::hit::max_extent_exact(&layout, editor.layout_aspect()).0,
+        19.5
+    );
+    assert_eq!(
+        editor.widget_scroll_left(),
+        0.0,
+        "Metal tiled wheel routing must use the exact 19.5-cell layout viewport, not the floored 19-cell event width"
+    );
 }
 
 #[test]
@@ -4580,6 +4896,62 @@ fn buffer_list_mode_accepts_filter_input_while_read_only() {
 }
 
 #[test]
+fn buffer_list_native_order_tracks_recent_buffer_switches() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+
+    let grid_id = editor.open_scratch_buffer("*grid*", "");
+    editor.open_scratch_buffer("*gain*", "");
+    editor.set_active_buffer(grid_id);
+
+    let value = editor.runtime_mut().eval_str("(buffer-list)").unwrap().unwrap();
+    let Value::List(items) = value else {
+        panic!("expected buffer-list to return a list");
+    };
+    let names = items
+        .iter()
+        .map(|item| match &*item.borrow() {
+            Value::String(name) => name.clone(),
+            other => panic!("expected buffer name string, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(names[0], "*grid*");
+    assert_eq!(names[1], "*gain*");
+}
+
+#[test]
+fn buffer_list_mode_shows_previous_buffer_first() {
+    let init = include_str!("../../init.lisp").to_string();
+    let runtime = Runtime::with_init_source(&init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init),
+            ..EditorConfig::default()
+        },
+    );
+
+    let grid_id = editor.open_scratch_buffer("*grid*", "");
+    editor.open_scratch_buffer("*gain*", "");
+    editor.set_active_buffer(grid_id);
+
+    editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().name, "*buffers*");
+    assert_eq!(editor.active_buffer().lines[1], "> *grid*");
+    assert!(
+        !editor
+            .active_buffer()
+            .lines
+            .iter()
+            .any(|line| line.contains("*buffers*")),
+        "buffer-list mode should not offer the buffer-list buffer itself"
+    );
+}
+
+#[test]
 fn buffer_list_mode_backspace_updates_filter() {
     let init = include_str!("../../init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);
@@ -4948,6 +5320,43 @@ fn ui_only_nested_scroll_content_does_not_inflate_outer_widget_scroll() {
 }
 
 #[test]
+fn ui_only_nested_scroll_content_does_not_inflate_outer_horizontal_scroll() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport_exact(19.5, 8.0);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect
+                  (box :width :fill :height :fill
+                    (scroll :width :fill :height 4
+                      (h-stack :gap 0
+                        (box :width 50 :height 2
+                          (label "wide clipped content"))))))
+                "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport_exact(19.5, 8.0);
+
+    let layout = editor.widget_layout().expect("widget layout");
+    assert_eq!(
+        crate::ui::hit::max_extent_exact(&layout, editor.layout_aspect()).0,
+        19.5,
+        "outer widget scroll extent should stop at nested scroll viewport"
+    );
+
+    editor.handle_mouse(mouse_event(MouseEventKind::ScrollRight, 2, 2), 1, 1, 19, 8);
+
+    assert_eq!(
+        editor.widget_scroll_left(),
+        0.0,
+        "content clipped inside nested scroll should not move the outer viewport horizontally"
+    );
+}
+
+#[test]
 fn touchpad_scroll_rematerializes_virtual_stack_on_next_frame() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -5284,6 +5693,40 @@ fn timeline_touchpad_magnify_emits_zoom_view_action() {
         Some("zoom-view".to_string())
     );
     assert!(super::get_map_field_number(&action, "factor").unwrap_or(0.0) > 1.0);
+}
+
+#[test]
+fn widget_touchpad_magnify_internal_state_marks_redraw() {
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-magnify-redraw-{}.lisp",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, "(+ 1 2)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 12);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (patcher
+                    :height 10
+                    :path "{}"))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+    editor.clear_needs_redraw();
+
+    editor.handle_touchpad_magnify(1, 1, 10.0, 4.0, 0.2);
+
+    assert!(editor.needs_redraw());
 }
 
 #[test]

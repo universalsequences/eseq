@@ -21,6 +21,33 @@ When changing Lisp UI structure or widget wrapper argument order, do not stop at
 
 When adding reactive props to a widget, update that widget's `bindable_props` contract. `build_widget` rejects unsupported reactive bindings by returning a string diagnostic instead of a widget map; if that rejected widget is passed through a wrapper, the wrapper may render as an empty measured container with no children. Add a regression test that passes the new prop as a `ReactiveRef`, not only as a literal number.
 
+### Patcher visual capture
+
+When changing the patcher renderer, cable geometry, node layout, ports, or other visual behavior, use the macOS Metal capture test to generate a PNG for inspection:
+
+```sh
+cargo test -p eseqlisp --test capture capture_patcher_lexilush_png -- --ignored --nocapture
+```
+
+The test writes `/tmp/eseqlisp-patcher-lexilush.png`. Open that image and inspect it before claiming a visual change is correct. The fixture renders:
+
+```lisp
+(effect
+  (patcher
+    :intent :effect
+    :path "crates/sequencer/effects/lexilush/dsp.lisp"))
+```
+
+For custom one-off captures, run `eseqlisp_capture` directly:
+
+```sh
+cargo run -p eseqlisp --bin eseqlisp_capture -- \
+  --source '(effect (patcher :intent :effect :path "crates/sequencer/effects/lexilush/dsp.lisp"))' \
+  --width 2050 \
+  --height 1218 \
+  --out /tmp/eseqlisp-patcher.png
+```
+
 ## Render loop ownership
 
 When changing animation cadence, redraw scheduling, frame pacing, or FPS diagnostics, first identify which binary owns the active event/render loop. Shared backends such as `crates/eseqlisp/src/ui/metal_backend.rs` perform drawing, but app binaries may decide when drawing happens. In particular, `metal_seq` owns its render loop in `crates/sequencer/src/bin/metal_seq/main.rs`; changes to `eseqlisp::run_metal` do not affect `metal_seq`. If a backend log appears but loop-level logs or frame pacing changes do not, check for a binary-specific loop before continuing.

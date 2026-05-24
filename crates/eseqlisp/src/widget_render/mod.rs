@@ -1,6 +1,7 @@
 pub mod adsr_editor;
 pub mod box_widget;
 pub mod button;
+pub mod cable;
 pub mod dropdown;
 pub mod grid;
 pub mod hslider;
@@ -13,6 +14,7 @@ pub mod mixer_meter;
 pub mod modulator_curve;
 pub mod number_label;
 pub mod number_picker;
+pub mod patcher;
 pub mod response_curve_editor;
 pub mod scroll;
 pub mod sdf_widget;
@@ -136,6 +138,18 @@ pub fn trigger_level_change_haptic() {
 
 #[cfg(not(target_os = "macos"))]
 pub fn trigger_level_change_haptic() {}
+
+#[cfg(target_os = "macos")]
+pub fn trigger_alignment_haptic() {
+    let performer = NSHapticFeedbackManager::defaultPerformer();
+    performer.performFeedbackPattern_performanceTime(
+        NSHapticFeedbackPattern::Alignment,
+        NSHapticFeedbackPerformanceTime::Now,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn trigger_alignment_haptic() {}
 
 // ── Overlay system ───────────────────────────────────────────────────────────
 // Only one overlay (dropdown menu, etc.) can be active at a time.
@@ -440,6 +454,8 @@ pub struct MetalProportionalTextPrimitive {
     pub text: String,
     /// Font size in points.
     pub font_size: f32,
+    /// Additional geometry scale applied to glyph quads after rasterization.
+    pub scale: f32,
     pub fg: Color,
     pub bg: Color,
 }
@@ -491,11 +507,53 @@ pub enum ImageFit {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
+pub struct MetalPatchCablePrimitive {
+    pub start: [f32; 2],
+    pub control1: [f32; 2],
+    pub control2: [f32; 2],
+    pub end: [f32; 2],
+    pub radius_px: f32,
+    pub color: Color,
+    pub is_segmented: bool,
+    pub segment_row: f32,
+    pub corner_radius_cells: f32,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct MetalCirclePrimitive {
+    pub center: [f32; 2],
+    pub radius_px: f32,
+    pub color: Color,
+    pub visible_half: MetalCircleVisibleHalf,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetalCircleVisibleHalf {
+    Full,
+    Top,
+    Bottom,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub enum MetalPrimitive {
+    ZLayer {
+        z_index: i32,
+        primitive: Box<MetalPrimitive>,
+    },
     Rect(MetalRectPrimitive),
+    /// Rectangles that must render above foreground widget instances but below
+    /// proportional text. This is for widget-local editing overlays such as
+    /// text selections and cursors on widgets whose chassis intentionally masks
+    /// cables or other canvas geometry.
+    ForegroundRect(MetalRectPrimitive),
     Quad(MetalQuadPrimitive),
     GlyphRun(MetalGlyphRunPrimitive),
     ProportionalText(MetalProportionalTextPrimitive),
+    PatchCable(MetalPatchCablePrimitive),
+    Circle(MetalCirclePrimitive),
     Waveform(MetalWaveformPrimitive),
     Image(MetalImagePrimitive),
     WidgetInstance {
@@ -507,6 +565,30 @@ pub enum MetalPrimitive {
     PushClipRect(Rect),
     /// Restore the previous scissor rect.
     PopClipRect,
+}
+
+#[cfg(target_os = "macos")]
+pub fn z_layer(z_index: i32, primitive: MetalPrimitive) -> MetalPrimitive {
+    MetalPrimitive::ZLayer {
+        z_index,
+        primitive: Box::new(primitive),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn effective_z_index(primitive: &MetalPrimitive) -> i32 {
+    match primitive {
+        MetalPrimitive::ZLayer { z_index, .. } => *z_index,
+        _ => 0,
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn innermost_primitive(primitive: &MetalPrimitive) -> &MetalPrimitive {
+    match primitive {
+        MetalPrimitive::ZLayer { primitive, .. } => innermost_primitive(primitive),
+        primitive => primitive,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -608,6 +690,8 @@ pub trait WidgetDefinition: Sync {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         _modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         MouseEventOutcome::Ignore
     }
@@ -664,6 +748,9 @@ pub trait WidgetDefinition: Sync {
     fn handle_event(&self, _node: &LayoutNode, _event: WidgetEvent) -> Option<EventOutput> {
         None
     }
+    fn wants_animation_frames(&self, _node: &LayoutNode) -> bool {
+        false
+    }
     #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         None
@@ -694,6 +781,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &mixer_meter::MIXER_METER_WIDGET,
     &modulator_curve::MODULATOR_CURVE_WIDGET,
     &number_label::NUMBER_LABEL_WIDGET,
+    &patcher::PATCHER_WIDGET,
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,
@@ -763,6 +851,14 @@ pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
             render_widget_tree(child, buf);
         }
     }
+}
+
+pub fn layout_wants_animation_frames(node: &LayoutNode) -> bool {
+    widget_definition(&node.widget_type)
+        .is_some_and(|definition| definition.wants_animation_frames(node))
+        || sdf_widget::sdf_widget_def(&node.widget_type)
+            .is_some_and(|definition| definition.animates)
+        || node.children.iter().any(layout_wants_animation_frames)
 }
 
 #[cfg(target_os = "macos")]
@@ -891,6 +987,9 @@ fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
 #[cfg(target_os = "macos")]
 pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
     let mut shaders = Vec::new();
+    shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
+    shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
+    shaders.push(("patcher-back-chevron", None, PATCHER_BACK_CHEVRON_SHADER));
     for definition in WIDGET_DEFINITIONS {
         for &name in definition.names() {
             if let Some(fragment_shader) = definition.metal_fragment_shader(name) {
@@ -1046,10 +1145,20 @@ fn collect_metal_primitives_recursive(
 #[cfg(target_os = "macos")]
 fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetViewport) {
     match prim {
+        MetalPrimitive::ZLayer { primitive, .. } => offset_primitive_y_mut(primitive, dy, viewport),
         MetalPrimitive::Rect(r) => r.rect.row += dy,
+        MetalPrimitive::ForegroundRect(r) => r.rect.row += dy,
         MetalPrimitive::Quad(q) => q.y += dy,
         MetalPrimitive::GlyphRun(g) => g.row += dy,
         MetalPrimitive::ProportionalText(t) => t.row += dy,
+        MetalPrimitive::PatchCable(c) => {
+            c.start[1] += dy;
+            c.control1[1] += dy;
+            c.control2[1] += dy;
+            c.end[1] += dy;
+            c.segment_row += dy;
+        }
+        MetalPrimitive::Circle(c) => c.center[1] += dy,
         MetalPrimitive::Waveform(w) => w.rect.row += dy,
         MetalPrimitive::Image(i) => i.rect.row += dy,
         MetalPrimitive::WidgetInstance { instance, .. } => {
@@ -1077,6 +1186,8 @@ pub fn map_mouse_event(
     drag_start: Option<(f32, f32)>,
     gesture: Option<&Value>,
     modifiers: KeyModifiers,
+    cell_w: f32,
+    cell_h: f32,
 ) -> MouseEventOutcome {
     // SDF widgets handle their own mouse events
     if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
@@ -1085,7 +1196,8 @@ pub fn map_mouse_event(
     widget_definition(&node.widget_type)
         .map(|definition| {
             definition.mouse_event(
-                node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers,
+                node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers, cell_w,
+                cell_h,
             )
         })
         .unwrap_or(MouseEventOutcome::Ignore)
@@ -1230,6 +1342,41 @@ mod tests {
         assert!((mapped_haptic_value(&props, 0.75, 0.0) - 3.875).abs() < 0.0001);
         assert!((mapped_haptic_value(&props, 1.0, 0.0) - 32.0).abs() < 0.0001);
     }
+
+    #[test]
+    fn sdf_defwidget_can_request_animation_frames() {
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "test-animated-sdf".to_string(),
+            shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0),
+            state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: true,
+        });
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "test-animated-sdf".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            props: HashMap::new(),
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        assert!(layout_wants_animation_frames(&node));
+    }
 }
 
 /// Shared rounded-rect SDF shader used by tree-row, text-input, number-picker, dropdown.
@@ -1256,6 +1403,131 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
+}
+"#;
+
+#[cfg(target_os = "macos")]
+pub const PATCHER_PORT_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 p = (in.uv - float2(0.5)) * 2.0;
+
+    if ((in.value_t > 0.0 && p.y < 0.0) || (in.value_t < 0.0 && p.y > 0.0)) {
+        discard_fragment();
+    }
+
+    float d = length(p);
+    float aa = max(fwidth(d), 0.001);
+    float outerMask = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, d);
+    if (outerMask < 0.002) {
+        discard_fragment();
+    }
+
+    float innerRadius = clamp(in.uniform_a.x, 0.0, 0.98);
+    float innerMask = 1.0 - smoothstep(innerRadius - aa, innerRadius + aa, d);
+    float4 col = mix(in.color_a, in.color_b, innerMask);
+    return float4(col.rgb, col.a * outerMask);
+}
+"#;
+
+#[cfg(target_os = "macos")]
+pub const PATCHER_BACK_CHEVRON_SHADER: &str = r#"
+float patcher_chevron_segment_distance(float2 p, float2 a, float2 b)
+{
+    float2 pa = p - a;
+    float2 ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 p = float2(in.uv.x * aspect, in.uv.y);
+    float scale = min(aspect, 1.0);
+    float center_x = aspect * 0.5;
+    float2 tip = float2(center_x - 0.18 * scale, 0.50);
+    float2 upper = float2(center_x + 0.18 * scale, 0.25);
+    float2 lower = float2(center_x + 0.18 * scale, 0.75);
+
+    float d = min(
+        patcher_chevron_segment_distance(p, upper, tip),
+        patcher_chevron_segment_distance(p, tip, lower));
+    float thickness = 0.055 * scale;
+    float aa = max(fwidth(d), 0.001);
+    float mask = smoothstep(thickness + aa, thickness - aa, d);
+    if (mask < 0.002) {
+        discard_fragment();
+    }
+
+    return float4(in.color_a.rgb, in.color_a.a * mask);
+}
+"#;
+
+#[cfg(target_os = "macos")]
+pub const PATCHER_NODE_SHADER: &str = r#"
+float patcher_node_smooth_rounded_rect(float2 pos, float2 size, float radius, float smin, float smax)
+{
+    return smoothstep(smin, smax, sdf_rounded_rect(pos, size, radius));
+}
+
+float3 patcher_node_normal(float2 pos, float2 size, float radius, float eps, float ratio)
+{
+    float smin = -0.1 * ratio;
+    float smax = 1.118;
+    float right = patcher_node_smooth_rounded_rect(pos + float2(eps, 0.0), size, radius, smin, smax);
+    float left = patcher_node_smooth_rounded_rect(pos - float2(eps, 0.0), size, radius, smin, smax);
+    float up = patcher_node_smooth_rounded_rect(pos + float2(0.0, eps), size, radius, smin, smax);
+    float down = patcher_node_smooth_rounded_rect(pos - float2(0.0, eps), size, radius, smin, smax);
+    return normalize(float3((right - left) / (2.0 * eps), (up - down) / (2.0 * eps), 1.0));
+}
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 localPos = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+    float2 sdfSize = float2(aspect, 1.0);
+    float cornerRadius = min(in.corner_radius * 1.5, min(aspect, 1.0));
+
+    float nodeDist = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
+    float nodeDerivative = max(fwidth(nodeDist), 0.001);
+    float outerAlpha = smoothstep(nodeDerivative, -nodeDerivative, nodeDist);
+    if (outerAlpha <= 0.001) {
+        discard_fragment();
+    }
+
+    float borderThickness = max(in.uniform_a.x, 0.0) * nodeDerivative;
+    float2 innerSize = max(sdfSize - float2(borderThickness), float2(0.001));
+    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
+    float innerDerivative = max(fwidth(innerDist), 0.001);
+    float innerAlpha = smoothstep(innerDerivative, -innerDerivative, innerDist);
+    float borderMask = outerAlpha * (1.0 - innerAlpha);
+
+    float3 normal = patcher_node_normal(
+        localPos,
+        sdfSize,
+        cornerRadius,
+        0.01,
+        0.83 / max(min(aspect, 1.0), 0.001));
+    float3 viewDir = float3(0.0, 0.0, 1.0);
+    float3 lightDir = normalize(float3(-0.9, -0.9, 1.3));
+    float diffuse = max(0.0, dot(normal, lightDir));
+    float3 halfVector = normalize(lightDir + viewDir);
+    float specularRaw = pow(max(0.0, dot(normal, halfVector)), 48.0);
+    float specularFadeDistance = clamp(nodeDerivative * 2.5, 0.01, 0.06);
+    float specular = specularRaw * smoothstep(0.0, -specularFadeDistance, nodeDist);
+
+    float3 bg = in.color_b.rgb;
+    float3 border = in.color_a.rgb;
+    float3 litBg = bg * (0.82 + 0.18 * diffuse) + float3(0.20) * specular;
+    float3 litBorder = border * (0.76 + 0.24 * diffuse) + float3(0.55) * specular;
+
+    float edgeShade = smoothstep(0.18, 0.98, localPos.y * 0.5 + 0.5);
+    litBg *= mix(0.94, 1.04, edgeShade);
+    litBorder *= mix(0.88, 1.12, edgeShade);
+
+    float3 color = mix(litBg, litBorder, borderMask);
+    return float4(color, outerAlpha * max(in.color_a.a, in.color_b.a));
 }
 "#;
 

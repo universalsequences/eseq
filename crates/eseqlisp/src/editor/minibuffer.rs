@@ -88,6 +88,7 @@ impl Editor {
                     };
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                         self.active_leaf_mut().buffer_idx = idx;
+                        self.record_buffer_access_by_idx(idx);
                         self.mark_needs_redraw();
                         self.sync_runtime_context();
                         self.completion = None;

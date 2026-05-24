@@ -3741,7 +3741,7 @@ pub(crate) fn extract_path_from_payload(payload: &Value) -> Option<String> {
 pub(crate) fn extract_string_from_payload(payload: &Value, key: &str) -> Option<String> {
     if let Value::Map(map) = payload {
         if let Some(cell) = map.get(key) {
-            if let Value::String(s) = &*cell.borrow() {
+            if let Value::String(s) | Value::Keyword(s) | Value::Symbol(s) = &*cell.borrow() {
                 return Some(s.clone());
             }
         }
@@ -4883,6 +4883,138 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_agent_busy_state_uses_submit_button_as_cancel() {
+        use eseqlisp::layout::LayoutNode;
+
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        fn node_text(node: &LayoutNode) -> Option<&str> {
+            match node.props.get("text") {
+                Some(Value::String(text)) => Some(text.as_str()),
+                _ => None,
+            }
+        }
+
+        fn find_button_by_text<'a>(node: &'a LayoutNode, text: &str) -> Option<&'a LayoutNode> {
+            if node.widget_type == "button" && node_text(node) == Some(text) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_button_by_text(child, text))
+        }
+
+        fn find_widget_by_type<'a>(
+            node: &'a LayoutNode,
+            widget_type: &str,
+        ) -> Option<&'a LayoutNode> {
+            if node.widget_type == widget_type {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_widget_by_type(child, widget_type))
+        }
+
+        fn prop_number(node: &LayoutNode, prop: &str) -> Option<f64> {
+            match node.props.get(prop)? {
+                Value::Number(value) => Some(*value),
+                _ => None,
+            }
+        }
+
+        let mut editor =
+            eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        editor.set_layout_viewport(92, 24);
+        register_agent_test_natives(editor.runtime_mut());
+        let cancel_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+        editor
+            .runtime_mut()
+            .register_native("agent/status", |_args, _ctx| {
+                Ok(Value::Symbol("streaming".to_string()))
+            });
+        let captured_cancel_calls = cancel_calls.clone();
+        editor
+            .runtime_mut()
+            .register_native("agent/cancel", move |args, _ctx| {
+                let Some(Value::Number(conv_id)) = args.first() else {
+                    return Err("agent/cancel: expected conv-id".to_string());
+                };
+                captured_cancel_calls.lock().unwrap().push(*conv_id as i64);
+                Ok(Value::Nil)
+            });
+        editor.runtime_mut().register_reactive(
+            "AGENT",
+            vec![("generation", Value::Number(0.0))],
+            false,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "mac-osx-dark.lisp")"#)
+            .expect("load theme");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "metal-seq-agent.lisp")"#)
+            .expect("load agent lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(set! agent-current-conv 1)")
+            .expect("select test conversation");
+        editor
+            .runtime_mut()
+            .eval_str("(agent-submit-current)")
+            .expect("busy submit should cancel the active request");
+        assert_eq!(
+            *cancel_calls.lock().unwrap(),
+            vec![1],
+            "busy submit affordance should route to agent/cancel"
+        );
+        editor.refresh_runtime_side_effects();
+
+        let agent_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*agent*")
+            .expect("agent buffer")
+            .id;
+        editor.set_active_buffer(agent_id);
+        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("agent layout");
+
+        assert!(
+            find_button_by_text(&layout, "Cancel").is_none(),
+            "busy agent composer should not render a separate Cancel button"
+        );
+
+        let submit = find_layout_node_by_stable_key(&layout, "agent-submit")
+            .expect("agent submit affordance");
+        assert!(
+            submit.rect.width > 0.0 && submit.rect.height > 0.0,
+            "agent submit/cancel affordance should remain visible while busy: {:?}",
+            submit.rect
+        );
+
+        let icon = find_widget_by_type(&layout, "agent-submit-icon").expect("agent submit icon");
+        assert_eq!(prop_number(icon, "canceling"), Some(1.0));
+        assert_eq!(prop_number(icon, "active"), Some(1.0));
+    }
+
+    #[test]
     fn metal_seq_agent_transcript_uses_virtualized_message_stack() {
         use eseqlisp::layout::LayoutNode;
 
@@ -5013,6 +5145,7 @@ mod tests {
             "SEQ",
             vec![
                 ("num-tracks", Value::Number(0.0)),
+                ("current-track", Value::Number(0.0)),
                 ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-selected-sample", Value::String(String::new())),
@@ -5026,6 +5159,7 @@ mod tests {
                 ("current-project-name", Value::String(String::new())),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
+                ("editor-canceling", Value::Bool(false)),
                 ("editor-error", Value::String(String::new())),
             ],
             true,
@@ -5157,6 +5291,73 @@ mod tests {
         assert!(
             value_contains_string(tree, "digitone") || value_contains_string(tree, "minimoog"),
             "instrument tab should render saved instruments"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_new_instrument_editor_uses_finalize_copy() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-instrument".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
+        assert!(value_contains_string(tree, "Draft patch"));
+        assert!(value_contains_string(tree, "track "));
+        assert!(value_contains_string(tree, "Save as"));
+        assert!(value_contains_string(tree, "Finalize"));
+        assert!(
+            !value_contains_string(tree, "Save & Add"),
+            "new instrument editor should use finalization copy"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_editor_compile_status_spinner_is_visible_and_animating() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let tree = editor
+            .runtime_mut()
+            .eval_str(r#"(sbrowser-editor-status-row "Preview compiling..." :gray)"#)
+            .expect("build compile status row")
+            .expect("compile status row should return a widget tree");
+        let layout = editor
+            .runtime_mut()
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 30.0)))
+            .expect("compile status row should lay out");
+        fn find_editor_spinner(
+            node: &eseqlisp::layout::LayoutNode,
+        ) -> Option<&eseqlisp::layout::LayoutNode> {
+            if node.widget_type.contains("editor-spinner") {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_editor_spinner)
+        }
+
+        let spinner =
+            find_editor_spinner(&layout).expect("compile status should render an animated spinner");
+
+        assert!(
+            spinner.rect.width.is_finite()
+                && spinner.rect.height.is_finite()
+                && spinner.rect.width > 0.0
+                && spinner.rect.height > 0.0,
+            "compile spinner should have a finite visible rect, got {:?}",
+            spinner.rect
+        );
+        assert!(
+            eseqlisp::widget_render::layout_wants_animation_frames(&layout),
+            "compile spinner should keep animation frames active"
         );
     }
 
@@ -7897,6 +8098,59 @@ mod tests {
         assert_eq!(
             track_count, 1,
             "bottom piano roll layout should have one expanded track tile: {tile_buffers:?}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_instrument_patcher_layout_uses_transport_patcher_and_three_part_bottom_bar() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.create_scratch_buffer(
+            "*instrument-patcher:test*",
+            "",
+            eseqlisp::BufferMode::ESeqLisp,
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seq-apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
+            .expect("apply instrument patcher layout");
+        editor.refresh_runtime_side_effects();
+
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let tile = |name: &str| {
+            frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == name)
+                .unwrap_or_else(|| panic!("expected tile for {name}"))
+        };
+
+        let transport = tile("*transport*").rect;
+        let patcher = tile("*instrument-patcher:test*").rect;
+        let samples = tile("*samples*").rect;
+        let mixer = tile("*mixer*").rect;
+        let fx = tile("*fx*").rect;
+
+        assert!(
+            transport.row < patcher.row && patcher.row + patcher.height <= samples.row,
+            "patcher mode should stack transport, patcher, then bottom bar; transport={transport:?} patcher={patcher:?} samples={samples:?}"
+        );
+        assert!(
+            patcher.height > samples.height * 4.0,
+            "patcher should dominate the viewport; patcher={patcher:?} bottom={samples:?}"
+        );
+        assert!(
+            (samples.height - 13.0).abs() < 0.75
+                && (mixer.height - 13.0).abs() < 0.75
+                && (fx.height - 13.0).abs() < 0.75,
+            "bottom bar should use the fixed mixer-panel height; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+        );
+        assert!(
+            (samples.width - mixer.width).abs() <= 1.0
+                && (mixer.width - fx.width).abs() <= 1.0
+                && (samples.row - mixer.row).abs() <= 0.1
+                && (mixer.row - fx.row).abs() <= 0.1,
+            "samples/mixer/fx should divide the bottom bar into three horizontal parts; samples={samples:?} mixer={mixer:?} fx={fx:?}"
         );
     }
 

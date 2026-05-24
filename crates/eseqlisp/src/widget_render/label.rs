@@ -375,6 +375,7 @@ impl WidgetDefinition for LabelWidget {
                     h_align: resolve_h_align(&node.props),
                     text: line,
                     font_size,
+                    scale: 1.0,
                     fg,
                     bg,
                 },

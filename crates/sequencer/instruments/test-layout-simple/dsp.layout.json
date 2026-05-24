@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 93.91676,
+        "y": 29.833569
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "audio": {
+        "x": 89.683334,
+        "y": 49.600044
+      },
+      "cos1": {
+        "x": 22.11723,
+        "y": 30.70421
+      },
+      "created-0": {
+        "x": 22.05915,
+        "y": 28.431128
+      },
+      "created-1": {
+        "x": 22.158903,
+        "y": 25.566006
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 6.6800003
+      },
+      "env": {
+        "x": 105.48826,
+        "y": 16.60947
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 14.720001
+      },
+      "gate": {
+        "x": 143.91,
+        "y": 4.0
+      },
+      "mod#0": {
+        "x": 132.095,
+        "y": 16.3
+      },
+      "phase": {
+        "x": 83.578064,
+        "y": 17.42078
+      },
+      "pitch": {
+        "x": 92.01,
+        "y": 4.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 12.040001
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 9.360001
+      },
+      "trigger": {
+        "x": 166.96,
+        "y": 4.0
+      },
+      "velocity": {
+        "x": 116.22,
+        "y": 4.0
+      }
+    },
+    "cables": {
+      "*#0:0->audio:0": {
+        "segmented": true,
+        "y": 40.478745
+      },
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "cos1:0->*#0:0": {
+        "segmented": true,
+        "y": 33.796246
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 27.113747
+      },
+      "gain:0->mod#0:0": {
+        "segmented": true,
+        "y": 16.3
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 10.94
+      },
+      "mod#0:0->*#0:3": {
+        "segmented": true,
+        "y": 27.733747
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 9.7
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 13.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 13.150001
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 12.179999
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 20.431248
+      }
+    }
+  },
+  "macros": {}
+}

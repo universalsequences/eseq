@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "engine_name": "808kick-trib/",
+  "source_file": "instruments/808kick-trib/.lisp",
+  "presets": [
+    {
+      "id": "808dubbass",
+      "name": "808dubbass",
+      "base_note_offset": -48.0,
+      "params": {
+        "__dgen_mod_active__gain": 0.0,
+        "attack": 6.0,
+        "decay": 180.0,
+        "division": 10.0,
+        "drive": 2.119239,
+        "enabled": 1.0,
+        "gain": 0.788223,
+        "hloss": 0.9563803,
+        "hyst": 0.8514424,
+        "mod gain slot 1 amt": 0.0,
+        "mod gain slot 10 amt": 0.0,
+        "mod gain slot 2 amt": 0.0,
+        "mod gain slot 3 amt": 0.0,
+        "mod gain slot 4 amt": 0.0,
+        "mod gain slot 5 amt": 0.0,
+        "mod gain slot 6 amt": 0.0,
+        "mod gain slot 7 amt": 0.0,
+        "mod gain slot 8 amt": 0.0,
+        "mod gain slot 9 amt": 0.0,
+        "pulse width": 0.5,
+        "rate": 0.37,
+        "release": 240.0,
+        "retrigger": 0.0,
+        "shape": 0.0,
+        "slew": 0.0,
+        "sustain": 0.55,
+        "sync": 0.0
+      }
+    }
+  ]
+}

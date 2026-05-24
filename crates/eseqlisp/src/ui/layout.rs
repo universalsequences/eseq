@@ -83,8 +83,8 @@ pub struct MeasureCtx<'a> {
 }
 
 pub struct LayoutEngine<'a> {
-    pub terminal_cols: u16,
-    pub terminal_rows: u16,
+    pub terminal_cols: f32,
+    pub terminal_rows: f32,
     pub aspect: f32,
     pub text_measurer: Option<&'a dyn TextMeasurer>,
     pub cell_w: f32,
@@ -93,9 +93,13 @@ pub struct LayoutEngine<'a> {
 
 impl<'a> LayoutEngine<'a> {
     pub fn new(cols: u16, rows: u16, aspect: f32) -> Self {
+        Self::new_exact(cols as f32, rows as f32, aspect)
+    }
+
+    pub fn new_exact(cols: f32, rows: f32, aspect: f32) -> Self {
         Self {
-            terminal_cols: cols,
-            terminal_rows: rows,
+            terminal_cols: cols.max(1.0),
+            terminal_rows: rows.max(1.0),
             aspect,
             text_measurer: None,
             cell_w: 1.0,
@@ -111,9 +115,27 @@ impl<'a> LayoutEngine<'a> {
         cell_w: f32,
         cell_h: f32,
     ) -> Self {
+        Self::with_text_measurer_exact(
+            cols as f32,
+            rows as f32,
+            aspect,
+            text_measurer,
+            cell_w,
+            cell_h,
+        )
+    }
+
+    pub fn with_text_measurer_exact(
+        cols: f32,
+        rows: f32,
+        aspect: f32,
+        text_measurer: &'a dyn TextMeasurer,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> Self {
         Self {
-            terminal_cols: cols,
-            terminal_rows: rows,
+            terminal_cols: cols.max(1.0),
+            terminal_rows: rows.max(1.0),
             aspect,
             text_measurer: Some(text_measurer),
             cell_w,
@@ -130,7 +152,7 @@ impl<'a> LayoutEngine<'a> {
             tree,
             Constraints {
                 min_width: 0.0,
-                max_width: self.terminal_cols as f32,
+                max_width: self.terminal_cols,
                 min_height: 0.0,
                 max_height: f32::INFINITY,
                 aspect: self.aspect,
@@ -138,7 +160,7 @@ impl<'a> LayoutEngine<'a> {
             DEFAULT_FONT_SIZE,
         )?;
         let root_width = if prop_is_keyword(tree, "width", "fill") {
-            self.terminal_cols as f32
+            self.terminal_cols
         } else {
             size.width
         };
@@ -149,9 +171,9 @@ impl<'a> LayoutEngine<'a> {
             .iter()
             .any(|child| get_prop_num(child, "flex").is_some_and(|f| f > 0.0));
         let root_height = if prop_is_keyword(tree, "height", "fill") {
-            self.terminal_rows as f32
+            self.terminal_rows
         } else if has_flex_children {
-            (self.terminal_rows as f32).max(size.height)
+            self.terminal_rows.max(size.height)
         } else {
             size.height
         };
@@ -2130,6 +2152,25 @@ mod tests {
 
         assert_eq!(layout.rect.height, 24.0);
         assert_eq!(layout.children[0].rect.height, 24.0);
+    }
+
+    #[test]
+    fn height_fill_root_box_expands_to_fractional_viewport_height() {
+        let tree = build_widget(
+            "box",
+            vec![
+                kw("width"),
+                kw("fill"),
+                kw("height"),
+                kw("fill"),
+                label("centered", None),
+            ],
+        );
+        let engine = LayoutEngine::new_exact(80.0, 23.72, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+
+        assert_eq!(layout.rect.height, 23.72);
+        assert_eq!(layout.children[0].rect.height, 23.72);
     }
 
     #[test]

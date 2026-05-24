@@ -227,6 +227,8 @@ impl WidgetDefinition for ButtonWidget {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         if node.widget_type == "badge" {
             return MouseEventOutcome::Ignore;
@@ -366,6 +368,7 @@ impl WidgetDefinition for ButtonWidget {
                     h_align: 0.5,
                     text,
                     font_size,
+                    scale: 1.0,
                     fg: variant_fg(&node.props),
                     bg,
                 },

@@ -101,6 +101,27 @@ pub fn max_extent(node: &LayoutNode, aspect: f32) -> (u16, u16) {
         })
 }
 
+/// Exact layout-space extent for outer widget scroll bounds.
+///
+/// Hit grids need whole-cell extents, but scroll bounds must compare exact
+/// content size against exact viewport size. Otherwise a filled 19.5-cell
+/// viewport becomes a false 20-cell content width. Nested scroll containers
+/// clip their own children, so their descendants must not inflate the outer
+/// scroll range.
+pub fn max_extent_exact(node: &LayoutNode, aspect: f32) -> (f32, f32) {
+    let own_cols = node.rect.col + node.rect.width;
+    let own_rows = (node.rect.row + node.rect.height) / aspect; // uniform → terminal
+    if node.widget_type == "scroll" {
+        return (own_cols, own_rows);
+    }
+    node.children
+        .iter()
+        .fold((own_cols, own_rows), |(c, r), child| {
+            let (cc, cr) = max_extent_exact(child, aspect);
+            (c.max(cc), r.max(cr))
+        })
+}
+
 /// Like `max_extent` but only counts nodes whose left edge (col) starts
 /// within `max_col`. Nodes positioned entirely beyond `max_col` are clipped
 /// siblings in an overflowing container and should not inflate the scroll range.
@@ -112,6 +133,22 @@ pub fn max_extent_bounded(node: &LayoutNode, aspect: f32, max_col: f32) -> (u16,
         .filter(|child| child.rect.col < max_col)
         .fold((own_cols, own_rows), |(c, r), child| {
             let (cc, cr) = max_extent_bounded(child, aspect, max_col);
+            (c.max(cc), r.max(cr))
+        })
+}
+
+/// Exact layout-space variant of `max_extent_bounded`.
+pub fn max_extent_bounded_exact(node: &LayoutNode, aspect: f32, max_col: f32) -> (f32, f32) {
+    let own_cols = node.rect.col + node.rect.width;
+    let own_rows = (node.rect.row + node.rect.height) / aspect;
+    if node.widget_type == "scroll" {
+        return (own_cols, own_rows);
+    }
+    node.children
+        .iter()
+        .filter(|child| child.rect.col < max_col)
+        .fold((own_cols, own_rows), |(c, r), child| {
+            let (cc, cr) = max_extent_bounded_exact(child, aspect, max_col);
             (c.max(cc), r.max(cr))
         })
 }

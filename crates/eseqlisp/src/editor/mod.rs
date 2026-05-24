@@ -40,7 +40,7 @@ fn metal_tile_content_viewport(
     border_width_px: f32,
     cell_w: f32,
     cell_h: f32,
-) -> (u16, u16) {
+) -> (f32, f32) {
     let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
     let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
     let border_inset_px = if show_border {
@@ -51,13 +51,10 @@ fn metal_tile_content_viewport(
     } else {
         0.0
     };
-    let cols = (rect.width - border_inset_px * 2.0 / cell_w.max(1.0))
-        .max(0.0)
-        .floor() as u16;
+    let cols = (rect.width - border_inset_px * 2.0 / cell_w.max(1.0)).max(0.0);
     let content_height =
         rect.height - border_inset_px * 2.0 / cell_h.max(1.0) - if show_status { 1.0 } else { 0.0 };
-    let rows = content_height.max(0.0).floor() as u16;
-    (cols.max(1), rows.max(1))
+    (cols.max(1.0), content_height.max(1.0))
 }
 
 fn metal_tile_content_viewport_height_exact(
@@ -270,6 +267,7 @@ pub struct MajorMode {
 
 pub struct Editor {
     pub buffers: Vec<Buffer>,
+    buffer_recency: Vec<BufferId>,
     pub tile_root: TileNode,
     pub active_tile: TileId,
     next_tile_id: TileId,
@@ -285,6 +283,7 @@ pub struct Editor {
     should_quit: bool,
     last_exit: EditorExit,
     next_buffer_id: BufferId,
+    patcher_emitted_source_origins: HashMap<String, BufferId>,
     save_prompt: Option<SavePrompt>,
     completion: Option<CompletionState>,
     last_mouse_precise: Option<(f32, f32)>,
@@ -374,6 +373,7 @@ impl Editor {
 
         let mut editor = Editor {
             buffers: vec![Buffer::new(0, "*scratch*")],
+            buffer_recency: vec![0],
             tile_root: TileNode::Leaf(TileLeaf::new(0, 0)),
             active_tile: 0,
             next_tile_id: 1,
@@ -388,6 +388,7 @@ impl Editor {
             should_quit: false,
             last_exit: EditorExit::Closed,
             next_buffer_id: 1,
+            patcher_emitted_source_origins: HashMap::new(),
             save_prompt: None,
             completion: None,
             last_mouse_precise: None,
@@ -464,6 +465,46 @@ impl Editor {
     /// Get the buffer index for the active tile.
     pub fn active_buffer_idx(&self) -> usize {
         self.active_leaf().buffer_idx
+    }
+
+    fn record_buffer_access_by_idx(&mut self, buffer_idx: usize) {
+        let Some(buffer) = self.buffers.get(buffer_idx) else {
+            return;
+        };
+        let id = buffer.id;
+        self.buffer_recency.retain(|existing| *existing != id);
+        self.buffer_recency.insert(0, id);
+    }
+
+    fn track_new_buffer(&mut self, id: BufferId, active: bool) {
+        self.buffer_recency.retain(|existing| *existing != id);
+        if active {
+            self.buffer_recency.insert(0, id);
+        } else {
+            self.buffer_recency.push(id);
+        }
+    }
+
+    fn buffer_names_by_recency(&mut self) -> Vec<String> {
+        let ids: std::collections::HashSet<BufferId> =
+            self.buffers.iter().map(|buffer| buffer.id).collect();
+        self.buffer_recency.retain(|id| ids.contains(id));
+
+        for buffer in &self.buffers {
+            if !self.buffer_recency.contains(&buffer.id) {
+                self.buffer_recency.push(buffer.id);
+            }
+        }
+
+        self.buffer_recency
+            .iter()
+            .filter_map(|id| {
+                self.buffers
+                    .iter()
+                    .find(|buffer| buffer.id == *id)
+                    .map(|buffer| buffer.name.clone())
+            })
+            .collect()
     }
 
     /// Recompute cached tile rects for the given viewport.
@@ -617,7 +658,7 @@ impl Editor {
     pub fn switch_active_tile_with_viewport(
         &mut self,
         new_tile: TileId,
-        viewport: Option<(u16, u16)>,
+        viewport: Option<(f32, f32)>,
     ) {
         if new_tile == self.active_tile {
             return;
@@ -627,8 +668,10 @@ impl Editor {
         };
         let cached_layout = target_leaf.cached_layout.clone();
         let layout_revision = target_leaf.layout_revision;
+        let buffer_idx = target_leaf.buffer_idx;
         self.save_current_widget_tree();
         self.active_tile = new_tile;
+        self.record_buffer_access_by_idx(buffer_idx);
         self.sync_runtime_context();
         self.restore_buffer_widget_tree_with_cached_layout(
             cached_layout,
@@ -668,6 +711,8 @@ impl Editor {
             // Switch to the first remaining leaf
             let ids = self.tile_root.leaf_ids();
             self.active_tile = ids[0];
+            let buffer_idx = self.active_buffer_idx();
+            self.record_buffer_access_by_idx(buffer_idx);
             self.sync_runtime_context();
             self.restore_buffer_widget_tree();
             self.mark_needs_redraw();
@@ -796,6 +841,8 @@ impl Editor {
         let ids = self.tile_root.leaf_ids();
         if !ids.is_empty() {
             self.active_tile = ids[0];
+            let buffer_idx = self.active_buffer_idx();
+            self.record_buffer_access_by_idx(buffer_idx);
         }
         self.sync_runtime_context();
         self.restore_buffer_widget_tree();
@@ -1269,6 +1316,31 @@ impl Editor {
         }
     }
 
+    fn tile_content_layout_viewport(
+        &self,
+        tile_id: TileId,
+        border_inset: u16,
+    ) -> Option<(f32, f32)> {
+        let rect = self.tile_rect(tile_id)?;
+        if border_inset != 0 {
+            return self
+                .tile_content_area(tile_id, border_inset)
+                .map(|(_, _, width, height)| (width as f32, height as f32));
+        }
+
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        let show_status = self.tile_effective_show_status(tile_id)?;
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        Some(metal_tile_content_viewport(
+            &rect,
+            show_status,
+            leaf.show_border,
+            leaf.border_width_px,
+            cell_w,
+            cell_h,
+        ))
+    }
+
     fn tile_content_precise_event_position(
         &self,
         tile_id: TileId,
@@ -1360,18 +1432,14 @@ impl Editor {
     ) -> R {
         let previous_tile = self.active_tile;
         let switched = tile_id != previous_tile;
-        let previous_viewport = self
-            .tile_content_area(previous_tile, border_inset)
-            .map(|(_, _, width, height)| (width, height));
+        let previous_viewport = self.tile_content_layout_viewport(previous_tile, border_inset);
 
-        let target_viewport = self
-            .tile_content_area(tile_id, border_inset)
-            .map(|(_, _, width, height)| (width, height));
+        let target_viewport = self.tile_content_layout_viewport(tile_id, border_inset);
 
         if switched {
             self.switch_active_tile_with_viewport(tile_id, target_viewport);
         } else if let Some((width, height)) = target_viewport {
-            self.set_layout_viewport(width, height);
+            self.set_layout_viewport_exact(width, height);
         }
 
         let result = f(self);
@@ -2065,7 +2133,7 @@ impl Editor {
         let viewport_rows = if viewport_rows > 0.0 {
             viewport_rows
         } else {
-            self.runtime.layout_rows() as f32
+            self.runtime.layout_rows_exact()
         };
         let overflow = self
             .runtime
@@ -2083,12 +2151,12 @@ impl Editor {
     pub fn clamp_widget_scroll_offsets(&mut self) {
         let max_v = self.max_widget_vertical_scroll();
         let max_h = {
-            let vp = self.runtime.layout_cols() as f32;
+            let vp = self.runtime.layout_cols_exact();
             let aspect = self.runtime.layout_aspect();
             self.runtime
                 .current_layout
                 .as_ref()
-                .map(|layout| (crate::ui::hit::max_extent(layout, aspect).0 as f32 - vp).max(0.0))
+                .map(|layout| (crate::ui::hit::max_extent_exact(layout, aspect).0 - vp).max(0.0))
                 .unwrap_or(0.0)
         };
         let leaf = self.active_leaf_mut();
@@ -2102,12 +2170,12 @@ impl Editor {
         let max_v = self.max_widget_vertical_scroll();
 
         let max_h = {
-            let vp = self.runtime.layout_cols() as f32;
+            let vp = self.runtime.layout_cols_exact();
             let aspect = self.runtime.layout_aspect();
             self.runtime
                 .current_layout
                 .as_ref()
-                .map(|l| (crate::ui::hit::max_extent(l, aspect).0 as f32 - vp).max(0.0))
+                .map(|l| (crate::ui::hit::max_extent_exact(l, aspect).0 - vp).max(0.0))
                 .unwrap_or(0.0)
         };
 
@@ -2144,6 +2212,11 @@ impl Editor {
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
         self.runtime.set_layout_viewport(cols, rows);
+        self.sync_layout_to_active_leaf();
+    }
+
+    pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
+        self.runtime.set_layout_viewport_exact(cols, rows);
         self.sync_layout_to_active_leaf();
     }
 
@@ -2230,6 +2303,15 @@ impl Editor {
         self.visible_binding_layout_signature = Some(signature);
     }
 
+    pub fn visible_widgets_animating(&self) -> bool {
+        self.tile_root.leaf_ids().into_iter().any(|id| {
+            self.tile_root
+                .find_leaf(id)
+                .and_then(|leaf| leaf.cached_layout.as_ref())
+                .is_some_and(|layout| crate::widget_render::layout_wants_animation_frames(layout))
+        })
+    }
+
     fn refresh_all_inactive_tile_layouts(&mut self) {
         let mut buf_indices: Vec<usize> = Vec::new();
         for id in self.tile_root.leaf_ids() {
@@ -2268,7 +2350,9 @@ impl Editor {
         buffer.set_mode(mode);
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
+        let new_idx = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = new_idx;
+        self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -2286,8 +2370,64 @@ impl Editor {
             let mut buffer = Buffer::new(id, name);
             buffer.set_text(text);
             self.buffers.push(buffer);
+            self.track_new_buffer(id, false);
             id
         }
+    }
+
+    fn upsert_read_only_scratch_buffer_with_mode(
+        &mut self,
+        name: &str,
+        text: &str,
+        mode: BufferMode,
+    ) -> BufferId {
+        if let Some(idx) = self.buffers.iter().position(|buffer| buffer.name == name) {
+            let id = self.buffers[idx].id;
+            let cursor = self.buffers[idx].cursor;
+            let scroll_top = self.buffers[idx].scroll_top;
+            self.buffers[idx].set_text(text);
+            self.buffers[idx].set_mode(mode);
+            self.buffers[idx].read_only = true;
+            self.buffers[idx].dirty = false;
+            let cursor_row = cursor
+                .0
+                .min(self.buffers[idx].lines.len().saturating_sub(1));
+            let cursor_col = cursor
+                .1
+                .min(self.buffers[idx].lines[cursor_row].chars().count());
+            self.buffers[idx].cursor = (cursor_row, cursor_col);
+            self.buffers[idx].scroll_top =
+                scroll_top.min(self.buffers[idx].lines.len().saturating_sub(1));
+            id
+        } else {
+            let id = self.alloc_buffer_id();
+            let mut buffer = Buffer::new(id, name);
+            buffer.set_text(text);
+            buffer.set_mode(mode);
+            buffer.read_only = true;
+            buffer.dirty = false;
+            self.buffers.push(buffer);
+            self.track_new_buffer(id, false);
+            id
+        }
+    }
+
+    pub fn create_scratch_buffer(&mut self, name: &str, text: &str, mode: BufferMode) -> BufferId {
+        let id = self.alloc_buffer_id();
+        let mut buffer = Buffer::new(id, name);
+        buffer.set_text(text);
+        buffer.set_mode(mode);
+        self.buffers.push(buffer);
+        self.track_new_buffer(id, false);
+        id
+    }
+
+    pub fn set_buffer_view_mode_by_name(&mut self, name: &str, view_mode: ViewMode) -> bool {
+        let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.name == name) else {
+            return false;
+        };
+        buffer.view_mode = view_mode;
+        true
     }
 
     fn ensure_scratch_buffer_named(&mut self, name: &str) -> usize {
@@ -2296,6 +2436,7 @@ impl Editor {
         }
         let id = self.alloc_buffer_id();
         self.buffers.push(Buffer::new(id, name));
+        self.track_new_buffer(id, false);
         self.buffers.len() - 1
     }
 
@@ -2322,7 +2463,9 @@ impl Editor {
         buffer.dirty = false;
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
+        let new_idx = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = new_idx;
+        self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -2360,7 +2503,9 @@ impl Editor {
         buffer.dirty = false;
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
+        let new_idx = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = new_idx;
+        self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -2392,6 +2537,7 @@ impl Editor {
         buffer.set_mode(mode);
         buffer.dirty = false;
         self.buffers.push(buffer);
+        self.track_new_buffer(id, false);
         Ok(name)
     }
 
@@ -2401,6 +2547,14 @@ impl Editor {
         let current_idx = self.buffers.iter().position(|b| b.name == current_name);
         let new_idx = self.buffers.iter().position(|b| b.name == new_name);
         if let (Some(cur), Some(new)) = (current_idx, new_idx) {
+            let active_tile = self.active_tile;
+            let swapping_active_tile = self
+                .tile_root
+                .find_leaf(active_tile)
+                .is_some_and(|leaf| leaf.buffer_idx == cur);
+            if swapping_active_tile {
+                self.save_current_widget_tree();
+            }
             if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(cur) {
                 leaf.buffer_idx = new;
                 if widget_only_scratch_buffer_should_show_ui(&self.buffers[new]) {
@@ -2414,7 +2568,14 @@ impl Editor {
                 leaf.highlight_cache = None;
                 leaf.widget_scroll_top = 0.0;
                 leaf.widget_scroll_left = 0.0;
-                self.refresh_inactive_tile_layouts_for_buffer(new);
+                if swapping_active_tile {
+                    self.record_buffer_access_by_idx(new);
+                    self.sync_runtime_context();
+                    self.restore_buffer_widget_tree();
+                } else {
+                    self.refresh_inactive_tile_layouts_for_buffer(new);
+                }
+                self.mark_needs_redraw();
                 return true;
             }
         }
@@ -2429,10 +2590,40 @@ impl Editor {
             .map(|b| b.lines.join("\n"))
     }
 
+    pub fn upsert_patcher_emitted_source_buffer(
+        &mut self,
+        patcher_buffer_name: &str,
+        patcher_path: &std::path::Path,
+        emitted_source: &str,
+    ) -> Result<String, String> {
+        let Some(patcher_buffer_id) = self
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == patcher_buffer_name)
+            .map(|buffer| buffer.id)
+        else {
+            return Err(format!("No patcher buffer named '{patcher_buffer_name}'"));
+        };
+        let path = patcher_path.to_string_lossy().to_string();
+        let emitted_buffer_name = crate::widget_render::patcher::emitted_source_buffer_name(&path);
+        self.upsert_read_only_scratch_buffer_with_mode(
+            &emitted_buffer_name,
+            emitted_source,
+            BufferMode::DGenLisp,
+        );
+        self.patcher_emitted_source_origins
+            .insert(path, patcher_buffer_id);
+        Ok(emitted_buffer_name)
+    }
+
     /// Remove a buffer by name. Returns true if found and removed.
     pub fn remove_buffer_by_name(&mut self, name: &str) -> bool {
         if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+            let removed_id = self.buffers[idx].id;
             self.buffers.remove(idx);
+            self.buffer_recency.retain(|id| *id != removed_id);
+            self.patcher_emitted_source_origins
+                .retain(|_, buffer_id| *buffer_id != removed_id);
             // Fix up any tile leaf buffer indices that pointed past the removed slot
             Self::fix_leaf_indices(&mut self.tile_root, idx);
             true
@@ -2459,6 +2650,7 @@ impl Editor {
         if let Some(index) = self.buffers.iter().position(|buffer| buffer.id == id) {
             self.save_current_widget_tree();
             self.active_leaf_mut().buffer_idx = index;
+            self.record_buffer_access_by_idx(index);
             self.mark_needs_redraw();
             self.sync_runtime_context();
             self.completion = None;
@@ -2595,6 +2787,10 @@ impl Editor {
             return;
         }
 
+        if self.handle_patcher_emitted_source_tab(key) {
+            return;
+        }
+
         if self.handle_completion_key(key) {
             return;
         }
@@ -2614,6 +2810,10 @@ impl Editor {
         // Focused widget keys take priority over global bindings
         // (so Enter/arrows work in number-pickers, dropdowns, etc.)
         if self.handle_focused_widget_key(key) {
+            return;
+        }
+
+        if self.handle_visible_patcher_selected_cable_shortcut(key) {
             return;
         }
 
@@ -3732,22 +3932,27 @@ impl Editor {
         let view_mode = self.active_buffer().view_mode;
 
         // Widget layout extent: max right edge of root's direct children.
-        let layout_width =
-            if view_mode != ViewMode::TextOnly && self.active_buffer().widget_tree.is_some() {
-                // Use bounded extent: only count nodes whose left edge starts
-                // within the viewport. This prevents h-stacks with many clipped
-                // children (e.g. 10 effect boxes) from inflating the scroll range,
-                // while still detecting legitimate overflow (e.g. a grid whose
-                // visible cells extend past the viewport).
-                let aspect = self.runtime.layout_aspect();
-                self.runtime
-                    .current_layout
-                    .as_ref()
-                    .map(|l| crate::ui::hit::max_extent_bounded(l, aspect, vp as f32).0 as usize)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+        let layout_overflow = if view_mode != ViewMode::TextOnly
+            && self.active_buffer().widget_tree.is_some()
+        {
+            // Use bounded extent: only count nodes whose left edge starts
+            // within the viewport. This prevents h-stacks with many clipped
+            // children (e.g. 10 effect boxes) from inflating the scroll range,
+            // while still detecting legitimate overflow (e.g. a grid whose
+            // visible cells extend past the viewport).
+            let aspect = self.runtime.layout_aspect();
+            let layout_vp = self.runtime.layout_cols_exact();
+            self.runtime
+                .current_layout
+                .as_ref()
+                .map(|l| {
+                    (crate::ui::hit::max_extent_bounded_exact(l, aspect, layout_vp).0 - layout_vp)
+                        .max(0.0)
+                })
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         // Text line width (only when text is visible).
         let max_line = if view_mode == ViewMode::UiOnly {
@@ -3761,12 +3966,8 @@ impl Editor {
                 .unwrap_or(0)
         };
 
-        let content_width = layout_width.max(max_line);
-        let result = content_width.saturating_sub(vp) as u16;
-        eprintln!(
-            "[MAX-H-SCROLL] view_mode={view_mode:?} layout_width={layout_width} max_line={max_line} vp={vp} result={result}"
-        );
-        result
+        let text_overflow = max_line.saturating_sub(vp) as f32;
+        layout_overflow.max(text_overflow).ceil() as u16
     }
 
     pub fn handle_touchpad_magnify(
@@ -3980,21 +4181,29 @@ impl Editor {
 
     fn sync_runtime_context(&mut self) {
         let active = self.active_buffer();
-        let buffer_names: Vec<String> = self.buffers.iter().map(|b| b.name.clone()).collect();
-        let mut shared = self.runtime.shared.borrow_mut();
-        shared.current_buffer_id = Some(active.id);
-        shared.current_buffer_name = active.name.clone();
-        shared.current_buffer_path = active.path.clone();
-        shared.current_buffer_read_only = active.read_only;
-        shared.current_buffer_mode = active.mode.name().to_string();
-        shared.current_line_number = active.cursor.0 + 1;
-        shared.current_line_text = active
+        let current_buffer_id = active.id;
+        let current_buffer_name = active.name.clone();
+        let current_buffer_path = active.path.clone();
+        let current_buffer_read_only = active.read_only;
+        let current_buffer_mode = active.mode.name().to_string();
+        let current_line_number = active.cursor.0 + 1;
+        let current_line_text = active
             .lines
             .get(active.cursor.0)
             .cloned()
             .unwrap_or_default();
+        let current_view_mode = active.view_mode.label().to_string();
+        let buffer_names = self.buffer_names_by_recency();
+        let mut shared = self.runtime.shared.borrow_mut();
+        shared.current_buffer_id = Some(current_buffer_id);
+        shared.current_buffer_name = current_buffer_name;
+        shared.current_buffer_path = current_buffer_path;
+        shared.current_buffer_read_only = current_buffer_read_only;
+        shared.current_buffer_mode = current_buffer_mode;
+        shared.current_line_number = current_line_number;
+        shared.current_line_text = current_line_text;
         shared.buffer_names = buffer_names;
-        shared.current_view_mode = active.view_mode.label().to_string();
+        shared.current_view_mode = current_view_mode;
     }
 
     fn sync_runtime_source_context(&mut self) {
@@ -4042,7 +4251,7 @@ impl Editor {
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         // Collect tile viewports first to avoid borrow issues
-        let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -4068,7 +4277,10 @@ impl Editor {
                         cell_w,
                         cell_h,
                     ),
-                    None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
+                    None => (
+                        self.runtime.layout_cols_exact(),
+                        self.runtime.layout_rows_exact(),
+                    ),
                 };
                 Some((id, cols, rows))
             })
@@ -4143,7 +4355,7 @@ impl Editor {
         let buffer_id = self.buffers[buffer_idx].id as u64;
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
-        let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -4168,7 +4380,10 @@ impl Editor {
                         cell_w,
                         cell_h,
                     ),
-                    None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
+                    None => (
+                        self.runtime.layout_cols_exact(),
+                        self.runtime.layout_rows_exact(),
+                    ),
                 };
                 Some((id, cols, rows))
             })
@@ -4571,6 +4786,7 @@ impl Editor {
             if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                 self.save_current_widget_tree();
                 self.active_leaf_mut().buffer_idx = idx;
+                self.record_buffer_access_by_idx(idx);
                 self.mark_needs_redraw();
                 self.sync_runtime_context();
                 self.completion = None;
@@ -4958,6 +5174,7 @@ impl Editor {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                         self.save_current_widget_tree();
                         self.active_leaf_mut().buffer_idx = idx;
+                        self.record_buffer_access_by_idx(idx);
                         self.sync_runtime_context();
                         self.restore_buffer_widget_tree();
                         self.refresh_inactive_tile_layouts_for_buffer(idx);
@@ -5058,6 +5275,7 @@ impl Editor {
         let Some(output) = output else {
             return false;
         };
+        self.sync_patcher_emitted_source_buffer(&output.args);
         self.sync_runtime_source_context();
         let result = self.runtime.invoke(output.callback, output.args);
         if let Some(status) = self.runtime.take_status_message() {
@@ -5071,6 +5289,100 @@ impl Editor {
         self.completion = None;
         self.mark_needs_redraw();
         true
+    }
+
+    fn sync_patcher_emitted_source_buffer(&mut self, args: &[Value]) -> Option<BufferId> {
+        let Value::Map(map) = args.first()? else {
+            return None;
+        };
+        let status = map.get("status").and_then(|value| match &*value.borrow() {
+            Value::Keyword(status) | Value::String(status) => Some(status.clone()),
+            _ => None,
+        })?;
+        if status != "valid" {
+            return None;
+        }
+        let source = map.get("source").and_then(|value| match &*value.borrow() {
+            Value::String(source) => Some(source.clone()),
+            _ => None,
+        })?;
+        let path = map.get("path").and_then(|value| match &*value.borrow() {
+            Value::String(path) if !path.is_empty() => Some(path.clone()),
+            _ => None,
+        })?;
+        let name = crate::widget_render::patcher::emitted_source_buffer_name(&path);
+        let id =
+            self.upsert_read_only_scratch_buffer_with_mode(&name, &source, BufferMode::DGenLisp);
+        if self
+            .active_buffer()
+            .widget_tree
+            .as_ref()
+            .is_some_and(|tree| widget_tree_contains_patcher_path(tree, &path))
+        {
+            self.patcher_emitted_source_origins
+                .insert(path, self.active_buffer().id);
+        }
+        Some(id)
+    }
+
+    fn switch_focused_patcher_to_emitted_source_buffer(
+        &mut self,
+        node: &crate::layout::LayoutNode,
+    ) -> bool {
+        match crate::widget_render::patcher::emitted_source_buffer_snapshot(node) {
+            Ok(snapshot) => {
+                let origin_buffer_id = self.active_buffer().id;
+                let id = self.upsert_read_only_scratch_buffer_with_mode(
+                    &snapshot.buffer_name,
+                    &snapshot.source,
+                    BufferMode::DGenLisp,
+                );
+                self.patcher_emitted_source_origins
+                    .insert(snapshot.path, origin_buffer_id);
+                self.set_active_buffer(id);
+            }
+            Err(error) => {
+                self.minibuffer = Some(format!("Patch emitted source unavailable: {error}"));
+                self.mark_needs_redraw();
+            }
+        }
+        true
+    }
+
+    fn handle_patcher_emitted_source_tab(&mut self, key: KeyEvent) -> bool {
+        if key.code != KeyCode::Tab || key.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+        let Some(path) = crate::widget_render::patcher::emitted_source_path_from_buffer_name(
+            &self.active_buffer().name,
+        ) else {
+            return false;
+        };
+        let Some(buffer_id) = self.patcher_buffer_id_for_path(&path) else {
+            self.minibuffer = Some(format!("No patcher buffer found for {path}"));
+            self.mark_needs_redraw();
+            return true;
+        };
+        self.set_active_buffer(buffer_id);
+        true
+    }
+
+    fn patcher_buffer_id_for_path(&self, path: &str) -> Option<BufferId> {
+        if let Some(buffer_id) = self
+            .patcher_emitted_source_origins
+            .get(path)
+            .copied()
+            .filter(|buffer_id| self.buffers.iter().any(|buffer| buffer.id == *buffer_id))
+        {
+            return Some(buffer_id);
+        }
+        self.buffers.iter().find_map(|buffer| {
+            buffer
+                .widget_tree
+                .as_ref()
+                .is_some_and(|tree| widget_tree_contains_patcher_path(tree, path))
+                .then_some(buffer.id)
+        })
     }
 
     fn copy_active_region(&mut self) -> bool {
@@ -5469,6 +5781,34 @@ fn max_layout_bottom(node: &crate::layout::LayoutNode) -> f32 {
         })
 }
 
+fn widget_tree_contains_patcher_path(value: &Value, path: &str) -> bool {
+    match value {
+        Value::Map(map) => {
+            let is_matching_patcher = map.get("type").is_some_and(
+                |value| matches!(&*value.borrow(), Value::String(kind) if kind == "patcher"),
+            ) && ["path", "file"].iter().any(|key| {
+                map.get(*key).is_some_and(|value| {
+                    matches!(
+                        &*value.borrow(),
+                        Value::String(value) | Value::Keyword(value) | Value::Symbol(value)
+                            if value == path
+                    )
+                })
+            });
+            is_matching_patcher
+                || map.values().any(|value| {
+                    let value = value.borrow();
+                    widget_tree_contains_patcher_path(&value, path)
+                })
+        }
+        Value::List(items) => items.iter().any(|item| {
+            let item = item.borrow();
+            widget_tree_contains_patcher_path(&item, path)
+        }),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Editor, EditorConfig, VimInputMode, key_str};
@@ -5502,6 +5842,20 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    fn first_patcher_layout_node(
+        node: &crate::layout::LayoutNode,
+    ) -> Option<crate::layout::LayoutNode> {
+        if node.widget_type == "patcher" {
+            return Some(node.clone());
+        }
+        for child in &node.children {
+            if let Some(found) = first_patcher_layout_node(child) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     // Tests are included from the original file — they reference super:: helpers above.

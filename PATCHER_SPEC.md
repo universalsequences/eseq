@@ -25,6 +25,78 @@ sitting on top of the existing `lisp_effect` / `compile_instrument` pipeline.
 
 ---
 
+## Current Progress
+
+The patcher currently exists as an `eseqlisp` widget that can be embedded with:
+
+```lisp
+(patcher
+  :intent :instrument ; or :effect
+  :path "instruments/.../dsp.lisp")
+```
+
+Implemented so far:
+
+- Read-only import/projection from `dsp.lisp` into a patch graph.
+- Top-level `def`, nested calls, `in`, `out`, `param`, destructuring defs,
+  `defmacro`, and history projection.
+- Unsupported forms render as explicit code-island nodes instead of being
+  silently dropped.
+- Operator metadata comes from
+  `crates/sequencer/tools/dgenlisp-operators.json`.
+- `param` forms render as normal parameter nodes, and symbol references to
+  params become patch cables into consuming operators.
+- `make-history`, `read-history`, and `write-history` collapse into one
+  `history` node with feedback-class cabling.
+- Macro instances render as normal nodes; pressing Enter on a selected macro
+  opens its read-only subpatch. The breadcrumb/back-arrow returns to the root.
+- Macro subpatch arguments render as `in 1`, `in 2`, etc., and macro return
+  values render as `out 1`, etc.
+- Inline node argument display supports hidden literal inlets and `?`
+  placeholders for connected args before later literals, e.g. `ap ? 0.6`.
+- Deterministic auto-layout plus in-memory node position overrides.
+- Smooth canvas-local Metal cables, rounded node chassis, top/bottom
+  semicircle ports, grid, breadcrumb, diagnostics, panning, node selection, and
+  node dragging.
+- Double-clicking the background creates an in-memory draft node.
+- Double-clicking a node edits its header text in memory using the shared text
+  input cursor/selection math.
+- Pressing Enter commits an edited draft/header into the in-memory graph shape
+  and resolves visible ports from operator metadata.
+- Focused patcher key input invalidates layout/redraw correctly, so text
+  editing cursor state updates immediately.
+- Headless capture support exists through `eseqlisp_capture`, including an
+  ignored visual fixture test for the lexilush patcher screenshot.
+
+Important current limitations:
+
+- Edits are in-memory only. The patcher does not emit Lisp or save `dsp.lisp`.
+- No `dsp.layout.json` sidecar is written yet; node positions are not persisted.
+- No hot-reload or compile loop is connected to patcher edits.
+- New/edit node behavior only updates standalone node text/ports; it does not
+  yet update source-level bindings, output routing, or surrounding expressions.
+- Cable creation, cable deletion, reconnecting ports, and node deletion are not
+  implemented yet.
+- Macro editing is navigable/read-only at the source level; edited macro view
+  contents do not round-trip to `defmacro` source yet.
+- Comments are still import diagnostics/non-editable because the current parser
+  does not preserve comments.
+- No zoom, minimap, search, operator autocomplete, or palette UI yet.
+- No persistent undo/redo transaction model yet.
+
+Recommended next phase:
+
+1. Introduce a real patch edit model that distinguishes imported source nodes,
+   draft nodes, committed unsaved nodes, and deleted nodes.
+2. Implement graph mutation operations for create/edit/delete node and
+   create/delete/reconnect cable.
+3. Add deterministic graph-to-DGenLisp emission for the representable subset,
+   initially behind an explicit save/apply action.
+4. Add `dsp.layout.json` persistence for user-positioned nodes and pan state.
+5. Wire save/apply into the existing compile/load path once emission is stable.
+
+---
+
 ## 2. Goals / Non-Goals
 
 ### Goals
@@ -81,8 +153,8 @@ sitting on top of the existing `lisp_effect` / `compile_instrument` pipeline.
 
 **Single source of truth:** the lisp text on disk. The patch graph in memory
 is a *projection* of that text. The sidecar `dsp.layout.json` carries only
-positional metadata (x, y per node, view state per subpatch); it is never
-required for compilation or correctness.
+presentation metadata (node positions, segmented cable routing, and view state
+per subpatch); it is never required for compilation or correctness.
 
 The widget owns:
 - Parse: lisp → graph (using existing dgenlisp parser).
@@ -120,7 +192,12 @@ Node
 Connection
 ├── from:            (NodeId, OutletIdx)
 ├── to:              (NodeId, InletIdx)
-└── kind:            Audio | Control | Feedback
+├── kind:            Audio | Control | Feedback
+└── segment:         Option<CableSegment>   // sidecar-only visual routing
+
+CableSegment
+├── enabled:         bool
+└── y:               f32                    // patch-local row for horizontal run
 
 MacroDefinition
 ├── name:            String
@@ -167,12 +244,18 @@ crates/sequencer/instruments/videogame-arp/
       "pitch_env":  { "x": 320.0, "y": 240.0 },
       "ap#0":       { "x": 480.0, "y": 120.0 }
     },
+    "cables": {
+      "amp_env:0->ap#0:1": { "segmented": true, "y": 210.0 }
+    },
     "scroll": { "x": 0.0, "y": 0.0 },
     "zoom":   1.0
   },
   "macros": {
     "ap": {
       "nodes": { "node": { "x": 200, "y": 100 }, "delayed": { "x": 400, "y": 100 } },
+      "cables": {
+        "node:0->delayed:0": { "segmented": true, "y": 120.0 }
+      },
       "inline_render": false,
       "scroll": { "x": 0.0, "y": 0.0 },
       "zoom":   1.0
@@ -181,9 +264,12 @@ crates/sequencer/instruments/videogame-arp/
 }
 ```
 
-**No semantic content in the layout file.** If it is deleted or corrupted, the
-patch still loads (with auto-layout). If a hand-edit to `dsp.lisp` removes a
-node, its entry in the layout file is silently dropped on the next save.
+**No semantic content in the layout file.** Cable entries describe only how an
+existing source connection is drawn; they must never create, delete, or retarget
+connections. If the sidecar is deleted or corrupted, the patch still loads
+(with auto-layout and default cable slack). If a hand-edit to `dsp.lisp` removes
+a node or connection, its entry in the layout file is silently dropped on the
+next save.
 
 ---
 

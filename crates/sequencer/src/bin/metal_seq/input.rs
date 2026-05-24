@@ -48,7 +48,7 @@ pub(crate) fn layout_node_by_stable_key<'a>(
 
 pub(crate) fn focused_widget_matches(
     editor: &Editor,
-    predicate: impl FnOnce(&str) -> bool,
+    predicate: impl FnOnce(&eseqlisp::layout::LayoutNode) -> bool,
 ) -> bool {
     let Some(focused_id) = editor.focused_widget_id() else {
         return false;
@@ -59,19 +59,24 @@ pub(crate) fn focused_widget_matches(
     let Some(node) = layout_node_by_id(&layout, focused_id) else {
         return false;
     };
-    predicate(node.widget_type.as_str())
+    predicate(node)
 }
 
 pub(crate) fn focused_widget_captures_space(editor: &Editor) -> bool {
-    focused_widget_matches(editor, |widget_type| {
-        matches!(widget_type, "text-input" | "textbox")
-    })
+    focused_widget_matches(editor, widget_captures_text_input)
 }
 
 pub(crate) fn focused_widget_captures_text_input(editor: &Editor) -> bool {
-    focused_widget_matches(editor, |widget_type| {
-        matches!(widget_type, "text-input" | "textbox")
-    })
+    focused_widget_matches(editor, widget_captures_text_input)
+}
+
+fn widget_type_captures_text_input(widget_type: &str) -> bool {
+    matches!(widget_type, "text-input" | "textbox")
+}
+
+fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
+    widget_type_captures_text_input(node.widget_type.as_str())
+        || eseqlisp::widget_render::patcher::patcher_has_text_edit(node)
 }
 
 fn active_buffer_accepts_global_step_shortcuts(editor: &Editor) -> bool {
@@ -205,6 +210,19 @@ pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
     match editor.runtime_mut().eval_str("param-mode") {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::widget_type_captures_text_input;
+
+    #[test]
+    fn only_text_entry_widgets_capture_text_input_by_type() {
+        assert!(widget_type_captures_text_input("text-input"));
+        assert!(widget_type_captures_text_input("textbox"));
+        assert!(!widget_type_captures_text_input("patcher"));
+        assert!(!widget_type_captures_text_input("button"));
     }
 }
 
@@ -437,6 +455,24 @@ pub(crate) fn handle_metal_command_shortcut(
 
     if editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
+        && !focused_widget_captures_text_input(editor)
+        && matches!((key.code, key.modifiers), (KeyCode::Tab, KeyModifiers::NONE))
+        && editor
+            .runtime_mut()
+            .eval_str(r#"(or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))"#)
+            .ok()
+            .flatten()
+            .is_some_and(|value| matches!(value, eseqlisp::vm::Value::Bool(true)))
+    {
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-main-or-piano-roll)");
+        editor.refresh_runtime_side_effects();
+        return true;
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
         && active_buffer_accepts_global_ui_shortcuts(editor)
         && editor.focused_widget_id().is_none()
         && !focused_widget_captures_text_input(editor)
@@ -460,6 +496,13 @@ pub(crate) fn handle_metal_command_shortcut(
                 let _ = editor
                     .runtime_mut()
                     .eval_str("(seq-toggle-metal-sequencer-main)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Char('i') | KeyCode::Char('I'), KeyModifiers::SUPER) => {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(host-command \"enter-new-instrument-editor\" (dict))");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
@@ -786,6 +829,7 @@ mod live_keyboard_tests {
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::editor::ViewMode;
+    use eseqlisp::HostCommand;
     use eseqlisp::{Editor, EditorConfig, Runtime};
     use sequencer::sequencer::{SequencerState, StepSnapshot};
     use std::collections::HashSet;
@@ -916,6 +960,34 @@ mod live_keyboard_tests {
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
             Some(eseqlisp::vm::Value::String("placement".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_i_queues_new_instrument_editor() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                HostCommand::Custom { name, .. } if name == "enter-new-instrument-editor"
+            )),
+            "Cmd+i should queue the new instrument editor command: {commands:?}"
         );
     }
 

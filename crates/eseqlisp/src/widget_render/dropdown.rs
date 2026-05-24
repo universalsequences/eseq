@@ -442,6 +442,8 @@ impl WidgetDefinition for DropdownWidget {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         _modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         if !matches!(
             mouse_kind,
@@ -715,6 +717,7 @@ impl WidgetDefinition for DropdownWidget {
                     h_align: 0.0,
                     text: selected_display,
                     font_size,
+                    scale: 1.0,
                     fg: text_color,
                     bg: transparent,
                 },
@@ -872,6 +875,7 @@ impl WidgetDefinition for DropdownWidget {
                             h_align: 0.0,
                             text: "✓".to_string(),
                             font_size,
+                            scale: 1.0,
                             fg: check_color,
                             bg: transparent,
                         },
@@ -891,6 +895,7 @@ impl WidgetDefinition for DropdownWidget {
                         h_align: 0.0,
                         text: option_display,
                         font_size,
+                        scale: 1.0,
                         fg: text_color,
                         bg: transparent,
                     },

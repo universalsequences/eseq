@@ -204,6 +204,7 @@ impl WidgetDefinition for NumberLabelWidget {
                 h_align: resolve_h_align(&node.props),
                 text: formatted_value(&node.props),
                 font_size,
+                scale: 1.0,
                 fg,
                 bg,
             },

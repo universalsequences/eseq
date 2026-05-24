@@ -319,7 +319,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     runtime.register_native_with_docs(
         "buffer-list",
         "(buffer-list)",
-        "Return a list of buffer name strings.",
+        "Return buffer name strings ordered from most to least recently selected.",
         |_args, ctx| {
             let names = ctx.buffer_names();
             Ok(Value::List(

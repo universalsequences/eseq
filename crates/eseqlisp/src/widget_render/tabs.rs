@@ -259,6 +259,8 @@ impl WidgetDefinition for TabsWidget {
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         _modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
     ) -> MouseEventOutcome {
         // Only respond to clicks in the header area (above children)
         let header_bottom = node
@@ -364,6 +366,7 @@ impl WidgetDefinition for TabsWidget {
                     h_align: 0.0,
                     text: label.clone(),
                     font_size: DEFAULT_FONT_SIZE,
+                    scale: 1.0,
                     fg,
                     bg: theme::BG(),
                 },

@@ -534,10 +534,13 @@ pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("{}{}", stderr, stdout));
+        let error = format!("{}{}", stderr, stdout);
+        log_dgenlisp_compile_failure("effect", &src_path, &error, source);
+        return Err(error);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    log_dgenlisp_compile_manifest("effect", &src_path, &stdout);
     Ok(stdout)
 }
 
@@ -2082,10 +2085,30 @@ pub fn compile_instrument_with_asset_base(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("{}{}", stderr, stdout));
+        let error = format!("{}{}", stderr, stdout);
+        log_dgenlisp_compile_failure("instrument", &src_path, &error, source);
+        return Err(error);
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    log_dgenlisp_compile_manifest("instrument", &src_path, &stdout);
+    Ok(stdout)
+}
+
+fn log_dgenlisp_compile_failure(kind: &str, src_path: &Path, error: &str, source: &str) {
+    eprintln!(
+        "[dgenlisp compile failed] kind={kind} path={}\nerror:\n{error}\nsource:\n{source}\n[/dgenlisp compile failed]",
+        src_path.display()
+    );
+}
+
+fn log_dgenlisp_compile_manifest(kind: &str, src_path: &Path, manifest: &str) {
+    /*
+    eprintln!(
+        "[dgenlisp compile manifest] kind={kind} path={}\nmanifest:\n{manifest}\n[/dgenlisp compile manifest]",
+        src_path.display()
+    );
+    */
 }
 
 pub fn compile_and_load_instrument(
@@ -9072,6 +9095,89 @@ mod tests {
         assert_eq!(manifest.tensor_init_data[0].data.len(), 8);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patcher_writeback_for_real_instrument_compiles() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
+        let emitted = eseqlisp::widget_render::patcher::emit_patch_writeback_source(
+            &source,
+            eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+        )
+        .expect("patcher writeback should emit source");
+
+        compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
+            |error| panic!("patcher-emitted instrument source should compile:\n{error}\n{emitted}"),
+        );
+    }
+
+    #[test]
+    fn patcher_insert_unity_gain_before_real_instrument_output_compiles() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
+        let emitted =
+            eseqlisp::widget_render::patcher::emit_patch_writeback_with_inserted_node_before_first_output(
+                &source,
+                eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                "* 1",
+            )
+            .expect("patcher writeback should insert unity gain node");
+
+        assert!(
+            emitted.contains("(* "),
+            "emitted source should contain an inserted multiply node:\n{emitted}"
+        );
+        compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
+            |error| panic!("patcher-edited instrument source should compile:\n{error}\n{emitted}"),
+        );
+    }
+
+    #[test]
+    fn patcher_edit_piano_to_test_svf_literal_compiles() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("instruments/piano-to-test/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read piano-to-test dsp source");
+        let emitted =
+            eseqlisp::widget_render::patcher::emit_patch_writeback_with_first_node_text_edit(
+                &source,
+                eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                "svf",
+                "svf knock_cutoff 1.40 1",
+            )
+            .expect("patcher writeback should edit svf node text");
+
+        compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
+            |error| {
+                panic!(
+                    "patcher-edited piano-to-test svf source should compile:\n{error}\n{emitted}"
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn patcher_insert_created_phasor_multiply_before_real_instrument_output_compiles() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
+        let emitted =
+            eseqlisp::widget_render::patcher::emit_patch_writeback_with_created_phasor_multiply_before_first_output(
+                &source,
+                eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                "5",
+            )
+            .expect("patcher writeback should insert created phasor multiply chain");
+
+        assert!(
+            emitted.contains("(phasor 5.0)") && emitted.contains("(* "),
+            "emitted source should contain the inserted phasor multiply chain:\n{emitted}"
+        );
+        compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
+            |error| panic!("patcher-edited instrument source should compile:\n{error}\n{emitted}"),
+        );
     }
 
     #[test]

@@ -112,6 +112,9 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
 
     loop {
         editor.update_timers();
+        if editor.visible_widgets_animating() {
+            editor.mark_needs_redraw();
+        }
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) => editor.handle_key(key),
@@ -194,10 +197,11 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         let now_seconds = backend.time_seconds();
         let sdf_animation_active =
             crate::widget_render::sdf_widget::sdf_visual_animations_active(now_seconds);
-        if sdf_animation_active {
+        let widget_animation_active = editor.visible_widgets_animating();
+        if sdf_animation_active || widget_animation_active {
             editor.mark_needs_redraw();
         }
-        let frame_interval = if sdf_animation_active {
+        let frame_interval = if sdf_animation_active || widget_animation_active {
             animation_frame_interval
         } else {
             idle_frame_interval

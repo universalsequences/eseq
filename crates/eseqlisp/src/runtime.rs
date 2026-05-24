@@ -926,8 +926,8 @@ pub struct Runtime {
     deferred_layout_invalidated: bool,
     current_widget_tree: Option<Value>,
     current_committed_ui_snapshot: Option<CommittedBufferUiSnapshot>,
-    layout_cols: u16,
-    layout_rows: u16,
+    layout_cols: f32,
+    layout_rows: f32,
     layout_aspect: f32,
     layout_cell_w: f32,
     layout_cell_h: f32,
@@ -968,8 +968,8 @@ impl Runtime {
             deferred_layout_invalidated: false,
             current_widget_tree: None,
             current_committed_ui_snapshot: None,
-            layout_cols: 80,
-            layout_rows: 24,
+            layout_cols: 80.0,
+            layout_rows: 24.0,
             layout_aspect: 1.0,
             layout_cell_w: 1.0,
             layout_cell_h: 1.0,
@@ -1047,6 +1047,7 @@ impl Runtime {
                 let mut shader_val = None;
                 let mut widget_state_names: Vec<String> = Vec::new();
                 let mut bindable_props: Vec<String> = Vec::new();
+                let mut animates = false;
 
                 let mut i = 1;
                 while i + 1 < args.len() {
@@ -1069,6 +1070,9 @@ impl Runtime {
                             }
                             "shader" => {
                                 shader_val = Some(args[i + 1].clone());
+                            }
+                            "animates" => {
+                                animates = matches!(args[i + 1], Value::Bool(true));
                             }
                             "state" => {
                                 // Extract state symbol names from quoted list
@@ -1129,6 +1133,7 @@ impl Runtime {
                     width,
                     height,
                     paint_margin,
+                    animates,
                 });
 
                 let widget_type = name.clone();
@@ -1346,7 +1351,7 @@ impl Runtime {
             ("dot", "(dot a b)", "Return the dot product of two vec2 lists."),
             ("load", "(load path)", "Read and evaluate a Lisp file from path."),
             ("sdf->metal", "(sdf->metal sdf-expr)", "Compile a quoted SDF expression to Metal shader source."),
-            ("defwidget", "(defwidget name :width w :height h :shader expr ...)", "Register an SDF-backed widget constructor."),
+            ("defwidget", "(defwidget name :width w :height h :animates bool :shader expr ...)", "Register an SDF-backed widget constructor."),
             ("vec3", "(vec3 x y z)", "Return a tagged SDF vec3 expression."),
             ("vec4", "(vec4 x y z w)", "Return a tagged SDF vec4 expression."),
             ("rgba", "(rgba r g b a)", "Return a tagged SDF color expression."),
@@ -1538,9 +1543,15 @@ impl Runtime {
     }
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
-        let cols = cols.max(1);
-        let rows = rows.max(1);
-        if self.layout_cols == cols && self.layout_rows == rows {
+        self.set_layout_viewport_exact(cols as f32, rows as f32);
+    }
+
+    pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
+        let cols = cols.max(1.0);
+        let rows = rows.max(1.0);
+        if self.layout_cols.to_bits() == cols.to_bits()
+            && self.layout_rows.to_bits() == rows.to_bits()
+        {
             self.flush_deferred_layout_invalidation();
             if self.current_layout.is_none() && self.current_widget_tree.is_some() {
                 self.relayout_current_tree();
@@ -1995,7 +2006,7 @@ impl Runtime {
     pub fn layout_snapshot_for_tree_with_viewport(
         &mut self,
         tree: &Value,
-        viewport: Option<(u16, u16)>,
+        viewport: Option<(f32, f32)>,
     ) -> Option<Arc<LayoutNode>> {
         self.layout_snapshot_for_tree_with_viewport_and_offset(tree, viewport, 0)
     }
@@ -2003,7 +2014,7 @@ impl Runtime {
     pub fn layout_snapshot_for_tree_with_viewport_and_offset(
         &mut self,
         tree: &Value,
-        viewport: Option<(u16, u16)>,
+        viewport: Option<(f32, f32)>,
         widget_id_offset: u64,
     ) -> Option<Arc<LayoutNode>> {
         let saved_tree = self.current_widget_tree.clone();
@@ -2069,10 +2080,18 @@ impl Runtime {
     }
 
     pub fn layout_rows(&self) -> u16 {
-        self.layout_rows
+        self.layout_rows.floor().max(1.0) as u16
     }
 
     pub fn layout_cols(&self) -> u16 {
+        self.layout_cols.floor().max(1.0) as u16
+    }
+
+    pub fn layout_rows_exact(&self) -> f32 {
+        self.layout_rows
+    }
+
+    pub fn layout_cols_exact(&self) -> f32 {
         self.layout_cols
     }
 
@@ -2112,13 +2131,13 @@ impl Runtime {
         tree: Value,
         snapshot: Option<CommittedBufferUiSnapshot>,
         cached_layout: Option<Arc<LayoutNode>>,
-        viewport: Option<(u16, u16)>,
+        viewport: Option<(f32, f32)>,
         widget_id_offset: u64,
         layout_revision: u64,
     ) {
         if let Some((cols, rows)) = viewport {
-            self.layout_cols = cols.max(1);
-            self.layout_rows = rows.max(1);
+            self.layout_cols = cols.max(1.0);
+            self.layout_rows = rows.max(1.0);
         }
         self.widget_id_offset = widget_id_offset;
         self.current_widget_tree = Some(tree.clone());
@@ -2467,7 +2486,7 @@ impl Runtime {
             return;
         }
         let engine = if let Some(measurer) = self.text_measurer.as_deref() {
-            LayoutEngine::with_text_measurer(
+            LayoutEngine::with_text_measurer_exact(
                 self.layout_cols,
                 self.layout_rows,
                 self.layout_aspect,
@@ -2476,7 +2495,7 @@ impl Runtime {
                 self.layout_cell_h,
             )
         } else {
-            LayoutEngine::new(self.layout_cols, self.layout_rows, self.layout_aspect)
+            LayoutEngine::new_exact(self.layout_cols, self.layout_rows, self.layout_aspect)
         };
         if let Some(layout) = engine.layout_with_id_offset(tree, self.widget_id_offset) {
             let geometry_changed = self

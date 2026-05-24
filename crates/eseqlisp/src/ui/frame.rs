@@ -257,13 +257,28 @@ pub fn build_render_frame(
     viewport_width: usize,
     viewport_height: usize,
 ) -> RenderFrame {
-    editor.set_layout_viewport(viewport_width as u16, viewport_height as u16);
-    editor.active_leaf_mut().widget_viewport_height = viewport_height as f32;
+    build_render_frame_with_layout_viewport(
+        editor,
+        viewport_width,
+        viewport_height,
+        viewport_width as f32,
+        viewport_height as f32,
+    )
+}
+
+fn build_render_frame_with_layout_viewport(
+    editor: &mut Editor,
+    viewport_width: usize,
+    viewport_height: usize,
+    layout_width: f32,
+    layout_height: f32,
+) -> RenderFrame {
+    editor.set_layout_viewport_exact(layout_width, layout_height);
+    editor.active_leaf_mut().widget_viewport_height = layout_height;
     editor.clamp_widget_scroll_offsets();
     if let Some(layout) = editor.widget_layout() {
         let aspect = editor.layout_aspect();
-        let max_h =
-            (crate::ui::hit::max_extent(&layout, aspect).0 as f32 - viewport_width as f32).max(0.0);
+        let max_h = (crate::ui::hit::max_extent_exact(&layout, aspect).0 - layout_width).max(0.0);
         let leaf = editor.active_leaf_mut();
         if leaf.widget_scroll_left > max_h {
             leaf.widget_scroll_left = max_h;
@@ -609,8 +624,13 @@ fn metal_tile_inner_cells(
 
 #[cfg(test)]
 mod tests {
-    use super::{metal_content_cells, metal_tile_inner_cells};
+    use super::{
+        build_tiled_render_frame_borderless, metal_content_cells, metal_tile_inner_cells,
+        metal_tile_inner_extents,
+    };
+    use crate::editor::{Editor, EditorConfig, ViewMode};
     use crate::layout::Rect;
+    use crate::runtime::Runtime;
 
     #[test]
     fn metal_content_cells_never_round_fractional_tiles_up() {
@@ -662,6 +682,50 @@ mod tests {
 
         assert_eq!(cols, 99);
         assert_eq!(rows, 8);
+    }
+
+    #[test]
+    fn metal_tile_inner_extents_preserve_fractional_fill_space() {
+        let (cols, rows) = metal_tile_inner_extents(
+            Rect {
+                col: 0.0,
+                row: 0.0,
+                width: 100.0,
+                height: 10.0,
+            },
+            false,
+            true,
+            2.0,
+            10.0,
+            20.0,
+        );
+
+        assert_eq!(cols, 99.6);
+        assert_eq!(rows, 9.8);
+    }
+
+    #[test]
+    fn metal_tiled_fill_root_uses_fractional_content_height() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect (box :width :fill :height :fill :background-color :black))"#)
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.active_leaf_mut().show_status = false;
+        editor.active_leaf_mut().show_border = true;
+        editor.active_leaf_mut().border_width_px = 0.25;
+
+        let frame = build_tiled_render_frame_borderless(&mut editor, 20, 9);
+        let layout = frame.tiles[0]
+            .frame
+            .widget_layout
+            .as_ref()
+            .expect("fill box should produce a widget layout");
+
+        assert_eq!(layout.rect.height, 7.5);
     }
 }
 
@@ -797,6 +861,7 @@ fn build_tiled_render_frame_impl(
         // Compute inner dimensions
         let inner_width;
         let inner_height;
+        let inner_width_exact;
         let inner_height_exact;
         if cell_borders {
             // TUI: subtract 1-cell borders on each side
@@ -806,13 +871,14 @@ fn build_tiled_render_frame_impl(
             } else {
                 (rect.height.round() as usize).saturating_sub(2) // border top/bottom
             };
+            inner_width_exact = inner_width as f32;
             inner_height_exact = inner_height as f32;
         } else {
             // Metal tile rects can be fractional because margins/splits are
             // stored in logical cell units, and the Metal backend clips content
             // inside pixel borders. Lay widgets out to the same inset content
             // rect so :width :fill children do not clip their right edge.
-            let (_, rows_exact) = metal_tile_inner_extents(
+            let (cols_exact, rows_exact) = metal_tile_inner_extents(
                 rect,
                 show_status,
                 show_border,
@@ -830,6 +896,7 @@ fn build_tiled_render_frame_impl(
             );
             inner_width = cols;
             inner_height = rows;
+            inner_width_exact = cols_exact;
             inner_height_exact = rows_exact;
         }
 
@@ -845,6 +912,8 @@ fn build_tiled_render_frame_impl(
             buffer_scroll_top,
             inner_width,
             inner_height,
+            inner_width_exact.to_bits(),
+            inner_height_exact.to_bits(),
             view_mode,
         );
         let cached = cached_frame
@@ -856,7 +925,13 @@ fn build_tiled_render_frame_impl(
         if is_active {
             // Active tile: use full build_render_frame for highlights/cursor, but
             // completion is rendered once globally by the tiled backend.
-            let mut frame = build_render_frame(editor, inner_width, inner_height);
+            let mut frame = build_render_frame_with_layout_viewport(
+                editor,
+                inner_width,
+                inner_height,
+                inner_width_exact,
+                inner_height_exact,
+            );
             frame.completion = None;
             frame.dirty_widget_ids = dirty_widget_ids.clone();
             if Editor::trace_completion_enabled() {
