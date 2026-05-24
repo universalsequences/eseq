@@ -3050,31 +3050,78 @@ fn generated_node_consumers(
     edit: &super::state::PatcherNodeEdit,
     generated: &GeneratedBindings,
 ) -> Vec<String> {
-    interaction_state
+    let mut consumers = Vec::new();
+    let mut seen = HashSet::new();
+    let mut visiting = HashSet::new();
+    collect_generated_node_consumers(
+        root_patch,
+        interaction_state,
+        generated,
+        view_key,
+        &edit.id,
+        &mut visiting,
+        &mut seen,
+        &mut consumers,
+    );
+    consumers
+}
+
+fn collect_generated_node_consumers(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    node_id: &str,
+    visiting: &mut HashSet<String>,
+    seen: &mut HashSet<String>,
+    consumers: &mut Vec<String>,
+) {
+    if !visiting.insert(node_id.to_string()) {
+        return;
+    }
+    let mut outgoing = interaction_state
         .edit_state
         .connections
         .values()
-        .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
-        .filter(|connection| !connection_edit_touches_created_out(interaction_state, connection))
-        .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
-        .filter(|connection| {
-            created_value_node(interaction_state, view_key, &connection.to.node_id).is_none()
-        })
-        .filter(|connection| {
-            !node_is_history(
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == node_id)
+        .collect::<Vec<_>>();
+    outgoing.sort_by_key(|connection| (connection.to.node_id.clone(), connection.to.input_index));
+    for connection in outgoing {
+        if connection_edit_touches_created_out(interaction_state, connection)
+            || node_is_history(
                 root_patch,
                 interaction_state,
                 view_key,
                 &connection.to.node_id,
             )
-        })
-        .filter(|connection| {
-            patch_for_view(root_patch, view_key)
-                .and_then(|patch| patch_node(patch, &connection.to.node_id))
-                .is_some()
-        })
-        .map(|connection| connection.to.node_id.clone())
-        .collect()
+        {
+            continue;
+        }
+        if created_value_node(interaction_state, view_key, &connection.to.node_id).is_some() {
+            collect_generated_node_consumers(
+                root_patch,
+                interaction_state,
+                generated,
+                view_key,
+                &connection.to.node_id,
+                visiting,
+                seen,
+                consumers,
+            );
+            continue;
+        }
+        if generated.get(view_key, &connection.to.node_id).is_some() {
+            continue;
+        }
+        if patch_for_view(root_patch, view_key)
+            .and_then(|patch| patch_node(patch, &connection.to.node_id))
+            .is_some()
+            && seen.insert(connection.to.node_id.clone())
+        {
+            consumers.push(connection.to.node_id.clone());
+        }
+    }
+    visiting.remove(node_id);
 }
 
 fn source_owner_location_for_node(node: &PatchNode) -> Option<(&SourceFormId, usize)> {
@@ -5199,13 +5246,20 @@ impl SourceDocument {
     ) -> Result<(), WriteBackError> {
         match scope {
             SourceScopeId::Root => {
-                let insert_at = dependencies
+                let mut insert_at = dependencies
                     .iter()
                     .filter(|dependency| dependency.scope == *scope)
                     .filter_map(|dependency| self.form_position(dependency))
                     .max()
                     .map(|position| position + 1)
                     .unwrap_or(self.forms.len());
+                while self
+                    .forms
+                    .get(insert_at)
+                    .is_some_and(|form| form.original_index.is_none())
+                {
+                    insert_at += 1;
+                }
                 self.forms.insert(
                     insert_at,
                     DocumentForm {
@@ -5233,6 +5287,14 @@ impl SourceDocument {
                     .max()
                     .map(|position| position + 1)
                     .unwrap_or(macro_doc.body.len());
+                let mut insert_at = insert_at;
+                while macro_doc
+                    .body
+                    .get(insert_at)
+                    .is_some_and(|form| form.original_index.is_none())
+                {
+                    insert_at += 1;
+                }
                 macro_doc.body.insert(
                     insert_at,
                     MacroBodyForm {

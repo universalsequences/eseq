@@ -5591,6 +5591,83 @@ fn writeback_created_mod_from_existing_modulatable_param_follows_modulator_input
 }
 
 #[test]
+fn writeback_created_modulatable_param_replacing_early_source_input_precedes_mod_accessor() {
+    let source = r#"
+        (def value1 2.0)
+        (defmacro cymbal_model (trig amount) (* trig amount))
+        (def phasor1 (phasor value1))
+        (def ramp2trig1 (ramp2trig phasor1))
+        (def hit (cymbal_model ramp2trig1 0.5))
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (def mod2 (in 6 @name mod2 @modulator 2))
+        (def mod3 (in 7 @name mod3 @modulator 3))
+        (def mod4 (in 8 @name mod4 @modulator 4))
+        (def mod5 (in 9 @name mod5 @modulator 5))
+        (def mod6 (in 10 @name mod6 @modulator 6))
+        (def ext1 (in 11 @name ext1 @modulator 7))
+        (def ext2 (in 12 @name ext2 @modulator 8))
+        (def ext3 (in 13 @name ext3 @modulator 9))
+        (def ext4 (in 14 @name ext4 @modulator 10))
+        (out hit 1)
+    "#;
+    let patch = parse(source);
+    let phasor = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let ramp2trig = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "ramp2trig1")
+        .unwrap();
+    let phasor_to_ramp2trig = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == phasor.id && connection.to_node == ramp2trig.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(phasor_to_ramp2trig),
+        ));
+    let param = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param ramp @min 0 @max 1 @mod true @mod-mode additive",
+    );
+    let mod_node = allocate_created_text_node(&mut state, "root", "mod");
+    connect_output_to_input(&mut state, "root", &param, &mod_node, 0);
+    connect_output_to_input(&mut state, "root", &mod_node, &ramp2trig.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    let ext4_index = emitted
+        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+        .expect("instrument modulator inputs should be present");
+    let param_index = emitted
+        .find("(param ramp @min 0.0 @max 1.0 @mod true @mod-mode additive)")
+        .expect("created modulatable param should be emitted");
+    let modulated_index = emitted
+        .find("(def modulated1 (mod ramp))")
+        .expect("created mod accessor should be emitted");
+    let ramp2trig_index = emitted
+        .find("(def ramp2trig1 (ramp2trig modulated1))")
+        .expect("source consumer should use generated mod accessor");
+    assert!(ext4_index < param_index, "{emitted}");
+    assert!(param_index < modulated_index, "{emitted}");
+    assert!(modulated_index < ramp2trig_index, "{emitted}");
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+#[test]
 fn writeback_generated_binding_avoids_scope_name_collisions() {
     let source = r#"
         (param phasor1)
