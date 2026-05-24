@@ -216,12 +216,6 @@ const NEW_INSTRUMENT_STARTER_DSP: &str = r#"(def gate (in 1 @name gate))
 (def mod2 (in 6 @name mod2 @modulator 2))
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
-(def mod5 (in 9 @name mod5 @modulator 5))
-(def mod6 (in 10 @name mod6 @modulator 6))
-(def ext1 (in 11 @name ext1 @modulator 7))
-(def ext2 (in 12 @name ext2 @modulator 8))
-(def ext3 (in 13 @name ext3 @modulator 9))
-(def ext4 (in 14 @name ext4 @modulator 10))
 
 (param attack @default 5 @min 0 @max 1000 @unit ms)
 (param decay @default 120 @min 1 @max 2000 @unit ms)
@@ -494,7 +488,7 @@ fn metal_agent_instrument_preset_schema(
 
     let mut params = Vec::new();
     for (idx, param) in desc.params.iter().enumerate() {
-        let group = if param.node_param_idx >= 1_000_000 {
+        let group = if param.node_param_idx >= sequencer::voice_modulator::MOD_PARAM_BASE {
             "source"
         } else if param.name.starts_with("mod ") {
             "mod"
@@ -1566,30 +1560,13 @@ mod tests {
             (6, "mod2"),
             (7, "mod3"),
             (8, "mod4"),
-            (9, "mod5"),
-            (10, "mod6"),
-            (11, "ext1"),
-            (12, "ext2"),
-            (13, "ext3"),
-            (14, "ext4"),
         ] {
             assert!(
                 source.contains(&format!("(def {name} (in {idx} @name {name}")),
                 "starter source should declare input {idx} as {name}"
             );
         }
-        for (idx, name) in [
-            (1, "mod1"),
-            (2, "mod2"),
-            (3, "mod3"),
-            (4, "mod4"),
-            (5, "mod5"),
-            (6, "mod6"),
-            (7, "ext1"),
-            (8, "ext2"),
-            (9, "ext3"),
-            (10, "ext4"),
-        ] {
+        for (idx, name) in [(1, "mod1"), (2, "mod2"), (3, "mod3"), (4, "mod4")] {
             assert!(
                 source.contains(&format!(
                     "(def {name} (in {} @name {name} @modulator {idx}))",

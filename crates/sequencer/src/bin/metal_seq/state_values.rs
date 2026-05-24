@@ -331,6 +331,36 @@ fn insert_string_prop(
     );
 }
 
+fn instrument_slot_param_value(
+    slot: &sequencer::effects::EffectSlotState,
+    desc: &sequencer::effects::EffectDescriptor,
+    param_idx: usize,
+    plock_step: Option<usize>,
+) -> f32 {
+    plock_step
+        .and_then(|step| slot.plocks.get(step, param_idx))
+        .unwrap_or_else(|| {
+            if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                slot.defaults.get(param_idx)
+            } else {
+                desc.params
+                    .get(param_idx)
+                    .map(|param| param.default)
+                    .unwrap_or_default()
+            }
+        })
+}
+
+fn selected_voice_mod_source_indices(
+    desc: &sequencer::effects::EffectDescriptor,
+    slot: &sequencer::effects::EffectSlotState,
+    plock_step: Option<usize>,
+) -> Vec<usize> {
+    sequencer::voice_modulator::selected_source_param_indices(&desc.params, |idx, _| {
+        instrument_slot_param_value(slot, desc, idx, plock_step)
+    })
+}
+
 fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDescriptor) -> bool {
     matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. })
         || matches!(pdesc.kind, sequencer::effects::ParamKind::Enum { .. })
@@ -2207,20 +2237,6 @@ pub(crate) fn build_sampler_panel_value(
 ) -> Value {
     use std::collections::HashMap;
 
-    const MOD_PARAM_BASE: u32 = 1_000_000;
-    const PARAM_LFO1_RATE_HZ: usize = 13;
-    const PARAM_LFO1_RETRIGGER: usize = 18;
-    const PARAM_LFO2_RATE_HZ: usize = 19;
-    const PARAM_LFO2_RETRIGGER: usize = 24;
-    const PARAM_LFO3_RATE_HZ: usize = 25;
-    const PARAM_LFO3_RETRIGGER: usize = 30;
-    const PARAM_ENV_ATTACK_MS: usize = 31;
-    const PARAM_ENV_RELEASE_MS: usize = 34;
-    const PARAM_RAND_RATE_HZ: usize = 35;
-    const PARAM_RAND_SLEW: usize = 38;
-    const PARAM_DRIFT_RATE: usize = 39;
-    const PARAM_DRIFT_DIV: usize = 41;
-
     fn is_mod_param(name: &str) -> bool {
         name.starts_with("mod ")
     }
@@ -2234,64 +2250,11 @@ pub(crate) fn build_sampler_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        node_param_idx >= MOD_PARAM_BASE
-    }
-
-    fn source_section_name(node_param_idx: u32) -> &'static str {
-        if (MOD_PARAM_BASE + PARAM_LFO1_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
-            .contains(&node_param_idx)
-        {
-            "LFO 1"
-        } else if (MOD_PARAM_BASE + PARAM_ENV_ATTACK_MS as u32
-            ..=MOD_PARAM_BASE + PARAM_ENV_RELEASE_MS as u32)
-            .contains(&node_param_idx)
-        {
-            "ENV 1"
-        } else if (MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_RAND_SLEW as u32)
-            .contains(&node_param_idx)
-        {
-            "RAND"
-        } else if (MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32
-            ..=MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
-            .contains(&node_param_idx)
-        {
-            "DRIFT"
-        } else if (MOD_PARAM_BASE + PARAM_LFO2_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32)
-            .contains(&node_param_idx)
-        {
-            "LFO 2"
-        } else {
-            "LFO 3"
-        }
+        sequencer::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
-        if name.ends_with("_div") || name.ends_with("_rate") {
-            "rate".to_string()
-        } else if name.ends_with("_sync") {
-            "sync".to_string()
-        } else if name.ends_with("_shape") {
-            "shape".to_string()
-        } else if name.ends_with("_pw") {
-            "pulse width".to_string()
-        } else if name.ends_with("_retrigger") {
-            "retrigger".to_string()
-        } else if name == "mod_rand_slew" {
-            "slew".to_string()
-        } else if name == "mod_env_attack" {
-            "attack".to_string()
-        } else if name == "mod_env_decay" {
-            "decay".to_string()
-        } else if name == "mod_env_sustain" {
-            "sustain".to_string()
-        } else if name == "mod_env_release" {
-            "release".to_string()
-        } else {
-            name.to_string()
-        }
+        sequencer::voice_modulator::source_param_display_name(name)
     }
 
     app.publish_sampler_analysis_runtime(track);
@@ -2480,8 +2443,12 @@ pub(crate) fn build_sampler_panel_value(
 
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let mut source_params_by_section: HashMap<&'static str, Vec<Rc<RefCell<Value>>>> =
-        HashMap::new();
+    let mut source_params_by_slot: HashMap<usize, Vec<Rc<RefCell<Value>>>> = HashMap::new();
+    let mut source_type_param_by_slot: HashMap<usize, Rc<RefCell<Value>>> = HashMap::new();
+    let visible_source_indices: std::collections::HashSet<usize> =
+        selected_voice_mod_source_indices(&desc, slot, plock_step)
+            .into_iter()
+            .collect();
     let base_note = f32::from_bits(
         app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
     );
@@ -2607,10 +2574,20 @@ pub(crate) fn build_sampler_panel_value(
                     Rc::new(RefCell::new(Value::String(rename_source_param(&name)))),
                 );
             }
-            source_params_by_section
-                .entry(source_section_name(pdesc.node_param_idx))
-                .or_default()
-                .push(Rc::new(RefCell::new(Value::Map(pmap))));
+            if let Some(slot_number) = sequencer::voice_modulator::slot_from_param_name(&pdesc.name)
+            {
+                let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
+                if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+                    == Some("source")
+                {
+                    source_type_param_by_slot.insert(slot_number, param_value);
+                } else if visible_source_indices.contains(&param_idx) {
+                    source_params_by_slot
+                        .entry(slot_number)
+                        .or_default()
+                        .push(param_value);
+                }
+            }
         } else if is_mod_param(&pdesc.name) {
             if let Some(Value::String(name)) = pmap.get("name").map(|v| v.borrow().clone()) {
                 pmap.insert(
@@ -2631,21 +2608,25 @@ pub(crate) fn build_sampler_panel_value(
 
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for section_name in ["LFO 1", "ENV 1", "RAND", "DRIFT", "LFO 2", "LFO 3"] {
-        let Some(params) = source_params_by_section.remove(section_name) else {
-            continue;
-        };
-        if params.is_empty() {
-            continue;
-        }
-        source_names.push(Rc::new(RefCell::new(Value::String(
-            section_name.to_string(),
-        ))));
+    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+        let params = source_params_by_slot
+            .remove(&slot_number)
+            .unwrap_or_default();
+        let source_param = source_type_param_by_slot.remove(&slot_number);
+        source_names.push(Rc::new(RefCell::new(Value::String(section_name.clone()))));
         let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
         section_map.insert(
             "name".to_string(),
-            Rc::new(RefCell::new(Value::String(section_name.to_string()))),
+            Rc::new(RefCell::new(Value::String(section_name))),
         );
+        section_map.insert(
+            "slot".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_number as f64))),
+        );
+        if let Some(source_param) = source_param {
+            section_map.insert("source-param".to_string(), source_param);
+        }
         section_map.insert(
             "params".to_string(),
             Rc::new(RefCell::new(Value::List(params))),
@@ -2806,37 +2787,6 @@ pub(crate) fn build_instrument_panel_value(
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
     use std::collections::HashMap;
-
-    const MOD_PARAM_BASE: u32 = 1_000_000;
-    const PARAM_LFO1_RATE_HZ: usize = 13;
-    const PARAM_LFO1_SYNC: usize = 14;
-    const PARAM_LFO1_DIV: usize = 15;
-    const PARAM_LFO1_SHAPE: usize = 16;
-    const PARAM_LFO1_PW: usize = 17;
-    const PARAM_LFO1_RETRIGGER: usize = 18;
-    const PARAM_LFO2_RATE_HZ: usize = 19;
-    const PARAM_LFO2_SYNC: usize = 20;
-    const PARAM_LFO2_DIV: usize = 21;
-    const PARAM_LFO2_SHAPE: usize = 22;
-    const PARAM_LFO2_PW: usize = 23;
-    const PARAM_LFO2_RETRIGGER: usize = 24;
-    const PARAM_LFO3_RATE_HZ: usize = 25;
-    const PARAM_LFO3_SYNC: usize = 26;
-    const PARAM_LFO3_DIV: usize = 27;
-    const PARAM_LFO3_SHAPE: usize = 28;
-    const PARAM_LFO3_PW: usize = 29;
-    const PARAM_LFO3_RETRIGGER: usize = 30;
-    const PARAM_ENV_ATTACK_MS: usize = 31;
-    const PARAM_ENV_DECAY_MS: usize = 32;
-    const PARAM_ENV_SUSTAIN: usize = 33;
-    const PARAM_ENV_RELEASE_MS: usize = 34;
-    const PARAM_RAND_RATE_HZ: usize = 35;
-    const PARAM_RAND_SYNC: usize = 36;
-    const PARAM_RAND_DIV: usize = 37;
-    const PARAM_RAND_SLEW: usize = 38;
-    const PARAM_DRIFT_RATE: usize = 39;
-    const PARAM_DRIFT_SYNC: usize = 40;
-    const PARAM_DRIFT_DIV: usize = 41;
 
     if app.is_sampler_track(track) {
         return build_sampler_panel_value(app, track, selected);
@@ -3013,189 +2963,14 @@ pub(crate) fn build_instrument_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        node_param_idx >= MOD_PARAM_BASE
-    }
-
-    fn source_section_name(node_param_idx: u32) -> &'static str {
-        if (MOD_PARAM_BASE + PARAM_LFO1_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
-            .contains(&node_param_idx)
-        {
-            "LFO 1"
-        } else if (MOD_PARAM_BASE + PARAM_ENV_ATTACK_MS as u32
-            ..=MOD_PARAM_BASE + PARAM_ENV_RELEASE_MS as u32)
-            .contains(&node_param_idx)
-        {
-            "ENV 1"
-        } else if (MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_RAND_SLEW as u32)
-            .contains(&node_param_idx)
-        {
-            "RAND"
-        } else if (MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32
-            ..=MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
-            .contains(&node_param_idx)
-        {
-            "DRIFT"
-        } else if (MOD_PARAM_BASE + PARAM_LFO2_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32)
-            .contains(&node_param_idx)
-        {
-            "LFO 2"
-        } else {
-            "LFO 3"
-        }
+        sequencer::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
-        if name.ends_with("_div") || name.ends_with("_rate") {
-            "rate".to_string()
-        } else if name.ends_with("_sync") {
-            "sync".to_string()
-        } else if name.ends_with("_shape") {
-            "shape".to_string()
-        } else if name.ends_with("_pw") {
-            "pulse width".to_string()
-        } else if name.ends_with("_retrigger") {
-            "retrigger".to_string()
-        } else if name == "mod_rand_slew" {
-            "slew".to_string()
-        } else if name == "mod_env_attack" {
-            "attack".to_string()
-        } else if name == "mod_env_decay" {
-            "decay".to_string()
-        } else if name == "mod_env_sustain" {
-            "sustain".to_string()
-        } else if name == "mod_env_release" {
-            "release".to_string()
-        } else {
-            name.to_string()
-        }
+        sequencer::voice_modulator::source_param_display_name(name)
     }
 
-    let source_indices: Vec<usize> = desc
-        .params
-        .iter()
-        .enumerate()
-        .filter_map(|(i, p)| is_source_param(p.node_param_idx).then_some(i))
-        .collect();
-
-    let find_idx_by_node = |node_param_idx: u32| {
-        source_indices
-            .iter()
-            .copied()
-            .find(|&idx| desc.params.get(idx).map(|p| p.node_param_idx) == Some(node_param_idx))
-    };
-
-    let lfo_sync = |sync_idx: u32| -> bool {
-        find_idx_by_node(sync_idx)
-            .map(|idx| slot.defaults.get(idx) > 0.5)
-            .unwrap_or(false)
-    };
-    let lfo_shape_is_pulse = |shape_idx: u32| -> bool {
-        find_idx_by_node(shape_idx)
-            .map(|idx| slot.defaults.get(idx).round() as i32 == 2)
-            .unwrap_or(false)
-    };
-
-    let mut source_actual: Vec<usize> = Vec::new();
-    let push_lfo = |out: &mut Vec<usize>,
-                    rate_idx: usize,
-                    sync_idx: usize,
-                    div_idx: usize,
-                    shape_idx: usize,
-                    pw_idx: usize,
-                    retrig_idx: usize| {
-        let rate_node = MOD_PARAM_BASE + rate_idx as u32;
-        let sync_node = MOD_PARAM_BASE + sync_idx as u32;
-        let div_node = MOD_PARAM_BASE + div_idx as u32;
-        let shape_node = MOD_PARAM_BASE + shape_idx as u32;
-        let pw_node = MOD_PARAM_BASE + pw_idx as u32;
-        let retrig_node = MOD_PARAM_BASE + retrig_idx as u32;
-
-        if let Some(idx) = if lfo_sync(sync_node) {
-            find_idx_by_node(div_node)
-        } else {
-            find_idx_by_node(rate_node)
-        } {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(sync_node) {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(shape_node) {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(retrig_node) {
-            out.push(idx);
-        }
-        if lfo_shape_is_pulse(shape_node) {
-            if let Some(idx) = find_idx_by_node(pw_node) {
-                out.push(idx);
-            }
-        }
-    };
-
-    push_lfo(
-        &mut source_actual,
-        PARAM_LFO1_RATE_HZ,
-        PARAM_LFO1_SYNC,
-        PARAM_LFO1_DIV,
-        PARAM_LFO1_SHAPE,
-        PARAM_LFO1_PW,
-        PARAM_LFO1_RETRIGGER,
-    );
-    for idx_const in [
-        PARAM_ENV_ATTACK_MS,
-        PARAM_ENV_DECAY_MS,
-        PARAM_ENV_SUSTAIN,
-        PARAM_ENV_RELEASE_MS,
-    ] {
-        if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + idx_const as u32) {
-            source_actual.push(idx);
-        }
-    }
-    if let Some(idx) = if lfo_sync(MOD_PARAM_BASE + PARAM_RAND_SYNC as u32) {
-        find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_DIV as u32)
-    } else {
-        find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32)
-    } {
-        source_actual.push(idx);
-    }
-    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_SYNC as u32) {
-        source_actual.push(idx);
-    }
-    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_SLEW as u32) {
-        source_actual.push(idx);
-    }
-    if let Some(idx) = if lfo_sync(MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32) {
-        find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
-    } else {
-        find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32)
-    } {
-        source_actual.push(idx);
-    }
-    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32) {
-        source_actual.push(idx);
-    }
-    push_lfo(
-        &mut source_actual,
-        PARAM_LFO2_RATE_HZ,
-        PARAM_LFO2_SYNC,
-        PARAM_LFO2_DIV,
-        PARAM_LFO2_SHAPE,
-        PARAM_LFO2_PW,
-        PARAM_LFO2_RETRIGGER,
-    );
-    push_lfo(
-        &mut source_actual,
-        PARAM_LFO3_RATE_HZ,
-        PARAM_LFO3_SYNC,
-        PARAM_LFO3_DIV,
-        PARAM_LFO3_SHAPE,
-        PARAM_LFO3_PW,
-        PARAM_LFO3_RETRIGGER,
-    );
+    let source_actual = selected_voice_mod_source_indices(desc, slot, plock_step);
 
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
@@ -3341,13 +3116,15 @@ pub(crate) fn build_instrument_panel_value(
 
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for section_name in ["LFO 1", "ENV 1", "RAND", "DRIFT", "LFO 2", "LFO 3"] {
+    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
         let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
+        let mut source_param: Option<Rc<RefCell<Value>>> = None;
         for &param_idx in &source_actual {
             let Some(pdesc) = desc.params.get(param_idx) else {
                 continue;
             };
-            if source_section_name(pdesc.node_param_idx) != section_name {
+            if sequencer::voice_modulator::slot_from_param_name(&pdesc.name) != Some(slot_number) {
                 continue;
             }
             let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
@@ -3376,18 +3153,25 @@ pub(crate) fn build_instrument_panel_value(
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
             );
+            if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+                == Some("source")
+            {
+                source_param = params.pop();
+            }
         }
-        if params.is_empty() {
-            continue;
-        }
-        source_names.push(Rc::new(RefCell::new(Value::String(
-            section_name.to_string(),
-        ))));
+        source_names.push(Rc::new(RefCell::new(Value::String(section_name.clone()))));
         let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
         section_map.insert(
             "name".to_string(),
-            Rc::new(RefCell::new(Value::String(section_name.to_string()))),
+            Rc::new(RefCell::new(Value::String(section_name))),
         );
+        section_map.insert(
+            "slot".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_number as f64))),
+        );
+        if let Some(source_param) = source_param {
+            section_map.insert("source-param".to_string(), source_param);
+        }
         section_map.insert(
             "params".to_string(),
             Rc::new(RefCell::new(Value::List(params))),
@@ -7067,16 +6851,10 @@ mod tests {
             "modulators".to_string(),
             Rc::new(RefCell::new(test_list(
                 [
-                    (1.0, "LFO 1"),
-                    (2.0, "ENV 1"),
-                    (3.0, "RAND"),
-                    (4.0, "DRIFT"),
-                    (5.0, "LFO 2"),
-                    (6.0, "LFO 3"),
-                    (7.0, "Ext 1"),
-                    (8.0, "Ext 2"),
-                    (9.0, "Ext 3"),
-                    (10.0, "Ext 4"),
+                    (1.0, "Mod 1"),
+                    (2.0, "Mod 2"),
+                    (3.0, "Mod 3"),
+                    (4.0, "Mod 4"),
                 ]
                 .into_iter()
                 .map(|(slot, label)| {
@@ -11095,7 +10873,7 @@ mod tests {
                     ),
                     (
                         "label".to_string(),
-                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
                     ),
                 ])),
                 Value::Map(HashMap::from([
@@ -11105,7 +10883,7 @@ mod tests {
                     ),
                     (
                         "label".to_string(),
-                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 2".to_string()))),
                     ),
                 ])),
             ]))),
@@ -11145,7 +10923,23 @@ mod tests {
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
-                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            29,
+                            1.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
                     ),
                     (
                         "params".to_string(),
@@ -11161,7 +10955,23 @@ mod tests {
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
-                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 2".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            19,
+                            2.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
                     ),
                     (
                         "params".to_string(),
@@ -11309,7 +11119,7 @@ mod tests {
             "selector must have a nonzero rect: {:?}",
             selector.rect
         );
-        assert!(find_layout_node_by_text(&layout, "LFO 1").is_some());
+        assert!(find_layout_node_by_text(&layout, "Mod 1").is_some());
         let lfo_editor = find_layout_node_by_debug_name(&layout, "instrument-lfo-source-editor")
             .expect("selected LFO source editor should render");
         assert!(
@@ -11386,19 +11196,19 @@ mod tests {
         assert_set_instrument_param(&commands[1], 13.0, 0.75);
 
         editor.set_active_buffer(fx_id);
-        let env_layout = editor.widget_layout().expect("ENV 1 source editor layout");
+        let env_layout = editor.widget_layout().expect("Mod 2 source editor layout");
         let env_editor = find_layout_node_by_widget_type(&env_layout, "adsr-editor")
-            .expect("ENV 1 source editor should use an adsr-editor widget");
+            .expect("Mod 2 source editor should use an adsr-editor widget");
         assert!(
             env_editor.rect.width > 8.0 && env_editor.rect.height > 1.5,
-            "ENV 1 adsr-editor should have a visible measured rect, got {:?}",
+            "Mod 2 adsr-editor should have a visible measured rect, got {:?}",
             env_editor.rect
         );
         let env_callback = env_editor
             .props
             .get("on-change")
             .cloned()
-            .expect("ENV 1 adsr-editor should expose on-change");
+            .expect("Mod 2 adsr-editor should expose on-change");
         editor
             .runtime_mut()
             .invoke(
@@ -11422,7 +11232,7 @@ mod tests {
                     ),
                 ]))],
             )
-            .expect("edit ENV 1 source ADSR");
+            .expect("edit Mod 2 source ADSR");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 4, "commands={commands:?}");
         assert_set_instrument_param(&commands[0], 20.0, 11.0);
@@ -11575,7 +11385,7 @@ mod tests {
                     ),
                     (
                         "label".to_string(),
-                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
                     ),
                 ])),
                 Value::Map(HashMap::from([
@@ -11585,7 +11395,7 @@ mod tests {
                     ),
                     (
                         "label".to_string(),
-                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 2".to_string()))),
                     ),
                 ])),
             ]))),
@@ -11596,7 +11406,23 @@ mod tests {
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
-                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            39,
+                            1.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
                     ),
                     (
                         "params".to_string(),
@@ -11655,7 +11481,23 @@ mod tests {
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
-                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 2".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            29,
+                            2.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
                     ),
                     (
                         "params".to_string(),
@@ -11778,10 +11620,10 @@ mod tests {
         assert_set_instrument_param(&commands[0], 21.0, 0.75);
 
         let env_editor = find_layout_node_by_widget_type(&layout, "adsr-editor")
-            .expect("sampler ENV 1 source editor should use an adsr-editor widget");
+            .expect("sampler Mod 2 source editor should use an adsr-editor widget");
         assert!(
             env_editor.rect.width > 8.0 && env_editor.rect.height > 1.5,
-            "sampler ENV 1 adsr-editor should be visible, got {:?}",
+            "sampler Mod 2 adsr-editor should be visible, got {:?}",
             env_editor.rect
         );
 

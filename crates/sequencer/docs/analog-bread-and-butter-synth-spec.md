@@ -303,12 +303,10 @@ Required modulatable destinations:
 
 Preferred modulation sources:
 
-- host LFO 1
-- host LFO 2
-- filter envelope
-- amp envelope or auxiliary envelope
+- host Mod slots configured as LFOs
+- host Mod slots configured as envelopes
 - velocity
-- mod wheel / macro bus
+- mod wheel / macro bus routed through an external modulation source
 
 Modulation depth ranges must be destination-specific. Do not use broad generic
 depth ranges that allow nonsensical patches.

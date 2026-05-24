@@ -6005,12 +6005,6 @@ fn expected_instrument_modulator_slot(name: &str) -> Option<usize> {
         "mod2" => Some(2),
         "mod3" => Some(3),
         "mod4" => Some(4),
-        "mod5" => Some(5),
-        "mod6" => Some(6),
-        "ext1" => Some(7),
-        "ext2" => Some(8),
-        "ext3" => Some(9),
-        "ext4" => Some(10),
         _ => None,
     }
 }

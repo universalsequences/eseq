@@ -4657,12 +4657,6 @@ fn writeback_created_param_replaces_deleted_constant_source_input() {
         (def mod2 (in 6 @name mod2 @modulator 2))
         (def mod3 (in 7 @name mod3 @modulator 3))
         (def mod4 (in 8 @name mod4 @modulator 4))
-        (def mod5 (in 9 @name mod5 @modulator 5))
-        (def mod6 (in 10 @name mod6 @modulator 6))
-        (def ext1 (in 11 @name ext1 @modulator 7))
-        (def ext2 (in 12 @name ext2 @modulator 8))
-        (def ext3 (in 13 @name ext3 @modulator 9))
-        (def ext4 (in 14 @name ext4 @modulator 10))
         (param attack @default 5.0 @min 0.0 @max 1000.0 @unit ms)
         (param decay @default 120.0 @min 1.0 @max 2000.0 @unit ms)
         (param sustain @default 0.8 @min 0.0 @max 1.0)
@@ -5151,12 +5145,6 @@ fn writeback_created_macro_call_stays_after_created_macro_definition_when_file_m
         (def mod2 (in 6 @name mod2 @modulator 2))
         (def mod3 (in 7 @name mod3 @modulator 3))
         (def mod4 (in 8 @name mod4 @modulator 4))
-        (def mod5 (in 9 @name mod5 @modulator 5))
-        (def mod6 (in 10 @name mod6 @modulator 6))
-        (def ext1 (in 11 @name ext1 @modulator 7))
-        (def ext2 (in 12 @name ext2 @modulator 8))
-        (def ext3 (in 13 @name ext3 @modulator 9))
-        (def ext4 (in 14 @name ext4 @modulator 10))
         (def phase (phasor pitch))
         (def (shape1 shape2 shape3 shape4) (ramp-to-lfo-shapes phase))
         (def osc (scale shape1 0.0 1.0 -1.0 1.0))
@@ -5271,12 +5259,6 @@ fn writeback_created_modulatable_param_uses_param_name_for_mod_accessor() {
         (def mod2 (in 6 @name mod2 @modulator 2))
         (def mod3 (in 7 @name mod3 @modulator 3))
         (def mod4 (in 8 @name mod4 @modulator 4))
-        (def mod5 (in 9 @name mod5 @modulator 5))
-        (def mod6 (in 10 @name mod6 @modulator 6))
-        (def ext1 (in 11 @name ext1 @modulator 7))
-        (def ext2 (in 12 @name ext2 @modulator 8))
-        (def ext3 (in 13 @name ext3 @modulator 9))
-        (def ext4 (in 14 @name ext4 @modulator 10))
         (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
         (def phase (phasor pitch))
         (out (* phase velocity (mod gain)) 1 @name audio)
@@ -5381,8 +5363,8 @@ fn writeback_created_modulatable_param_uses_param_name_for_mod_accessor() {
     assert!(!emitted.contains("(def param"));
     assert!(!emitted.contains("(mod param"));
     assert!(!emitted.contains("(def mod7"));
-    let ext4_index = emitted
-        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+    let mod4_index = emitted
+        .find("(def mod4 (in 8 @name mod4 @modulator 4))")
         .expect("instrument modulator inputs should be present");
     let modulated_index = emitted
         .find("(def modulated1 (mod newparam))")
@@ -5390,7 +5372,7 @@ fn writeback_created_modulatable_param_uses_param_name_for_mod_accessor() {
     let phase_index = emitted
         .find("(def phase (phasor add1))")
         .expect("source consumer should be rewritten");
-    assert!(ext4_index < modulated_index);
+    assert!(mod4_index < modulated_index);
     assert!(modulated_index < phase_index);
 }
 
@@ -5405,12 +5387,6 @@ fn writeback_created_unconnected_modulatable_param_follows_modulator_inputs() {
         (def mod2 (in 6 @name mod2 @modulator 2))
         (def mod3 (in 7 @name mod3 @modulator 3))
         (def mod4 (in 8 @name mod4 @modulator 4))
-        (def mod5 (in 9 @name mod5 @modulator 5))
-        (def mod6 (in 10 @name mod6 @modulator 6))
-        (def ext1 (in 11 @name ext1 @modulator 7))
-        (def ext2 (in 12 @name ext2 @modulator 8))
-        (def ext3 (in 13 @name ext3 @modulator 9))
-        (def ext4 (in 14 @name ext4 @modulator 10))
         (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
         (def phase (phasor pitch))
         (out (* phase velocity (mod gain)) 1 @name audio)
@@ -5426,8 +5402,8 @@ fn writeback_created_unconnected_modulatable_param_follows_modulator_inputs() {
 
     let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
 
-    let ext4_index = emitted
-        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+    let mod4_index = emitted
+        .find("(def mod4 (in 8 @name mod4 @modulator 4))")
         .expect("instrument modulator inputs should be present");
     let xyz_index = emitted
         .find("(param xyz @default 0.0 @min 0.0 @max 1.0 @mod true @mod-mode additive)")
@@ -5435,7 +5411,7 @@ fn writeback_created_unconnected_modulatable_param_follows_modulator_inputs() {
     let gain_index = emitted
         .find("(param gain @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)")
         .expect("existing gain param should remain present");
-    assert!(ext4_index < xyz_index);
+    assert!(mod4_index < xyz_index);
     assert!(xyz_index < gain_index);
 }
 
@@ -5452,12 +5428,6 @@ fn writeback_created_node_depending_on_mod_accessor_follows_modulator_inputs() {
         (def mod2 (in 6 @name mod2 @modulator 2))
         (def mod3 (in 7 @name mod3 @modulator 3))
         (def mod4 (in 8 @name mod4 @modulator 4))
-        (def mod5 (in 9 @name mod5 @modulator 5))
-        (def mod6 (in 10 @name mod6 @modulator 6))
-        (def ext1 (in 11 @name ext1 @modulator 7))
-        (def ext2 (in 12 @name ext2 @modulator 8))
-        (def ext3 (in 13 @name ext3 @modulator 9))
-        (def ext4 (in 14 @name ext4 @modulator 10))
         (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
         (out (* op1 velocity (mod gain)) 1 @name audio)
     "#;
@@ -5522,8 +5492,8 @@ fn writeback_created_node_depending_on_mod_accessor_follows_modulator_inputs() {
 
     let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
 
-    let ext4_index = emitted
-        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+    let mod4_index = emitted
+        .find("(def mod4 (in 8 @name mod4 @modulator 4))")
         .expect("instrument modulator inputs should be present");
     let param_index = emitted
         .find("(param mything @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)")
@@ -5534,7 +5504,7 @@ fn writeback_created_node_depending_on_mod_accessor_follows_modulator_inputs() {
     let op_index = emitted
         .find("(def op2 (op pitch modulated1))")
         .expect("created dependent macro call should be emitted");
-    assert!(ext4_index < param_index);
+    assert!(mod4_index < param_index);
     assert!(param_index < modulated_index);
     assert!(modulated_index < op_index);
 }
@@ -5553,12 +5523,6 @@ fn badmallet_modulatable_param_source() -> &'static str {
         (def mod2 (in 6 @name mod2 @modulator 2))
         (def mod3 (in 7 @name mod3 @modulator 3))
         (def mod4 (in 8 @name mod4 @modulator 4))
-        (def mod5 (in 9 @name mod5 @modulator 5))
-        (def mod6 (in 10 @name mod6 @modulator 6))
-        (def ext1 (in 11 @name ext1 @modulator 7))
-        (def ext2 (in 12 @name ext2 @modulator 8))
-        (def ext3 (in 13 @name ext3 @modulator 9))
-        (def ext4 (in 14 @name ext4 @modulator 10))
         (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
         (def add1 (+ sub1 mul1))
         (out (* add1 velocity (mod gain)) 1 @name audio)
@@ -5585,13 +5549,13 @@ fn writeback_existing_param_made_modulatable_follows_modulator_inputs() {
 
     let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
 
-    let ext4_index = emitted
-        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+    let mod4_index = emitted
+        .find("(def mod4 (in 8 @name mod4 @modulator 4))")
         .expect("instrument modulator inputs should be present");
     let param_index = emitted
         .find("(param marimbamix @min 0.0 @max 1.0 @mod true @mod-mode additive)")
         .expect("edited modulatable param should be present");
-    assert!(ext4_index < param_index);
+    assert!(mod4_index < param_index);
     compile_patch_source_with_dgenlisp(&emitted).unwrap();
 }
 
@@ -5631,8 +5595,8 @@ fn writeback_created_mod_from_existing_modulatable_param_follows_modulator_input
 
     let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
 
-    let ext4_index = emitted
-        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+    let mod4_index = emitted
+        .find("(def mod4 (in 8 @name mod4 @modulator 4))")
         .expect("instrument modulator inputs should be present");
     let param_index = emitted
         .find("(param marimbamix @min 0.0 @max 1.0 @mod true @mod-mode additive)")
@@ -5643,7 +5607,7 @@ fn writeback_created_mod_from_existing_modulatable_param_follows_modulator_input
     let sub1_index = emitted
         .find("(def sub1 (- value8 modulated1))")
         .expect("source consumer should use the created mod accessor");
-    assert!(ext4_index < param_index, "{emitted}");
+    assert!(mod4_index < param_index, "{emitted}");
     assert!(param_index < modulated_index, "{emitted}");
     assert!(modulated_index < sub1_index, "{emitted}");
     compile_patch_source_with_dgenlisp(&emitted).unwrap();
@@ -5665,12 +5629,6 @@ fn writeback_created_modulatable_param_replacing_early_source_input_precedes_mod
         (def mod2 (in 6 @name mod2 @modulator 2))
         (def mod3 (in 7 @name mod3 @modulator 3))
         (def mod4 (in 8 @name mod4 @modulator 4))
-        (def mod5 (in 9 @name mod5 @modulator 5))
-        (def mod6 (in 10 @name mod6 @modulator 6))
-        (def ext1 (in 11 @name ext1 @modulator 7))
-        (def ext2 (in 12 @name ext2 @modulator 8))
-        (def ext3 (in 13 @name ext3 @modulator 9))
-        (def ext4 (in 14 @name ext4 @modulator 10))
         (out hit 1)
     "#;
     let patch = parse(source);
@@ -5708,8 +5666,8 @@ fn writeback_created_modulatable_param_replacing_early_source_input_precedes_mod
 
     let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
 
-    let ext4_index = emitted
-        .find("(def ext4 (in 14 @name ext4 @modulator 10))")
+    let mod4_index = emitted
+        .find("(def mod4 (in 8 @name mod4 @modulator 4))")
         .expect("instrument modulator inputs should be present");
     let param_index = emitted
         .find("(param ramp @min 0.0 @max 1.0 @mod true @mod-mode additive)")
@@ -5720,7 +5678,7 @@ fn writeback_created_modulatable_param_replacing_early_source_input_precedes_mod
     let ramp2trig_index = emitted
         .find("(def ramp2trig1 (ramp2trig modulated1))")
         .expect("source consumer should use generated mod accessor");
-    assert!(ext4_index < param_index, "{emitted}");
+    assert!(mod4_index < param_index, "{emitted}");
     assert!(param_index < modulated_index, "{emitted}");
     assert!(modulated_index < ramp2trig_index, "{emitted}");
     compile_patch_source_with_dgenlisp(&emitted).unwrap();
@@ -6995,12 +6953,6 @@ fn instrument_signature_modulator_inputs_are_hidden_boilerplate() {
             (def mod2 (in 6 @name mod2 @modulator 2))
             (def mod3 (in 7 @name mod3 @modulator 3))
             (def mod4 (in 8 @name mod4 @modulator 4))
-            (def mod5 (in 9 @name mod5 @modulator 5))
-            (def mod6 (in 10 @name mod6 @modulator 6))
-            (def ext1 (in 11 @name ext1 @modulator 7))
-            (def ext2 (in 12 @name ext2 @modulator 8))
-            (def ext3 (in 13 @name ext3 @modulator 9))
-            (def ext4 (in 14 @name ext4 @modulator 10))
             (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
             (out (* gate (mod gain)) 1 @name audio)
             "#,
@@ -7012,9 +6964,7 @@ fn instrument_signature_modulator_inputs_are_hidden_boilerplate() {
             "missing visible instrument input {name}"
         );
     }
-    for name in [
-        "mod1", "mod2", "mod3", "mod4", "mod5", "mod6", "ext1", "ext2", "ext3", "ext4",
-    ] {
+    for name in ["mod1", "mod2", "mod3", "mod4"] {
         assert!(
             !patch.nodes.iter().any(|node| node.id == name),
             "boilerplate modulator input {name} should be hidden"

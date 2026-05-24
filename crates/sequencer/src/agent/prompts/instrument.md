@@ -48,8 +48,7 @@ INCLUDES `@mod true`; OTHERWISE READ THE PARAMETER DIRECTLY AS `param_name`.
    host route external sources such as track LFOs, envelopes, random, drift, or
    performance lanes into instrument parameters. A host-modulated destination
    param must be declared with `@mod true @mod-mode additive`, and DSP must read
-   its host-modulated value with `(mod param_name)`. The `mod1`..`mod6` and
-   `ext1`..`ext4` inputs are only host plumbing for that matrix; do not use them
+   its host-modulated value with `(mod param_name)`. The `mod1`..`mod4` inputs are configurable host modulation slots for that matrix; do not use them
    as audio/control signals in the synth algorithm.
 
 2. Bespoke modulators are signals generated inside the instrument DSP itself:
@@ -128,17 +127,11 @@ Critical syntax rules:
   `(def pitch (in 2 @name pitch))`
   `(def velocity (in 3 @name velocity))`
   `(def trigger (in 4 @name trigger))`
-- If any param uses `@mod true`, also declare modulation inputs:
+- If any param uses `@mod true`, also declare the four configurable modulation inputs:
   `(def mod1 (in 5 @name mod1 @modulator 1))`
   `(def mod2 (in 6 @name mod2 @modulator 2))`
   `(def mod3 (in 7 @name mod3 @modulator 3))`
   `(def mod4 (in 8 @name mod4 @modulator 4))`
-  `(def mod5 (in 9 @name mod5 @modulator 5))`
-  `(def mod6 (in 10 @name mod6 @modulator 6))`
-  `(def ext1 (in 11 @name ext1 @modulator 7))`
-  `(def ext2 (in 12 @name ext2 @modulator 8))`
-  `(def ext3 (in 13 @name ext3 @modulator 9))`
-  `(def ext4 (in 14 @name ext4 @modulator 10))`
 - Do not mark a parameter `@mod true` just because it appears in the UI or is
   related to modulation. Host-modulatable params are destination controls for
   the host modulation matrix. Local modulation amount knobs are usually plain
@@ -148,8 +141,7 @@ Critical syntax rules:
 - When a validation error says a plain param was used as `(mod some_param)`, fix
   the DSP expression by replacing `(mod some_param)` with `some_param`. Do not
   add `@mod true` just to silence that error.
-- Never read `mod1`, `mod2`, `mod3`, `mod4`, `mod5`, `mod6`, `ext1`, `ext2`,
-  `ext3`, or `ext4` directly in DSP expressions. These inputs are host
+- Never read `mod1`, `mod2`, `mod3`, or `mod4` directly in DSP expressions. These inputs are host
   modulation lanes, not patch signals. They exist so the host mod matrix can
   route LFO/envelope/random/drift/external sources into params declared with
   `@mod true`.
@@ -220,13 +212,6 @@ Minimal valid instrument shape:
 (def mod2 (in 6 @name mod2 @modulator 2))
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
-(def mod5 (in 9 @name mod5 @modulator 5))
-(def mod6 (in 10 @name mod6 @modulator 6))
-(def ext1 (in 11 @name ext1 @modulator 7))
-(def ext2 (in 12 @name ext2 @modulator 8))
-(def ext3 (in 13 @name ext3 @modulator 9))
-(def ext4 (in 14 @name ext4 @modulator 10))
-
 (param amp_attack @default 3 @min 1 @max 1000 @unit ms)
 (param amp_decay @default 180 @min 1 @max 2000 @unit ms)
 (param amp_sustain @default 0.55 @min 0 @max 1)

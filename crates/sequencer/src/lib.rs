@@ -89,6 +89,6 @@ pub mod ui;
 #[allow(dead_code)]
 mod voice;
 #[allow(dead_code)]
-mod voice_modulator;
+pub mod voice_modulator;
 
 pub mod engine;

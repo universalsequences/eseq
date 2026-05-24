@@ -814,46 +814,39 @@
 
 (def instrument-mod-selector-row (modulator)
   (let ((slot (get modulator :slot))
-        (label-text (get modulator :label)))
+        (label-text (get modulator :name))
+        (source-p (get modulator :source-param)))
     (subtree :key (str "instrument-mod-selector-" slot)
-      (button label-text
-        :width 4.7 :height 1.1
-        :padding 0
-        :font-size 9
-        :background-color (if (= instrument-selected-mod-slot slot)
-          (rgba 0.95 0.48 0.18 0.82)
-          :instrument-control-bg)
-        :color (if (= instrument-selected-mod-slot slot) :white :dim)
-        :on-click (lambda (info) (set! instrument-selected-mod-slot slot))))))
+      (h-stack :gap 0.18 :align :center
+        (button label-text
+          :width 3.9 :height 1.1
+          :padding 0
+          :font-size 9
+          :background-color (if (= instrument-selected-mod-slot slot)
+            (rgba 0.95 0.48 0.18 0.82)
+            :instrument-control-bg)
+          :color (if (= instrument-selected-mod-slot slot) :white :dim)
+          :on-click (lambda (info) (set! instrument-selected-mod-slot slot)))
+        (dropdown :value (if source-p (get source-p :text-value) "off")
+          :options (if source-p (get source-p :options) '())
+          :on-change (lambda (v) (if source-p (fx-set-instrument-option source-p v) false))
+          :width 4.8 :height 1.1 :font-size 8.5)))))
 
 (def instrument-mod-selector (inst)
   (box :debug-name "instrument-mod-selector"
-       :width 10.2
+       :width 9.4
        :height :fill
        :padding 0.25
     (v-stack :gap 0.18 :align :start
       (label "mods" :font-size 9 :color :dim :bg :transparent)
-      (h-stack :gap 0.18 :align :start
-        (each (chunks (get inst :modulators) 5) |column ci|
-          (v-stack :gap 0.18 :align :start
-            (each column |modulator mi|
-              (instrument-mod-selector-row modulator))))))))
-
-(def instrument-mod-source-section-name (slot)
-  (if (= slot 1) "LFO 1"
-    (if (= slot 2) "ENV 1"
-      (if (= slot 3) "RAND"
-        (if (= slot 4) "DRIFT"
-          (if (= slot 5) "LFO 2"
-            (if (= slot 6) "LFO 3" false)))))))
+      (v-stack :gap 0.18 :align :start
+        (each (get inst :sources) |modulator mi|
+          (instrument-mod-selector-row modulator))))))
 
 (def instrument-selected-mod-source-section (inst)
-  (let ((section-name (instrument-mod-source-section-name (instrument-mod-selected-slot))))
-    (if section-name
-      (nth (filter |section| (= (get section :name) section-name)
-             (get inst :sources))
-           0)
-      false)))
+  (nth (filter |section| (= (get section :slot) (instrument-mod-selected-slot))
+         (get inst :sources))
+       0))
 
 (def instrument-source-param (section name)
   (nth (filter |p| (= (get p :name) name) (get section :params)) 0))
@@ -945,7 +938,7 @@
               (instrument-source-set-param-value sustain (get env :sustain))
               (instrument-source-set-param-value release (get env :release)))))
         (v-stack :width 8.2 :height :fill :gap 0.10 :align :start
-          (ui-lego-badge-dark "ENV 1" 7.7 (ui-accent-blue))
+          (ui-lego-badge-dark "env" 7.7 (ui-accent-blue))
           (h-stack :gap 0.14 :align :start
             (instrument-source-adsr-number attack "atk" 0 "ms")
             (instrument-source-adsr-number decay "dec" 0 "ms"))
@@ -976,10 +969,9 @@
                :width 4.4 :height 1.55 :padding 0
             (instrument-source-button retrigger "retrig" 4.4)))))))
 
-(def instrument-lfo-source-section? (section)
-  (or (= (get section :name) "LFO 1")
-      (= (get section :name) "LFO 2")
-      (= (get section :name) "LFO 3")))
+(def instrument-source-type (section)
+  (let ((source-p (get section :source-param)))
+    (if source-p (get source-p :text-value) "off")))
 
 (def instrument-selected-mod-source-editor (inst)
   (let ((slot (instrument-mod-selected-slot)))
@@ -987,20 +979,21 @@
          :width 25.5
          :height :fill
          :padding 0.35
-      (if (> slot 6)
-        (box :width :fill :height :fill :h-align :center :v-align :center
-          (label "external mod" :font-size 12 :color :dim :bg :transparent))
-        (let ((section (instrument-selected-mod-source-section inst)))
-          (if section
+      (let ((section (instrument-selected-mod-source-section inst)))
+        (if section
+          (let ((source-type (instrument-source-type section)))
             (v-stack :width :fill :height :fill :gap 0.3 :align :start
               (label (get section :name) :font-size 9 :color :dim :bg :transparent)
-              (if (= (get section :name) "ENV 1")
+              (if (= source-type "env")
                 (instrument-env-source-editor section)
-                (if (instrument-lfo-source-section? section)
+                (if (= source-type "lfo")
                   (instrument-lfo-source-editor section)
-                  (fx-param-grid (get section :params) false))))
-            (box :width :fill :height :fill :h-align :center :v-align :center
-              (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))))
+                  (if (or (= source-type "rand") (= source-type "drift"))
+                    (fx-param-grid (get section :params) false)
+                    (box :width :fill :height :fill :h-align :center :v-align :center
+                      (label "no source controls" :font-size 12 :color :dim :bg :transparent)))))))
+          (box :width :fill :height :fill :h-align :center :v-align :center
+            (label "no source controls" :font-size 12 :color :dim :bg :transparent)))))))
 
 (def instrument-mod-control-panel (inst)
   (box :debug-name "instrument-mod-control-panel"

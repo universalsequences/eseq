@@ -852,18 +852,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             modulators,
-            vec![
-                (1, "LFO 1"),
-                (2, "ENV 1"),
-                (3, "RAND"),
-                (4, "DRIFT"),
-                (5, "LFO 2"),
-                (6, "LFO 3"),
-                (7, "Ext 1"),
-                (8, "Ext 2"),
-                (9, "Ext 3"),
-                (10, "Ext 4"),
-            ]
+            vec![(1, "Mod 1"), (2, "Mod 2"), (3, "Mod 3"), (4, "Mod 4"),]
         );
 
         let target_names = desc
@@ -2216,7 +2205,10 @@ impl EffectDescriptor {
         ];
         params.extend(crate::voice_modulator::ui_param_descriptors());
         let mod_source_labels: Vec<String> = std::iter::once("off".to_string())
-            .chain((1..=10).map(|slot| crate::voice_modulator::modulator_slot_label(slot, "")))
+            .chain(
+                (1..=crate::voice_modulator::SLOT_COUNT)
+                    .map(|slot| crate::voice_modulator::modulator_slot_label(slot, "")),
+            )
             .collect();
         let mut instrument_modulation_targets = Vec::new();
         for lane in crate::sampler::SAMPLER_MOD_TARGET_PARAMS {
@@ -2233,7 +2225,7 @@ impl EffectDescriptor {
                     format!("mod {name} lane {} src", lane.lane)
                 },
                 min: 0.0,
-                max: 10.0,
+                max: crate::voice_modulator::SLOT_COUNT as f32,
                 default: 0.0,
                 kind: ParamKind::Enum {
                     labels: mod_source_labels.clone(),
@@ -2290,7 +2282,7 @@ impl EffectDescriptor {
             name: "Sampler".to_string(),
             input_channels: 0,
             output_channels: 2,
-            instrument_modulators: (1..=10)
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
                     label: crate::voice_modulator::modulator_slot_label(slot, ""),

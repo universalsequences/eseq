@@ -36,7 +36,7 @@ fn migrate_slot(slot: &ProjectEffectSlot, desc: &EffectDescriptor) -> ProjectEff
     let old_generated_start = slot
         .param_node_indices
         .iter()
-        .rposition(|node| *node >= VOICE_MOD_PARAM_BASE)
+        .rposition(|node| *node >= sequencer::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
         .map(|idx| idx + 1)
         .unwrap_or_else(|| {
             slot.param_node_indices
@@ -139,7 +139,6 @@ fn migrate_slot(slot: &ProjectEffectSlot, desc: &EffectDescriptor) -> ProjectEff
 }
 
 const DGEN_ENABLED_PARAM_IDX: u32 = 4;
-const VOICE_MOD_PARAM_BASE: u32 = 1_000_000;
 
 fn value_in_param_range(value: f32, param: &sequencer::effects::ParamDescriptor) -> bool {
     let min = param.min.min(param.max);

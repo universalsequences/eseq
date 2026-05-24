@@ -126,7 +126,7 @@ const MIN_RELEASE_SAMPLES: f32 = 64.0;
 // first fades the previous output to silence, then starts the new amp envelope.
 const RETRIGGER_FADE_SECONDS: f32 = 0.004;
 const WARP_XFADE_SECONDS: f32 = 0.005;
-const MOD_INPUT_COUNT: usize = 10;
+const MOD_INPUT_COUNT: usize = crate::voice_modulator::SLOT_COUNT;
 const SR_MIN_HZ: f32 = 2_000.0;
 const SR_MAX_HZ: f32 = 44_100.0;
 const SPEED_MIN: f32 = -4.0;

@@ -1791,7 +1791,7 @@ impl GraphController<'_> {
                     crate::voice_modulator::voice_modulator_vtable(),
                     crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
                     mod_name.as_ptr(),
-                    4,
+                    crate::voice_modulator::INPUT_COUNT as i32,
                     crate::voice_modulator::NUM_OUTPUTS as i32,
                     std::ptr::null(),
                     0,
@@ -1843,8 +1843,8 @@ impl GraphController<'_> {
                         self.app.graph.lg.0,
                         clip_id,
                         0,
-                        st.node_id,
-                        (crate::voice_modulator::NUM_OUTPUTS + input) as i32,
+                        mod_id,
+                        (4 + input) as i32,
                     );
                 }
                 crate::audiograph::graph_connect(
@@ -1954,7 +1954,7 @@ impl GraphController<'_> {
                     crate::voice_modulator::voice_modulator_vtable(),
                     crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
                     mod_name.as_ptr(),
-                    4,
+                    crate::voice_modulator::INPUT_COUNT as i32,
                     crate::voice_modulator::NUM_OUTPUTS as i32,
                     std::ptr::null(),
                     0,
@@ -2129,8 +2129,8 @@ impl GraphController<'_> {
             return Ok(());
         }
         let synth_ids = existing_engine.synth_ids.clone();
-        let synth_inputs = existing_engine.synth_inputs;
         let synth_outputs = existing_engine.synth_outputs.max(1);
+        let modulator_ids = existing_engine.modulator_ids.clone();
 
         let mut route_ids = Vec::with_capacity(MAX_VOICES);
         let mut ext_route_ids = Vec::with_capacity(MAX_VOICES);
@@ -2255,7 +2255,7 @@ impl GraphController<'_> {
 
             let mut voice_ext_route_ids = [0; EXT_MOD_INPUT_COUNT];
             for input in 0..EXT_MOD_INPUT_COUNT {
-                if synth_inputs > 10 + input {
+                if !modulator_ids.is_empty() {
                     let ext_route_name = CString::new(format!(
                         "{}_eng{}_ext{}_route_{}",
                         track_name,
@@ -2296,10 +2296,10 @@ impl GraphController<'_> {
                     self.graph_connect_checked(
                         ext_route_id,
                         0,
-                        synth_ids[v],
-                        10 + input as i32,
+                        modulator_ids[v],
+                        4 + input as i32,
                         &format!(
-                            "connect_engine_to_track ext{} synth engine {} track {} voice {}",
+                            "connect_engine_to_track ext{} modulator engine {} track {} voice {}",
                             input + 1,
                             engine_id,
                             track_idx,
@@ -2435,8 +2435,8 @@ impl GraphController<'_> {
                             self.app.graph.lg.0,
                             *ext_route_id,
                             0,
-                            old_synth,
-                            10 + input as i32,
+                            mod_id,
+                            4 + input as i32,
                         );
                     }
                 }
@@ -2530,14 +2530,14 @@ impl GraphController<'_> {
                 .filter_map(|routes| routes.get(v))
                 .flat_map(|route_ids| route_ids.iter().enumerate())
             {
-                if manifest.n_inputs <= 10 + input || *ext_route_id <= 0 {
+                if *ext_route_id <= 0 {
                     continue;
                 }
                 self.graph_connect_checked(
                     *ext_route_id,
                     0,
-                    synth_id,
-                    10 + input as i32,
+                    mod_id,
+                    4 + input as i32,
                     &format!(
                         "rebuild_custom_engine_runtime engine {} voice {} ext{} route {}",
                         engine_id,

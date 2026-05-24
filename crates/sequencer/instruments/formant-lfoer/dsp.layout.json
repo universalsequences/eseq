@@ -1,0 +1,1090 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 55.60915,
+        "y": 55.642544
+      },
+      "add1": {
+        "x": 48.222385,
+        "y": 39.109905
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "audio": {
+        "x": 55.60915,
+        "y": 58.546288
+      },
+      "clock": {
+        "x": 9.401506,
+        "y": 19.804527
+      },
+      "cos1": {
+        "x": 48.66706,
+        "y": 42.322437
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 6.6800003
+      },
+      "env": {
+        "x": 111.295,
+        "y": 17.75498
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9": {
+        "x": 166.03612,
+        "y": 36.3825
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 14.720001
+      },
+      "gainscale": {
+        "x": 111.66459,
+        "y": 47.29321
+      },
+      "gate": {
+        "x": 143.91,
+        "y": 4.0
+      },
+      "mod#0": {
+        "x": 140.7668,
+        "y": 32.921116
+      },
+      "modulated1": {
+        "x": 9.401506,
+        "y": 22.8547
+      },
+      "modulated2": {
+        "x": 96.0045,
+        "y": 40.742435
+      },
+      "modulated3": {
+        "x": 129.72205,
+        "y": 43.924442
+      },
+      "mul1": {
+        "x": 17.942533,
+        "y": 23.531935
+      },
+      "mul2": {
+        "x": 40.153625,
+        "y": 33.493305
+      },
+      "mul3": {
+        "x": 50.946068,
+        "y": 35.721344
+      },
+      "mul4": {
+        "x": 34.75869,
+        "y": 36.72401
+      },
+      "phasor1": {
+        "x": 51.29922,
+        "y": 31.852365
+      },
+      "pitch": {
+        "x": 92.01,
+        "y": 4.0
+      },
+      "pow1": {
+        "x": 29.242521,
+        "y": 31.852365
+      },
+      "qscale": {
+        "x": 126.60606,
+        "y": 41.318394
+      },
+      "release": {
+        "x": 4.0,
+        "y": 12.040001
+      },
+      "scale1": {
+        "x": 66.55026,
+        "y": 42.322437
+      },
+      "scale2": {
+        "x": 69.21907,
+        "y": 37.1129
+      },
+      "schroeder-allpass1": {
+        "x": 48.667065,
+        "y": 45.34746,
+        "width": 39.32734
+      },
+      "schroeder-allpass2": {
+        "x": 47.34535,
+        "y": 48.68667
+      },
+      "shift": {
+        "x": 97.20337,
+        "y": 37.644333
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 9.360001
+      },
+      "tri-formant-bank1": {
+        "x": 72.49441,
+        "y": 54.062542
+      },
+      "triangle1": {
+        "x": 27.864994,
+        "y": 29.1629
+      },
+      "trigger": {
+        "x": 166.96,
+        "y": 4.0
+      },
+      "value1": {
+        "x": 83.694405,
+        "y": 42.685192
+      },
+      "value2": {
+        "x": 51.29922,
+        "y": 29.1629
+      },
+      "velocity": {
+        "x": 116.22,
+        "y": 4.0
+      },
+      "vowlidx": {
+        "x": 73.69578,
+        "y": 47.71906
+      },
+      "wrap1": {
+        "x": 17.942533,
+        "y": 26.115093
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:0->tri-formant-bank1:1": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:1->tri-formant-bank1:2": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:2->tri-formant-bank1:3": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:3->tri-formant-bank1:4": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:4->tri-formant-bank1:5": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:5->tri-formant-bank1:6": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:6->tri-formant-bank1:7": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:7->tri-formant-bank1:8": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:8->tri-formant-bank1:9": {
+        "segmented": true,
+        "y": 67.243744
+      },
+      "gainscale:0->formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:3": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 10.94
+      },
+      "modulated2:0->formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:1": {
+        "segmented": true,
+        "y": 35.07125
+      },
+      "modulated3:0->formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:2": {
+        "segmented": true,
+        "y": 32.591248
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 13.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 13.150001
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 12.179999
+      },
+      "vowlidx:0->formant-controller1_formant-controller2_formant-controller3_formant-controller4_formant-controller5_formant-controller6_formant-controller7_formant-controller8_formant-controller9:0": {
+        "segmented": true,
+        "y": 5.93
+      }
+    }
+  },
+  "macros": {
+    "formant-controller": {
+      "nodes": {
+        "*#0": {
+          "x": 219.51501,
+          "y": 10.6825
+        },
+        "*#1": {
+          "x": 247.78502,
+          "y": 44.094997
+        },
+        "*#2": {
+          "x": 287.65503,
+          "y": 44.094997
+        },
+        "*#3": {
+          "x": 330.42502,
+          "y": 44.094997
+        },
+        "*#4": {
+          "x": 366.815,
+          "y": 44.094997
+        },
+        "*#5": {
+          "x": 396.825,
+          "y": 44.094997
+        },
+        "*#6": {
+          "x": 448.77505,
+          "y": 44.094997
+        },
+        "0.057762265": {
+          "x": 219.51501,
+          "y": 4.0
+        },
+        "f1": {
+          "x": 242.47002,
+          "y": 50.777496
+        },
+        "f1_val": {
+          "x": 246.38503,
+          "y": 37.4125
+        },
+        "f2": {
+          "x": 282.34003,
+          "y": 50.777496
+        },
+        "f2_val": {
+          "x": 286.255,
+          "y": 37.4125
+        },
+        "f3": {
+          "x": 325.11002,
+          "y": 50.777496
+        },
+        "f3_val": {
+          "x": 329.025,
+          "y": 37.4125
+        },
+        "g1": {
+          "x": 478.20502,
+          "y": 44.094997
+        },
+        "g1_val": {
+          "x": 476.805,
+          "y": 37.4125
+        },
+        "g2": {
+          "x": 511.11505,
+          "y": 44.094997
+        },
+        "g2_val": {
+          "x": 509.71503,
+          "y": 37.4125
+        },
+        "g3": {
+          "x": 550.405,
+          "y": 44.094997
+        },
+        "g3_val": {
+          "x": 549.005,
+          "y": 37.4125
+        },
+        "gain_scale": {
+          "x": 320.99503,
+          "y": 4.0
+        },
+        "out": {
+          "x": 247.93922,
+          "y": 57.459995
+        },
+        "out2": {
+          "x": 366.13998,
+          "y": 57.459995
+        },
+        "out3": {
+          "x": 477.53,
+          "y": 57.459995
+        },
+        "out4": {
+          "x": 286.98,
+          "y": 57.459995
+        },
+        "out5": {
+          "x": 396.15,
+          "y": 57.459995
+        },
+        "out6": {
+          "x": 510.44003,
+          "y": 57.459995
+        },
+        "out7": {
+          "x": 329.75,
+          "y": 57.459995
+        },
+        "out8": {
+          "x": 448.10004,
+          "y": 57.459995
+        },
+        "out9": {
+          "x": 549.73004,
+          "y": 57.459995
+        },
+        "q1": {
+          "x": 362.08,
+          "y": 50.777496
+        },
+        "q1_val": {
+          "x": 365.41498,
+          "y": 37.4125
+        },
+        "q2": {
+          "x": 392.09,
+          "y": 50.777496
+        },
+        "q2_val": {
+          "x": 395.425,
+          "y": 37.4125
+        },
+        "q3": {
+          "x": 444.04004,
+          "y": 50.777496
+        },
+        "q3_val": {
+          "x": 447.37503,
+          "y": 37.4125
+        },
+        "q_scale": {
+          "x": 294.46503,
+          "y": 4.0
+        },
+        "selector#0": {
+          "x": 233.77002,
+          "y": 24.0475
+        },
+        "selector#1": {
+          "x": 403.445,
+          "y": 30.73
+        },
+        "selector#10": {
+          "x": 437.66003,
+          "y": 24.0475
+        },
+        "selector#11": {
+          "x": 587.13495,
+          "y": 30.73
+        },
+        "selector#12": {
+          "x": 469.99002,
+          "y": 24.0475
+        },
+        "selector#13": {
+          "x": 619.46497,
+          "y": 30.73
+        },
+        "selector#14": {
+          "x": 496.52002,
+          "y": 24.0475
+        },
+        "selector#15": {
+          "x": 645.995,
+          "y": 30.73
+        },
+        "selector#16": {
+          "x": 535.81,
+          "y": 24.0475
+        },
+        "selector#17": {
+          "x": 685.285,
+          "y": 30.73
+        },
+        "selector#2": {
+          "x": 271.90002,
+          "y": 24.0475
+        },
+        "selector#3": {
+          "x": 441.575,
+          "y": 30.73
+        },
+        "selector#4": {
+          "x": 313.51,
+          "y": 24.0475
+        },
+        "selector#5": {
+          "x": 483.185,
+          "y": 30.73
+        },
+        "selector#6": {
+          "x": 357.44,
+          "y": 24.0475
+        },
+        "selector#7": {
+          "x": 527.115,
+          "y": 30.73
+        },
+        "selector#8": {
+          "x": 386.29,
+          "y": 24.0475
+        },
+        "selector#9": {
+          "x": 555.96497,
+          "y": 30.73
+        },
+        "shift_ratio": {
+          "x": 220.00002,
+          "y": 17.365
+        },
+        "shift_st": {
+          "x": 237.92502,
+          "y": 4.0
+        },
+        "t": {
+          "x": 427.56003,
+          "y": 24.0475
+        },
+        "v1": {
+          "x": 247.11002,
+          "y": 17.365
+        },
+        "v2": {
+          "x": 417.46002,
+          "y": 24.0475
+        },
+        "v_val": {
+          "x": 243.63002,
+          "y": 10.6825
+        },
+        "vowel_idx": {
+          "x": 265.61502,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "*#0:0->shift_ratio:0": {
+          "segmented": true,
+          "y": 14.193749
+        },
+        "*#1:0->f1:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "*#2:0->f2:0": {
+          "segmented": true,
+          "y": 46.986248
+        },
+        "*#3:0->f3:0": {
+          "segmented": true,
+          "y": 49.46625
+        },
+        "*#4:0->q1:0": {
+          "segmented": true,
+          "y": 50.427498
+        },
+        "*#5:0->q2:0": {
+          "segmented": true,
+          "y": 46.024998
+        },
+        "*#6:0->q3:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "0.057762265:0->*#0:0": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "f1:0->out:0": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "f1_val:0->*#1:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "f2:0->out4:0": {
+          "segmented": true,
+          "y": 53.668743
+        },
+        "f2_val:0->*#2:0": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "f3:0->out7:0": {
+          "segmented": true,
+          "y": 56.148746
+        },
+        "f3_val:0->*#3:0": {
+          "segmented": true,
+          "y": 42.78375
+        },
+        "g1:0->out3:0": {
+          "segmented": true,
+          "y": 51.567497
+        },
+        "g1_val:0->g1:0": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "g2:0->out6:0": {
+          "segmented": true,
+          "y": 51.567497
+        },
+        "g2_val:0->g2:0": {
+          "segmented": true,
+          "y": 42.78375
+        },
+        "g3:0->out9:0": {
+          "segmented": true,
+          "y": 50.327496
+        },
+        "g3_val:0->g3:0": {
+          "segmented": true,
+          "y": 39.3425
+        },
+        "gain_scale:0->g1:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "gain_scale:0->g2:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "gain_scale:0->g3:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "q1:0->out2:0": {
+          "segmented": true,
+          "y": 52.707497
+        },
+        "q1_val:0->*#4:0": {
+          "segmented": true,
+          "y": 39.3425
+        },
+        "q2:0->out5:0": {
+          "segmented": true,
+          "y": 57.109997
+        },
+        "q2_val:0->*#5:0": {
+          "segmented": true,
+          "y": 43.745
+        },
+        "q3:0->out8:0": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "q3_val:0->*#6:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "q_scale:0->*#4:1": {
+          "segmented": true,
+          "y": 31.52
+        },
+        "q_scale:0->*#5:1": {
+          "segmented": true,
+          "y": 31.52
+        },
+        "q_scale:0->*#6:1": {
+          "segmented": true,
+          "y": 31.52
+        },
+        "selector#0:0->f1_val:0": {
+          "segmented": true,
+          "y": 32.760002
+        },
+        "selector#10:0->q3_val:0": {
+          "segmented": true,
+          "y": 26.40375
+        },
+        "selector#11:0->q3_val:1": {
+          "segmented": true,
+          "y": 36.721252
+        },
+        "selector#12:0->g1_val:0": {
+          "segmented": true,
+          "y": 28.26375
+        },
+        "selector#13:0->g1_val:1": {
+          "segmented": true,
+          "y": 32.66
+        },
+        "selector#14:0->g2_val:0": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "selector#15:0->g2_val:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "selector#16:0->g3_val:0": {
+          "segmented": true,
+          "y": 27.02375
+        },
+        "selector#17:0->g3_val:1": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "selector#1:0->f1_val:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "selector#2:0->f2_val:0": {
+          "segmented": true,
+          "y": 29.66
+        },
+        "selector#3:0->f2_val:1": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "selector#4:0->f3_val:0": {
+          "segmented": true,
+          "y": 35.86
+        },
+        "selector#5:0->f3_val:1": {
+          "segmented": true,
+          "y": 36.721252
+        },
+        "selector#6:0->q1_val:0": {
+          "segmented": true,
+          "y": 31.52
+        },
+        "selector#7:0->q1_val:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "selector#8:0->q2_val:0": {
+          "segmented": true,
+          "y": 30.9
+        },
+        "selector#9:0->q2_val:1": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "shift_ratio:0->*#1:1": {
+          "segmented": true,
+          "y": 30.9
+        },
+        "shift_ratio:0->*#2:1": {
+          "segmented": true,
+          "y": 30.9
+        },
+        "shift_ratio:0->*#3:1": {
+          "segmented": true,
+          "y": 30.9
+        },
+        "shift_st:0->*#0:1": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "t:0->f1_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "t:0->f2_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "t:0->f3_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "t:0->g1_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "t:0->g2_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "t:0->g3_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "t:0->q1_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "t:0->q2_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "t:0->q3_val:2": {
+          "segmented": true,
+          "y": 28.88375
+        },
+        "v1:0->selector#0:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->selector#10:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->selector#12:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->selector#14:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->selector#16:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->selector#2:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->selector#4:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->selector#6:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->selector#8:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->t:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v1:0->v2:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "v2:0->selector#11:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v2:0->selector#13:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v2:0->selector#15:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v2:0->selector#17:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v2:0->selector#1:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v2:0->selector#3:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v2:0->selector#5:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v2:0->selector#7:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v2:0->selector#9:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "v_val:0->t:0": {
+          "segmented": true,
+          "y": 14.89875
+        },
+        "v_val:0->v1:0": {
+          "segmented": true,
+          "y": 14.89875
+        },
+        "vowel_idx:0->v_val:0": {
+          "segmented": true,
+          "y": 8.13125
+        }
+      }
+    },
+    "schroeder-allpass": {
+      "nodes": {
+        "*#0": {
+          "x": 80.765,
+          "y": 17.365
+        },
+        "*#1": {
+          "x": 80.765,
+          "y": 30.73
+        },
+        "delay_samples": {
+          "x": 55.969997,
+          "y": 4.0
+        },
+        "delayed": {
+          "x": 51.82,
+          "y": 10.6825
+        },
+        "gain": {
+          "x": 89.46,
+          "y": 4.0
+        },
+        "h_w": {
+          "x": 38.05,
+          "y": 24.0475
+        },
+        "input": {
+          "x": 112.509995,
+          "y": 4.0
+        },
+        "out": {
+          "x": 52.649197,
+          "y": 44.094997
+        },
+        "return": {
+          "x": 52.495,
+          "y": 37.4125
+        },
+        "w": {
+          "x": 104.39499,
+          "y": 24.0475
+        }
+      },
+      "cables": {
+        "*#0:0->w:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "*#1:0->return:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "delay_samples:0->delayed:1": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "delayed:0->*#0:1": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "delayed:0->return:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "gain:0->*#0:0": {
+          "segmented": true,
+          "y": 11.5575
+        },
+        "gain:0->*#1:0": {
+          "segmented": true,
+          "y": 11.5575
+        },
+        "h_w:0->delayed:0": {
+          "segmented": true,
+          "y": 25.977503
+        },
+        "input:0->w:0": {
+          "segmented": true,
+          "y": 14.81375
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "w:0->*#1:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "w:0->h_w:0": {
+          "segmented": true,
+          "y": 27.63225
+        }
+      }
+    },
+    "tri-formant-bank": {
+      "nodes": {
+        "*#0": {
+          "x": 148.09743,
+          "y": 17.365
+        },
+        "*#1": {
+          "x": 164.18742,
+          "y": 17.365
+        },
+        "*#2": {
+          "x": 180.27742,
+          "y": 17.365
+        },
+        "b1": {
+          "x": 145.10243,
+          "y": 10.6825
+        },
+        "b2": {
+          "x": 161.19243,
+          "y": 10.6825
+        },
+        "b3": {
+          "x": 177.28242,
+          "y": 10.6825
+        },
+        "f1": {
+          "x": 163.29616,
+          "y": 4.0
+        },
+        "f2": {
+          "x": 225.48615,
+          "y": 4.0
+        },
+        "f3": {
+          "x": 287.67615,
+          "y": 4.0
+        },
+        "g1": {
+          "x": 184.02615,
+          "y": 4.0
+        },
+        "g2": {
+          "x": 246.21614,
+          "y": 4.0
+        },
+        "g3": {
+          "x": 308.40616,
+          "y": 4.0
+        },
+        "input": {
+          "x": 142.9987,
+          "y": 4.0
+        },
+        "out": {
+          "x": 148.25163,
+          "y": 30.73
+        },
+        "q1": {
+          "x": 204.75615,
+          "y": 4.0
+        },
+        "q2": {
+          "x": 266.94614,
+          "y": 4.0
+        },
+        "q3": {
+          "x": 330.29614,
+          "y": 4.0
+        },
+        "return": {
+          "x": 146.69743,
+          "y": 24.0475
+        }
+      },
+      "cables": {
+        "*#0:0->return:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "*#1:0->return:1": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "*#2:0->return:2": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "b1:0->*#0:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "b2:0->*#1:0": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "b3:0->*#2:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "f1:0->b1:1": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "f2:0->b2:1": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "f3:0->b3:1": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "g1:0->*#0:1": {
+          "segmented": true,
+          "y": 10.076249
+        },
+        "g2:0->*#1:1": {
+          "segmented": true,
+          "y": 11.31625
+        },
+        "g3:0->*#2:1": {
+          "segmented": true,
+          "y": 12.55625
+        },
+        "input:0->b1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "input:0->b2:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "input:0->b3:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "q1:0->b1:2": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "q2:0->b2:2": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "q3:0->b3:2": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 28.17875
+        }
+      }
+    }
+  }
+}

@@ -70,15 +70,27 @@ pub fn validate_instrument_dsp_source(source: &str) -> Result<(), String> {
     direct_mod_refs.dedup();
     if !direct_mod_refs.is_empty() {
         return Err(format!(
-            "dsp.lisp directly reads host modulator input(s): {}. Do not use mod1..mod10/ext1..ext4 in DSP expressions. Declare modulator inputs only when params use @mod true, then read the host-modulated parameter with `(mod param_name)`; the host mod matrix chooses which LFO/envelope/random/source drives that param.",
+            "dsp.lisp directly reads host modulator input(s): {}. Do not use mod1..mod4 or legacy mod5..mod10/ext1..ext4 in DSP expressions. Declare modulator inputs only when params use @mod true, then read the host-modulated parameter with `(mod param_name)`; the host mod matrix chooses which configured Mod slot drives that param.",
             direct_mod_refs.join(", ")
         ));
     }
 
+    let required = ["mod1", "mod2", "mod3", "mod4"];
+    let mut extra = declared_modulator_inputs
+        .iter()
+        .filter(|name| !required.iter().any(|required| *required == name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    extra.sort();
+    extra.dedup();
+    if !extra.is_empty() {
+        return Err(format!(
+            "dsp.lisp declares unsupported host modulator input(s): {}. Instruments expose exactly four configurable host modulation slots: `(def mod1 (in 5 @name mod1 @modulator 1))` through `(def mod4 (in 8 @name mod4 @modulator 4))`; remove legacy mod5/mod6/ext1..ext4 declarations.",
+            extra.join(", ")
+        ));
+    }
+
     if !mod_declared_params.is_empty() {
-        let required = [
-            "mod1", "mod2", "mod3", "mod4", "mod5", "mod6", "ext1", "ext2", "ext3", "ext4",
-        ];
         let missing = required
             .iter()
             .filter(|name| {
@@ -90,7 +102,7 @@ pub fn validate_instrument_dsp_source(source: &str) -> Result<(), String> {
             .collect::<Vec<_>>();
         if !missing.is_empty() {
             return Err(format!(
-                "dsp.lisp declares host-modulatable parameter(s) with `@mod true` but is missing modulator input declaration(s): {}. Declare all ten host modulation lanes, including `(def ext1 (in 11 @name ext1 @modulator 7))` through `(def ext4 (in 14 @name ext4 @modulator 10))`, when any param uses `@mod true`.",
+                "dsp.lisp declares host-modulatable parameter(s) with `@mod true` but is missing modulator input declaration(s): {}. Declare exactly the four configurable host modulation slots: `(def mod1 (in 5 @name mod1 @modulator 1))` through `(def mod4 (in 8 @name mod4 @modulator 4))`, when any param uses `@mod true`.",
                 missing.join(", ")
             ));
         }
@@ -148,7 +160,7 @@ pub fn validate_effect_dsp_source(source: &str) -> Result<(), String> {
     direct_mod_refs.dedup();
     if !direct_mod_refs.is_empty() {
         return Err(format!(
-            "effects cannot read host modulation input(s): {}. Do not declare or use mod1..mod10/ext1..ext4 in effect DSP.",
+            "effects cannot read host modulation input(s): {}. Do not declare or use mod1..mod4 or legacy mod5..mod10/ext1..ext4 in effect DSP.",
             direct_mod_refs.join(", ")
         ));
     }
@@ -626,12 +638,6 @@ mod tests {
             (def mod2 (in 6 @name mod2 @modulator 2))
             (def mod3 (in 7 @name mod3 @modulator 3))
             (def mod4 (in 8 @name mod4 @modulator 4))
-            (def mod5 (in 9 @name mod5 @modulator 5))
-            (def mod6 (in 10 @name mod6 @modulator 6))
-            (def ext1 (in 11 @name ext1 @modulator 7))
-            (def ext2 (in 12 @name ext2 @modulator 8))
-            (def ext3 (in 13 @name ext3 @modulator 9))
-            (def ext4 (in 14 @name ext4 @modulator 10))
             (param cutoff @default 900 @min 40 @max 12000 @mod true @mod-mode additive)
             (def filtered (svf (sin (* (phasor pitch) twopi)) (clip (mod cutoff) 40 12000) 1 0))
             (out (* filtered gate velocity) 1 @name audio)
@@ -718,8 +724,6 @@ mod tests {
             (def mod2 (in 6 @name mod2 @modulator 2))
             (def mod3 (in 7 @name mod3 @modulator 3))
             (def mod4 (in 8 @name mod4 @modulator 4))
-            (def mod5 (in 9 @name mod5 @modulator 5))
-            (def mod6 (in 10 @name mod6 @modulator 6))
             (param lfo_to_pitch @default 0 @min 0 @max 0.14)
             (def pitch_mod (+ pitch (* pitch (sin (* (phasor 1) twopi)) (mod lfo_to_pitch))))
             (out (* (sin (* (phasor pitch_mod) twopi)) gate velocity) 1 @name audio)
@@ -798,7 +802,31 @@ mod tests {
         assert!(err.contains("@mod true"));
         assert!(err.contains("missing modulator input"));
         assert!(err.contains("mod1"));
-        assert!(err.contains("mod6"));
+        assert!(err.contains("mod4"));
+    }
+
+    #[test]
+    fn rejects_legacy_extra_modulator_inputs() {
+        let err = validate_instrument_dsp_source(
+            r#"
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (def mod1 (in 5 @name mod1 @modulator 1))
+            (def mod2 (in 6 @name mod2 @modulator 2))
+            (def mod3 (in 7 @name mod3 @modulator 3))
+            (def mod4 (in 8 @name mod4 @modulator 4))
+            (def ext1 (in 11 @name ext1 @modulator 7))
+            (param cutoff @default 900 @min 40 @max 12000 @mod true @mod-mode additive)
+            (out (sin (* (phasor (mod cutoff)) twopi)) 1 @name audio)
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("unsupported host modulator input"));
+        assert!(err.contains("ext1"));
+        assert!(err.contains("exactly four"));
     }
 
     #[test]
