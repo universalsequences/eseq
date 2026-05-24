@@ -139,6 +139,18 @@ pub fn trigger_level_change_haptic() {
 #[cfg(not(target_os = "macos"))]
 pub fn trigger_level_change_haptic() {}
 
+#[cfg(target_os = "macos")]
+pub fn trigger_alignment_haptic() {
+    let performer = NSHapticFeedbackManager::defaultPerformer();
+    performer.performFeedbackPattern_performanceTime(
+        NSHapticFeedbackPattern::Alignment,
+        NSHapticFeedbackPerformanceTime::Now,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn trigger_alignment_haptic() {}
+
 // ── Overlay system ───────────────────────────────────────────────────────────
 // Only one overlay (dropdown menu, etc.) can be active at a time.
 

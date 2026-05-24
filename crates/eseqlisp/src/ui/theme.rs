@@ -135,6 +135,7 @@ pub struct Theme {
     pub patcher_port_output: Color,
     pub patcher_edit_selection: Color,
     pub patcher_edit_cursor: Color,
+    pub patcher_alignment_guide: Color,
     pub patcher_autocomplete_bg: Color,
     pub patcher_autocomplete_border: Color,
     pub patcher_autocomplete_selected_bg: Color,
@@ -708,6 +709,11 @@ theme_slots!(
         patcher_edit_cursor,
         PATCHER_EDIT_CURSOR,
         Color::from_hex(0xff, 0xff, 0xff)
+    ),
+    (
+        patcher_alignment_guide,
+        PATCHER_ALIGNMENT_GUIDE,
+        Color::rgba(0.38, 0.62, 1.0, 0.86)
     ),
     (
         patcher_autocomplete_bg,

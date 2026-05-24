@@ -1,3 +1,4 @@
+mod alignment;
 mod display;
 mod emit;
 mod geometry;
@@ -665,7 +666,7 @@ impl WidgetDefinition for PatcherWidget {
                 MouseEventOutcome::Consume
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                handle_patcher_pointer_drag(node, local_col, local_row);
+                handle_patcher_pointer_drag(node, local_col, local_row, modifiers, cell_w, cell_h);
                 MouseEventOutcome::Consume
             }
             MouseEventKind::Up(MouseButton::Left) => MouseEventOutcome::Dispatch(

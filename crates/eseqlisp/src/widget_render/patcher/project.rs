@@ -201,6 +201,7 @@ impl Projector {
             args: Vec::new(),
             outputs: vec!["out".to_string()],
             position: (0.0, 0.0),
+            width: None,
             diagnostic: None,
             source: Some(NodeSource {
                 owner: SourceOwner::Compound {
@@ -372,6 +373,7 @@ impl Projector {
                 ],
                 outputs: vec![param.clone()],
                 position: (0.0, 0.0),
+                width: None,
                 diagnostic: None,
                 source: Some(NodeSource {
                     owner: SourceOwner::MacroParameter {
@@ -486,6 +488,7 @@ impl Projector {
                 args: vec![ArgValue::Literal((idx + 1).to_string())],
                 outputs: Vec::new(),
                 position: (0.0, 0.0),
+                width: None,
                 diagnostic: None,
                 source: Some(NodeSource {
                     owner: SourceOwner::TopLevelForm {
@@ -710,6 +713,7 @@ impl Projector {
             args: Vec::new(),
             outputs: self.default_outputs_for_node(&op, kind),
             position: (0.0, 0.0),
+            width: None,
             diagnostic: self.operator_diagnostic(&op, kind),
             source: Some(NodeSource {
                 owner,
@@ -887,6 +891,7 @@ impl Projector {
             args: Vec::new(),
             outputs: vec!["out".to_string()],
             position: (0.0, 0.0),
+            width: None,
             diagnostic: None,
             source,
         });
@@ -1036,6 +1041,7 @@ impl Projector {
             args: Vec::new(),
             outputs: Vec::new(),
             position: (0.0, 0.0),
+            width: None,
             diagnostic: Some(reason.to_string()),
             source: Some(NodeSource {
                 owner: SourceOwner::CodeIsland {

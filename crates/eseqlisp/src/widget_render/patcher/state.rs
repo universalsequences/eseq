@@ -129,6 +129,35 @@ pub(super) struct PatcherInteractionState {
     pub(super) drag: Option<PatcherDragState>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AlignmentAxis {
+    X,
+    Y,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AlignmentGuideKind {
+    Vertical,
+    Horizontal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct AlignmentGuide {
+    pub(super) kind: AlignmentGuideKind,
+    pub(super) position: f32,
+    pub(super) extent_start: f32,
+    pub(super) extent_end: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct AlignmentSnapState {
+    pub(super) snapped_x: bool,
+    pub(super) snapped_y: bool,
+    pub(super) guides: Vec<AlignmentGuide>,
+    pub(super) last_haptic_axis: Option<AlignmentAxis>,
+    pub(super) last_haptic_at: Option<Instant>,
+}
+
 pub(super) const PATCHER_Z_SLOTS_PER_NODE: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +169,7 @@ pub(super) enum PatcherZSlot {
     Text = 3,
     DrillIn = 4,
     EditCursor = 5,
+    ResizeHandles = 6,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -217,12 +247,27 @@ pub(super) struct PatcherNodeEdit {
     pub(super) origin: PatcherNodeOrigin,
     pub(super) text: String,
     pub(super) position: (f32, f32),
+    pub(super) width: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PatcherNodeOrigin {
     Source { source_node_id: String },
     Created { created_id: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NodeResizeCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl NodeResizeCorner {
+    pub(super) fn resizes_left_edge(self) -> bool {
+        matches!(self, Self::TopLeft | Self::BottomLeft)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -254,9 +299,18 @@ pub(super) struct PatcherTextEdit {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum PatcherDragState {
     Nodes {
+        primary_node_id: String,
         start_col: f32,
         start_row: f32,
         start_positions: HashMap<String, (f32, f32)>,
+        alignment: AlignmentSnapState,
+    },
+    NodeResize {
+        node_id: String,
+        corner: NodeResizeCorner,
+        start_col: f32,
+        start_width: f32,
+        start_position: (f32, f32),
     },
     Marquee {
         start_col: f32,
@@ -565,7 +619,7 @@ pub(super) fn node_z_index(
 
 pub(super) fn max_node_z_index(patch: &Patch) -> i32 {
     patch.nodes.len().saturating_sub(1) as i32 * PATCHER_Z_SLOTS_PER_NODE
-        + PatcherZSlot::EditCursor as i32
+        + PatcherZSlot::ResizeHandles as i32
 }
 
 pub(super) fn scoped_node_key(view_key: &str, node_id: &str) -> String {
@@ -617,6 +671,7 @@ pub(super) fn allocate_created_node(
             },
             text: String::new(),
             position,
+            width: None,
         },
     );
     debug_log_edit_event(
@@ -839,6 +894,7 @@ pub(super) fn ensure_source_node_edit(
             },
             text,
             position: node.position,
+            width: node.width,
         });
 }
 
@@ -856,6 +912,25 @@ pub(super) fn set_node_edit_position(
         .get_mut(&node_edit_key(view_key, &node.id))
     {
         edit.position = position;
+    }
+}
+
+pub(super) fn set_node_edit_width(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    node: &PatchNode,
+    position: (f32, f32),
+    width: Option<f32>,
+    text: String,
+) {
+    ensure_source_node_edit(state, view_key, node, text);
+    if let Some(edit) = state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(view_key, &node.id))
+    {
+        edit.position = position;
+        edit.width = width.filter(|width| width.is_finite());
     }
 }
 
@@ -931,6 +1006,7 @@ pub(super) fn patch_with_interaction_state(
         let edit_key = node_edit_key(view_key, &node.id);
         if let Some(edit) = interaction_state.edit_state.nodes.get(&edit_key) {
             node.position = edit.position;
+            node.width = edit.width;
             apply_node_text_override(node, &edit.text, &macro_signatures);
         }
         if let Some(edit) = interaction_state
@@ -974,6 +1050,9 @@ pub(super) fn patch_with_interaction_state(
                 .as_ref()
                 .is_some_and(|text_edit| text_edit.node_id == edit.id),
         ));
+        if let Some(node) = patch.nodes.last_mut() {
+            node.width = edit.width;
+        }
     }
     patch.connections.extend(
         interaction_state
@@ -1256,6 +1335,7 @@ pub(super) fn node_from_editor_text(
             args: Vec::new(),
             outputs: Vec::new(),
             position,
+            width: None,
             diagnostic: None,
             source: None,
         };
@@ -1315,6 +1395,7 @@ pub(super) fn node_from_editor_text(
                     .collect()
             }),
         position,
+        width: None,
         diagnostic: parse_diagnostic.or_else(|| {
             let known =
                 dgenlisp_operator_names().contains(&op) || macro_signatures.contains_key(&op);

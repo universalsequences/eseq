@@ -20,15 +20,15 @@ use crate::vm::Value;
 
 use super::display::{node_display_label, preview};
 use super::geometry::{
-    connection_cable_edit_points, connection_endpoints, patch_content_size, patch_input_indices,
-    patch_input_slot_counts, patch_node_rects, patch_output_counts, patcher_back_button_rect,
-    patcher_zoom, port_center, rect_from_points,
+    connection_cable_edit_points, connection_endpoints, node_resize_handle_centers,
+    patch_content_size, patch_input_indices, patch_input_slot_counts, patch_node_rects,
+    patch_output_counts, patcher_back_button_rect, patcher_zoom, port_center, rect_from_points,
 };
 use super::load_patch_from_props;
 use super::metrics::{
     CABLE_HANDLE_RADIUS_PX, CODE_NODE_FONT_SIZE, NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX,
-    NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
-    SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+    NODE_FONT_SIZE, NODE_RESIZE_HANDLE_SIZE_CELLS, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX,
+    PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
 use super::model::{
     ArgValue, BindingTarget, ConnectionKind, InputPortRef, NodeKind, OutputPortRef, Patch,
@@ -38,12 +38,12 @@ use super::model::{
 use super::project::OperatorPortDocumentation;
 use super::project::dgenlisp_operator_documentation;
 use super::state::{
-    AgenticBubbleState, AgenticBubbleTarget, PATCHER_Z_SLOTS_PER_NODE, PatcherDragState,
-    PatcherInteractionState, PatcherPanState, PatcherTextEdit, PatcherZSlot, active_patcher_patch,
-    active_patcher_view_key, get_patcher_interaction_state, get_patcher_pan_state,
-    max_node_z_index, node_z_index, ordered_patch_nodes, patch_with_interaction_state,
-    patcher_breadcrumb, patcher_state_key, set_patcher_pan_state, source_connection_id,
-    sync_patcher_z_order,
+    AgenticBubbleState, AgenticBubbleTarget, AlignmentGuide, AlignmentGuideKind,
+    PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState, PatcherPanState,
+    PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
+    get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
+    ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
+    set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
 };
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
@@ -746,6 +746,16 @@ fn draw_patch_with_view_key(
         push_cable_handles(&mut cable_prims, &preview_connection, start, end, zoom);
         push_z_layered(prims, cable_handle_z, cable_prims);
     }
+    let mut alignment_prims = Vec::new();
+    push_alignment_guides(
+        &mut alignment_prims,
+        rect,
+        viewport,
+        origin,
+        zoom,
+        interaction_state,
+    );
+    push_z_layered(prims, PATCHER_OVERLAY_Z + 10, alignment_prims);
 
     let mut active_edit_panel = None;
     for node in ordered_patch_nodes(patch, interaction_state, view_key) {
@@ -899,6 +909,77 @@ fn push_hovered_port_tooltip(
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
         },
     ));
+}
+
+#[cfg(target_os = "macos")]
+fn push_alignment_guides(
+    prims: &mut Vec<MetalPrimitive>,
+    panel: Rect,
+    viewport: WidgetViewport,
+    origin: (f32, f32),
+    zoom: f32,
+    interaction_state: &PatcherInteractionState,
+) {
+    let Some(PatcherDragState::Nodes { alignment, .. }) = &interaction_state.drag else {
+        return;
+    };
+    for guide in &alignment.guides {
+        if let Some(rect) = alignment_guide_rect(*guide, panel, viewport, origin, zoom) {
+            prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+                rect,
+                color: theme::PATCHER_ALIGNMENT_GUIDE(),
+            }));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn alignment_guide_rect(
+    guide: AlignmentGuide,
+    panel: Rect,
+    viewport: WidgetViewport,
+    origin: (f32, f32),
+    zoom: f32,
+) -> Option<Rect> {
+    let thickness_px = 2.0;
+    match guide.kind {
+        AlignmentGuideKind::Vertical => {
+            let x = origin.0 + guide.position * zoom;
+            let y1 = origin.1 + guide.extent_start.min(guide.extent_end) * zoom;
+            let y2 = origin.1 + guide.extent_start.max(guide.extent_end) * zoom;
+            let top = y1.max(panel.row);
+            let bottom = y2.min(panel.row + panel.height);
+            let width = thickness_px / viewport.cell_w.max(1.0);
+            let min_height = thickness_px / viewport.cell_h.max(1.0);
+            if x < panel.col || x > panel.col + panel.width || bottom <= top {
+                return None;
+            }
+            Some(Rect {
+                col: x - width * 0.5,
+                row: top,
+                width,
+                height: (bottom - top).max(min_height),
+            })
+        }
+        AlignmentGuideKind::Horizontal => {
+            let y = origin.1 + guide.position * zoom;
+            let x1 = origin.0 + guide.extent_start.min(guide.extent_end) * zoom;
+            let x2 = origin.0 + guide.extent_start.max(guide.extent_end) * zoom;
+            let left = x1.max(panel.col);
+            let right = x2.min(panel.col + panel.width);
+            let height = thickness_px / viewport.cell_h.max(1.0);
+            let min_width = thickness_px / viewport.cell_w.max(1.0);
+            if y < panel.row || y > panel.row + panel.height || right <= left {
+                return None;
+            }
+            Some(Rect {
+                col: left,
+                row: y - height * 0.5,
+                width: (right - left).max(min_width),
+                height,
+            })
+        }
+    }
 }
 
 pub(super) fn input_port_tooltip(patch: &Patch, port: &InputPortRef) -> Option<String> {
@@ -1403,6 +1484,20 @@ fn push_node(
         node_base_z + PatcherZSlot::EditCursor as i32,
         cursor_prims,
     );
+    let mut handle_prims = Vec::new();
+    push_node_resize_handles(
+        &mut handle_prims,
+        rect,
+        selected,
+        edit.is_some(),
+        viewport,
+        zoom,
+    );
+    push_z_layered(
+        prims,
+        node_base_z + PatcherZSlot::ResizeHandles as i32,
+        handle_prims,
+    );
 }
 
 fn highlighted_inputs_for_node(drag: &Option<PatcherDragState>, node_id: &str) -> Vec<usize> {
@@ -1703,6 +1798,34 @@ fn push_port(
         },
         is_background: false,
     });
+}
+
+#[cfg(target_os = "macos")]
+fn push_node_resize_handles(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    selected: bool,
+    editing: bool,
+    viewport: WidgetViewport,
+    zoom: f32,
+) {
+    if !selected || editing {
+        return;
+    }
+    let size_px = NODE_RESIZE_HANDLE_SIZE_CELLS * zoom * viewport.cell_h.max(1.0);
+    let width = size_px / viewport.cell_w.max(1.0);
+    let height = size_px / viewport.cell_h.max(1.0);
+    for (_, center) in node_resize_handle_centers(rect) {
+        prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
+            rect: Rect {
+                col: center.0 - width * 0.5,
+                row: center.1 - height * 0.5,
+                width,
+                height,
+            },
+            color: theme::PATCHER_NODE_SELECTED_BORDER(),
+        }));
+    }
 }
 
 #[cfg(target_os = "macos")]

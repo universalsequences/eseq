@@ -1,18 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::layout::Rect;
 
 use super::display::node_size_for_ports;
 use super::metrics::{
     CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HIT_RADIUS_CELLS,
-    CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT, PATCH_ORIGIN_COL_OFFSET,
-    PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
-    SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
+    CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT, NODE_RESIZE_HANDLE_HIT_SIZE_CELLS,
+    PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS,
+    PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{
     ArgValue, CableEndpoint, InputPortRef, OutputPortRef, Patch, PatchConnection, PatchNode,
 };
-use super::state::{PatcherPanState, source_connection_id};
+use super::state::{NodeResizeCorner, PatcherPanState, source_connection_id};
 
 pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
     let input_indices = patch_input_indices(patch);
@@ -161,6 +161,57 @@ pub(super) fn hit_patcher_node(
     ordered_nodes.iter().rev().find_map(|node| {
         let node_rect = node_rects.get(&node.id)?;
         rect_contains(*node_rect, local_col, local_row).then(|| node.id.clone())
+    })
+}
+
+pub(super) fn node_resize_handle_centers(rect: Rect) -> [(NodeResizeCorner, (f32, f32)); 4] {
+    [
+        (NodeResizeCorner::TopLeft, (rect.col, rect.row)),
+        (
+            NodeResizeCorner::TopRight,
+            (rect.col + rect.width, rect.row),
+        ),
+        (
+            NodeResizeCorner::BottomLeft,
+            (rect.col, rect.row + rect.height),
+        ),
+        (
+            NodeResizeCorner::BottomRight,
+            (rect.col + rect.width, rect.row + rect.height),
+        ),
+    ]
+}
+
+pub(super) fn hit_patcher_node_resize_handle(
+    patch: &Patch,
+    ordered_nodes: &[&PatchNode],
+    selected_nodes: &HashSet<String>,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    local_col: f32,
+    local_row: f32,
+) -> Option<(String, NodeResizeCorner)> {
+    if selected_nodes.is_empty() {
+        return None;
+    }
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    let half_size = NODE_RESIZE_HANDLE_HIT_SIZE_CELLS * patcher_zoom(pan_state) * 0.5;
+    ordered_nodes.iter().rev().find_map(|node| {
+        if !selected_nodes.contains(&node.id) {
+            return None;
+        }
+        let node_rect = *node_rects.get(&node.id)?;
+        node_resize_handle_centers(node_rect)
+            .into_iter()
+            .find_map(|(corner, center)| {
+                let handle_rect = Rect {
+                    col: center.0 - half_size,
+                    row: center.1 - half_size,
+                    width: half_size * 2.0,
+                    height: half_size * 2.0,
+                };
+                rect_contains(handle_rect, local_col, local_row).then(|| (node.id.clone(), corner))
+            })
     })
 }
 

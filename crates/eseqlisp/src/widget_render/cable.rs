@@ -7,42 +7,27 @@ pub struct CableCurve {
 }
 
 const SAME_X_EPSILON: f32 = 0.20;
-const MIN_X_HANDLE: f32 = 1.2;
-const MAX_X_HANDLE: f32 = 4.8;
 const MIN_Y_HANDLE: f32 = 1.1;
-const MAX_Y_HANDLE: f32 = 2.4;
+const MAX_Y_HANDLE: f32 = 8.0;
+const Y_HANDLE_VERTICAL_WEIGHT: f32 = 0.35;
+const Y_HANDLE_HORIZONTAL_WEIGHT: f32 = 0.08;
 
 pub fn should_render_segmented_cable(start: (f32, f32), end: (f32, f32)) -> bool {
     (end.0 - start.0).abs() >= SAME_X_EPSILON
 }
 
-/// Generate the patch-editor cable Bezier used by the standalone Swift editor.
+/// Generate the patch-editor cable Bezier.
 ///
-/// The original Swift implementation works in a world coordinate system where
-/// "down" is negative Y. eseqlisp patcher primitives use screen-style cells,
-/// where Y increases downward, so the vertical handle signs are mirrored here.
+/// Cable endpoints keep port-oriented vertical tangents: patcher cables leave
+/// bottom outlets downward and enter top inlets from above. The handle length
+/// adapts mostly to vertical span, with horizontal distance contributing only
+/// when the cable is meaningfully diagonal.
 pub fn cable_curve(start: (f32, f32), end: (f32, f32)) -> CableCurve {
-    let diff_y = (end.1 - start.1).abs();
-    let y_a = diff_y.clamp(MIN_Y_HANDLE, MAX_Y_HANDLE);
-    let y_b = diff_y.clamp(MIN_Y_HANDLE, MAX_Y_HANDLE);
     let diff_x = (end.0 - start.0).abs();
-
-    let (p1, p2) = if diff_x < SAME_X_EPSILON {
-        let y_direction = if end.1 >= start.1 { 1.0 } else { -1.0 };
-        (
-            (start.0, start.1 + y_a * y_direction),
-            (end.0, end.1 - y_b * y_direction),
-        )
-    } else {
-        let x_a = diff_x.clamp(MIN_X_HANDLE, MAX_X_HANDLE);
-        let x_b = diff_x.clamp(MIN_X_HANDLE, MAX_X_HANDLE);
-        let x_sign = if end.0 - start.0 < 0.0 { 1.0 } else { -1.0 };
-        let final_y_a = if end.1 < start.1 { MAX_Y_HANDLE } else { y_a };
-        (
-            (start.0 + (-x_sign * x_a), start.1 + final_y_a),
-            (end.0 + (x_sign * x_b), end.1 - y_b),
-        )
-    };
+    let diff_y = (end.1 - start.1).abs();
+    let y_handle = cable_y_handle(diff_x, diff_y);
+    let p1 = (start.0, start.1 + y_handle);
+    let p2 = (end.0, end.1 - y_handle);
 
     CableCurve {
         p0: start,
@@ -50,6 +35,17 @@ pub fn cable_curve(start: (f32, f32), end: (f32, f32)) -> CableCurve {
         p2,
         p3: end,
     }
+}
+
+fn cable_y_handle(diff_x: f32, diff_y: f32) -> f32 {
+    let span = diff_x + diff_y;
+    let verticalness = if span > f32::EPSILON {
+        diff_y / span
+    } else {
+        0.0
+    };
+    (diff_y * Y_HANDLE_VERTICAL_WEIGHT + diff_x * Y_HANDLE_HORIZONTAL_WEIGHT * verticalness)
+        .clamp(MIN_Y_HANDLE, MAX_Y_HANDLE)
 }
 
 pub fn cubic_bezier_point(curve: CableCurve, t: f32) -> (f32, f32) {
@@ -468,12 +464,33 @@ mod tests {
     }
 
     #[test]
-    fn cable_curve_moves_horizontal_handles_toward_each_other() {
+    fn cable_curve_uses_vertical_endpoint_tangents_for_horizontal_offsets() {
         let curve = cable_curve((10.0, 20.0), (100.0, 40.0));
-        assert!(curve.p1.0 > curve.p0.0, "{curve:?}");
-        assert!(curve.p2.0 < curve.p3.0, "{curve:?}");
+        assert_eq!(curve.p1.0, curve.p0.0);
+        assert_eq!(curve.p2.0, curve.p3.0);
         assert!(curve.p1.1 > curve.p0.1, "{curve:?}");
         assert!(curve.p2.1 < curve.p3.1, "{curve:?}");
+    }
+
+    #[test]
+    fn cable_curve_scales_vertical_handles_with_span() {
+        let short = cable_curve((10.0, 20.0), (18.0, 30.0));
+        let long = cable_curve((10.0, 20.0), (18.0, 120.0));
+        let short_handle = (short.p1.1 - short.p0.1).abs();
+        let long_handle = (long.p1.1 - long.p0.1).abs();
+        assert!(short_handle >= MIN_Y_HANDLE, "{short:?}");
+        assert!(long_handle > short_handle, "{short:?} {long:?}");
+        assert!(long_handle <= MAX_Y_HANDLE, "{long:?}");
+    }
+
+    #[test]
+    fn cable_curve_keeps_mostly_horizontal_cables_tight() {
+        let shallow = cable_curve((10.0, 20.0), (130.0, 24.0));
+        let diagonal = cable_curve((10.0, 20.0), (130.0, 70.0));
+        let shallow_handle = (shallow.p1.1 - shallow.p0.1).abs();
+        let diagonal_handle = (diagonal.p1.1 - diagonal.p0.1).abs();
+        assert!(shallow_handle < 2.0, "{shallow:?}");
+        assert!(diagonal_handle > shallow_handle, "{shallow:?} {diagonal:?}");
     }
 
     #[test]
@@ -486,12 +503,12 @@ mod tests {
     }
 
     #[test]
-    fn cable_curve_keeps_upward_vertical_cables_monotonic() {
+    fn cable_curve_keeps_port_oriented_tangents_when_destination_is_above_source() {
         let curve = cable_curve((10.0, 60.0), (10.0, 20.0));
         assert_eq!(curve.p1.0, curve.p0.0);
         assert_eq!(curve.p2.0, curve.p3.0);
-        assert!(curve.p1.1 < curve.p0.1, "{curve:?}");
-        assert!(curve.p2.1 > curve.p3.1, "{curve:?}");
+        assert!(curve.p1.1 > curve.p0.1, "{curve:?}");
+        assert!(curve.p2.1 < curve.p3.1, "{curve:?}");
     }
 
     #[test]

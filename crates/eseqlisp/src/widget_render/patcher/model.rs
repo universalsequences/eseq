@@ -169,6 +169,7 @@ pub struct PatchNode {
     pub args: Vec<ArgValue>,
     pub outputs: Vec<String>,
     pub position: (f32, f32),
+    pub width: Option<f32>,
     pub diagnostic: Option<String>,
     pub source: Option<NodeSource>,
 }
