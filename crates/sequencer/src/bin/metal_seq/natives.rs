@@ -79,6 +79,26 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
     }
 }
 
+fn effect_param_target(
+    slot_state: &sequencer::effects::EffectSlotState,
+    param_idx: usize,
+) -> Option<(u64, u64)> {
+    let idx = slot_state.resolve_node_idx(param_idx);
+    if idx == u32::MAX as u64 {
+        return None;
+    }
+    if idx as u32 >= sequencer::voice_modulator::MOD_PARAM_BASE {
+        let modulator_node_id = slot_state.modulator_node_id.load(Ordering::Relaxed);
+        (modulator_node_id != 0).then_some((
+            modulator_node_id as u64,
+            idx - sequencer::voice_modulator::MOD_PARAM_BASE as u64,
+        ))
+    } else {
+        let node_id = slot_state.node_id.load(Ordering::Relaxed);
+        (node_id != 0).then_some((node_id as u64, idx))
+    }
+}
+
 fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
     match target {
         Some(ActiveDeleteTarget::MixerTrack { .. }) => Value::String("mixer-track".to_string()),
@@ -1234,10 +1254,7 @@ pub(crate) fn init_runtime(
 
         slot_state.defaults.set(param_idx, clamped);
 
-        // Push to audiograph
-        let node_id = slot_state.node_id.load(Ordering::Relaxed);
-        if node_id != 0 {
-            let idx = slot_state.resolve_node_idx(param_idx);
+        if let Some((logical_id, idx)) = effect_param_target(slot_state, param_idx) {
             // Check for host_control — skip if present
             let skip = descs
                 .get(track)
@@ -1251,7 +1268,7 @@ pub(crate) fn init_runtime(
                         lg_raw,
                         sequencer::audiograph::ParamMsg {
                             idx,
-                            logical_id: node_id as u64,
+                            logical_id,
                             fvalue: clamped,
                         },
                     );
@@ -1317,9 +1334,7 @@ pub(crate) fn init_runtime(
 
             slot_state.defaults.set(param_idx, clamped);
 
-            let node_id = slot_state.node_id.load(Ordering::Relaxed);
-            if node_id != 0 {
-                let idx = slot_state.resolve_node_idx(param_idx);
+            if let Some((logical_id, idx)) = effect_param_target(slot_state, param_idx) {
                 let skip = descs
                     .get(track)
                     .and_then(|d| d.get(slot_idx))
@@ -1332,7 +1347,7 @@ pub(crate) fn init_runtime(
                             lg_raw,
                             sequencer::audiograph::ParamMsg {
                                 idx,
-                                logical_id: node_id as u64,
+                                logical_id,
                                 fvalue: clamped,
                             },
                         );
@@ -1417,9 +1432,7 @@ pub(crate) fn init_runtime(
 
             slot_state.defaults.set(param_idx, clamped);
 
-            let node_id = slot_state.node_id.load(Ordering::Relaxed);
-            if node_id != 0 {
-                let idx = slot_state.resolve_node_idx(param_idx);
+            if let Some((logical_id, idx)) = effect_param_target(slot_state, param_idx) {
                 let skip = descs
                     .get(track)
                     .and_then(|d| d.get(slot_idx))
@@ -1432,7 +1445,7 @@ pub(crate) fn init_runtime(
                             lg_raw,
                             sequencer::audiograph::ParamMsg {
                                 idx,
-                                logical_id: node_id as u64,
+                                logical_id,
                                 fvalue: clamped,
                             },
                         );

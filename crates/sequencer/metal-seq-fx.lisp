@@ -5,6 +5,11 @@
 (defstate instrument-source-tab 0)
 (defstate instrument-mods-open false)
 (defstate instrument-selected-mod-slot 1)
+(defstate effect-mods-open false)
+(defstate effect-mods-chain "audio")
+(defstate effect-mods-slot -1)
+(defstate effect-mods-bus -1)
+(defstate effect-selected-mod-slot 1)
 ;; These are temporary render-context globals used by generated custom synth UI.
 ;; They must NOT be defstate: custom UI functions set them while rendering, and
 ;; writing reactive state during measurement/layout can perturb the layout.
@@ -87,6 +92,9 @@
             (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
             (str "audio-fx-enabled-" (get fx :slot-idx)))))
       (label title :font-size 11 :color :white :bg :transparent)
+      (if (fx-has-modulators? fx)
+        (effect-mods-toggle-button fx)
+        (box))
       (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
         (box :width 4 :height 1.0 :align :center
           :on-click (lambda (info)
@@ -526,6 +534,138 @@
       (bind-seq (get p :value-field))
       (get p :value))))
 
+(def effect-mods-active? (fx)
+  (and fx
+       effect-mods-open
+       (= effect-mods-chain (fx-effect-chain-kind fx))
+       (= effect-mods-slot (get fx :slot-idx))
+       (= effect-mods-bus (if (get fx :bus-fx) (get fx :bus-idx) -1))))
+
+(def fx-has-modulators? (fx)
+  (and fx (> (len (get fx :sources)) 0)))
+
+(def param-mods-open? (fx)
+  (if fx (effect-mods-active? fx) instrument-mods-open))
+
+(def param-mod-selected-slot (fx)
+  (if fx
+    (if (> effect-selected-mod-slot 0) effect-selected-mod-slot 1)
+    (instrument-mod-selected-slot)))
+
+(def param-selected-mod-target (fx p)
+  (nth
+    (filter |target| (= (instrument-mod-target-source-slot target) (param-mod-selected-slot fx))
+      (instrument-param-mod-targets p))
+    0))
+
+(def param-empty-mod-target (p)
+  (nth
+    (filter |target| (and (get target :source-idx)
+                          (= (instrument-mod-target-source-slot target) 0))
+      (instrument-param-mod-targets p))
+    0))
+
+(def param-control-mod-target (fx p)
+  (let ((selected-target (param-selected-mod-target fx p)))
+    (if selected-target
+      selected-target
+      (let ((empty-target (param-empty-mod-target p)))
+        (if empty-target
+          empty-target
+          (nth (instrument-param-mod-targets p) 0))))))
+
+(def fx-param-value-for (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (let ((target (param-control-mod-target fx p)))
+      (if target (instrument-mod-target-depth target) 0))
+    (if (get p :value-field)
+      (bind-seq (get p :value-field))
+      (get p :value))))
+
+(def param-control-min (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (let ((target (param-control-mod-target fx p)))
+      (if target (get target :depth-min) -1))
+    (get p :min)))
+
+(def param-control-max (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (let ((target (param-control-mod-target fx p)))
+      (if target (get target :depth-max) 1))
+    (get p :max)))
+
+(def param-set-option (fx p label)
+  (if fx
+    (do
+      (fx-clear-selected-effect)
+      (host-command
+        (if (get fx :bus-fx)
+          (if (seq-has-selection?) "set-bus-effect-plock-option" "set-bus-effect-param-option")
+          (if (get fx :midi-fx)
+            (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
+            (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")))
+        (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
+              :param-idx (get p :idx) :label label)))
+    (fx-set-instrument-option p label)))
+
+(def param-set-control-value (fx p v)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (let ((target (param-control-mod-target fx p)))
+      (if target
+        (let ((source-slot (instrument-mod-target-source-slot target))
+              (selected-slot (param-mod-selected-slot fx)))
+          (if (= source-slot selected-slot)
+            (if fx
+              (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") v)
+              (fx-set-instrument-value (dict :idx (get target :depth-idx) :control "param") v))
+            (if (= source-slot 0)
+              (do
+                (if fx
+                  (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") selected-slot)
+                  (fx-set-instrument-value (dict :idx (get target :source-idx) :control "param") selected-slot))
+                (if fx
+                  (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") v)
+                  (fx-set-instrument-value (dict :idx (get target :depth-idx) :control "param") v))))))))
+    (if fx (fx-set-effect-value fx p v) (fx-set-instrument-value p v))))
+
+(def param-toggle-modulation (fx p)
+  (if (get p :modulatable)
+    (let ((target (param-selected-mod-target fx p))
+          (selected-slot (param-mod-selected-slot fx)))
+      (if target
+        (if (get target :source-idx)
+          (if fx
+            (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") 0)
+            (fx-set-instrument-value (dict :idx (get target :source-idx) :control "param") 0))
+          (if fx
+            (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0)
+            (fx-set-instrument-value (dict :idx (get target :depth-idx) :control "param") 0)))
+        (let ((target (param-empty-mod-target p)))
+          (if target
+            (do
+              (if fx
+                (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") selected-slot)
+                (fx-set-instrument-value (dict :idx (get target :source-idx) :control "param") selected-slot))
+              (if fx
+                (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0)
+                (fx-set-instrument-value (dict :idx (get target :depth-idx) :control "param") 0)))))))))
+
+(def param-mod-bg (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (rgba 0.18 0.48 0.95 0.24)
+    :transparent))
+
+(def param-mod-wrapper (fx p key body)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (subtree :key key
+      (box :background-color (param-mod-bg fx p)
+           :corner-radius 8
+           :border-width 1
+           :padding 0.08
+           :on-double-click (lambda (info) (param-toggle-modulation fx p))
+        body))
+    body))
+
 (def fx-param-numeric-value (p)
   (reactive-value (fx-param-value p)))
 
@@ -701,7 +841,7 @@
 
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
-    (instrument-param-mod-wrapper p (str subtree-key "-mod-wrapper")
+    (param-mod-wrapper fx p (str subtree-key "-mod-wrapper")
     (box :height 1.25
       (h-stack :gap 0.45 :align :center
         (box :width 13.2 :height 1.25
@@ -721,36 +861,21 @@
               (if (get p :options)
               (dropdown :value (get p :text-value)
                 :options (get p :options)
-                :on-change (lambda (v)
-                  (fx-clear-selected-effect)
-                  (if fx
-                    (host-command
-                      (if (get fx :bus-fx)
-                        (if (seq-has-selection?) "set-bus-effect-plock-option" "set-bus-effect-param-option")
-                        (if (get fx :midi-fx)
-                        (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
-                        (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")))
-                      (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
-                            :param-idx (get p :idx) :label v))
-                    (fx-set-instrument-option p v)))
+                :on-change (lambda (v) (param-set-option fx p v))
                 :width 5.8 :height 1.2 :font-size 11)
-              (number-picker :value (fx-param-value p)
-                :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
+              (number-picker :value (fx-param-value-for fx p)
+                :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
                 :noui true :font-size 12 :text-color :dim
                 :on-change (lambda (v)
-                  (if fx
-                    (fx-set-effect-value fx p v)
-                    (instrument-set-param-control-value p v)))
+                  (param-set-control-value fx p v))
                 :width 5.2 :height 1.1)))))
         (if (or (get p :options) (get p :boolean))
           (label "" :width 7.8 :bg :transparent)
-          (hslider :width 7.8 :min (instrument-param-control-min p) :max (instrument-param-control-max p)
-                   :value (fx-param-value p)
+          (hslider :width 7.8 :min (param-control-min fx p) :max (param-control-max fx p)
+                   :value (fx-param-value-for fx p)
                    :material (aqua-slider-material)
                    :on-change (lambda (v)
-                     (if fx
-                       (fx-set-effect-value fx p v)
-                       (instrument-set-param-control-value p v))))))))))
+                     (param-set-control-value fx p v)))))))))
 
 (def fx-param-grid (params fx)
   (h-stack :gap 1.5 :padding 0
@@ -814,7 +939,7 @@
 
 (def instrument-mod-selector-row (modulator)
   (let ((slot (get modulator :slot))
-        (label-text (get modulator :name))
+        (label-text (if (get modulator :name) (get modulator :name) (get modulator :label)))
         (source-p (get modulator :source-param)))
     (subtree :key (str "instrument-mod-selector-" slot)
       (h-stack :gap 0.18 :align :center
@@ -832,6 +957,11 @@
           :on-change (lambda (v) (if source-p (fx-set-instrument-option source-p v) false))
           :width 4.8 :height 1.1 :font-size 8.5)))))
 
+(def instrument-mod-selector-sections (inst)
+  (if (> (len (get inst :sources)) 0)
+    (get inst :sources)
+    (get inst :modulators)))
+
 (def instrument-mod-selector (inst)
   (box :debug-name "instrument-mod-selector"
        :width 9.4
@@ -840,7 +970,7 @@
     (v-stack :gap 0.18 :align :start
       (label "mods" :font-size 9 :color :dim :bg :transparent)
       (v-stack :gap 0.18 :align :start
-        (each (get inst :sources) |modulator mi|
+        (each (instrument-mod-selector-sections inst) |modulator mi|
           (instrument-mod-selector-row modulator))))))
 
 (def instrument-selected-mod-source-section (inst)
@@ -1006,6 +1136,153 @@
       (instrument-mod-selector inst)
       (instrument-selected-mod-source-editor inst))))
 
+(def effect-set-selected-mod-slot (slot)
+  (set! effect-selected-mod-slot slot))
+
+(def effect-mod-selector-row (fx modulator)
+  (let ((slot (get modulator :slot))
+        (label-text (if (get modulator :name) (get modulator :name) (get modulator :label)))
+        (source-p (get modulator :source-param)))
+    (subtree :key (str "effect-mod-selector-" (fx-effect-chain-kind fx) "-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" slot)
+      (h-stack :gap 0.18 :align :center
+        (button label-text
+          :width 3.9 :height 1.1
+          :padding 0
+          :font-size 9
+          :background-color (if (= effect-selected-mod-slot slot)
+            (rgba 0.95 0.48 0.18 0.82)
+            :instrument-control-bg)
+          :color (if (= effect-selected-mod-slot slot) :white :dim)
+          :on-click (lambda (info) (effect-set-selected-mod-slot slot)))
+        (dropdown :value (if source-p (get source-p :text-value) "off")
+          :options (if source-p (get source-p :options) '())
+          :on-change (lambda (v) (if source-p (param-set-option fx source-p v) false))
+          :width 4.8 :height 1.1 :font-size 8.5)))))
+
+(def effect-mod-selector (fx)
+  (box :debug-name "effect-mod-selector"
+       :width 9.4
+       :height :fill
+       :padding 0.25
+    (v-stack :gap 0.18 :align :start
+      (label "mods" :font-size 9 :color :dim :bg :transparent)
+      (v-stack :gap 0.18 :align :start
+        (each (get fx :sources) |modulator mi|
+          (effect-mod-selector-row fx modulator))))))
+
+(def effect-selected-mod-source-section (fx)
+  (nth (filter |section| (= (get section :slot) effect-selected-mod-slot)
+         (get fx :sources))
+       0))
+
+(def effect-source-param (section name)
+  (nth (filter |p| (= (get p :name) name) (get section :params)) 0))
+
+(def effect-source-param-value (fx p fallback)
+  (if p (fx-param-value-for fx p) fallback))
+
+(def effect-source-set-param-value (fx p v)
+  (if p (param-set-control-value fx p v) false))
+
+(def effect-source-button (fx p title width)
+  (let ((active (> (reactive-value (effect-source-param-value fx p 0)) 0.5)))
+    (v-stack :width width :height 1.72 :gap 0.10 :align :start
+      (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
+      (button (if active "ON" "OFF")
+        :width width :height 0.88 :padding 0 :font-size 9
+        :background-color (if active (ui-accent-orange) :mixer-control-bg)
+        :color (if active :black :dim)
+        :on-click |x y r|
+          (effect-source-set-param-value fx p (if active 0 1))))))
+
+(def effect-source-dropdown (fx p title width)
+  (v-stack :width width :height 1.72 :gap 0.10 :align :start
+    (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
+    (dropdown :value (if p (get p :text-value) "")
+      :options (if p (get p :options) '())
+      :on-change (lambda (v) (if p (param-set-option fx p v) false))
+      :width width :height 0.88 :font-size 8.5)))
+
+(def effect-source-number (fx p title decimals unit width)
+  (v-stack :width width :height 1.72 :gap 0.10 :align :start
+    (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
+    (number-picker :value (effect-source-param-value fx p 0)
+      :min (if p (param-control-min fx p) 0)
+      :max (if p (param-control-max fx p) 0)
+      :decimals decimals
+      :unit unit
+      :noui true :font-size 9.3
+      :text-color :dim :edit-color :yellow
+      :text-align :left
+      :width width :height 0.82
+      :on-change (lambda (v) (effect-source-set-param-value fx p v)))))
+
+(def effect-source-compact-knob (fx p title decimals)
+  (box :debug-name (str "effect-source-compact-knob-" title)
+       :width 4.4 :height 2.25 :padding 0
+    (knob-number :label title
+      :value (effect-source-param-value fx p 0)
+      :min (if p (param-control-min fx p) 0)
+      :max (if p (param-control-max fx p) 0)
+      :decimals decimals
+      :font-size 9.4 :label-font-size 8.2
+      :text-color :dim :label-color :dim
+      :width 4.4 :height 2.05
+      :on-change (lambda (v) (effect-source-set-param-value fx p v)))))
+
+(def effect-lfo-source-editor (fx section)
+  (let ((rate (effect-source-param section "rate"))
+        (sync (effect-source-param section "sync"))
+        (division (effect-source-param section "division"))
+        (shape (effect-source-param section "shape"))
+        (pulse-width (effect-source-param section "pulse width"))
+        (retrigger (effect-source-param section "retrigger")))
+    (ui-readout-panel-medium-s 0
+      (h-stack :debug-name "effect-lfo-source-editor"
+               :width :fill :height :fill :gap 0.38 :align :start
+        (v-stack :width 13.8 :height :fill :gap 0.12 :align :start
+          (h-stack :gap 0.25 :align :start
+            (effect-source-number fx rate "rate" 2 false 6.4)
+            (effect-source-button fx sync "sync" 5.0))
+          (h-stack :gap 0.25 :align :start
+            (effect-source-dropdown fx division "division" 6.4)
+            (effect-source-dropdown fx shape "shape" 5.0)))
+        (v-stack :width 5.0 :height :fill :gap 0.18 :align :center
+          (effect-source-compact-knob fx pulse-width "pw" 2)
+          (box :debug-name "effect-lfo-retrigger-button"
+               :width 4.4 :height 1.55 :padding 0
+            (effect-source-button fx retrigger "retrig" 4.4)))))))
+
+(def effect-selected-mod-source-editor (fx)
+  (box :debug-name "effect-selected-mod-source-editor"
+       :width 25.5
+       :height :fill
+       :padding 0.35
+    (let ((section (effect-selected-mod-source-section fx)))
+      (if section
+        (let ((source-type (instrument-source-type section)))
+          (v-stack :width :fill :height :fill :gap 0.3 :align :start
+            (label (get section :name) :font-size 9 :color :dim :bg :transparent)
+            (if (= source-type "lfo")
+              (effect-lfo-source-editor fx section)
+              (if (or (= source-type "rand") (= source-type "drift"))
+                (fx-param-grid (get section :params) fx)
+                (box :width :fill :height :fill :h-align :center :v-align :center
+                  (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))
+        (box :width :fill :height :fill :h-align :center :v-align :center
+          (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))
+
+(def effect-mod-control-panel (fx)
+  (box :debug-name "effect-mod-control-panel"
+       :width 36.4
+       :height :fill
+       :background-color :black
+       :corner-radius 10
+       :padding 0.25
+    (h-stack :height :fill :gap 0.25 :align :stretch
+      (effect-mod-selector fx)
+      (effect-selected-mod-source-editor fx))))
+
 (def instrument-sources-grid (sections)
   (h-stack :gap 2 
     (each sections |section si|
@@ -1163,6 +1440,25 @@
 (def instrument-mods-toggle-button ()
   (instrument-header-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
     (lambda (info) (instrument-toggle-mods-view))))
+
+(def effect-toggle-mods-view (fx)
+  (let ((chain (fx-effect-chain-kind fx))
+        (slot (get fx :slot-idx))
+        (bus (if (get fx :bus-fx) (get fx :bus-idx) -1)))
+    (if (and effect-mods-open
+             (= effect-mods-chain chain)
+             (= effect-mods-slot slot)
+             (= effect-mods-bus bus))
+      (set! effect-mods-open false)
+      (do
+        (set! effect-mods-open true)
+        (set! effect-mods-chain chain)
+        (set! effect-mods-slot slot)
+        (set! effect-mods-bus bus)))))
+
+(def effect-mods-toggle-button (fx)
+  (instrument-header-button "mods" (effect-mods-active? fx) 4.0
+    (lambda (info) (effect-toggle-mods-view fx))))
 
 (def inst-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
@@ -2110,16 +2406,22 @@
 
 (def audio-fx-panel-body (fx params)
   (let ((builtin-ui (builtin-audio-fx-ui fx)))
-    (if builtin-ui
-      builtin-ui
-      (do
-        (set! custom-ui-current-kind "audio-fx")
-        (let ((custom (custom-audio-fx-ui fx)))
-          (if custom
-            (box
-              (v-stack :gap 0.25 custom)
-              :debug-name "custom-audio-fx-wrapper" :padding 0 :h-align :start :v-align :start)
-            (fx-param-grid params fx)))))))
+    (let ((body
+            (if builtin-ui
+              builtin-ui
+              (do
+                (set! custom-ui-current-kind "audio-fx")
+                (let ((custom (custom-audio-fx-ui fx)))
+                  (if custom
+                    (box
+                      (v-stack :gap 0.25 custom)
+                      :debug-name "custom-audio-fx-wrapper" :padding 0 :h-align :start :v-align :start)
+                    (fx-param-grid params fx)))))))
+      (if (effect-mods-active? fx)
+        (h-stack :debug-name "effect-mods-inline-body" :height :fill :gap 0.45 :align :stretch
+          (effect-mod-control-panel fx)
+          body)
+        body))))
 
 (def fx-panel-selected? (fx)
   (do

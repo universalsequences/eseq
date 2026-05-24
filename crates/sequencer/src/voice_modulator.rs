@@ -313,12 +313,15 @@ fn default_source(slot: usize) -> f32 {
     }
 }
 
-unsafe fn init_param_defaults(s: *mut f32) {
+unsafe fn init_param_defaults_with_source<F>(s: *mut f32, mut source_for_slot: F)
+where
+    F: FnMut(usize) -> f32,
+{
     *s.add(PARAM_BPM) = 120.0;
     *s.add(PARAM_RESET_COUNTER) = 0.0;
 
     for slot in 0..SLOT_COUNT {
-        *s.add(slot_source_param_idx(slot)) = default_source(slot);
+        *s.add(slot_source_param_idx(slot)) = source_for_slot(slot);
 
         *s.add(slot_param_idx(slot, PARAM_LFO_RATE_HZ)) = match slot {
             1 => 1.7,
@@ -351,6 +354,14 @@ unsafe fn init_param_defaults(s: *mut f32) {
     }
 }
 
+unsafe fn init_param_defaults(s: *mut f32) {
+    init_param_defaults_with_source(s, default_source);
+}
+
+unsafe fn init_effect_param_defaults(s: *mut f32) {
+    init_param_defaults_with_source(s, |_| SOURCE_OFF as f32);
+}
+
 fn push_param(
     out: &mut Vec<ParamDescriptor>,
     name: &str,
@@ -375,6 +386,17 @@ fn push_param(
 }
 
 pub fn param_descriptors() -> Vec<ParamDescriptor> {
+    param_descriptors_with_default_source(default_source)
+}
+
+pub fn effect_param_descriptors() -> Vec<ParamDescriptor> {
+    param_descriptors_with_default_source(|_| SOURCE_OFF as f32)
+}
+
+fn param_descriptors_with_default_source<F>(mut source_for_slot: F) -> Vec<ParamDescriptor>
+where
+    F: FnMut(usize) -> f32,
+{
     let mut out = Vec::new();
     let source_labels = source_labels();
     let sync_div_labels = sync_labels();
@@ -387,7 +409,7 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
             &format!("{prefix}_source"),
             SOURCE_OFF as f32,
             SOURCE_EXT4 as f32,
-            default_source(slot),
+            source_for_slot(slot),
             ParamKind::Enum {
                 labels: source_labels.clone(),
             },
@@ -626,6 +648,23 @@ unsafe extern "C" fn voice_modulator_init(
     init_param_defaults(s);
 }
 
+unsafe extern "C" fn effect_modulator_init(
+    state: *mut c_void,
+    sample_rate: c_int,
+    _max_block: c_int,
+    _initial_state: *const c_void,
+) {
+    let s = state as *mut f32;
+    for i in 0..STATE_SIZE {
+        *s.add(i) = 0.0;
+    }
+    for slot in 0..SLOT_COUNT {
+        *s.add(slot_state_idx(slot, IDX_RNG)) = 0x1234_5678u32.wrapping_add(slot as u32) as f32;
+    }
+    *s.add(IDX_SAMPLE_RATE) = sample_rate as f32;
+    init_effect_param_defaults(s);
+}
+
 unsafe fn render_slot(
     s: *mut f32,
     ext_inputs: &[*mut f32; EXT_INPUT_COUNT],
@@ -849,6 +888,15 @@ pub fn voice_modulator_vtable() -> NodeVTable {
     NodeVTable {
         process: Some(voice_modulator_process),
         init: Some(voice_modulator_init),
+        reset: None,
+        migrate: None,
+    }
+}
+
+pub fn effect_modulator_vtable() -> NodeVTable {
+    NodeVTable {
+        process: Some(voice_modulator_process),
+        init: Some(effect_modulator_init),
         reset: None,
         migrate: None,
     }

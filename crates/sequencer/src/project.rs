@@ -573,6 +573,7 @@ impl ProjectEffectSlot {
     pub fn into_snapshot_with_node_id(self, node_id: u32) -> EffectSlotSnapshot {
         EffectSlotSnapshot {
             node_id,
+            modulator_node_id: 0,
             num_params: self.num_params,
             defaults: self.defaults,
             plocks: self.plocks,

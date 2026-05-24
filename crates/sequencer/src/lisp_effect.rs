@@ -227,6 +227,12 @@ fn dgenlisp_vtable() -> NodeVTable {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectGraphNodeIds {
+    pub effect_node_id: i32,
+    pub modulator_node_id: Option<i32>,
+}
+
 // ── Manifest types ──
 
 #[derive(Clone)]
@@ -721,6 +727,38 @@ pub fn instrument_descriptor_from_manifest(
     desc.params
         .extend(crate::voice_modulator::ui_param_descriptors());
 
+    append_dgen_modulator_descriptors(&mut desc, manifest);
+    append_dgen_modulation_target_params(&mut desc, manifest);
+
+    desc
+}
+
+pub fn effect_has_host_modulation(manifest: &DGenManifest) -> bool {
+    !manifest.mod_destinations.is_empty()
+}
+
+pub fn append_effect_host_modulation_controls(
+    desc: &mut crate::effects::EffectDescriptor,
+    manifest: &DGenManifest,
+) {
+    if !effect_has_host_modulation(manifest) {
+        return;
+    }
+    desc.params
+        .extend(crate::voice_modulator::effect_param_descriptors());
+    desc.instrument_modulators = (1..=crate::voice_modulator::SLOT_COUNT)
+        .map(|slot| crate::effects::InstrumentModulatorDescriptor {
+            slot,
+            label: crate::voice_modulator::modulator_slot_label(slot, ""),
+        })
+        .collect();
+    append_dgen_modulation_target_params(desc, manifest);
+}
+
+fn append_dgen_modulator_descriptors(
+    desc: &mut crate::effects::EffectDescriptor,
+    manifest: &DGenManifest,
+) {
     let mut sorted_modulators = manifest.modulators.clone();
     sorted_modulators.sort_by_key(|m| m.slot);
     desc.instrument_modulators = sorted_modulators
@@ -730,7 +768,12 @@ pub fn instrument_descriptor_from_manifest(
             label: crate::voice_modulator::modulator_slot_label(m.slot, &m.name),
         })
         .collect();
+}
 
+fn append_dgen_modulation_target_params(
+    desc: &mut crate::effects::EffectDescriptor,
+    manifest: &DGenManifest,
+) {
     let param_by_cell: std::collections::HashMap<usize, &DGenParam> =
         manifest.params.iter().map(|p| (p.cell_id, p)).collect();
     for dest in &manifest.mod_destinations {
@@ -829,8 +872,6 @@ pub fn instrument_descriptor_from_manifest(
             }
         }
     }
-
-    desc
 }
 
 // ── Load dylib ──
@@ -921,6 +962,12 @@ pub unsafe fn remove_effect_from_chain(
         }
     }
     audiograph::delete_node(lg, effect_node_id);
+}
+
+pub unsafe fn remove_effect_modulator(lg: *mut LiveGraph, modulator_node_id: i32) {
+    if modulator_node_id > 0 {
+        audiograph::delete_node(lg, modulator_node_id);
+    }
 }
 
 unsafe fn disconnect_direct_chain(lg: *mut LiveGraph, predecessor_id: i32, successor_id: i32) {
@@ -1025,7 +1072,9 @@ pub unsafe fn add_effect_to_chain_at(
     successor_id: i32,
     successor_inputs: usize,
     existing_effect: Option<i32>,
-) -> Result<i32, String> {
+    existing_modulator: Option<i32>,
+    ext_mod_input_nodes: Option<&[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]>,
+) -> Result<EffectGraphNodeIds, String> {
     // Full state allocation (header + distinct read/write buffers), zeroed by the engine
     let state_size =
         dgen_total_state_slots(manifest.total_memory_slots) * std::mem::size_of::<f32>();
@@ -1051,6 +1100,27 @@ pub unsafe fn add_effect_to_chain_at(
         return Err("Failed to add DGenLisp node to graph".to_string());
     }
 
+    let modulator_node_id = if effect_has_host_modulation(manifest) {
+        let mod_name = CString::new(format!("dgenlisp_fx_{}_mod", slot_id)).unwrap();
+        let mod_id = audiograph::add_node(
+            lg,
+            crate::voice_modulator::effect_modulator_vtable(),
+            crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+            mod_name.as_ptr(),
+            crate::voice_modulator::INPUT_COUNT as c_int,
+            crate::voice_modulator::NUM_OUTPUTS as c_int,
+            std::ptr::null(),
+            0,
+        );
+        if mod_id < 0 {
+            audiograph::delete_node(lg, node_id);
+            return Err("Failed to add DGenLisp effect modulator node to graph".to_string());
+        }
+        Some(mod_id)
+    } else {
+        None
+    };
+
     // Commit the replacement only after the new node exists and can be wired.
     // Until this batch succeeds, the old node and process function remain the
     // rollback target for the live graph.
@@ -1070,17 +1140,67 @@ pub unsafe fn add_effect_to_chain_at(
     if let Err(error) = connect_result {
         set_dgen_process_fn_raw(slot_id, previous_process_fn);
         audiograph::delete_node(lg, node_id);
+        if let Some(mod_id) = modulator_node_id {
+            audiograph::delete_node(lg, mod_id);
+        }
         audiograph::end_graph_edit_batch(lg);
         return Err(error);
     }
+
+    let mod_connect_result = (|| {
+        if let Some(mod_id) = modulator_node_id {
+            if let Some(ext_nodes) = ext_mod_input_nodes {
+                for (input, &ext_node) in ext_nodes.iter().enumerate() {
+                    connect_effect_port(
+                        lg,
+                        ext_node,
+                        0,
+                        mod_id,
+                        (4 + input) as i32,
+                        "connect effect modulator ext input",
+                    )?;
+                }
+            }
+            for modulator in &manifest.modulators {
+                if !(1..=crate::voice_modulator::SLOT_COUNT).contains(&modulator.slot) {
+                    continue;
+                }
+                connect_effect_port(
+                    lg,
+                    mod_id,
+                    (modulator.slot - 1) as i32,
+                    node_id,
+                    modulator.input_channel as i32,
+                    "connect effect modulator output",
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = mod_connect_result {
+        set_dgen_process_fn_raw(slot_id, previous_process_fn);
+        audiograph::delete_node(lg, node_id);
+        if let Some(mod_id) = modulator_node_id {
+            audiograph::delete_node(lg, mod_id);
+        }
+        audiograph::end_graph_edit_batch(lg);
+        return Err(error);
+    }
+
     if let Some(old_id) = existing_effect {
         remove_effect_from_chain(lg, old_id, predecessor_id, successor_id);
     } else {
         disconnect_direct_chain(lg, predecessor_id, successor_id);
     }
+    if let Some(old_mod_id) = existing_modulator {
+        remove_effect_modulator(lg, old_mod_id);
+    }
     audiograph::end_graph_edit_batch(lg);
 
-    Ok(node_id)
+    Ok(EffectGraphNodeIds {
+        effect_node_id: node_id,
+        modulator_node_id,
+    })
 }
 
 // ── Full interactive editor-compile-load flow ──
@@ -1166,9 +1286,11 @@ pub fn run_editor_flow(
                                         successor_id,
                                         2,
                                         existing_effect,
+                                        None,
+                                        None,
                                     )
                                 } {
-                                    Ok(node_id) => {
+                                    Ok(node_ids) => {
                                         println!(" OK!");
                                         let n = manifest.params.len();
                                         if n > 0 {
@@ -1223,7 +1345,7 @@ pub fn run_editor_flow(
                                         let mut buf = String::new();
                                         std::io::stdin().read_line(&mut buf).ok();
                                         return Some(LispEditResult {
-                                            node_id,
+                                            node_id: node_ids.effect_node_id,
                                             lib,
                                             source,
                                             manifest,
@@ -7430,6 +7552,88 @@ mod tests {
             vec![(1, 21), (2, 22)]
         );
     }
+
+    #[test]
+    fn effect_host_modulation_controls_use_effect_local_bank() {
+        let manifest = parse_manifest(
+            r#"
+            {
+              "totalMemorySlots": 128,
+              "params": [
+                { "name": "gain", "cellId": 10, "default": 0.5, "min": 0, "max": 1 }
+              ],
+              "inputs": [],
+              "outputs": [{ "channel": 0, "name": "out" }],
+              "modulators": [
+                { "slot": 1, "inputChannel": 2, "name": "mod1" },
+                { "slot": 2, "inputChannel": 3, "name": "mod2" }
+              ],
+              "modDestinations": [
+                {
+                  "name": "gain",
+                  "paramCellId": 10,
+                  "activeCellId": 20,
+                  "depthLanes": [
+                    { "slot": 1, "depthCellId": 21 },
+                    { "slot": 2, "depthCellId": 22 }
+                  ],
+                  "mode": "additive",
+                  "min": 0,
+                  "max": 1
+                }
+              ],
+              "tensors": [],
+              "tensorInitData": []
+            }
+            "#,
+        )
+        .expect("manifest parses");
+
+        let mut desc = EffectDescriptor::from_lisp_manifest(
+            "MODDED_GAIN",
+            &manifest.params,
+            manifest.n_inputs,
+            manifest.n_outputs,
+        );
+        super::append_effect_host_modulation_controls(&mut desc, &manifest);
+
+        assert!(super::effect_has_host_modulation(&manifest));
+        assert_eq!(
+            desc.instrument_modulators.len(),
+            crate::voice_modulator::SLOT_COUNT
+        );
+        let mod1_source = desc
+            .params
+            .iter()
+            .find(|param| param.name == "mod1_source")
+            .expect("effect descriptor should expose Mod 1 source");
+        assert_eq!(mod1_source.default, 0.0);
+        assert!(mod1_source.node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE);
+
+        let depth = desc
+            .params
+            .iter()
+            .find(|param| param.name == "mod gain slot 1 amt")
+            .expect("effect descriptor should expose DGen depth param");
+        assert_eq!(depth.node_param_idx, (super::HEADER_SLOTS + 21) as u32);
+        assert_eq!(
+            desc.instrument_modulation_targets
+                .iter()
+                .map(|target| {
+                    (
+                        desc.params[target.base_param_idx].name.as_str(),
+                        target.modulator_slot,
+                        desc.params[target.depth_param_idx].name.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("gain", 1, "mod gain slot 1 amt"),
+                ("gain", 2, "mod gain slot 2 amt"),
+            ]
+        );
+    }
+
     use std::sync::Arc;
 
     #[test]

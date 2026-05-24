@@ -1853,6 +1853,17 @@ unsafe fn dispatch_bus_effect_params_at_step(
             if idx == u32::MAX || param_idx >= slot.defaults.len() {
                 continue;
             }
+            let (logical_id, idx) = if idx >= crate::voice_modulator::MOD_PARAM_BASE {
+                if slot.modulator_node_id == 0 {
+                    continue;
+                }
+                (
+                    slot.modulator_node_id as u64,
+                    (idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+                )
+            } else {
+                (slot.node_id as u64, idx as u64)
+            };
             let value = slot
                 .plocks
                 .get(step)
@@ -1866,8 +1877,8 @@ unsafe fn dispatch_bus_effect_params_at_step(
             crate::audiograph::params_push_wrapper(
                 lg,
                 crate::audiograph::ParamMsg {
-                    idx: idx as u64,
-                    logical_id: slot.node_id as u64,
+                    idx,
+                    logical_id,
                     fvalue: value,
                 },
             );

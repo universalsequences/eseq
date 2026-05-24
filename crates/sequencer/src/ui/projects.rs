@@ -287,6 +287,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
 
     let mut snapshot = crate::effects::EffectSlotSnapshot {
         node_id,
+        modulator_node_id: 0,
         num_params: new_np as u32,
         defaults,
         plocks,
@@ -1617,6 +1618,7 @@ impl App {
                             // start=0.0, end=1.0 already set from defaults
                             crate::effects::EffectSlotSnapshot {
                                 node_id: 0,
+                                modulator_node_id: 0,
                                 num_params: defaults.len() as u32,
                                 defaults,
                                 plocks: vec![Vec::new(); MAX_STEPS],

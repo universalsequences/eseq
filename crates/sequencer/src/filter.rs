@@ -38,7 +38,11 @@ const STATE_IC1EQ2_L: usize = 32;
 const STATE_IC2EQ2_L: usize = 33;
 const STATE_IC1EQ2_R: usize = 34;
 const STATE_IC2EQ2_R: usize = 35;
-pub const FILTER_STATE_SIZE: usize = 36;
+const STATE_MOD_CUTOFF_DEPTH_1: usize = 36;
+const STATE_MOD_CUTOFF_DEPTH_2: usize = 37;
+const STATE_MOD_CUTOFF_DEPTH_3: usize = 38;
+const STATE_MOD_CUTOFF_DEPTH_4: usize = 39;
+pub const FILTER_STATE_SIZE: usize = 40;
 
 // Param indices for external control
 pub const FILTER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
@@ -58,6 +62,10 @@ pub const FILTER_PARAM_ENV_RELEASE_MS: u64 = STATE_ENV_RELEASE_MS as u64;
 pub const FILTER_PARAM_SLOPE: u64 = STATE_SLOPE as u64;
 pub const FILTER_PARAM_LFO_PHASE_OFFSET: u64 = STATE_LFO_PHASE_OFFSET as u64;
 pub const FILTER_PARAM_BPM: u64 = STATE_BPM as u64;
+pub const FILTER_PARAM_MOD_CUTOFF_DEPTH_1: u64 = STATE_MOD_CUTOFF_DEPTH_1 as u64;
+pub const FILTER_PARAM_MOD_CUTOFF_DEPTH_2: u64 = STATE_MOD_CUTOFF_DEPTH_2 as u64;
+pub const FILTER_PARAM_MOD_CUTOFF_DEPTH_3: u64 = STATE_MOD_CUTOFF_DEPTH_3 as u64;
+pub const FILTER_PARAM_MOD_CUTOFF_DEPTH_4: u64 = STATE_MOD_CUTOFF_DEPTH_4 as u64;
 
 const SYNC_BEATS: [f32; 11] = [
     0.125,     // 1/32
@@ -176,6 +184,10 @@ unsafe extern "C" fn filter_init(
     *s.add(STATE_IC2EQ2_L) = 0.0;
     *s.add(STATE_IC1EQ2_R) = 0.0;
     *s.add(STATE_IC2EQ2_R) = 0.0;
+    *s.add(STATE_MOD_CUTOFF_DEPTH_1) = 0.0;
+    *s.add(STATE_MOD_CUTOFF_DEPTH_2) = 0.0;
+    *s.add(STATE_MOD_CUTOFF_DEPTH_3) = 0.0;
+    *s.add(STATE_MOD_CUTOFF_DEPTH_4) = 0.0;
 }
 
 unsafe extern "C" fn filter_process(
@@ -191,6 +203,7 @@ unsafe extern "C" fn filter_process(
 
     let in0 = *inp.add(0);
     let in1 = *inp.add(1);
+    let mod_cutoff_inputs = [*inp.add(2), *inp.add(3), *inp.add(4), *inp.add(5)];
     let out0 = *out.add(0);
     let out1 = *out.add(1);
 
@@ -217,6 +230,12 @@ unsafe extern "C" fn filter_process(
     let sr = *s.add(STATE_SAMPLE_RATE);
     let target_drive = *s.add(STATE_DRIVE);
     let target_wet = *s.add(STATE_WET);
+    let mod_cutoff_depths = [
+        *s.add(STATE_MOD_CUTOFF_DEPTH_1),
+        *s.add(STATE_MOD_CUTOFF_DEPTH_2),
+        *s.add(STATE_MOD_CUTOFF_DEPTH_3),
+        *s.add(STATE_MOD_CUTOFF_DEPTH_4),
+    ];
     let lfo_rate_hz = if *s.add(STATE_LFO_SYNCED) > 0.5 {
         synced_rate_hz(
             (*s.add(STATE_LFO_DIVISION)).round() as usize,
@@ -283,7 +302,14 @@ unsafe extern "C" fn filter_process(
         };
         env_follow += env_coeff * (amp - env_follow);
 
-        let octave_mod = lfo * smooth_lfo_amount * 4.0 + env_follow * smooth_env_amount * 4.0;
+        let host_cutoff_octaves = mod_cutoff_inputs
+            .iter()
+            .zip(mod_cutoff_depths)
+            .map(|(input, depth)| (*input.add(i)).clamp(0.0, 1.0) * depth)
+            .sum::<f32>();
+        let octave_mod = lfo * smooth_lfo_amount * 4.0
+            + env_follow * smooth_env_amount * 4.0
+            + host_cutoff_octaves;
         let mod_cutoff = (smooth_cutoff * 2.0_f32.powf(octave_mod)).clamp(20.0, 20_000.0);
 
         // SVF coefficients: k = 1/Q, where Q = resonance value
@@ -336,7 +362,11 @@ pub fn filter_vtable() -> NodeVTable {
 
 #[cfg(test)]
 mod tests {
-    use super::{drive_sample, lfo_value, synced_rate_hz};
+    use super::{
+        drive_sample, filter_init, filter_process, lfo_value, synced_rate_hz, FILTER_STATE_SIZE,
+        STATE_CUTOFF, STATE_ENABLED, STATE_MOD_CUTOFF_DEPTH_1, STATE_RESONANCE, STATE_WET,
+    };
+    use std::ffi::c_void;
 
     #[test]
     fn zero_drive_is_literal_passthrough() {
@@ -365,5 +395,71 @@ mod tests {
     fn lfo_phase_offset_moves_wave_position() {
         let phase = (0.0_f32 + 0.25).fract();
         assert!((lfo_value(0, phase, 0.0) - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn host_cutoff_modulation_changes_filter_output() {
+        fn render(mod_value: f32, depth_octaves: f32) -> Vec<f32> {
+            const FRAMES: usize = 512;
+            let mut state = vec![0.0_f32; FILTER_STATE_SIZE];
+            unsafe {
+                filter_init(
+                    state.as_mut_ptr().cast::<c_void>(),
+                    48_000,
+                    FRAMES as i32,
+                    std::ptr::null(),
+                );
+            }
+            state[STATE_ENABLED] = 1.0;
+            state[STATE_CUTOFF] = 300.0;
+            state[STATE_RESONANCE] = 0.1;
+            state[STATE_WET] = 1.0;
+            state[STATE_MOD_CUTOFF_DEPTH_1] = depth_octaves;
+
+            let mut left = (0..FRAMES)
+                .map(|idx| if idx % 2 == 0 { 0.8 } else { -0.8 })
+                .collect::<Vec<_>>();
+            let mut right = left.clone();
+            let mut mod1 = vec![mod_value; FRAMES];
+            let mut mod2 = vec![0.0; FRAMES];
+            let mut mod3 = vec![0.0; FRAMES];
+            let mut mod4 = vec![0.0; FRAMES];
+            let inputs = [
+                left.as_mut_ptr(),
+                right.as_mut_ptr(),
+                mod1.as_mut_ptr(),
+                mod2.as_mut_ptr(),
+                mod3.as_mut_ptr(),
+                mod4.as_mut_ptr(),
+            ];
+            let mut out_l = vec![0.0; FRAMES];
+            let mut out_r = vec![0.0; FRAMES];
+            let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+
+            unsafe {
+                filter_process(
+                    inputs.as_ptr(),
+                    outputs.as_ptr(),
+                    FRAMES as i32,
+                    state.as_mut_ptr().cast::<c_void>(),
+                    std::ptr::null_mut(),
+                );
+            }
+            out_l
+        }
+
+        let unmodulated = render(0.0, 4.0);
+        let modulated = render(1.0, 4.0);
+        let diff_rms = unmodulated
+            .iter()
+            .zip(modulated.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>();
+        let diff_rms = (diff_rms / unmodulated.len() as f32).sqrt();
+
+        assert!(
+            diff_rms > 0.01,
+            "expected cutoff modulation to audibly change output, diff_rms={diff_rms}"
+        );
     }
 }

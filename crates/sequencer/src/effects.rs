@@ -780,6 +780,60 @@ mod tests {
     }
 
     #[test]
+    fn builtin_filter_exposes_effect_local_cutoff_modulation() {
+        let desc = EffectDescriptor::builtin_filter();
+
+        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(
+            desc.instrument_modulators
+                .iter()
+                .map(|modulator| (modulator.slot, modulator.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Mod 1"), (2, "Mod 2"), (3, "Mod 3"), (4, "Mod 4")]
+        );
+
+        let mod1_source = desc
+            .params
+            .iter()
+            .find(|param| param.name == "mod1_source")
+            .expect("filter should expose effect-local Mod 1 source");
+        assert_eq!(mod1_source.default, 0.0);
+        match &mod1_source.kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
+                );
+            }
+            other => panic!("mod1_source should be enum, got {other:?}"),
+        }
+
+        let target_names = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| {
+                (
+                    desc.params[target.base_param_idx].name.as_str(),
+                    target.modulator_slot,
+                    desc.params[target.depth_param_idx].name.as_str(),
+                    target.depth_min,
+                    target.depth_max,
+                    target.depth_unit.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target_names,
+            vec![
+                ("cutoff", 1, "mod cutoff slot 1 amt", -4.0, 4.0, Some("oct")),
+                ("cutoff", 2, "mod cutoff slot 2 amt", -4.0, 4.0, Some("oct")),
+                ("cutoff", 3, "mod cutoff slot 3 amt", -4.0, 4.0, Some("oct")),
+                ("cutoff", 4, "mod cutoff slot 4 amt", -4.0, 4.0, Some("oct")),
+            ]
+        );
+    }
+
+    #[test]
     fn builtin_str8_delay_exposes_ableton_style_params() {
         let desc = EffectDescriptor::builtin_str8_delay();
         let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
@@ -1068,11 +1122,16 @@ impl EffectDescriptor {
 
     /// Built-in filter effect descriptor.
     pub fn builtin_filter() -> Self {
-        Self {
+        let mut desc = Self {
             name: "Filter".to_string(),
-            input_channels: 2,
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: Vec::new(),
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
             instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::filter::FILTER_PARAM_ENABLED as u32, 1.0),
@@ -1292,7 +1351,48 @@ impl EffectDescriptor {
                     host_control: None,
                 },
             ],
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("built-in filter cutoff param should exist");
+        let depth_params = [
+            crate::filter::FILTER_PARAM_MOD_CUTOFF_DEPTH_1,
+            crate::filter::FILTER_PARAM_MOD_CUTOFF_DEPTH_2,
+            crate::filter::FILTER_PARAM_MOD_CUTOFF_DEPTH_3,
+            crate::filter::FILTER_PARAM_MOD_CUTOFF_DEPTH_4,
+        ];
+        for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+            let depth_param_idx = desc.params.len();
+            desc.params.push(ParamDescriptor {
+                name: format!("mod cutoff slot {} amt", slot + 1),
+                min: -4.0,
+                max: 4.0,
+                default: 0.0,
+                kind: ParamKind::Continuous {
+                    unit: Some("oct".to_string()),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+            });
+            desc.instrument_modulation_targets
+                .push(InstrumentModulationTarget {
+                    base_param_idx: cutoff_idx,
+                    source_param_idx: None,
+                    modulator_slot: slot + 1,
+                    depth_param_idx,
+                    active_param_idx: None,
+                    depth_min: -4.0,
+                    depth_max: 4.0,
+                    depth_unit: Some("oct".to_string()),
+                });
         }
+        desc
     }
 
     /// Built-in delay effect descriptor.
@@ -2477,7 +2577,8 @@ impl SlotParamDefaults {
 // ── EffectSlotState (runtime state for one effect in a track's chain) ──
 
 pub struct EffectSlotState {
-    pub node_id: AtomicU32, // audio graph node (0 = empty)
+    pub node_id: AtomicU32,           // audio graph node (0 = empty)
+    pub modulator_node_id: AtomicU32, // optional host modulation bank node
     pub plocks: SlotPLockData,
     pub defaults: SlotParamDefaults,
     pub num_params: AtomicU32,
@@ -2503,6 +2604,7 @@ impl EffectSlotState {
         param_node_spans.resize_with(capacity, || AtomicU32::new(1));
         Self {
             node_id: AtomicU32::new(node_id),
+            modulator_node_id: AtomicU32::new(0),
             plocks: SlotPLockData::new(capacity),
             defaults: SlotParamDefaults::new_from_descriptor(desc),
             num_params: AtomicU32::new(num_params as u32),
@@ -2534,6 +2636,7 @@ impl EffectSlotState {
     pub fn empty() -> Self {
         Self {
             node_id: AtomicU32::new(0),
+            modulator_node_id: AtomicU32::new(0),
             plocks: SlotPLockData::new(MAX_SLOT_PARAMS),
             defaults: SlotParamDefaults::new_zeroed(MAX_SLOT_PARAMS),
             num_params: AtomicU32::new(0),
@@ -2544,7 +2647,18 @@ impl EffectSlotState {
 
     /// Overwrite this pre-allocated slot in-place from a descriptor and node ID.
     pub fn apply_descriptor(&self, desc: &EffectDescriptor, node_id: u32) {
+        self.apply_descriptor_with_modulator(desc, node_id, 0);
+    }
+
+    pub fn apply_descriptor_with_modulator(
+        &self,
+        desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
         self.node_id.store(node_id, Ordering::Relaxed);
+        self.modulator_node_id
+            .store(modulator_node_id, Ordering::Relaxed);
         self.num_params
             .store(desc.params.len() as u32, Ordering::Relaxed);
         for (i, p) in desc.params.iter().enumerate() {
@@ -2578,7 +2692,8 @@ impl EffectSlotState {
             saved_plocks.push(step_plocks);
         }
 
-        self.apply_descriptor(desc, node_id);
+        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
+        self.apply_descriptor_with_modulator(desc, node_id, modulator_node_id);
 
         for param_idx in 0..preserve {
             self.defaults.set(param_idx, saved_defaults[param_idx]);
@@ -2641,7 +2756,8 @@ impl EffectSlotState {
             migrated.push((new_idx, default, plocks));
         }
 
-        self.apply_descriptor(new_desc, node_id);
+        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
+        self.apply_descriptor_with_modulator(new_desc, node_id, modulator_node_id);
         for step in 0..MAX_STEPS {
             for param_idx in 0..MAX_SLOT_PARAMS {
                 self.plocks.clear_param(step, param_idx);
@@ -2764,6 +2880,7 @@ fn unique_param_index_by_name(desc: &EffectDescriptor, name: &str) -> Option<usi
 #[derive(Clone, Debug)]
 pub struct EffectSlotSnapshot {
     pub node_id: u32,
+    pub modulator_node_id: u32,
     pub num_params: u32,
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
@@ -2774,6 +2891,7 @@ pub struct EffectSlotSnapshot {
 impl EffectSlotSnapshot {
     pub fn capture(slot: &EffectSlotState) -> Self {
         let node_id = slot.node_id.load(Ordering::Relaxed);
+        let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed);
         let num_params = slot.num_params.load(Ordering::Relaxed);
         let np = num_params as usize;
 
@@ -2808,6 +2926,7 @@ impl EffectSlotSnapshot {
 
         Self {
             node_id,
+            modulator_node_id,
             num_params,
             defaults,
             plocks,
@@ -2818,6 +2937,8 @@ impl EffectSlotSnapshot {
 
     pub fn restore(&self, slot: &EffectSlotState) {
         slot.node_id.store(self.node_id, Ordering::Relaxed);
+        slot.modulator_node_id
+            .store(self.modulator_node_id, Ordering::Relaxed);
         slot.num_params.store(self.num_params, Ordering::Relaxed);
         let np = self.num_params as usize;
 
@@ -2850,6 +2971,14 @@ impl EffectSlotSnapshot {
     }
 
     pub fn new_default(desc: &EffectDescriptor, node_id: u32) -> Self {
+        Self::new_default_with_modulator(desc, node_id, 0)
+    }
+
+    pub fn new_default_with_modulator(
+        desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) -> Self {
         let np = desc.params.len();
         let defaults: Vec<f32> = desc.params.iter().map(|p| p.default).collect();
         let plocks: Vec<Vec<Option<f32>>> = (0..MAX_STEPS).map(|_| vec![None; np]).collect();
@@ -2862,6 +2991,7 @@ impl EffectSlotSnapshot {
 
         Self {
             node_id,
+            modulator_node_id,
             num_params: np as u32,
             defaults,
             plocks,
@@ -2873,6 +3003,7 @@ impl EffectSlotSnapshot {
     pub fn new_empty() -> Self {
         Self {
             node_id: 0,
+            modulator_node_id: 0,
             num_params: 0,
             defaults: Vec::new(),
             plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
@@ -2886,11 +3017,21 @@ impl EffectSlotSnapshot {
     }
 
     pub fn sync_to_descriptor(&mut self, desc: &EffectDescriptor, node_id: u32) {
+        self.sync_to_descriptor_with_modulator(desc, node_id, self.modulator_node_id);
+    }
+
+    pub fn sync_to_descriptor_with_modulator(
+        &mut self,
+        desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
         let new_np = desc.params.len();
         let old_defaults = self.defaults.clone();
         let old_plocks = self.plocks.clone();
 
         self.node_id = node_id;
+        self.modulator_node_id = modulator_node_id;
         self.num_params = new_np as u32;
         self.defaults = desc.params.iter().map(|p| p.default).collect();
         self.param_node_indices = desc.params.iter().map(|p| p.node_param_idx).collect();

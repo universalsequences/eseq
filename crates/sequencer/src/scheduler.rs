@@ -305,6 +305,17 @@ fn resolve_effect_params(
             if idx == u32::MAX as u64 {
                 continue;
             }
+            let (logical_id, idx) = if idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE {
+                if slot.modulator_node_id == 0 {
+                    continue;
+                }
+                (
+                    slot.modulator_node_id as u64,
+                    idx - crate::voice_modulator::MOD_PARAM_BASE as u64,
+                )
+            } else {
+                (slot.node_id as u64, idx)
+            };
             let value = slot
                 .plocks
                 .get(step_idx)
@@ -316,7 +327,7 @@ fn resolve_effect_params(
                 continue;
             }
             params.push(ScheduledEffectParam {
-                logical_id: slot.node_id as u64,
+                logical_id,
                 idx,
                 value,
             });
@@ -2028,13 +2039,15 @@ pub fn spawn_scheduler_thread(
 #[cfg(test)]
 mod tests {
     use super::{
-        midi_fx_window_events_from_step, quantized_live_tick_sample, resolve_instrument_plocks,
-        track_active_note_spans_at_beat, track_note_spans_for_trigger, SnapshotSequencerClock,
+        midi_fx_window_events_from_step, quantized_live_tick_sample, resolve_effect_params,
+        resolve_instrument_plocks, track_active_note_spans_at_beat, track_note_spans_for_trigger,
+        SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
     use crate::scheduled_event::{
-        ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
+        ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+        ScheduledInstrumentParams,
     };
     use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
 
@@ -2085,6 +2098,73 @@ mod tests {
                     idx: crate::sampler::PARAM_SCRUB_OFFSET,
                     span: 1,
                     value: 0.25,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_effect_params_routes_modulator_params_to_effect_bank() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor {
+            name: "modded effect".to_string(),
+            input_channels: 6,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 12,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mod1_source".to_string(),
+                    min: 0.0,
+                    max: 8.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["off".to_string(), "lfo".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::voice_modulator::MOD_PARAM_BASE
+                        + crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+            ],
+        };
+        state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 77);
+        state.pattern.effect_chains[track][0]
+            .plocks
+            .set(step, 0, 0.75);
+        state.pattern.effect_chains[track][0]
+            .plocks
+            .set(step, 1, 1.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let params = resolve_effect_params(&snapshot, track, step);
+
+        assert_eq!(
+            params,
+            vec![
+                ScheduledEffectParam {
+                    logical_id: 42,
+                    idx: 12,
+                    value: 0.75,
+                },
+                ScheduledEffectParam {
+                    logical_id: 77,
+                    idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                    value: 1.0,
                 },
             ]
         );

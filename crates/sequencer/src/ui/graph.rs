@@ -805,6 +805,7 @@ impl GraphController<'_> {
             {
                 let slot = &self.app.state.pattern.effect_chains[track_idx][slot_idx];
                 let node_id = slot.node_id.load(Ordering::Relaxed);
+                let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed);
                 if node_id == 0 {
                     continue;
                 }
@@ -834,6 +835,12 @@ impl GraphController<'_> {
                         0,
                     );
                     crate::audiograph::delete_node(self.app.graph.lg.0, node_id as i32);
+                    if modulator_node_id != 0 {
+                        crate::audiograph::delete_node(
+                            self.app.graph.lg.0,
+                            modulator_node_id as i32,
+                        );
+                    }
                 }
             }
         }
@@ -984,6 +991,13 @@ impl GraphController<'_> {
                 .iter()
                 .filter_map(|slot| (slot.node_id != 0).then_some(slot.node_id as i32))
                 .collect::<Vec<_>>();
+            let active_effect_modulator_ids = bus
+                .effect_slots
+                .iter()
+                .filter_map(|slot| {
+                    (slot.modulator_node_id != 0).then_some(slot.modulator_node_id as i32)
+                })
+                .collect::<Vec<_>>();
 
             unsafe {
                 let mut predecessor_id = nodes.gate_id;
@@ -996,6 +1010,9 @@ impl GraphController<'_> {
 
                 for effect_id in active_effect_ids {
                     crate::audiograph::delete_node(self.app.graph.lg.0, effect_id);
+                }
+                for modulator_id in active_effect_modulator_ids {
+                    crate::audiograph::delete_node(self.app.graph.lg.0, modulator_id);
                 }
 
                 connect_stereo_pair(self.app.graph.lg.0, nodes.gate_id, nodes.volume_id);
@@ -1296,6 +1313,9 @@ impl GraphController<'_> {
         let node_id = self.app.state.pattern.effect_chains[track_idx][slot_idx]
             .node_id
             .load(Ordering::Relaxed);
+        let modulator_node_id = self.app.state.pattern.effect_chains[track_idx][slot_idx]
+            .modulator_node_id
+            .load(Ordering::Relaxed);
         if node_id == 0 {
             return Err("Effect slot is empty".to_string());
         }
@@ -1314,6 +1334,10 @@ impl GraphController<'_> {
                     node_id as i32,
                     predecessor_id,
                     successor_id,
+                );
+                crate::lisp_effect::remove_effect_modulator(
+                    self.app.graph.lg.0,
+                    modulator_node_id as i32,
                 );
             }
             self.connect_custom_effect_gap(
@@ -1375,6 +1399,7 @@ impl GraphController<'_> {
         {
             let slot = &self.app.state.pattern.effect_chains[track_idx][slot_idx];
             let node_id = slot.node_id.load(Ordering::Relaxed);
+            let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed);
             if node_id == 0 {
                 continue;
             }
@@ -1404,6 +1429,9 @@ impl GraphController<'_> {
                     0,
                 );
                 crate::audiograph::delete_node(self.app.graph.lg.0, node_id as i32);
+                if modulator_node_id != 0 {
+                    crate::audiograph::delete_node(self.app.graph.lg.0, modulator_node_id as i32);
+                }
             }
         }
     }

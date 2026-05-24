@@ -24,18 +24,20 @@
        (= builtin-fx-filter-live-slot (get fx :slot-idx))))
 
 (def builtin-fx-filter-cutoff-value (fx cutoff-p)
-  (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-cutoff (fx-param-value cutoff-p)))
+  (if (effect-mods-active? fx)
+    (fx-param-value-for fx cutoff-p)
+    (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-cutoff (fx-param-value-for fx cutoff-p))))
 
 (def builtin-fx-filter-resonance-value (fx resonance-p)
-  (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-resonance (fx-param-value resonance-p)))
+  (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-resonance (fx-param-value-for fx resonance-p)))
 
 (def builtin-fx-filter-band (fx mode-p cutoff-p resonance-p)
   (dict
     :id 0
     :type (builtin-fx-filter-mode-type (get mode-p :text-value))
     :freq (builtin-fx-filter-cutoff-value fx cutoff-p)
-    :freq-min (get cutoff-p :min)
-    :freq-max (get cutoff-p :max)
+    :freq-min (param-control-min fx cutoff-p)
+    :freq-max (param-control-max fx cutoff-p)
     :gain 0
     :gain-min -12
     :gain-max 12
@@ -87,27 +89,27 @@
   (h-stack :gap 0.18 :align :baseline
     (label label-text :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
     (number-picker :value value
-      :min (get p :min) :max (get p :max) :decimals 2
+      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
       :noui true :font-size 9.5 :text-color :dim
-      :on-change (lambda (v) (fx-set-effect-value fx p v))
+      :on-change (lambda (v) (param-set-control-value fx p v))
       :width width :height 0.95)))
 
 (def builtin-fx-filter-number (fx label-text p width decimals)
   (h-stack :gap 0.22 :align :baseline
     (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (number-picker :value (fx-param-value p)
-      :min (get p :min) :max (get p :max) :decimals decimals
+    (number-picker :value (fx-param-value-for fx p)
+      :min (param-control-min fx p) :max (param-control-max fx p) :decimals decimals
       :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (fx-set-effect-value fx p v))
+      :on-change (lambda (v) (param-set-control-value fx p v))
       :width width :height 1.05)))
 
 (def builtin-fx-filter-percent (fx label-text p width)
   (h-stack :gap 0.22 :align :baseline
     (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (number-picker :value (fx-param-value p)
-      :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
+    (number-picker :value (fx-param-value-for fx p)
+      :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
       :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (fx-set-effect-value fx p v))
+      :on-change (lambda (v) (param-set-control-value fx p v))
       :width width :height 1.05)))
 
 (def builtin-fx-filter-option (fx label-text p width)
@@ -132,47 +134,48 @@
 (def builtin-fx-filter-mini-number (fx label-text p)
   (h-stack :gap 0.18 :align :baseline
     (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-    (number-picker :value (fx-param-value p)
-      :min (get p :min) :max (get p :max) :decimals 2
+    (number-picker :value (fx-param-value-for fx p)
+      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
       :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (fx-set-effect-value fx p v))
+      :on-change (lambda (v) (param-set-control-value fx p v))
       :width 4.6 :height 1.0)))
 
 (def builtin-fx-filter-mini-cutoff (fx p)
   (h-stack :gap 0.18 :align :baseline
     (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
     (number-picker :value (builtin-fx-filter-cutoff-value fx p)
-      :min (get p :min) :max (get p :max) :decimals 2
+      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
       :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (fx-set-effect-value fx p v))
+      :on-change (lambda (v) (param-set-control-value fx p v))
       :width 4.6 :height 1.0)))
 
 (def builtin-fx-filter-mini-resonance (fx p)
   (h-stack :gap 0.18 :align :baseline
     (label "res" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
     (number-picker :value (builtin-fx-filter-resonance-value fx p)
-      :min (get p :min) :max (get p :max) :decimals 2
+      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
       :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (fx-set-effect-value fx p v))
+      :on-change (lambda (v) (param-set-control-value fx p v))
       :width 4.6 :height 1.0)))
 
 (def builtin-fx-filter-cutoff-knob (fx p)
-  (knob-number :label "cut"
-    :value (builtin-fx-filter-cutoff-value fx p)
-    :min (get p :min) :max (get p :max) :decimals 0
-    :font-size 9.5 :label-font-size 9.5
-    :text-color :dim :label-color :dim
-    :width 4.65 :height 2.55 :knob-size 1.65
-    :on-change (lambda (v) (fx-set-effect-value fx p v))))
+  (param-mod-wrapper fx p (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx) "-mod-wrapper")
+    (knob-number :label "cut"
+      :value (builtin-fx-filter-cutoff-value fx p)
+      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 0
+      :font-size 9.5 :label-font-size 9.5
+      :text-color :dim :label-color :dim
+      :width 4.65 :height 2.55 :knob-size 1.65
+      :on-change (lambda (v) (param-set-control-value fx p v)))))
 
 (def builtin-fx-filter-resonance-knob (fx p)
   (knob-number :label "res"
     :value (builtin-fx-filter-resonance-value fx p)
-    :min (get p :min) :max (get p :max) :decimals 2
+    :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
     :font-size 9.5 :label-font-size 9.5
     :text-color :dim :label-color :dim
     :width 4.65 :height 2.55 :knob-size 1.65
-    :on-change (lambda (v) (fx-set-effect-value fx p v))))
+    :on-change (lambda (v) (param-set-control-value fx p v))))
 
 (def builtin-fx-filter-mini-percent (fx label-text p)
   (h-stack :gap 0.18 :align :baseline

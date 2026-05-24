@@ -493,10 +493,6 @@ impl App {
             return;
         }
         let slot = &chain[slot_idx];
-        let node_id = slot.node_id.load(Ordering::Relaxed);
-        if node_id == 0 {
-            return;
-        }
         let Some(desc) = self
             .graph
             .effect_descriptors
@@ -514,12 +510,28 @@ impl App {
             return;
         }
         let idx = slot.resolve_node_idx(param_idx);
+        let (logical_id, idx) = if idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE {
+            let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed);
+            if modulator_node_id == 0 {
+                return;
+            }
+            (
+                modulator_node_id as u64,
+                idx - crate::voice_modulator::MOD_PARAM_BASE as u64,
+            )
+        } else {
+            let node_id = slot.node_id.load(Ordering::Relaxed);
+            if node_id == 0 {
+                return;
+            }
+            (node_id as u64, idx)
+        };
         unsafe {
             crate::audiograph::params_push_wrapper(
                 self.graph.lg.0,
                 crate::audiograph::ParamMsg {
                     idx,
-                    logical_id: node_id as u64,
+                    logical_id,
                     fvalue: value,
                 },
             );
