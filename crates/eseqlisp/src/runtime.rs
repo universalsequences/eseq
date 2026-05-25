@@ -2220,19 +2220,11 @@ impl Runtime {
         if replacements.is_empty() {
             return false;
         }
-        let Some(snapshot) = self.current_committed_ui_snapshot.as_ref() else {
+        if self.current_committed_ui_snapshot.is_none() {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some("missing-snapshot".to_string());
             }
             return false;
-        };
-        for (subtree_root_id, tree, _) in replacements {
-            if let Some(reason) = snapshot.subtree_replace_failure_reason(*subtree_root_id, tree) {
-                if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
-                    trace.subtree_failure_reason = Some(reason.to_string());
-                }
-                return false;
-            }
         }
         let snapshot = self
             .current_committed_ui_snapshot

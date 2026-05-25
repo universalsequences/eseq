@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -847,22 +847,53 @@ impl CommittedBufferUiSnapshot {
             return Some(self);
         }
 
+        let mut valid_replacements = Vec::new();
+        let mut stale_roots = Vec::new();
+        let replacement_parent_lookup = replacements
+            .iter()
+            .filter_map(|(subtree_root_id, replacement_tree, _)| {
+                Some((*subtree_root_id, parent_subtree_root_id(replacement_tree)?))
+            })
+            .collect::<HashMap<_, _>>();
+
         for (subtree_root_id, replacement_tree, _) in replacements {
-            if self
-                .subtree_replace_failure_reason(*subtree_root_id, replacement_tree)
-                .is_some()
-            {
+            if root_subtree_root_id(replacement_tree) != Some(*subtree_root_id) {
                 return None;
+            }
+            match self.subtree_replace_failure_reason(*subtree_root_id, replacement_tree) {
+                None => valid_replacements.push((*subtree_root_id, replacement_tree)),
+                Some("unknown-root") => stale_roots.push(*subtree_root_id),
+                Some(_) => return None,
             }
         }
 
-        let replacement_lookup = replacements
+        let valid_root_ids = valid_replacements
             .iter()
-            .map(|(subtree_root_id, replacement_tree, _)| (*subtree_root_id, replacement_tree))
+            .map(|(subtree_root_id, _)| *subtree_root_id)
+            .collect::<HashSet<_>>();
+        if stale_roots.iter().any(|root_id| {
+            !replacement_has_valid_replaced_ancestor(
+                *root_id,
+                &replacement_parent_lookup,
+                &valid_root_ids,
+            )
+        }) {
+            return None;
+        }
+
+        let replacement_lookup = valid_replacements
+            .iter()
+            .map(|(subtree_root_id, replacement_tree)| (*subtree_root_id, *replacement_tree))
             .collect::<HashMap<_, _>>();
         let merged_tree = replace_subtrees_in_value(&self.tree, &replacement_lookup)?;
         let mut dependency_lookup = self.subtree_root_dependencies;
-        for (_, replacement_tree, reactive_dependencies) in replacements {
+        for (subtree_root_id, replacement_tree) in valid_replacements {
+            let reactive_dependencies = replacements
+                .iter()
+                .find_map(|(root_id, _, dependencies)| {
+                    (*root_id == subtree_root_id).then_some(dependencies)
+                })
+                .expect("valid replacement came from replacements");
             for root_id in collect_subtree_root_ids(replacement_tree) {
                 dependency_lookup.insert(root_id, reactive_dependencies.clone());
             }
@@ -906,6 +937,25 @@ impl CommittedBufferUiSnapshot {
             widgets,
         }
     }
+}
+
+fn replacement_has_valid_replaced_ancestor(
+    subtree_root_id: u64,
+    replacement_parent_lookup: &HashMap<u64, u64>,
+    valid_root_ids: &HashSet<u64>,
+) -> bool {
+    let mut visited = HashSet::new();
+    let mut current = subtree_root_id;
+    while let Some(parent_root_id) = replacement_parent_lookup.get(&current).copied() {
+        if valid_root_ids.contains(&parent_root_id) {
+            return true;
+        }
+        if !visited.insert(current) {
+            return false;
+        }
+        current = parent_root_id;
+    }
+    false
 }
 
 impl CommittedSubtreeSnapshot {
@@ -1009,6 +1059,10 @@ fn value_children(value: &Value) -> Vec<Value> {
 
 pub fn root_subtree_root_id(value: &Value) -> Option<u64> {
     prop_u64_from_value(value, "__subtree-root-id")
+}
+
+fn parent_subtree_root_id(value: &Value) -> Option<u64> {
+    prop_u64_from_value(value, "__parent-subtree-root-id")
 }
 
 fn collect_subtree_root_ids(value: &Value) -> Vec<u64> {
@@ -1259,6 +1313,24 @@ mod tests {
                     .map(|child| Rc::new(RefCell::new(child)))
                     .collect(),
             ))),
+        );
+        Value::Map(map)
+    }
+
+    fn widget_with_parent(
+        widget_type: &str,
+        stable_widget_id: u64,
+        subtree_root_id: u64,
+        parent_subtree_root_id: u64,
+        children: Vec<Value>,
+    ) -> Value {
+        let Value::Map(mut map) = widget(widget_type, stable_widget_id, subtree_root_id, children)
+        else {
+            unreachable!("test widget helper returns a map");
+        };
+        map.insert(
+            "__parent-subtree-root-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(parent_subtree_root_id as f64))),
         );
         Value::Map(map)
     }
@@ -1601,6 +1673,72 @@ mod tests {
                 field: "steps".to_string(),
             }),
             vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn committed_snapshot_replacing_subtrees_ignores_stale_nested_replacement_when_parent_updates() {
+        let tree = widget(
+            "root",
+            1,
+            1,
+            vec![widget("panel-closed", 2, 2, vec![])],
+        );
+        let snapshot = CommittedBufferUiSnapshot::from_tree(
+            tree,
+            Some(7),
+            vec![ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "steps".to_string(),
+            }],
+        );
+
+        let merged = snapshot
+            .replacing_subtrees(&[
+                (
+                    3,
+                    widget_with_parent("stale-child", 33, 3, 2, vec![]),
+                    vec![ReactiveFieldKey {
+                        namespace: "UI".to_string(),
+                        field: "stale".to_string(),
+                    }],
+                ),
+                (
+                    2,
+                    widget("panel-open", 22, 2, vec![widget("fresh-child", 44, 4, vec![])]),
+                    vec![ReactiveFieldKey {
+                        namespace: "UI".to_string(),
+                        field: "panel".to_string(),
+                    }],
+                ),
+            ])
+            .expect("stale child replacement should not block valid parent replacement");
+
+        let root_children = super::value_children(&merged.tree);
+        let panel_type = super::value_map(&root_children[0])
+            .and_then(|map| super::prop_widget_type(&map))
+            .expect("panel widget type");
+        let panel_children = super::value_children(&root_children[0]);
+        let child_type = super::value_map(&panel_children[0])
+            .and_then(|map| super::prop_widget_type(&map))
+            .expect("fresh child widget type");
+        assert_eq!(panel_type, "panel-open");
+        assert_eq!(child_type, "fresh-child");
+        assert_eq!(
+            merged.subtree_roots_for_field(&ReactiveFieldKey {
+                namespace: "UI".to_string(),
+                field: "panel".to_string(),
+            }),
+            vec![2, 4]
+        );
+        assert!(
+            merged
+                .subtree_roots_for_field(&ReactiveFieldKey {
+                    namespace: "UI".to_string(),
+                    field: "stale".to_string(),
+                })
+                .is_empty(),
+            "discarded stale subtree dependencies should not be indexed"
         );
     }
 }

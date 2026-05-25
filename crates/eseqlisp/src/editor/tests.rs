@@ -2276,6 +2276,118 @@ fn tree_double_click_activates_leaf() {
 }
 
 #[test]
+fn stale_overlay_node_does_not_swallow_underlying_clicks() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def clicked (state 0))
+                (effect
+                  (box :width 12 :height 2 :on-click (lambda (info) (set! clicked (+ clicked 1)))
+                    (label "target")))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 8);
+    assert!(editor.widget_layout().is_some());
+
+    crate::widget_render::set_overlay(
+        999_999,
+        crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 20.0,
+            height: 4.0,
+        },
+    );
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        0,
+        0,
+        40,
+        8,
+        2.0,
+        1.0,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("clicked").unwrap().unwrap(),
+        Value::Number(1.0),
+        "a stale overlay id must be cleared and the current layout should receive the click"
+    );
+    assert_eq!(crate::widget_render::overlay_widget_id(), None);
+}
+
+#[test]
+fn clickable_child_inside_draggable_parent_does_not_start_parent_drag() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def clicked (state 0))
+                (def dropped (state 0))
+                (effect
+                  (box :width 20 :height 4
+                       :drag-type "thing"
+                       :drag-payload (dict :id 1)
+                       :drop-types '("thing")
+                       :on-drop (lambda (event) (set! dropped (+ dropped 1)))
+                    (box :width 8 :height 2
+                         :on-click (lambda (info) (set! clicked (+ clicked 1)))
+                      (label "child"))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 8);
+    assert!(editor.widget_layout().is_some());
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        0,
+        0,
+        40,
+        8,
+        2.0,
+        1.0,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 6, 1),
+        0,
+        0,
+        40,
+        8,
+        6.0,
+        1.0,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 6, 1),
+        0,
+        0,
+        40,
+        8,
+        6.0,
+        1.0,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("clicked").unwrap().unwrap(),
+        Value::Number(1.0)
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::Number(0.0),
+        "dragging after pressing a clickable child must not arm the draggable parent"
+    );
+}
+
+#[test]
 fn patcher_background_double_click_consumes_local_only_event() {
     let path = temp_file_path("patcher-double-click-create");
     std::fs::write(&path, "(+ 1 2)\n").unwrap();

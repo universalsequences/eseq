@@ -12850,15 +12850,11 @@ mod tests {
             None
         }
 
-        fn find_effect_mods_button_rect(
-            editor: &eseqlisp::Editor,
-        ) -> eseqlisp::layout::Rect {
+        fn find_effect_mods_button_rect(editor: &eseqlisp::Editor) -> eseqlisp::layout::Rect {
             let layout = editor.widget_layout().expect("custom effect layout");
-            let panel = find_layout_node_by_debug_name(
-                &layout,
-                "audio-fx-panel-root-0-toggle-effect",
-            )
-            .expect("custom effect panel should render");
+            let panel =
+                find_layout_node_by_debug_name(&layout, "audio-fx-panel-root-0-toggle-effect")
+                    .expect("custom effect panel should render");
             let header = find_layout_node_by_debug_name(panel, "audio-fx-panel-header")
                 .expect("custom effect header should render");
             let button = find_clickable_node_containing(header, "mods")
@@ -12894,6 +12890,12 @@ mod tests {
                 Some(Value::Bool(expected)),
                 "{context}"
             );
+            let layout = editor.widget_layout().expect("custom effect layout");
+            assert_eq!(
+                find_layout_node_by_debug_name(&layout, "effect-mods-inline-body").is_some(),
+                expected,
+                "{context}: visible layout should match effect-mods-open"
+            );
         }
 
         fn click_effect_mods_button(editor: &mut eseqlisp::Editor) {
@@ -12918,10 +12920,10 @@ mod tests {
             );
             editor.handle_mouse_precise(
                 crossterm::event::MouseEvent {
-                    kind: crossterm::event::MouseEventKind::Up(
+                    kind: crossterm::event::MouseEventKind::Drag(
                         crossterm::event::MouseButton::Left,
                     ),
-                    column: col.floor() as u16,
+                    column: (col + 1.25).floor() as u16,
                     row: row.floor() as u16,
                     modifiers: crossterm::event::KeyModifiers::NONE,
                 },
@@ -12929,7 +12931,21 @@ mod tests {
                 0,
                 160,
                 18,
-                col,
+                col + 1.25,
+                row,
+            );
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                    column: (col + 1.25).floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                160,
+                18,
+                col + 1.25,
                 row,
             );
             editor.refresh_runtime_side_effects();
@@ -13064,13 +13080,18 @@ mod tests {
         editor.set_active_buffer(fx_id);
 
         assert_effect_mods_open(&mut editor, false, "mods should start closed");
-        for (context, expected) in [
-            ("first mods click should open", true),
-            ("second mods click should close", false),
-            ("third mods click should reopen", true),
-        ] {
+        for toggle_idx in 0..12 {
             click_effect_mods_button(&mut editor);
-            assert_effect_mods_open(&mut editor, expected, context);
+            let commands = editor.drain_host_commands();
+            assert!(
+                commands.is_empty(),
+                "mods button click-drag should not arm the FX header drag/drop path: {commands:?}"
+            );
+            assert_effect_mods_open(
+                &mut editor,
+                toggle_idx % 2 == 0,
+                &format!("mods toggle {} should flip state", toggle_idx + 1),
+            );
         }
     }
 
