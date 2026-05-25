@@ -847,7 +847,7 @@ impl CommittedBufferUiSnapshot {
             return Some(self);
         }
 
-        let mut valid_replacements = Vec::new();
+        let mut valid_replacements = Vec::<ValidatedSubtreeReplacement<'_>>::new();
         let mut stale_roots = Vec::new();
         let replacement_parent_lookup = replacements
             .iter()
@@ -856,12 +856,16 @@ impl CommittedBufferUiSnapshot {
             })
             .collect::<HashMap<_, _>>();
 
-        for (subtree_root_id, replacement_tree, _) in replacements {
+        for (subtree_root_id, replacement_tree, reactive_dependencies) in replacements {
             if root_subtree_root_id(replacement_tree) != Some(*subtree_root_id) {
                 return None;
             }
             match self.subtree_replace_failure_reason(*subtree_root_id, replacement_tree) {
-                None => valid_replacements.push((*subtree_root_id, replacement_tree)),
+                None => valid_replacements.push(ValidatedSubtreeReplacement {
+                    root_id: *subtree_root_id,
+                    tree: replacement_tree,
+                    reactive_dependencies: reactive_dependencies.as_slice(),
+                }),
                 Some("unknown-root") => stale_roots.push(*subtree_root_id),
                 Some(_) => return None,
             }
@@ -869,7 +873,7 @@ impl CommittedBufferUiSnapshot {
 
         let valid_root_ids = valid_replacements
             .iter()
-            .map(|(subtree_root_id, _)| *subtree_root_id)
+            .map(|replacement| replacement.root_id)
             .collect::<HashSet<_>>();
         if stale_roots.iter().any(|root_id| {
             !replacement_has_valid_replaced_ancestor(
@@ -883,19 +887,13 @@ impl CommittedBufferUiSnapshot {
 
         let replacement_lookup = valid_replacements
             .iter()
-            .map(|(subtree_root_id, replacement_tree)| (*subtree_root_id, *replacement_tree))
+            .map(|replacement| (replacement.root_id, replacement.tree))
             .collect::<HashMap<_, _>>();
         let merged_tree = replace_subtrees_in_value(&self.tree, &replacement_lookup)?;
         let mut dependency_lookup = self.subtree_root_dependencies;
-        for (subtree_root_id, replacement_tree) in valid_replacements {
-            let reactive_dependencies = replacements
-                .iter()
-                .find_map(|(root_id, _, dependencies)| {
-                    (*root_id == subtree_root_id).then_some(dependencies)
-                })
-                .expect("valid replacement came from replacements");
-            for root_id in collect_subtree_root_ids(replacement_tree) {
-                dependency_lookup.insert(root_id, reactive_dependencies.clone());
+        for replacement in valid_replacements {
+            for root_id in collect_subtree_root_ids(replacement.tree) {
+                dependency_lookup.insert(root_id, replacement.reactive_dependencies.to_vec());
             }
         }
 
@@ -937,6 +935,12 @@ impl CommittedBufferUiSnapshot {
             widgets,
         }
     }
+}
+
+struct ValidatedSubtreeReplacement<'a> {
+    root_id: u64,
+    tree: &'a Value,
+    reactive_dependencies: &'a [ReactiveFieldKey],
 }
 
 fn replacement_has_valid_replaced_ancestor(
@@ -1739,6 +1743,38 @@ mod tests {
                 })
                 .is_empty(),
             "discarded stale subtree dependencies should not be indexed"
+        );
+    }
+
+    #[test]
+    fn committed_snapshot_replacing_subtrees_rejects_unknown_root_without_valid_parent() {
+        let tree = widget(
+            "root",
+            1,
+            1,
+            vec![widget("panel-closed", 2, 2, vec![])],
+        );
+        let snapshot = CommittedBufferUiSnapshot::from_tree(
+            tree,
+            Some(7),
+            vec![ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "steps".to_string(),
+            }],
+        );
+
+        assert!(
+            snapshot
+                .replacing_subtrees(&[(
+                    3,
+                    widget_with_parent("orphaned-child", 33, 3, 99, vec![]),
+                    vec![ReactiveFieldKey {
+                        namespace: "UI".to_string(),
+                        field: "orphan".to_string(),
+                    }],
+                )])
+                .is_none(),
+            "unknown subtree roots should only be discarded when covered by a valid parent replacement"
         );
     }
 }
