@@ -2620,16 +2620,12 @@ impl Runtime {
         if replacements.is_empty() {
             return false;
         }
-        if self.current_committed_ui_snapshot.is_none() {
+        let Some(snapshot) = self.current_committed_ui_snapshot.take() else {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some("missing-snapshot".to_string());
             }
             return false;
-        }
-        let snapshot = self
-            .current_committed_ui_snapshot
-            .take()
-            .expect("snapshot was validated before subtree replacement");
+        };
         let Some(merged) = snapshot.clone().replacing_subtrees(replacements) else {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some("replace-batch-missed".to_string());
@@ -2741,7 +2737,7 @@ impl Runtime {
                 if runtime.replace_current_subtrees_without_relayout(&batch) {
                     *active_tree_changed = true;
                 } else {
-                    if trace_ui_enabled() {
+                    if trace {
                         eprintln!(
                             "[ui-trace][flush] active subtree batch missed; delegating {} patches to editor buffer snapshots",
                             replacements.len()

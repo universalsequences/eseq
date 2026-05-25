@@ -5053,19 +5053,22 @@ impl Editor {
                         .and_then(|snapshot| {
                             snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
                         });
-                    let upgraded_subtree = upgraded_subtree_root.is_some_and(|subtree_root_id| {
-                        self.buffers[buffer_idx].replace_widget_subtree(
-                            subtree_root_id,
-                            pending.tree.deep_clone(),
-                            pending.source_buffer_id,
-                            pending.reactive_dependencies.clone(),
-                        )
-                    });
-                    if upgraded_subtree {
+                    let upgraded_subtree_root =
+                        upgraded_subtree_root.and_then(|subtree_root_id| {
+                            self.buffers[buffer_idx]
+                                .replace_widget_subtree(
+                                    subtree_root_id,
+                                    pending.tree.deep_clone(),
+                                    pending.source_buffer_id,
+                                    pending.reactive_dependencies.clone(),
+                                )
+                                .then_some(subtree_root_id)
+                        });
+                    if let Some(subtree_root_id) = upgraded_subtree_root {
                         if debug_ui_updates_enabled() {
                             eprintln!(
-                                "[ui-update full->subtree] target={} root={:?}",
-                                buffer_name, upgraded_subtree_root
+                                "[ui-update full->subtree] target={} root={}",
+                                buffer_name, subtree_root_id
                             );
                         }
                         self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
@@ -5083,7 +5086,7 @@ impl Editor {
                                 .entry(buffer_idx)
                                 .or_insert_with(|| Some(Vec::new()))
                                 .as_mut()
-                                .map(|roots| roots.push(upgraded_subtree_root.unwrap()));
+                                .map(|roots| roots.push(subtree_root_id));
                         }
                     } else if is_active {
                         if debug_ui_updates_enabled() {
