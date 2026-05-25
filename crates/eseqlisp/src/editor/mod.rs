@@ -4334,7 +4334,7 @@ impl Editor {
             match tree {
                 Some(tree) => {
                     self.runtime.set_widget_tree(tree);
-                    self.auto_focus_first_widget();
+                    self.remap_focused_widget_after_layout_change();
                 }
                 None => self.clear_widget_focus(),
             }
@@ -4957,8 +4957,7 @@ impl Editor {
                     self.minibuffer = Some(status);
                 }
             }
-            // Auto-focus first focusable widget if mode has them
-            self.auto_focus_first_widget();
+            self.remap_focused_widget_after_layout_change();
         }
 
         if let Some(text) = self.runtime.take_pending_set_text() {
@@ -5009,7 +5008,7 @@ impl Editor {
                     buffer.set_widget_tree(Some(tree.deep_clone()), Some(source_id));
                     buffer.view_mode = ViewMode::UiOnly;
                     self.runtime.set_widget_tree(tree);
-                    self.auto_focus_first_widget();
+                    self.remap_focused_widget_after_layout_change();
                 }
             }
         }
@@ -5083,7 +5082,7 @@ impl Editor {
                             if !runtime_upgraded {
                                 self.restore_runtime_widget_tree_from_buffer(buffer_idx);
                             }
-                            self.auto_focus_first_widget();
+                            self.remap_focused_widget_after_layout_change();
                         } else {
                             inactive_buffers_to_refresh
                                 .entry(buffer_idx)
@@ -5183,7 +5182,7 @@ impl Editor {
                             if !runtime_replaced {
                                 self.restore_runtime_widget_tree_from_buffer(buffer_idx);
                             }
-                            self.auto_focus_first_widget();
+                            self.remap_focused_widget_after_layout_change();
                         } else {
                             inactive_buffers_to_refresh
                                 .entry(buffer_idx)

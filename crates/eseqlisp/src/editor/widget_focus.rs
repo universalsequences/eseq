@@ -535,24 +535,6 @@ impl Editor {
         }
     }
 
-    pub(super) fn auto_focus_first_widget(&mut self) {
-        if !self.widgets_active() {
-            self.clear_focused_widget();
-            return;
-        }
-        let Some(layout) = self.runtime.current_layout.clone() else {
-            return;
-        };
-        let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
-        collect_focusable_nodes(&layout, &mut focusable_nodes);
-        if let Some((id, _, _, _, _)) = focusable_nodes.first() {
-            if let Some(node) = find_node_by_id(&layout, *id) {
-                self.set_focused_widget(node);
-            } else {
-                self.active_leaf_mut().focused_widget_id = Some(*id);
-            }
-        }
-    }
 }
 
 fn same_focus_identity(a: &LayoutNode, b: &LayoutNode) -> bool {

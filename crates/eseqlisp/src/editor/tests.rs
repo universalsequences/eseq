@@ -372,6 +372,78 @@ fn hot_reload_active_named_buffer_syncs_active_tile_layout_cache() {
 }
 
 #[test]
+fn hot_reload_active_named_buffer_does_not_auto_focus_first_widget() {
+    let dir = hot_reload_temp_dir("eseqlisp-hot-active-no-autofocus");
+    let root = dir.join("root.lisp");
+    std::fs::write(
+        &root,
+        r#"(effect-buffer "*hot-focus*"
+  (v-stack
+    (dropdown
+      :value "main"
+      :options (list "main" "Bus B")
+      :width 10
+      :height 1.2
+      :font-size 10)
+    (label "after-dropdown")))
+(define-mode "hot-focus-mode" :read-only true)
+(set-buffer-mode-for "*hot-focus*" "hot-focus-mode")"#,
+    )
+    .unwrap();
+
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(80, 20);
+    let source = std::fs::read_to_string(&root).unwrap();
+    let report = editor
+        .runtime_mut()
+        .eval_source_transactional(Some(root.clone()), &source, Vec::new());
+    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    editor.process_lisp_reload_report(report);
+
+    let hot_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*hot-focus*")
+        .expect("hot-focus buffer")
+        .id;
+    editor.set_active_buffer(hot_id);
+    editor.update_tile_rects(80, 20);
+    editor.sync_layout_to_active_leaf();
+    assert_eq!(
+        editor.focused_widget_id(),
+        None,
+        "activating a read-only UI buffer must not invent dropdown focus"
+    );
+
+    std::fs::write(
+        &root,
+        r#"(effect-buffer "*hot-focus*"
+  (v-stack
+    (dropdown
+      :value "main"
+      :options (list "main" "Bus B")
+      :width 10
+      :height 1.2
+      :font-size 10)
+    (label "after-reload")))
+(define-mode "hot-focus-mode" :read-only true)
+(set-buffer-mode-for "*hot-focus*" "hot-focus-mode")"#,
+    )
+    .unwrap();
+    let report = editor
+        .runtime_mut()
+        .reload_paths_transactional(vec![root], Vec::new());
+    assert!(report.success, "hot reload failed: {:?}", report.diagnostics);
+    editor.process_lisp_reload_report(report);
+
+    assert_eq!(
+        editor.focused_widget_id(),
+        None,
+        "hot reload must not focus the first dropdown when no widget was focused before"
+    );
+}
+
+#[test]
 fn hot_reload_leaf_eval_rerenders_owner_root_and_rolls_back_bad_source() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-leaf");
     let root = dir.join("root.lisp");
