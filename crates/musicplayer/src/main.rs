@@ -271,6 +271,7 @@ fn bootstrap_editor() -> (Editor, Rc<RefCell<PlayerHost>>) {
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            init_source_path: None,
             vim_mode: true,
         },
     );

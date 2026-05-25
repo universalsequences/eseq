@@ -15,6 +15,7 @@ mod custom_ui;
 mod editor_setup;
 mod host_commands;
 mod input;
+mod lisp_hot_reload;
 mod natives;
 mod piano_roll;
 mod profile;
@@ -28,6 +29,7 @@ use custom_ui::*;
 use editor_setup::*;
 use host_commands::*;
 use input::*;
+use lisp_hot_reload::*;
 use natives::*;
 use piano_roll::*;
 use profile::*;
@@ -1959,6 +1961,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
     let mut soft_step_param_edit = SoftStepParamEdit::default();
+    let mut lisp_hot_reload_watcher = LispHotReloadWatcher::start(std::env::current_dir()?);
 
     // Inline editor session state (instrument/effect creation/editing)
     let mut editor_buffer_name: Option<String> = None;
@@ -2012,6 +2015,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ui_loop_stats = UiLoopStats::new();
 
     loop {
+        if let Some(watcher) = lisp_hot_reload_watcher.as_mut() {
+            let changed_paths = watcher.poll_ready_paths();
+            if !changed_paths.is_empty()
+                && process_lisp_hot_reload_paths(&mut editor, changed_paths)
+            {
+                ui_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         pull_shared_bus_state(&mut app, &bus_state);
         pull_named_scratch_buffer_into_project(&editor, &mut app);
         editor.update_timers();
@@ -9807,9 +9818,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
+                if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
+                    eprintln!(
+                        "[ui-trace][metal_seq] ui_epoch {}->{} visible metal={} mixer={} sequencer={} fx={} ct={}",
+                        prev_ui_epoch,
+                        ui_ep,
+                        metal_visible,
+                        mixer_visible,
+                        sequencer_visible,
+                        fx_visible,
+                        ct
+                    );
+                }
                 pull_shared_bus_state(&mut app, &bus_state);
                 let track_button_states = track_button_state_snapshot(&state);
                 let track_buttons_changed = track_button_states != prev_track_button_states;
+                if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
+                    eprintln!(
+                        "[ui-trace][metal_seq] track_buttons_changed={} prev_buttons={} next_buttons={}",
+                        track_buttons_changed,
+                        prev_track_button_states.len(),
+                        track_button_states.len()
+                    );
+                }
                 let rt = editor.runtime_mut();
                 if app.tracks.is_empty() {
                     sync_track_topology_state(
@@ -9874,6 +9905,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 refresh_visible_sequencer_after_cycle = sequencer_visible;
                 refresh_visible_mixer_after_cycle |=
                     mixer_visible && (record_armed_changed || track_buttons_changed);
+                if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
+                    eprintln!(
+                        "[ui-trace][metal_seq] refresh_after_cycle sequencer={} mixer={} record_armed_changed={} track_buttons_changed={}",
+                        refresh_visible_sequencer_after_cycle,
+                        refresh_visible_mixer_after_cycle,
+                        record_armed_changed,
+                        track_buttons_changed
+                    );
+                }
                 prev_track_button_states = track_button_states;
                 prev_ui_epoch = ui_ep;
                 needs_reactive_cycle = true;

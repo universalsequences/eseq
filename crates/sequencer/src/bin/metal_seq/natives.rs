@@ -34,6 +34,10 @@ fn delete_kind_name(value: &Value) -> Option<&str> {
     }
 }
 
+fn trace_ui_enabled() -> bool {
+    std::env::var_os("ESEQLISP_TRACE_UI").is_some()
+}
+
 fn parse_fx_delete_chain(value: &Value) -> Option<FxDeleteChain> {
     match value_string_field(value, "chain")?.as_str() {
         "audio" | "fx" => Some(FxDeleteChain::Audio),
@@ -1013,8 +1017,20 @@ pub(crate) fn init_runtime(
         if previous != track {
             sel.lock().unwrap().clear();
             piano_sel.lock().unwrap().clear();
-            ui_ep.fetch_add(1, Ordering::Relaxed);
-            fx_ep.fetch_add(1, Ordering::Relaxed);
+            let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+            let next_fx_epoch = fx_ep.fetch_add(1, Ordering::Relaxed) + 1;
+            if trace_ui_enabled() {
+                eprintln!(
+                    "[ui-trace][native] seq-set-track previous={} next={} ui_epoch={} fx_epoch={}",
+                    previous, track, next_ui_epoch, next_fx_epoch
+                );
+            }
+        } else if trace_ui_enabled() {
+            eprintln!(
+                "[ui-trace][native] seq-set-track unchanged track={} ui_epoch={}",
+                track,
+                ui_ep.load(Ordering::Relaxed)
+            );
         }
         Ok(Value::Number(track as f64))
     });
@@ -1097,7 +1113,13 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-toggle-track-mute: track {track} out of range").into());
         }
         let muted = st.pattern.track_params[track].toggle_mute();
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+        if trace_ui_enabled() {
+            eprintln!(
+                "[ui-trace][native] seq-toggle-track-mute track={} muted={} ui_epoch={}",
+                track, muted, next_ui_epoch
+            );
+        }
         let pan_ids_lock = pan_ids.lock().unwrap();
         if let Some(&pan_id) = pan_ids_lock.get(track) {
             push_panner_bool(
@@ -1123,7 +1145,13 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-toggle-track-solo: track {track} out of range").into());
         }
         let solo = st.pattern.track_params[track].toggle_solo();
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+        if trace_ui_enabled() {
+            eprintln!(
+                "[ui-trace][native] seq-toggle-track-solo track={} solo={} ui_epoch={}",
+                track, solo, next_ui_epoch
+            );
+        }
         let pan_ids_lock = pan_ids.lock().unwrap();
         push_solo_mutes(lg_raw, &st, &pan_ids_lock);
         Ok(Value::Bool(solo))

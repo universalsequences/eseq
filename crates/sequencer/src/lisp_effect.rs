@@ -6622,6 +6622,7 @@ where
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            init_source_path: None,
             vim_mode: true,
         },
     );
@@ -7046,6 +7047,7 @@ pub fn run_embedded_scratch_flow(
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            init_source_path: None,
             vim_mode: true,
         },
     );

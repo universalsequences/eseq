@@ -101,6 +101,7 @@ fn changed_numeric_indices(previous: Option<&Value>, next: &Value) -> Vec<usize>
     changed
 }
 
+#[derive(Clone)]
 pub struct ReactiveRegistry {
     namespaces: HashMap<String, Namespace>,
     dirty: Vec<(String, String, Value)>,
@@ -109,6 +110,7 @@ pub struct ReactiveRegistry {
     batching: bool,
 }
 
+#[derive(Clone)]
 struct Namespace {
     fields: HashMap<String, Value>,
     map: HashMap<String, Rc<RefCell<Value>>>,

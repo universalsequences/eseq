@@ -884,6 +884,13 @@ impl CommittedBufferUiSnapshot {
         }) {
             return None;
         }
+        valid_replacements.retain(|replacement| {
+            !replacement_has_valid_replaced_ancestor(
+                replacement.root_id,
+                &replacement_parent_lookup,
+                &valid_root_ids,
+            )
+        });
 
         let replacement_lookup = valid_replacements
             .iter()
@@ -1743,6 +1750,66 @@ mod tests {
                 })
                 .is_empty(),
             "discarded stale subtree dependencies should not be indexed"
+        );
+    }
+
+    #[test]
+    fn committed_snapshot_replacing_subtrees_discards_known_child_when_parent_updates() {
+        let tree = widget(
+            "root",
+            1,
+            1,
+            vec![widget(
+                "panel-closed",
+                2,
+                2,
+                vec![widget_with_parent("old-child", 3, 3, 2, vec![])],
+            )],
+        );
+        let snapshot = CommittedBufferUiSnapshot::from_tree(
+            tree,
+            Some(7),
+            vec![ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "steps".to_string(),
+            }],
+        );
+
+        let merged = snapshot
+            .replacing_subtrees(&[
+                (
+                    3,
+                    widget_with_parent("stale-child", 33, 3, 2, vec![]),
+                    vec![ReactiveFieldKey {
+                        namespace: "UI".to_string(),
+                        field: "stale-child".to_string(),
+                    }],
+                ),
+                (
+                    2,
+                    widget("panel-open", 22, 2, vec![widget("fresh-child", 44, 4, vec![])]),
+                    vec![ReactiveFieldKey {
+                        namespace: "UI".to_string(),
+                        field: "panel".to_string(),
+                    }],
+                ),
+            ])
+            .expect("known child replacement should not block valid parent replacement");
+
+        let root_children = super::value_children(&merged.tree);
+        let panel_children = super::value_children(&root_children[0]);
+        let child_type = super::value_map(&panel_children[0])
+            .and_then(|map| super::prop_widget_type(&map))
+            .expect("child widget type");
+        assert_eq!(child_type, "fresh-child");
+        assert!(
+            merged
+                .subtree_roots_for_field(&ReactiveFieldKey {
+                    namespace: "UI".to_string(),
+                    field: "stale-child".to_string(),
+                })
+                .is_empty(),
+            "discarded child replacement dependencies should not be indexed"
         );
     }
 

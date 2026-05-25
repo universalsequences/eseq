@@ -67,6 +67,7 @@ pub mod audio;
 pub mod buffer;
 pub mod editor;
 pub mod host;
+pub mod hot_reload;
 pub mod mode;
 pub mod reactive;
 pub mod runtime;
@@ -90,6 +91,7 @@ use vm::{VMError, Value};
 
 pub use editor::{Editor, EditorConfig, EditorError, EditorExit};
 pub use host::{BufferId, CompileKind, HostCommand, HostEvent};
+pub use hot_reload::{ReloadReport, SourceOverlay, SourceSnapshot};
 pub use mode::BufferMode;
 pub use runtime::{NativeContext, NativeResult, Runtime, RuntimeError, SymbolMetadata};
 

@@ -18,6 +18,7 @@ use crossterm::event::{
 
 use crate::buffer::{Buffer, debug_widget_tree_summary};
 use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
+use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::Rect;
 use crate::mode::{
     BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match,
@@ -79,6 +80,39 @@ fn metal_tile_content_viewport_height_exact(
         .max(0.0)
 }
 
+fn format_lisp_reload_report(report: &ReloadReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(if report.success {
+        "Lisp reload: success".to_string()
+    } else {
+        "Lisp reload: failure".to_string()
+    });
+    if let Some(path) = &report.requested_path {
+        lines.push(format!("requested: {}", path.display()));
+    }
+    if let Some(path) = &report.evaluated_path {
+        lines.push(format!("evaluated: {}", path.display()));
+    }
+    if !report.changed_symbols.is_empty() {
+        lines.push(format!(
+            "changed symbols: {}",
+            report.changed_symbols.join(", ")
+        ));
+    }
+    if !report.rerendered_roots.is_empty() {
+        lines.push(format!(
+            "rerendered roots: {}",
+            report.rerendered_roots.join(", ")
+        ));
+    }
+    if !report.diagnostics.is_empty() {
+        lines.push(String::new());
+        lines.push("diagnostics:".to_string());
+        lines.extend(report.diagnostics.iter().cloned());
+    }
+    lines.join("\n")
+}
+
 fn widget_only_scratch_buffer_should_show_ui(buffer: &Buffer) -> bool {
     buffer.widget_tree.is_some()
         && buffer.path.is_none()
@@ -133,6 +167,7 @@ impl ViewMode {
 #[derive(Default, Clone)]
 pub struct EditorConfig {
     pub init_source: Option<String>,
+    pub init_source_path: Option<PathBuf>,
     pub vim_mode: bool,
 }
 
@@ -422,7 +457,10 @@ impl Editor {
             test_clipboard: None,
         };
         editor.bind_defaults();
-        editor.load_init(config.init_source.as_deref());
+        editor.load_init(
+            config.init_source.as_deref(),
+            config.init_source_path.as_deref(),
+        );
         editor.refresh_runtime_side_effects();
         editor.sync_runtime_context();
         editor
@@ -4012,16 +4050,62 @@ impl Editor {
         )
     }
 
+    pub fn snapshot_file_backed_sources(&self) -> Vec<SourceOverlay> {
+        self.buffers
+            .iter()
+            .filter_map(|buffer| {
+                let path = buffer.path.clone()?;
+                Some(SourceOverlay {
+                    path,
+                    text: buffer.text(),
+                    dirty: buffer.dirty,
+                    revision: buffer.revision,
+                })
+            })
+            .collect()
+    }
+
+    pub fn process_lisp_reload_report(&mut self, report: ReloadReport) {
+        let diagnostics_text = format_lisp_reload_report(&report);
+        if !report.success || !report.diagnostics.is_empty() {
+            let idx = self.ensure_scratch_buffer_named("*lisp-reload*");
+            let buffer = &mut self.buffers[idx];
+            buffer.set_text(&diagnostics_text);
+            buffer.read_only = true;
+            buffer.dirty = false;
+            buffer.view_mode = ViewMode::TextOnly;
+        }
+        if report.success {
+            self.show_transient_message(report.success_message());
+        } else {
+            self.show_transient_message(report.failure_message());
+        }
+        self.refresh_runtime_side_effects();
+        self.sync_runtime_context();
+        self.mark_needs_redraw();
+    }
+
     // ── Internal methods ─────────────────────────────────────────────────────
 
-    fn load_init(&mut self, override_source: Option<&str>) {
+    fn load_init(&mut self, override_source: Option<&str>, source_path: Option<&std::path::Path>) {
         let init_src = override_source
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| std::fs::read_to_string("init.lisp").unwrap_or_default());
         if init_src.trim().is_empty() {
             return;
         }
-        let _ = self.runtime.eval_str(&init_src);
+        if let Some(path) = source_path {
+            let report = self.runtime.eval_source_transactional(
+                Some(path.to_path_buf()),
+                &init_src,
+                Vec::new(),
+            );
+            if !report.success {
+                self.show_transient_message(report.failure_message());
+            }
+        } else {
+            let _ = self.runtime.eval_str(&init_src);
+        }
         self.refresh_runtime_side_effects();
         if let Some(status) = self.runtime.take_status_message() {
             self.show_transient_message(status);
@@ -4144,6 +4228,17 @@ impl Editor {
             return;
         }
 
+        if fn_name == "eval-buffer-command" {
+            let path = self.active_buffer().path.clone();
+            let overlays = self.snapshot_file_backed_sources();
+            let report = self
+                .runtime
+                .eval_source_transactional(path, &source, overlays);
+            self.process_lisp_reload_report(report);
+            self.completion = None;
+            return;
+        }
+
         match self.runtime.eval_str(&source) {
             Ok(Some(result)) => self.show_transient_message(format_value_for_minibuffer(&result)),
             Ok(None) => self.show_transient_message("No result"),
@@ -4242,6 +4337,34 @@ impl Editor {
             }
         }
         self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+    }
+
+    fn restore_runtime_widget_tree_from_buffer(&mut self, buffer_idx: usize) {
+        if self.active_buffer_idx() != buffer_idx {
+            return;
+        }
+        let tree = self.buffers[buffer_idx].widget_tree.clone();
+        let snapshot = self.buffers[buffer_idx].committed_ui_snapshot.clone();
+        let buffer_id = self.buffers[buffer_idx].id as u64;
+        match tree {
+            Some(tree) => {
+                if trace_ui_invalidation_enabled() {
+                    eprintln!(
+                        "[ui-trace][editor] restoring active runtime tree from buffer snapshot target={}",
+                        self.buffers[buffer_idx].name
+                    );
+                }
+                self.runtime.restore_widget_tree_with_cached_layout(
+                    tree,
+                    snapshot,
+                    None,
+                    None,
+                    buffer_id * 100_000,
+                    self.runtime.layout_revision(),
+                );
+            }
+            None => self.clear_widget_focus(),
+        }
     }
 
     fn refresh_inactive_tile_layouts_for_buffer(&mut self, buffer_idx: usize) {
@@ -4948,9 +5071,12 @@ impl Editor {
                         self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
                         if is_active {
                             crate::widget_render::clear_overlay();
-                            let _ = self
+                            let runtime_upgraded = self
                                 .runtime
                                 .try_upgrade_full_tree_to_current_subtree(&pending);
+                            if !runtime_upgraded {
+                                self.restore_runtime_widget_tree_from_buffer(buffer_idx);
+                            }
                             self.auto_focus_first_widget();
                         } else {
                             inactive_buffers_to_refresh
@@ -5043,11 +5169,14 @@ impl Editor {
                     if replaced {
                         if is_active {
                             crate::widget_render::clear_overlay();
-                            let _ = self.runtime.replace_current_subtree(
+                            let runtime_replaced = self.runtime.replace_current_subtree(
                                 subtree_root_id,
                                 tree,
                                 reactive_dependencies,
                             );
+                            if !runtime_replaced {
+                                self.restore_runtime_widget_tree_from_buffer(buffer_idx);
+                            }
                             self.auto_focus_first_widget();
                         } else {
                             inactive_buffers_to_refresh
@@ -5275,6 +5404,24 @@ impl Editor {
         let Some(output) = output else {
             return false;
         };
+        if trace_ui_invalidation_enabled() {
+            let args = output
+                .args
+                .iter()
+                .take(3)
+                .map(format_lisp_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suffix = if output.args.len() > 3 { ", ..." } else { "" };
+            eprintln!(
+                "[ui-trace][callback] active_buffer={} callback={} args=[{}{}] arg_count={}",
+                self.active_buffer().name,
+                format_lisp_value(&output.callback),
+                args,
+                suffix,
+                output.args.len()
+            );
+        }
         self.sync_patcher_emitted_source_buffer(&output.args);
         self.sync_runtime_source_context();
         let result = self.runtime.invoke(output.callback, output.args);
