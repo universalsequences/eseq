@@ -4637,7 +4637,34 @@ mod tests {
             "metal-seq-materials.lisp",
             "metal-seq-browser.lisp",
             "metal-seq-builtin-fx-ui.lisp",
+            "metal-seq-fx/builtin/filter-core.lisp",
+            "metal-seq-fx/builtin/str8-delay.lisp",
+            "metal-seq-fx/builtin/filter-panel.lisp",
+            "metal-seq-fx/builtin/dynamics.lisp",
+            "metal-seq-fx/builtin/dj-mixer.lisp",
+            "metal-seq-fx/builtin/audio-fx.lisp",
             "metal-seq-fx.lisp",
+            "metal-seq-fx/state.lisp",
+            "metal-seq-fx/panel-frame.lisp",
+            "metal-seq-fx/drag-drop.lisp",
+            "metal-seq-fx/track-panels.lisp",
+            "metal-seq-fx/panel-widgets.lisp",
+            "metal-seq-fx/param-controls.lisp",
+            "metal-seq-fx/param-grid.lisp",
+            "metal-seq-fx/instrument-modulation.lisp",
+            "metal-seq-fx/effect-modulation.lisp",
+            "metal-seq-fx/instrument-sources.lisp",
+            "metal-seq-fx/effect-panels.lisp",
+            "metal-seq-fx/custom-ui-runtime.lisp",
+            "metal-seq-fx/custom-ui-sections.lisp",
+            "metal-seq-fx/custom-ui-controls.lisp",
+            "metal-seq-fx/custom-ui-lego.lisp",
+            "metal-seq-fx/custom-effect-ui.lisp",
+            "metal-seq-fx/panel-bodies.lisp",
+            "metal-seq-fx/sampler-panel.lisp",
+            "metal-seq-fx/modulator-panel.lisp",
+            "metal-seq-fx/instrument-panel.lisp",
+            "metal-seq-fx/buffers.lisp",
             "metal-seq-piano-roll.lisp",
             "metal-seq-mixer-v2.lisp",
             "metal-seq-transport.lisp",
@@ -11586,8 +11613,10 @@ mod tests {
             .eval_str("(defstate lower-panel-buffer \"*fx*\")")
             .expect("install lower panel state for mods toggle action");
         let grid_src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
+        let effect_panels_src = std::fs::read_to_string("metal-seq-fx/effect-panels.lisp")
+            .expect("read effect panels lisp");
         let toggle_action_src = lisp_def_slice(
-            &src,
+            &effect_panels_src,
             "(def instrument-toggle-mods-view",
             "(def instrument-mods-toggle-button",
         );
