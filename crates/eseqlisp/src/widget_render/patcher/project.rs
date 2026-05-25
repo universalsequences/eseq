@@ -232,7 +232,7 @@ impl Projector {
 
         match &items[1] {
             Expression::Symbol(name) => {
-                if self.is_hidden_instrument_modulator_def(name, &items[2]) {
+                if self.is_hidden_host_modulator_def(name, &items[2]) {
                     return;
                 }
                 let binding = self.binding_id(name, BindingKind::Def);
@@ -416,12 +416,21 @@ impl Projector {
         );
     }
 
-    fn is_hidden_instrument_modulator_def(&self, name: &str, expr: &Expression) -> bool {
-        self.intent == PatcherIntent::Instrument
-            && self.scope == SourceScopeId::Root
-            && expected_instrument_modulator_slot(name).is_some_and(|slot| {
-                instrument_input_signature(expr) == Some((slot + 4, name, slot))
+    fn is_hidden_host_modulator_def(&self, name: &str, expr: &Expression) -> bool {
+        if self.scope != SourceScopeId::Root {
+            return false;
+        }
+        expected_host_modulator_slot(name).is_some_and(|slot| {
+            host_modulator_input_signature(expr).is_some_and(|(channel, input_name, modulator)| {
+                if input_name != name || modulator != slot {
+                    return false;
+                }
+                match self.intent {
+                    PatcherIntent::Instrument => channel == slot + 4,
+                    PatcherIntent::Effect => channel >= 3,
+                }
             })
+        })
     }
 
     fn project_macro_return(&mut self, expr: &Expression, form_id: SourceFormId) {
@@ -1074,7 +1083,7 @@ impl Projector {
     }
 }
 
-fn expected_instrument_modulator_slot(name: &str) -> Option<usize> {
+fn expected_host_modulator_slot(name: &str) -> Option<usize> {
     match name {
         "mod1" => Some(1),
         "mod2" => Some(2),
@@ -1084,7 +1093,7 @@ fn expected_instrument_modulator_slot(name: &str) -> Option<usize> {
     }
 }
 
-fn instrument_input_signature(expr: &Expression) -> Option<(usize, &str, usize)> {
+fn host_modulator_input_signature(expr: &Expression) -> Option<(usize, &str, usize)> {
     let Expression::List(items) = expr else {
         return None;
     };

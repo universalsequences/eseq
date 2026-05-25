@@ -1406,7 +1406,9 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
             debug_log_edit_event("writeback-payload-invalid-state", &state);
             debug_log_writeback_event(
                 "payload-invalid",
-                format!("path={path_str}\nintent={intent:?}\nerror={error:?}"),
+                format!(
+                    "path={path_str}\nintent={intent:?}\nerror={error:?}\npre-edit-source:\n{source}"
+                ),
             );
             map_value(vec![
                 ("status", Value::Keyword("invalid".to_string())),

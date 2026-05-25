@@ -7004,14 +7004,584 @@ fn writeback_preserves_integer_modulator_attribute_tokens() {
 }
 
 #[test]
-fn effect_patcher_does_not_hide_matching_modulator_input_forms() {
+fn effect_signature_modulator_inputs_are_hidden_boilerplate() {
     let root_patch = parse_patch_source(
-        "(def mod1 (in 5 @name mod1 @modulator 1))\n(out mod1 1)",
+        r#"
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mod1 (in 3 @name mod1 @modulator 1))
+        (def mod2 (in 4 @name mod2 @modulator 2))
+        (def mod3 (in 5 @name mod3 @modulator 3))
+        (def mod4 (in 6 @name mod4 @modulator 4))
+        (param mix @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+        (out (* input_l (mod mix)) 1)
+        (out (* input_r (mod mix)) 2)
+        "#,
         PatcherIntent::Effect,
     )
     .unwrap();
 
-    assert!(root_patch.nodes.iter().any(|node| node.id == "mod1"));
+    for name in ["input_l", "input_r"] {
+        assert!(
+            root_patch.nodes.iter().any(|node| node.id == name),
+            "missing visible effect audio input {name}"
+        );
+    }
+    for name in ["mod1", "mod2", "mod3", "mod4"] {
+        assert!(
+            !root_patch.nodes.iter().any(|node| node.id == name),
+            "effect host modulator input {name} should be hidden"
+        );
+    }
+}
+
+#[test]
+fn effect_writeback_created_modulatable_param_inserts_host_modulator_inputs() {
+    let source = r#"
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (out (* input_l mix-amt) 1 @name Left)
+        (out (* input_r mix-amt) 2 @name Right)
+    "#;
+    let mut state = PatcherInteractionState::default();
+    allocate_created_text_node(
+        &mut state,
+        "root",
+        "param tone @default 0.5 @min 0 @max 1 @mod true @mod-mode additive",
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    let input_r_index = emitted
+        .find("(def input_r (in 2 @name Right))")
+        .expect("right input should remain present");
+    let mod1_index = emitted
+        .find("(def mod1 (in 3 @name mod1 @modulator 1))")
+        .expect("effect mod1 input should be inserted at channel 3");
+    let mod4_index = emitted
+        .find("(def mod4 (in 6 @name mod4 @modulator 4))")
+        .expect("effect mod4 input should be inserted at channel 6");
+    let param_index = emitted
+        .find("(param tone @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)")
+        .expect("created modulatable param should be emitted");
+    assert!(input_r_index < mod1_index, "{emitted}");
+    assert!(mod1_index < mod4_index, "{emitted}");
+    assert!(mod4_index < param_index, "{emitted}");
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+#[test]
+fn effect_writeback_created_modulatable_param_can_feed_existing_output() {
+    let source = r#"
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let input_l = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "input_l")
+        .unwrap();
+    let mix_amt = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param && node.label.contains("param mix "))
+        .unwrap();
+    let left_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Left")
+        .unwrap();
+    let original_left_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == left_out.id && connection.to_input == 0)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(original_left_signal),
+        ));
+
+    let mix = allocate_created_text_node(&mut state, "root", "mix");
+    let unity = allocate_created_text_node(&mut state, "root", "* 1");
+    let other = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param other @mod true @mod-mode additive @min 0 @max 1",
+    );
+    let other_mod = allocate_created_text_node(&mut state, "root", "mod");
+    let mul = allocate_created_text_node(&mut state, "root", "*");
+
+    connect_output_to_input(&mut state, "root", &input_l.id, &mix, 0);
+    connect_output_to_input(&mut state, "root", &input_l.id, &mix, 1);
+    connect_output_to_input(&mut state, "root", &mix_amt.id, &mix, 2);
+    connect_output_to_input(&mut state, "root", &mix, &unity, 0);
+    connect_output_to_input(&mut state, "root", &other, &other_mod, 0);
+    connect_output_to_input(&mut state, "root", &unity, &mul, 0);
+    connect_output_to_input(&mut state, "root", &other_mod, &mul, 1);
+    connect_output_to_input(&mut state, "root", &mul, &left_out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    assert!(
+        emitted.contains("(param other @mod true @mod-mode additive @min 0.0 @max 1.0)"),
+        "created modulatable param should be emitted:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(mod other)"),
+        "created chain should read the modulated param:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+#[test]
+fn effect_writeback_created_modulatable_param_wrapping_inline_source_output_compiles() {
+    let source = r#"
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let left_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Left")
+        .unwrap();
+    let original_left_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == left_out.id && connection.to_input == 0)
+        .unwrap();
+    let inline_left_mix = original_left_signal.from_node.clone();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(original_left_signal),
+        ));
+
+    let amount = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param am @min 0 @max 1 @mod true @mod-mode additive",
+    );
+    let amount_mod = allocate_created_text_node(&mut state, "root", "mod");
+    let mul = allocate_created_text_node(&mut state, "root", "*");
+
+    connect_output_to_input(&mut state, "root", &inline_left_mix, &mul, 0);
+    connect_output_to_input(&mut state, "root", &amount, &amount_mod, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &mul, 1);
+    connect_output_to_input(&mut state, "root", &mul, &left_out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    assert!(
+        emitted.contains("(mix input_l processed_l mix-amt)"),
+        "test must preserve the inline source expression that depends on processed_l:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn effect_writeback_created_macro_instance_after_generated_chain_compiles() {
+    let source = r#"
+        (defmacro tanh-saturator (input drive bias makeup mix_amt)
+          (def biased (+ input bias))
+          (def driven (* biased drive))
+          (def wet (tanh driven))
+          (def scaled (* wet makeup))
+          (mix input scaled mix_amt))
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let left_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Left")
+        .unwrap();
+    let original_left_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == left_out.id && connection.to_input == 0)
+        .unwrap();
+    let inline_left_mix = original_left_signal.from_node.clone();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(original_left_signal),
+        ));
+
+    let amount = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param xyz @min 0 @max 1 @mod true @mod-mode additive",
+    );
+    let amount_mod = allocate_created_text_node(&mut state, "root", "mod");
+    let mul = allocate_created_text_node(&mut state, "root", "*");
+    let saturator = allocate_created_text_node(&mut state, "root", "tanh-saturator 2 0.5 2 0.3");
+
+    connect_output_to_input(&mut state, "root", &inline_left_mix, &mul, 0);
+    connect_output_to_input(&mut state, "root", &amount, &amount_mod, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &mul, 1);
+    connect_output_to_input(&mut state, "root", &mul, &saturator, 0);
+    connect_output_to_input(&mut state, "root", &saturator, &left_out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    assert!(
+        emitted.contains("(def mul1 (* (mix input_l processed_l mix-amt) modulated1))"),
+        "test must generate the upstream multiply from the inline output expression:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def tanh-saturator1 (tanh-saturator mul1 2.0 0.5 2.0 0.3))"),
+        "test must generate a macro call that consumes the generated multiply:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn effect_writeback_created_macro_instance_consumes_stereo_generated_inline_outputs_compiles() {
+    let source = r#"
+        (defmacro stereo-fold (left right blend)
+          (mix left right blend))
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let left_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Left")
+        .unwrap();
+    let right_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Right")
+        .unwrap();
+    let original_left_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == left_out.id && connection.to_input == 0)
+        .unwrap();
+    let original_right_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == right_out.id && connection.to_input == 0)
+        .unwrap();
+    let inline_left_mix = original_left_signal.from_node.clone();
+    let inline_right_mix = original_right_signal.from_node.clone();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(original_left_signal),
+        ));
+
+    let amount = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param depth @min 0 @max 1 @mod true @mod-mode additive",
+    );
+    let amount_mod = allocate_created_text_node(&mut state, "root", "mod");
+    let left_mul = allocate_created_text_node(&mut state, "root", "*");
+    let right_mul = allocate_created_text_node(&mut state, "root", "*");
+    let blend = allocate_created_text_node(&mut state, "root", "0.25");
+    let fold = allocate_created_text_node(&mut state, "root", "stereo-fold");
+
+    connect_output_to_input(&mut state, "root", &inline_left_mix, &left_mul, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &left_mul, 1);
+    connect_output_to_input(&mut state, "root", &inline_right_mix, &right_mul, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &right_mul, 1);
+    connect_output_to_input(&mut state, "root", &amount, &amount_mod, 0);
+    connect_output_to_input(&mut state, "root", &left_mul, &fold, 0);
+    connect_output_to_input(&mut state, "root", &right_mul, &fold, 1);
+    connect_output_to_input(&mut state, "root", &blend, &fold, 2);
+    connect_output_to_input(&mut state, "root", &fold, &left_out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    assert!(
+        emitted.contains("(mix input_l processed_l mix-amt)")
+            && emitted.contains("(mix input_r processed_r mix-amt)"),
+        "test must preserve both inline source expressions:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(stereo-fold"),
+        "test must generate a macro call consuming both generated branches:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn effect_writeback_created_multi_output_macro_replaces_both_inline_outputs_compiles() {
+    let source = r#"
+        (defmacro split-saturator (input amount)
+          (def wet (tanh (* input amount)))
+          (tuple wet (* wet 0.5)))
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let left_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Left")
+        .unwrap();
+    let right_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Right")
+        .unwrap();
+    let original_left_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == left_out.id && connection.to_input == 0)
+        .unwrap();
+    let original_right_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == right_out.id && connection.to_input == 0)
+        .unwrap();
+    let inline_left_mix = original_left_signal.from_node.clone();
+
+    let mut state = PatcherInteractionState::default();
+    for connection in [original_left_signal, original_right_signal] {
+        state
+            .edit_state
+            .deleted_connections
+            .insert(connection_edit_key(
+                "root",
+                &source_connection_id(connection),
+            ));
+    }
+
+    let amount = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param drive @min 0 @max 4 @default 1 @mod true @mod-mode additive",
+    );
+    let amount_mod = allocate_created_text_node(&mut state, "root", "mod");
+    let mul = allocate_created_text_node(&mut state, "root", "*");
+    let split = allocate_created_text_node(&mut state, "root", "split-saturator");
+
+    connect_output_to_input(&mut state, "root", &inline_left_mix, &mul, 0);
+    connect_output_to_input(&mut state, "root", &amount, &amount_mod, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &mul, 1);
+    connect_output_to_input(&mut state, "root", &mul, &split, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &split, 1);
+    connect_output_to_input(&mut state, "root", &split, &left_out.id, 0);
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: split,
+            output_index: 1,
+        },
+        InputPortRef {
+            node_id: right_out.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    assert!(
+        emitted.contains("(def (split-saturator"),
+        "multi-output created macro instance should emit a destructuring def:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(out split-saturator"),
+        "both effect outs should reference generated macro outputs:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn effect_writeback_deep_generated_chain_before_created_macro_instance_compiles() {
+    let source = r#"
+        (defmacro saturate-stage (input amount)
+          (tanh (* input amount)))
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let left_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Left")
+        .unwrap();
+    let original_left_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == left_out.id && connection.to_input == 0)
+        .unwrap();
+    let inline_left_mix = original_left_signal.from_node.clone();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(original_left_signal),
+        ));
+
+    let amount = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param crush @min 0 @max 1 @mod true @mod-mode additive",
+    );
+    let amount_mod = allocate_created_text_node(&mut state, "root", "mod");
+    let pre_gain = allocate_created_text_node(&mut state, "root", "*");
+    let bias = allocate_created_text_node(&mut state, "root", "+ 0.25");
+    let clip = allocate_created_text_node(&mut state, "root", "saturate-stage 3");
+
+    connect_output_to_input(&mut state, "root", &inline_left_mix, &pre_gain, 0);
+    connect_output_to_input(&mut state, "root", &amount, &amount_mod, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &pre_gain, 1);
+    connect_output_to_input(&mut state, "root", &pre_gain, &bias, 0);
+    connect_output_to_input(&mut state, "root", &bias, &clip, 0);
+    connect_output_to_input(&mut state, "root", &clip, &left_out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    assert!(
+        emitted.contains("(saturate-stage"),
+        "created macro stage should survive the generated chain:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn effect_writeback_new_macro_definition_consumes_generated_inline_chain_compiles() {
+    let source = r#"
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let root_patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let left_out = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Left")
+        .unwrap();
+    let original_left_signal = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == left_out.id && connection.to_input == 0)
+        .unwrap();
+    let inline_left_mix = original_left_signal.from_node.clone();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(original_left_signal),
+        ));
+
+    let macro_instance = allocate_created_text_node(&mut state, "root", "defmacro *clipper*");
+    assert!(promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        "root",
+        &macro_instance,
+    ));
+    let macro_source = r#"(defmacro clipper (input amount)
+  (def driven (* input amount))
+  (tanh driven))"#;
+    state
+        .edit_state
+        .created_macros
+        .get_mut("clipper")
+        .unwrap()
+        .source = Some(macro_source.to_string());
+
+    let amount = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param drive @min 0 @max 8 @default 1 @mod true @mod-mode additive",
+    );
+    let amount_mod = allocate_created_text_node(&mut state, "root", "mod");
+    let pre_gain = allocate_created_text_node(&mut state, "root", "*");
+
+    connect_output_to_input(&mut state, "root", &inline_left_mix, &pre_gain, 0);
+    connect_output_to_input(&mut state, "root", &amount, &amount_mod, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &pre_gain, 1);
+    connect_output_to_input(&mut state, "root", &pre_gain, &macro_instance, 0);
+    connect_output_to_input(&mut state, "root", &amount_mod, &macro_instance, 1);
+    connect_output_to_input(&mut state, "root", &macro_instance, &left_out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    let macro_index = emitted
+        .find("(defmacro clipper")
+        .expect("created macro definition should be emitted");
+    let call_index = emitted
+        .find("(def clipper1 (clipper")
+        .expect("created macro call should be emitted");
+    assert!(
+        macro_index < call_index,
+        "created macro definition must precede its generated call:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
 }
 
 #[test]
@@ -11509,6 +12079,57 @@ fn metal_render_emits_nodes_and_cables() {
     assert!(
         rect_count == 0,
         "patcher node chrome should use rounded widget instances, got {rect_count} rects"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_render_vertically_centers_normal_node_text_band() {
+    let patch = parse("(def sig (phasor 440))");
+    let panel = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        tile_content_rows: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let pan = PatcherPanState::default();
+    let node_rects = patch_node_rects(&patch, panel, &pan);
+    let sig_rect = node_rects.get("sig").expect("sig node rect");
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        panel,
+        viewport,
+        &pan,
+        &PatcherInteractionState::default(),
+    );
+
+    let text_row = prims
+        .iter()
+        .find_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::ProportionalText(text) if text.text == "phasor" => Some(text.row),
+            _ => None,
+        })
+        .expect("phasor node text");
+    let expected_row = sig_rect.row + (sig_rect.height - DEFAULT_ZOOM) * 0.5;
+
+    assert!(
+        (text_row - expected_row).abs() < 0.000_1,
+        "node text row should center the renderer's one-cell text band in the node: row={text_row} expected={expected_row}"
     );
 }
 

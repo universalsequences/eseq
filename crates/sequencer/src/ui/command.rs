@@ -82,6 +82,94 @@ fn sync_instrument_mod_active_plock(
         .set(step, active_param_idx, if active { 1.0 } else { 0.0 });
 }
 
+fn effect_mod_active_param_idx(
+    desc: &crate::effects::EffectDescriptor,
+    changed_param_idx: usize,
+) -> Option<usize> {
+    desc.instrument_modulation_targets
+        .iter()
+        .find(|target| target.depth_param_idx == changed_param_idx)
+        .and_then(|target| target.active_param_idx)
+}
+
+fn sync_effect_mod_active_default(
+    app: &mut App,
+    track: usize,
+    slot_idx: usize,
+    changed_param_idx: usize,
+) {
+    let Some(desc) = app
+        .graph
+        .effect_descriptors
+        .get(track)
+        .and_then(|track_descs| track_descs.get(slot_idx))
+    else {
+        return;
+    };
+    let Some(active_param_idx) = effect_mod_active_param_idx(desc, changed_param_idx) else {
+        return;
+    };
+    let Some(slot) = app
+        .state
+        .pattern
+        .effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+    else {
+        return;
+    };
+    let active = desc
+        .instrument_modulation_targets
+        .iter()
+        .filter(|target| target.active_param_idx == Some(active_param_idx))
+        .any(|target| slot.defaults.get(target.depth_param_idx).abs() > f32::EPSILON);
+    let value = if active { 1.0 } else { 0.0 };
+    slot.defaults.set(active_param_idx, value);
+    app.send_slot_param(track, slot_idx, active_param_idx, value);
+}
+
+fn sync_effect_mod_active_plock(
+    app: &mut App,
+    track: usize,
+    step: usize,
+    slot_idx: usize,
+    changed_param_idx: usize,
+) {
+    let Some(desc) = app
+        .graph
+        .effect_descriptors
+        .get(track)
+        .and_then(|track_descs| track_descs.get(slot_idx))
+    else {
+        return;
+    };
+    let Some(active_param_idx) = effect_mod_active_param_idx(desc, changed_param_idx) else {
+        return;
+    };
+    let Some(slot) = app
+        .state
+        .pattern
+        .effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+    else {
+        return;
+    };
+    let active = desc
+        .instrument_modulation_targets
+        .iter()
+        .filter(|target| target.active_param_idx == Some(active_param_idx))
+        .any(|target| {
+            slot.plocks
+                .get(step, target.depth_param_idx)
+                .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
+                .abs()
+                > f32::EPSILON
+        });
+    slot.plocks
+        .set(step, active_param_idx, if active { 1.0 } else { 0.0 });
+}
+
 fn sanitize_pasted_step_snapshot(
     snapshot: &StepSnapshot,
     preserve_audio_plocks: bool,
@@ -467,8 +555,121 @@ pub fn apply_command(app: &mut App, cmd: AppCommand) {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_pasted_step_snapshot;
-    use crate::sequencer::{StepSlotPlocks, StepSnapshot, SwingResolution, Timebase, NUM_PARAMS};
+    use std::sync::{Arc, Mutex};
+
+    use super::{apply_command, sanitize_pasted_step_snapshot, AppCommand};
+    use crate::audiograph::LiveGraphPtr;
+    use crate::effects::{
+        EffectDescriptor, InstrumentModulationTarget, ParamDescriptor, ParamKind, ParamScaling,
+    };
+    use crate::recorder::MasterRecorder;
+    use crate::sequencer::{
+        default_empty_effect_chain, SequencerState, StepSlotPlocks, StepSnapshot, SwingResolution,
+        Timebase, NUM_PARAMS,
+    };
+    use crate::ui::{App, AudioBuses};
+
+    fn effect_mod_test_descriptor() -> EffectDescriptor {
+        EffectDescriptor {
+            name: "modded effect".to_string(),
+            input_channels: 6,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: vec![
+                InstrumentModulationTarget {
+                    base_param_idx: 0,
+                    source_param_idx: None,
+                    modulator_slot: 1,
+                    depth_param_idx: 2,
+                    active_param_idx: Some(1),
+                    depth_min: -1.0,
+                    depth_max: 1.0,
+                    depth_unit: None,
+                },
+                InstrumentModulationTarget {
+                    base_param_idx: 0,
+                    source_param_idx: None,
+                    modulator_slot: 2,
+                    depth_param_idx: 3,
+                    active_param_idx: Some(1),
+                    depth_min: -1.0,
+                    depth_max: 1.0,
+                    depth_unit: None,
+                },
+            ],
+            params: vec![
+                ParamDescriptor {
+                    name: "xyz".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 10,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "__dgen_mod_active__xyz".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 11,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mod xyz slot 1 amt".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 12,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mod xyz slot 2 amt".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 13,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+            ],
+        }
+    }
+
+    fn test_app_with_effect_descriptor(desc: EffectDescriptor) -> App {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            state,
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.graph.effect_descriptors = vec![vec![desc]];
+        app
+    }
 
     #[test]
     fn paste_sanitizer_clears_audio_plocks_but_keeps_sequencer_plocks() {
@@ -535,6 +736,84 @@ mod tests {
         assert_eq!(
             sanitized.instrument_plocks.params,
             vec![Some(0.2), Some(0.8)]
+        );
+    }
+
+    #[test]
+    fn effect_depth_default_command_updates_dgen_mod_active_param() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc);
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 0.25,
+            },
+        );
+
+        assert_eq!(app.state.pattern.effect_chains[0][0].defaults.get(1), 1.0);
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 0.0,
+            },
+        );
+
+        let slot = &app.state.pattern.effect_chains[0][0];
+        assert_eq!(slot.defaults.get(1), 0.0);
+    }
+
+    #[test]
+    fn effect_depth_plock_command_updates_dgen_mod_active_plock() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc);
+        let step = 7;
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 0.25,
+            },
+        );
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectPlock {
+                track: 0,
+                step,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 0.0,
+            },
+        );
+
+        let slot = &app.state.pattern.effect_chains[0][0];
+        assert_eq!(slot.defaults.get(1), 1.0);
+        assert_eq!(slot.plocks.get(step, 1), Some(0.0));
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectPlock {
+                track: 0,
+                step,
+                slot_idx: 0,
+                param_idx: 3,
+                value: -0.5,
+            },
+        );
+
+        assert_eq!(
+            app.state.pattern.effect_chains[0][0].plocks.get(step, 1),
+            Some(1.0)
         );
     }
 }
@@ -888,6 +1167,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             if let Some(slot) = chain.get(slot_idx) {
                 slot.defaults.set(param_idx, value);
                 app.send_slot_param(track, slot_idx, param_idx, value);
+                sync_effect_mod_active_default(app, track, slot_idx, param_idx);
             }
         }
 
@@ -901,6 +1181,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
                 slot.plocks.set(step, param_idx, value);
+                sync_effect_mod_active_plock(app, track, step, slot_idx, param_idx);
             }
         }
 
@@ -911,10 +1192,21 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
-            let chain = &app.state.pattern.effect_chains[track];
-            if let Some(slot) = chain.get(slot_idx) {
+            let updated = app
+                .state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+                .is_some_and(|slot| {
+                    for step in &steps {
+                        slot.plocks.set(*step, param_idx, value);
+                    }
+                    true
+                });
+            if updated {
                 for step in steps {
-                    slot.plocks.set(step, param_idx, value);
+                    sync_effect_mod_active_plock(app, track, step, slot_idx, param_idx);
                 }
             }
         }

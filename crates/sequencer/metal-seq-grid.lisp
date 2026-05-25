@@ -214,7 +214,10 @@
           (seq-apply-fx-layout))))))
 
 (def seq-toggle-main-or-piano-roll ()
-  (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))
+  (if (or (= SEQ.editor-mode "new-instrument")
+          (= SEQ.editor-mode "edit-instrument")
+          (= SEQ.editor-mode "new-effect")
+          (= SEQ.editor-mode "edit-effect"))
     (host-command "toggle-instrument-patcher-source" (dict))
     (if (seq-piano-roll-open?)
       (seq-close-piano-roll)

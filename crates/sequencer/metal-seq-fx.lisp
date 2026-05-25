@@ -22,17 +22,22 @@
 (def custom-ui-current-kind "instrument")
 
 ;; Matches a standard built-in FX panel with four parameter rows.
-(def fx-fixed-panel-height 9.95)
+(def fx-fixed-panel-height 9.0)
+(def fx-panel-header-height 1.2)
 (def fx-panel-body-padding 0.35)
+(def fx-panel-body-top-spacer-height 0.16)
+(def fx-panel-body-content-height
+  (- fx-fixed-panel-height fx-panel-header-height (* 2 fx-panel-body-padding) fx-panel-body-top-spacer-height))
 
 (def fx-panel-body (debug-name children)
   (box
-    (v-stack :gap 0
-      (box :width 1 :height 0.16)
+    (v-stack :gap 0 :height :fill
+      (box :width 1 :height fx-panel-body-top-spacer-height)
       children)
     :debug-name debug-name
     :on-click (lambda (info) (fx-clear-selected-effect))
     :padding fx-panel-body-padding
+    :height :fill
     :v-align :start
     :h-align :start))
 
@@ -73,7 +78,7 @@
       (list "audio-effect" "effect-instance"))))
 
 (def fx-panel-header (title params fx)
-  (box :width :fill :height 0.7 :padding 0 :v-align :center :h-align :start
+  (box :width :fill :height fx-panel-header-height :padding 0 :v-align :center :h-align :start
     :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
     :drag-type "effect-instance"
     :drag-payload (fx-effect-drag-payload fx title)
@@ -1275,7 +1280,7 @@
 (def effect-mod-control-panel (fx)
   (box :debug-name "effect-mod-control-panel"
        :width 36.4
-       :height :fill
+       :height fx-panel-body-content-height
        :background-color :black
        :corner-radius 10
        :padding 0.25
@@ -1368,7 +1373,7 @@
 (def fx-panel (title params fx)
   (let ((selected (fx-panel-selected? fx)))
   (box
-    (v-stack :gap 0
+    (v-stack :gap 0 :height :fill
       (fx-panel-header title params fx)
       (fx-panel-body (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
         (if (get fx :midi-fx)
@@ -2418,7 +2423,7 @@
                       :debug-name "custom-audio-fx-wrapper" :padding 0 :h-align :start :v-align :start)
                     (fx-param-grid params fx)))))))
       (if (effect-mods-active? fx)
-        (h-stack :debug-name "effect-mods-inline-body" :height :fill :gap 0.45 :align :stretch
+        (h-stack :debug-name "effect-mods-inline-body" :height fx-panel-body-content-height :gap 0.45 :align :stretch
           (effect-mod-control-panel fx)
           body)
         body))))

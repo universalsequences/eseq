@@ -174,6 +174,86 @@ struct PendingInstrumentCancelRestore {
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
 }
 
+#[derive(Debug, Clone)]
+enum EffectEditTarget {
+    Track { track: usize, slot: usize },
+    Bus { bus: usize, slot: usize },
+}
+
+#[derive(Debug, Clone)]
+enum EffectEditMode {
+    EditExisting { persisted_source: String },
+    CreateDraft { temp_dir: PathBuf },
+}
+
+#[derive(Debug, Clone)]
+struct EffectEditSession {
+    name: String,
+    path: PathBuf,
+    buffer_name: String,
+    target: EffectEditTarget,
+    last_valid_source: String,
+    last_valid_layout: Option<String>,
+    visible_revision_valid: bool,
+    preview_generation: u64,
+    mode: EffectEditMode,
+}
+
+impl EffectEditSession {
+    fn begin_edit_existing(
+        name: String,
+        path: PathBuf,
+        buffer_name: String,
+        target: EffectEditTarget,
+        persisted_source: String,
+    ) -> Self {
+        Self {
+            name,
+            path,
+            buffer_name,
+            target,
+            last_valid_source: persisted_source.clone(),
+            last_valid_layout: None,
+            visible_revision_valid: true,
+            preview_generation: 0,
+            mode: EffectEditMode::EditExisting { persisted_source },
+        }
+    }
+
+    fn begin_create_draft(
+        name: String,
+        path: PathBuf,
+        buffer_name: String,
+        target: EffectEditTarget,
+        source: String,
+        temp_dir: PathBuf,
+    ) -> Self {
+        Self {
+            name,
+            path,
+            buffer_name,
+            target,
+            last_valid_source: source,
+            last_valid_layout: None,
+            visible_revision_valid: true,
+            preview_generation: 0,
+            mode: EffectEditMode::CreateDraft { temp_dir },
+        }
+    }
+}
+
+struct PendingEffectPreview {
+    generation: u64,
+    source: String,
+    layout: Option<String>,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+}
+
+struct PendingEffectCancelRestore {
+    session: EffectEditSession,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+}
+
 struct PendingAgenticBubble {
     path: PathBuf,
     intent: eseqlisp::widget_render::patcher::PatcherIntent,
@@ -206,7 +286,16 @@ fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -> String {
     )
 }
 
+fn effect_patcher_buffer_source(buffer_name: &str, path: &Path) -> String {
+    let buffer_name = escape_lisp_string(buffer_name);
+    let path = escape_lisp_string(&path.to_string_lossy());
+    format!(
+        "(effect-buffer \"{buffer_name}\"\n  (patcher\n    :intent :effect\n    :width :fill\n    :height :fill\n    :path \"{path}\"\n    :on-change (lambda (event)\n      (host-command \"preview-effect-patch\" event))))\n"
+    )
+}
+
 const NEW_INSTRUMENT_DRAFT_NAME: &str = "new-instrument-draft/";
+const NEW_EFFECT_DRAFT_NAME: &str = "new-effect-draft/";
 
 const NEW_INSTRUMENT_STARTER_DSP: &str = r#"(def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
@@ -242,6 +331,19 @@ fn create_new_instrument_draft_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn create_new_effect_draft_dir() -> Result<PathBuf, String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("System clock is before UNIX epoch: {error}"))?
+        .as_nanos();
+    let dir = std::env::temp_dir()
+        .join("eseq-effect-drafts")
+        .join(format!("draft-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Failed to create draft effect directory: {error}"))?;
+    Ok(dir)
+}
+
 fn show_instrument_patcher_layout_source(buffer_name: &str) -> String {
     let buffer_name = escape_lisp_string(buffer_name);
     format!("(seq-apply-instrument-patcher-layout \"{buffer_name}\")")
@@ -266,6 +368,13 @@ fn reset_instrument_patcher_state(path: &Path) {
     eseqlisp::widget_render::patcher::reset_patcher_state_for_path(
         path,
         eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+    );
+}
+
+fn reset_effect_patcher_state(path: &Path) {
+    eseqlisp::widget_render::patcher::reset_patcher_state_for_path(
+        path,
+        eseqlisp::widget_render::patcher::PatcherIntent::Effect,
     );
 }
 
@@ -1022,7 +1131,15 @@ fn finalized_instrument_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
 }
 
 fn patcher_layout_sidecar_path_for_dsp(dsp_path: &Path) -> PathBuf {
-    dsp_path.with_file_name("dsp.layout.json")
+    if dsp_path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
+        dsp_path.with_file_name("dsp.layout.json")
+    } else {
+        let stem = dsp_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("dsp");
+        dsp_path.with_file_name(format!("{stem}.layout.json"))
+    }
 }
 
 fn copy_patcher_layout_sidecar(source_dsp: &Path, target_dsp: &Path) -> std::io::Result<()> {
@@ -1054,6 +1171,22 @@ fn write_patcher_layout_sidecar(dsp_path: &Path, layout: &str) -> std::io::Resul
         let _ = std::fs::remove_file(&tmp_path);
         Err(error)
     })
+}
+
+fn apply_compiled_effect_edit_session(
+    app: &mut ui::App,
+    session: &EffectEditSession,
+    name: &str,
+    result: sequencer::lisp_effect::CompileResult,
+) -> Result<(), String> {
+    match session.target {
+        EffectEditTarget::Track { track, slot } => {
+            app.apply_compiled_effect_to_slot_sync(result, name, slot, track)
+        }
+        EffectEditTarget::Bus { bus, slot } => {
+            app.apply_compiled_bus_effect_to_slot_sync(bus, slot, name, result)
+        }
+    }
 }
 
 fn finalized_effect_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
@@ -1503,12 +1636,12 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_custom_instrument_ui_source_with_overlay, escape_lisp_string,
-        instrument_patcher_buffer_source, reconciled_track_index,
-        restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
-        show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        ActiveDeleteTarget, FxDeleteChain, Runtime, Value, AGENT_INSTRUMENT_STUB_UI,
-        NEW_INSTRUMENT_STARTER_DSP,
+        build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
+        escape_lisp_string, instrument_patcher_buffer_source, patcher_layout_sidecar_path_for_dsp,
+        reconciled_track_index, restore_instrument_patcher_layout_source,
+        should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
+        show_instrument_patcher_source_layout_source, ActiveDeleteTarget, FxDeleteChain, Runtime,
+        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use eseqlisp::parser::{ASTParser, Parser};
     use std::path::Path;
@@ -1587,6 +1720,12 @@ mod tests {
     }
 
     #[test]
+    fn new_effect_starter_compiles() {
+        sequencer::lisp_effect::compile_lisp(sequencer::lisp_effect::EFFECT_TEMPLATE, 44_100)
+            .expect("starter effect should compile");
+    }
+
+    #[test]
     fn instrument_patcher_buffer_uses_user_source_path_and_preview_command() {
         let source = instrument_patcher_buffer_source(
             "*instrument-patcher:digitone*",
@@ -1597,6 +1736,20 @@ mod tests {
         assert!(source.contains(":intent :instrument"));
         assert!(source.contains(":path \"instruments/digitone/dsp.lisp\""));
         assert!(source.contains("(host-command \"preview-instrument-patch\" event)"));
+        assert!(!source.contains("defmacro"));
+    }
+
+    #[test]
+    fn effect_patcher_buffer_uses_effect_intent_and_preview_command() {
+        let source = effect_patcher_buffer_source(
+            "*effect-patcher:lexilush*",
+            Path::new("effects/lexilush/dsp.lisp"),
+        );
+
+        assert!(source.contains("(effect-buffer \"*effect-patcher:lexilush*\""));
+        assert!(source.contains(":intent :effect"));
+        assert!(source.contains(":path \"effects/lexilush/dsp.lisp\""));
+        assert!(source.contains("(host-command \"preview-effect-patch\" event)"));
         assert!(!source.contains("defmacro"));
     }
 
@@ -1625,6 +1778,18 @@ mod tests {
         assert_eq!(
             source,
             "(seq-apply-instrument-patcher-source-layout \"*instrument-patcher:digitone*\" \"*patcher-emitted:instruments/digitone/dsp.lisp*\")"
+        );
+    }
+
+    #[test]
+    fn patcher_layout_sidecar_uses_stem_for_legacy_single_file_effects() {
+        assert_eq!(
+            patcher_layout_sidecar_path_for_dsp(Path::new("effects/legacy-delay.lisp")),
+            Path::new("effects/legacy-delay.layout.json")
+        );
+        assert_eq!(
+            patcher_layout_sidecar_path_for_dsp(Path::new("effects/lexilush/dsp.lisp")),
+            Path::new("effects/lexilush/dsp.layout.json")
         );
     }
 
@@ -1801,11 +1966,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut instrument_edit_session: Option<InstrumentEditSession> = None;
     let mut pending_instrument_preview: Option<PendingInstrumentPreview> = None;
     let mut pending_instrument_cancel_restore: Option<PendingInstrumentCancelRestore> = None;
+    let mut effect_edit_session: Option<EffectEditSession> = None;
+    let mut pending_effect_preview: Option<PendingEffectPreview> = None;
+    let mut pending_effect_cancel_restore: Option<PendingEffectCancelRestore> = None;
     let mut pending_agentic_bubbles: HashMap<String, PendingAgenticBubble> = HashMap::new();
-    let mut editor_effect_name: Option<String> = None; // original effect name (without .lisp)
-    let mut editor_effect_slot: Option<usize> = None; // effect slot index for hot-swap
-    let mut editor_effect_bus: Option<usize> = None; // bus index for bus effect hot-swap
-
     let mut prev_playing = false;
     let mut prev_bpm: u32 = 0;
     let mut prev_playhead: u32 = u32::MAX;
@@ -6757,7 +6921,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Value::String("new-instrument".to_string()),
                         );
                         rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                        rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-buffer-name",
+                            Value::String(buf_name.clone()),
+                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.handle_host_event(HostEvent::Status(format!(
@@ -6948,7 +7116,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.handle_host_event(HostEvent::Error(format!(
                                             "Failed to restore main editor layout: {error:?}"
                                         )));
-                                        continue;
                                     }
                                     editor.refresh_runtime_side_effects();
                                     editor.remove_buffer_by_name(&buf_name);
@@ -7491,26 +7658,198 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         editor.refresh_runtime_side_effects();
                     }
 
-                    "toggle-instrument-patcher-source" => {
-                        let Some(session) = instrument_edit_session.as_ref() else {
+                    "preview-effect-patch" => {
+                        let Some(session) = effect_edit_session.as_mut() else {
                             editor.handle_host_event(HostEvent::Status(
-                                "No instrument edit session is active".to_string(),
+                                "No effect edit session is active".to_string(),
                             ));
                             continue;
                         };
+                        let status = extract_string_from_payload(&payload, "status")
+                            .unwrap_or_else(|| "invalid".to_string());
+                        if status == "agentic-submit" {
+                            let Some(path) = extract_string_from_payload(&payload, "path") else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Agentic bubble request missing patch path".to_string(),
+                                ));
+                                continue;
+                            };
+                            let Some(bubble_id) =
+                                extract_string_from_payload(&payload, "bubble-id")
+                            else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Agentic bubble request missing bubble id".to_string(),
+                                ));
+                                continue;
+                            };
+                            let generation = extract_usize_from_payload(&payload, "generation")
+                                .unwrap_or(0) as u64;
+                            let prompt =
+                                extract_string_from_payload(&payload, "prompt").unwrap_or_default();
+                            let macro_name = extract_string_from_payload(&payload, "macro-name")
+                                .unwrap_or_else(|| "agentic-macro".to_string());
+                            let target = extract_string_from_payload(&payload, "target")
+                                .unwrap_or_else(|| "create-macro".to_string());
+                            let task_key = format!("{path}::{bubble_id}");
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let follow_up = if target == "edit-macro" {
+                                let existing_macro_name =
+                                    extract_string_from_payload(&payload, "existing-macro-name")
+                                        .unwrap_or_else(|| macro_name.clone());
+                                let params =
+                                    extract_string_from_payload(&payload, "existing-macro-params")
+                                        .unwrap_or_default()
+                                        .split_whitespace()
+                                        .map(str::to_string)
+                                        .collect::<Vec<_>>();
+                                let source =
+                                    extract_string_from_payload(&payload, "existing-macro-source")
+                                        .unwrap_or_default();
+                                Some(sequencer::agent::agentic_bubble::AgenticBubbleFollowUp {
+                                    macro_name: existing_macro_name,
+                                    params,
+                                    source,
+                                })
+                            } else {
+                                None
+                            };
+                            let request = sequencer::agent::agentic_bubble::AgenticBubbleRequest {
+                                prompt,
+                                suggested_macro_name: macro_name,
+                                follow_up,
+                            };
+                            std::thread::spawn(move || {
+                                let result =
+                                    sequencer::agent::agentic_bubble::generate_agentic_bubble_macro(
+                                        request,
+                                    );
+                                let _ = tx.send(result);
+                            });
+                            pending_agentic_bubbles.insert(
+                                task_key,
+                                PendingAgenticBubble {
+                                    path: PathBuf::from(path),
+                                    intent: eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+                                    bubble_id,
+                                    generation,
+                                    receiver: rx,
+                                },
+                            );
+                            editor.handle_host_event(HostEvent::Status(
+                                "Agentic bubble working...".to_string(),
+                            ));
+                            continue;
+                        }
+                        if status == "layout" {
+                            if let Some(layout) = extract_string_from_payload(&payload, "layout") {
+                                session.last_valid_layout = Some(layout);
+                                if let Some(pending) = pending_effect_preview.as_mut() {
+                                    pending.layout = session.last_valid_layout.clone();
+                                }
+                            }
+                            continue;
+                        }
+                        if status != "valid" {
+                            session.preview_generation = session.preview_generation.wrapping_add(1);
+                            session.visible_revision_valid = false;
+                            pending_effect_preview = None;
+                            let diagnostic = extract_string_from_payload(&payload, "diagnostic")
+                                .unwrap_or_else(|| "Patch writeback failed".to_string());
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-error", Value::String(diagnostic));
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            continue;
+                        }
+                        let Some(source) = extract_string_from_payload(&payload, "source") else {
+                            session.preview_generation = session.preview_generation.wrapping_add(1);
+                            session.visible_revision_valid = false;
+                            pending_effect_preview = None;
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(
+                                    "Patch preview did not include emitted source".to_string(),
+                                ),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            continue;
+                        };
+
+                        let layout = extract_string_from_payload(&payload, "layout");
+                        session.preview_generation = session.preview_generation.wrapping_add(1);
+                        session.visible_revision_valid = false;
+                        let generation = session.preview_generation;
+                        let sample_rate = app.graph.sample_rate;
+                        let asset_base = session.path.parent().map(|parent| parent.to_path_buf());
+                        let compile_source = source.clone();
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let result = sequencer::lisp_effect::compile_and_load_with_asset_base(
+                                &compile_source,
+                                sample_rate,
+                                asset_base.as_deref(),
+                            );
+                            let _ = tx.send(result);
+                        });
+                        pending_effect_preview = Some(PendingEffectPreview {
+                            generation,
+                            source,
+                            layout,
+                            receiver: rx,
+                        });
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-error",
+                            Value::String("Preview compiling...".to_string()),
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                    }
+
+                    "toggle-instrument-patcher-source" => {
+                        let (buffer_name, path, last_valid_source) =
+                            if let Some(session) = instrument_edit_session.as_ref() {
+                                (
+                                    session.buffer_name.clone(),
+                                    session.path.clone(),
+                                    session.last_valid_source.clone(),
+                                )
+                            } else if let Some(session) = effect_edit_session.as_ref() {
+                                (
+                                    session.buffer_name.clone(),
+                                    session.path.clone(),
+                                    session.last_valid_source.clone(),
+                                )
+                            } else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "No patch edit session is active".to_string(),
+                                ));
+                                continue;
+                            };
+                        if !path.exists() {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Patch source no longer exists: {}",
+                                path.display()
+                            )));
+                            continue;
+                        }
                         let source_buffer_name =
                             eseqlisp::widget_render::patcher::emitted_source_buffer_name(
-                                &session.path.to_string_lossy(),
+                                &path.to_string_lossy(),
                             );
                         let layout_source =
                             if editor_has_visible_buffer(&editor, &source_buffer_name) {
-                                show_instrument_patcher_layout_source(&session.buffer_name)
+                                show_instrument_patcher_layout_source(&buffer_name)
                             } else {
                                 let source_buffer_name = match editor
                                     .upsert_patcher_emitted_source_buffer(
-                                        &session.buffer_name,
-                                        &session.path,
-                                        &session.last_valid_source,
+                                        &buffer_name,
+                                        &path,
+                                        &last_valid_source,
                                     ) {
                                     Ok(name) => name,
                                     Err(error) => {
@@ -7519,7 +7858,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 };
                                 show_instrument_patcher_source_layout_source(
-                                    &session.buffer_name,
+                                    &buffer_name,
                                     &source_buffer_name,
                                 )
                             };
@@ -7532,40 +7871,168 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     "enter-new-effect-editor" => {
-                        let temp_path = std::path::PathBuf::from("effects/.untitled-effect.lisp");
-                        std::fs::create_dir_all("effects").ok();
-                        if let Err(e) =
-                            std::fs::write(&temp_path, sequencer::lisp_effect::EFFECT_TEMPLATE)
+                        if editor_mode.is_some()
+                            || instrument_edit_session.is_some()
+                            || effect_edit_session.is_some()
                         {
                             editor.handle_host_event(HostEvent::Error(format!(
-                                "Failed to write template: {e}"
+                                "Close the current editor before creating a new effect"
                             )));
-                        } else {
-                            let buf_name =
-                                match editor.create_file_buffer(&temp_path, BufferMode::DGenLisp) {
-                                    Ok(name) => name,
-                                    Err(e) => {
-                                        editor.handle_host_event(HostEvent::Error(format!(
-                                            "Failed to create buffer: {e:?}"
-                                        )));
-                                        continue;
-                                    }
-                                };
-                            editor.swap_buffer_in_tile_showing("*metal*", &buf_name);
-                            editor_buffer_name = Some(buf_name.clone());
-                            editor_mode = Some("new-effect".to_string());
+                            continue;
+                        }
+                        if app.tracks.is_empty() {
+                            editor.handle_host_event(HostEvent::Error(
+                                "No current track is available for a new effect".to_string(),
+                            ));
+                            continue;
+                        }
+                        let track = current_track.load(Ordering::Relaxed);
+                        app.ui.cursor_track = track;
+                        let Some(slot) = app.next_free_custom_slot() else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "No free effect slots available".to_string(),
+                            ));
+                            continue;
+                        };
+                        let temp_dir = match create_new_effect_draft_dir() {
+                            Ok(dir) => dir,
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Error(error));
+                                continue;
+                            }
+                        };
+                        let file_path = temp_dir.join("dsp.lisp");
+                        if let Err(error) =
+                            std::fs::write(&file_path, sequencer::lisp_effect::EFFECT_TEMPLATE)
+                        {
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to write starter effect: {error}"
+                            )));
+                            continue;
+                        }
+                        match sequencer::lisp_effect::compile_and_load_with_asset_base(
+                            sequencer::lisp_effect::EFFECT_TEMPLATE,
+                            app.graph.sample_rate,
+                            file_path.parent(),
+                        )
+                        .and_then(|result| {
+                            app.apply_compiled_effect_to_slot_sync(
+                                result,
+                                NEW_EFFECT_DRAFT_NAME,
+                                slot,
+                                track,
+                            )
+                        }) {
+                            Ok(()) => {}
+                            Err(error) => {
+                                let _ = std::fs::remove_dir_all(&temp_dir);
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Failed to create draft effect: {error}"
+                                )));
+                                continue;
+                            }
+                        }
+
+                        let buf_name = "*effect-patcher:new-effect*".to_string();
+                        editor.remove_buffer_by_name(&buf_name);
+                        editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+                        let patcher_source = effect_patcher_buffer_source(&buf_name, &file_path);
+                        if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                            let _ = app
+                                .graph_controller()
+                                .delete_custom_effect_slot(track, slot);
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to build patch editor: {error:?}"
+                            )));
+                            editor.remove_buffer_by_name(&buf_name);
+                            continue;
+                        }
+                        reset_effect_patcher_state(&file_path);
+                        let layout_source = show_instrument_patcher_layout_source(&buf_name);
+                        if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                            let _ = app
+                                .graph_controller()
+                                .delete_custom_effect_slot(track, slot);
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to show patch editor: {error:?}"
+                            )));
+                            editor.remove_buffer_by_name(&buf_name);
+                            continue;
+                        }
+                        editor_buffer_name = Some(buf_name.clone());
+                        editor_mode = Some("new-effect".to_string());
+                        effect_edit_session = Some(EffectEditSession::begin_create_draft(
+                            NEW_EFFECT_DRAFT_NAME.to_string(),
+                            file_path,
+                            buf_name.clone(),
+                            EffectEditTarget::Track { track, slot },
+                            sequencer::lisp_effect::EFFECT_TEMPLATE.to_string(),
+                            temp_dir,
+                        ));
+                        let rt = editor.runtime_mut();
+                        let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+                        rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-mode",
+                            Value::String("new-effect".to_string()),
+                        );
+                        rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-buffer-name",
+                            Value::String(buf_name.clone()),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "effects",
+                            build_effects_value(
+                                &state,
+                                track,
+                                &app.graph.effect_descriptors,
+                                &selected_steps,
+                            ),
+                        );
+                        rt.run_reactive_cycle();
+                        if let Err(error) = rt.eval_str("(sbrowser-refresh-buffer)") {
+                            let _ = app
+                                .graph_controller()
+                                .delete_custom_effect_slot(track, slot);
+                            if let Some(EffectEditSession {
+                                mode: EffectEditMode::CreateDraft { temp_dir },
+                                ..
+                            }) = effect_edit_session.take()
+                            {
+                                let _ = std::fs::remove_dir_all(temp_dir);
+                            }
+                            editor.remove_buffer_by_name(&buf_name);
+                            editor_buffer_name = None;
+                            editor_mode = None;
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
+                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
                             rt.set_reactive(
                                 "SEQ",
-                                "editor-mode",
-                                Value::String("new-effect".to_string()),
+                                "editor-buffer-name",
+                                Value::String(String::new()),
                             );
-                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
-                            rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to refresh effect editor sidebar: {error:?}"
+                            )));
+                            continue;
                         }
+                        editor.refresh_runtime_side_effects();
+                        editor.refresh_visible_layouts_for_buffer_named("*samples*");
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Created draft effect in slot {}",
+                            slot + 1
+                        )));
                     }
 
                     "save-new-effect" => {
@@ -7584,28 +8051,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.refresh_runtime_side_effects();
                                         continue;
                                     }
-                                    let buf_name = editor_buffer_name.clone().unwrap_or_default();
-                                    let source =
-                                        editor.read_buffer_text(&buf_name).unwrap_or_default();
-
-                                    // Validate compilation before saving — stay in editor on failure
-                                    let sr = app.graph.sample_rate;
-                                    if let Err(e) =
-                                        sequencer::lisp_effect::compile_and_load(&source, sr)
+                                    let Some(session) = effect_edit_session.as_ref() else {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(
+                                                "No draft effect session is active".to_string(),
+                                            ),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    };
+                                    if !matches!(&session.mode, EffectEditMode::CreateDraft { .. })
                                     {
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(
                                             "SEQ",
                                             "editor-error",
-                                            Value::String(format!("{e}")),
+                                            Value::String(
+                                                "Current editor session is not a draft effect"
+                                                    .to_string(),
+                                            ),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+                                    if !session.visible_revision_valid {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(
+                                                "Cannot finalize: the current patch has errors"
+                                                    .to_string(),
+                                            ),
                                         );
                                         rt.run_reactive_cycle();
                                         editor.refresh_runtime_side_effects();
                                         continue;
                                     }
 
+                                    let final_slug =
+                                        sequencer::agent::actions::normalize_patch_name(
+                                            &effect_name,
+                                            "new-effect",
+                                        );
+                                    let final_name = format!("{final_slug}/");
+                                    let (final_dir, legacy_file) =
+                                        finalized_effect_storage_paths(&final_slug);
+                                    if final_dir.exists() || legacy_file.exists() {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(format!(
+                                                "Effect '{final_slug}' already exists"
+                                            )),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+
+                                    let source = session.last_valid_source.clone();
                                     if let Err(e) =
-                                        sequencer::lisp_effect::save_effect(&effect_name, &source)
+                                        sequencer::lisp_effect::save_effect(&final_name, &source)
                                     {
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(
@@ -7617,11 +8130,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.refresh_runtime_side_effects();
                                         continue;
                                     }
-                                    let _ = std::fs::remove_file("effects/.untitled-effect.lisp");
-
-                                    // Compilation validated — close editor
-                                    editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
-                                    editor.remove_buffer_by_name(&buf_name);
+                                    let final_dsp =
+                                        sequencer::lisp_effect::effect_source_path(&final_name);
+                                    if let Some(layout) = session.last_valid_layout.as_deref() {
+                                        if let Err(e) =
+                                            write_patcher_layout_sidecar(&final_dsp, layout)
+                                        {
+                                            let _ = std::fs::remove_dir_all(&final_dir);
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-error",
+                                                Value::String(format!(
+                                                    "Failed to save layout: {e}"
+                                                )),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            continue;
+                                        }
+                                    }
+                                    let (track, slot) = match session.target {
+                                        EffectEditTarget::Track { track, slot } => (track, slot),
+                                        EffectEditTarget::Bus { .. } => {
+                                            let _ = std::fs::remove_dir_all(&final_dir);
+                                            editor.handle_host_event(HostEvent::Error(
+                                                "Draft effects can only target track effect slots"
+                                                    .to_string(),
+                                            ));
+                                            continue;
+                                        }
+                                    };
+                                    if let Err(error) =
+                                        app.load_saved_effect_to_slot_sync(track, slot, &final_name)
+                                    {
+                                        let _ = std::fs::remove_dir_all(&final_dir);
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(format!(
+                                                "Failed to load finalized effect: {error}"
+                                            )),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+                                    let session =
+                                        effect_edit_session.take().expect("session exists");
+                                    if let EffectEditMode::CreateDraft { temp_dir } = session.mode {
+                                        let _ = std::fs::remove_dir_all(temp_dir);
+                                    }
+                                    reset_effect_patcher_state(&session.path);
+                                    if let Err(error) = editor
+                                        .runtime_mut()
+                                        .eval_str(restore_instrument_patcher_layout_source())
+                                    {
+                                        editor.handle_host_event(HostEvent::Error(format!(
+                                            "Failed to restore main editor layout: {error:?}"
+                                        )));
+                                        continue;
+                                    }
+                                    editor.refresh_runtime_side_effects();
+                                    editor.remove_buffer_by_name(&session.buffer_name);
                                     editor_buffer_name = None;
                                     editor_mode = None;
 
@@ -7652,23 +8224,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "available-effects",
                                         build_available_effects(),
                                     );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "effects",
+                                        build_effects_value(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                            &selected_steps,
+                                        ),
+                                    );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
-
-                                    // Add effect to current track (re-compiles from file, uses cache)
-                                    app.ui.cursor_track = current_track.load(Ordering::Relaxed);
-                                    if let Some(slot_idx) = app.next_free_custom_slot() {
-                                        app.start_effect_compile(&effect_name, slot_idx);
-                                        editor.runtime_mut().set_reactive(
-                                            "SEQ",
-                                            "compiling",
-                                            Value::Bool(true),
-                                        );
-                                    } else {
-                                        editor.handle_host_event(HostEvent::Status(
-                                            "No free effect slots available".to_string(),
-                                        ));
-                                    }
+                                    editor.refresh_visible_layouts_for_buffer_named("*fx*");
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Finalized effect '{}' in slot {}",
+                                        display_instrument_name(&final_name),
+                                        slot + 1
+                                    )));
                                 }
                             }
                         }
@@ -7698,23 +8273,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )));
                                         continue;
                                     }
-                                    let buf_name = match editor
-                                        .create_file_buffer(&file_path, BufferMode::DGenLisp)
+                                    let target = match (bus_idx, slot_idx) {
+                                        (Some(bus), Some(slot)) => {
+                                            EffectEditTarget::Bus { bus, slot }
+                                        }
+                                        (None, Some(slot)) => EffectEditTarget::Track {
+                                            track: current_track.load(Ordering::Relaxed),
+                                            slot,
+                                        },
+                                        _ => {
+                                            editor.handle_host_event(HostEvent::Error(
+                                                "Effect edit command did not include a target slot"
+                                                    .to_string(),
+                                            ));
+                                            continue;
+                                        }
+                                    };
+                                    let persisted_source = match std::fs::read_to_string(&file_path)
                                     {
-                                        Ok(name) => name,
-                                        Err(e) => {
+                                        Ok(source) => source,
+                                        Err(error) => {
                                             editor.handle_host_event(HostEvent::Error(format!(
-                                                "Failed to open buffer: {e:?}"
+                                                "Failed to read '{}': {error}",
+                                                file_path.display()
                                             )));
                                             continue;
                                         }
                                     };
-                                    editor.swap_buffer_in_tile_showing("*metal*", &buf_name);
+                                    let buf_name = format!("*effect-patcher:{effect_name}*");
+                                    editor.remove_buffer_by_name(&buf_name);
+                                    editor.create_scratch_buffer(
+                                        &buf_name,
+                                        "",
+                                        BufferMode::ESeqLisp,
+                                    );
+                                    let patcher_source =
+                                        effect_patcher_buffer_source(&buf_name, &file_path);
+                                    if let Err(error) =
+                                        editor.runtime_mut().eval_str(&patcher_source)
+                                    {
+                                        editor.handle_host_event(HostEvent::Error(format!(
+                                            "Failed to build patch editor: {error:?}"
+                                        )));
+                                        editor.remove_buffer_by_name(&buf_name);
+                                        continue;
+                                    }
+                                    reset_effect_patcher_state(&file_path);
+                                    let layout_source =
+                                        show_instrument_patcher_layout_source(&buf_name);
+                                    if let Err(error) =
+                                        editor.runtime_mut().eval_str(&layout_source)
+                                    {
+                                        editor.handle_host_event(HostEvent::Error(format!(
+                                            "Failed to show patch editor: {error:?}"
+                                        )));
+                                        editor.remove_buffer_by_name(&buf_name);
+                                        continue;
+                                    }
                                     editor_buffer_name = Some(buf_name.clone());
                                     editor_mode = Some("edit-effect".to_string());
-                                    editor_effect_name = Some(effect_name.clone());
-                                    editor_effect_slot = slot_idx;
-                                    editor_effect_bus = bus_idx;
+                                    effect_edit_session =
+                                        Some(EffectEditSession::begin_edit_existing(
+                                            effect_name.clone(),
+                                            file_path,
+                                            buf_name.clone(),
+                                            target,
+                                            persisted_source,
+                                        ));
                                     let rt = editor.runtime_mut();
                                     rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
                                     rt.set_reactive(
@@ -7740,116 +8365,116 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     "update-effect" => {
-                        {
-                            let effect_name = match editor_effect_name.clone() {
-                                Some(n) => n,
-                                None => {
-                                    editor.handle_host_event(HostEvent::Error(
-                                        "No effect being edited".to_string(),
-                                    ));
-                                    continue;
-                                }
-                            };
-                            let buf_name = editor_buffer_name.clone().unwrap_or_default();
-                            let source = editor.read_buffer_text(&buf_name).unwrap_or_default();
-
-                            // Validate compilation before saving — stay in editor on failure
-                            let sr = app.graph.sample_rate;
-                            if let Err(e) = sequencer::lisp_effect::compile_and_load(&source, sr) {
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!("{e}")),
-                                );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
-                                continue;
-                            }
-
-                            if let Err(e) =
-                                sequencer::lisp_effect::save_effect(&effect_name, &source)
-                            {
-                                let rt = editor.runtime_mut();
-                                rt.set_reactive(
-                                    "SEQ",
-                                    "editor-error",
-                                    Value::String(format!("Failed to save: {e}")),
-                                );
-                                rt.run_reactive_cycle();
-                                editor.refresh_runtime_side_effects();
-                                continue;
-                            }
-
-                            // Compilation validated — close editor
-                            editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
-                            editor.remove_buffer_by_name(&buf_name);
-                            let slot_idx = editor_effect_slot.take();
-                            editor_buffer_name = None;
-                            editor_mode = None;
-                            editor_effect_name = None;
-
+                        let Some(session) = effect_edit_session.as_ref() else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "No effect being edited".to_string(),
+                            ));
+                            continue;
+                        };
+                        if !session.visible_revision_valid {
                             let rt = editor.runtime_mut();
-                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
-                            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
-                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
                             rt.set_reactive(
                                 "SEQ",
-                                "editor-buffer-name",
-                                Value::String(String::new()),
+                                "editor-error",
+                                Value::String(
+                                    "Cannot save: the current patch has errors".to_string(),
+                                ),
                             );
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
-
-                            // Recompile at the stored slot
-                            if let Some(slot_idx) = slot_idx {
-                                if let Some(bus_idx) = editor_effect_bus.take() {
-                                    match app.load_bus_effect_to_slot_sync(
-                                        bus_idx,
-                                        slot_idx,
-                                        &effect_name,
-                                    ) {
-                                        Ok(()) => {
-                                            *bus_state.lock().unwrap() = app.buses.clone();
-                                            let rt = editor.runtime_mut();
-                                            sync_bus_mixer_state(rt, &app);
-                                            rt.run_reactive_cycle();
-                                            editor.refresh_runtime_side_effects();
-                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                            editor.handle_host_event(HostEvent::Status(format!(
-                                                "Updated bus effect '{effect_name}'"
-                                            )));
-                                        }
-                                        Err(error) => {
-                                            editor.handle_host_event(HostEvent::Error(format!(
-                                                "Failed to reload bus effect: {error}"
-                                            )));
-                                        }
-                                    }
-                                } else {
-                                    app.ui.cursor_track = current_track.load(Ordering::Relaxed);
-                                    app.start_effect_compile(&effect_name, slot_idx);
-                                    editor.runtime_mut().set_reactive(
-                                        "SEQ",
-                                        "compiling",
-                                        Value::Bool(true),
-                                    );
-                                }
-                            } else {
-                                editor_effect_bus = None;
-                                editor.handle_host_event(HostEvent::Status(format!(
-                                    "Saved effect '{effect_name}'"
-                                )));
+                            continue;
+                        }
+                        if let Err(e) = std::fs::write(&session.path, &session.last_valid_source) {
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(format!("Failed to save: {e}")),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            continue;
+                        }
+                        if let Some(layout) = session.last_valid_layout.as_deref() {
+                            if let Err(e) = write_patcher_layout_sidecar(&session.path, layout) {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-error",
+                                    Value::String(format!("Failed to save layout: {e}")),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                continue;
                             }
                         }
+                        let session = effect_edit_session.take().expect("session exists");
+                        reset_effect_patcher_state(&session.path);
+                        if let Err(error) = editor
+                            .runtime_mut()
+                            .eval_str(restore_instrument_patcher_layout_source())
+                        {
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to restore main editor layout: {error:?}"
+                            )));
+                            effect_edit_session = Some(session);
+                            continue;
+                        }
+                        editor.refresh_runtime_side_effects();
+                        editor.remove_buffer_by_name(&session.buffer_name);
+                        editor_buffer_name = None;
+                        editor_mode = None;
+
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                        rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                        rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                        rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+                        match session.target {
+                            EffectEditTarget::Track { track, .. } => {
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "effects",
+                                    build_effects_value(
+                                        &state,
+                                        track,
+                                        &app.graph.effect_descriptors,
+                                        &selected_steps,
+                                    ),
+                                );
+                            }
+                            EffectEditTarget::Bus { .. } => {
+                                *bus_state.lock().unwrap() = app.buses.clone();
+                                sync_bus_mixer_state(rt, &app);
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "bus-effects",
+                                    build_bus_effects_value_for_selection(
+                                        &app,
+                                        Some(&selected_steps),
+                                    ),
+                                );
+                            }
+                        }
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Saved effect '{}'",
+                            session.name
+                        )));
                     }
 
                     "cancel-editor" => {
-                        if pending_instrument_cancel_restore.is_some() {
+                        if pending_instrument_cancel_restore.is_some()
+                            || pending_effect_cancel_restore.is_some()
+                        {
                             continue;
                         }
-                        let cancelled_instrument_patcher = instrument_edit_session.is_some();
+                        let cancelled_patcher =
+                            instrument_edit_session.is_some() || effect_edit_session.is_some();
                         if let Some(session) = instrument_edit_session.take() {
                             pending_instrument_preview = None;
                             reset_instrument_patcher_state(&session.path);
@@ -7948,8 +8573,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        if let Some(session) = effect_edit_session.take() {
+                            pending_effect_preview = None;
+                            reset_effect_patcher_state(&session.path);
+                            match session.mode.clone() {
+                                EffectEditMode::EditExisting { persisted_source } => {
+                                    let source = persisted_source.clone();
+                                    let sample_rate = app.graph.sample_rate;
+                                    let asset_base =
+                                        session.path.parent().map(|parent| parent.to_path_buf());
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    std::thread::spawn(move || {
+                                        let result =
+                                            sequencer::lisp_effect::compile_and_load_with_asset_base(
+                                                &source,
+                                                sample_rate,
+                                                asset_base.as_deref(),
+                                            );
+                                        let _ = tx.send(result);
+                                    });
+                                    pending_effect_cancel_restore =
+                                        Some(PendingEffectCancelRestore {
+                                            session,
+                                            receiver: rx,
+                                        });
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "editor-canceling", Value::Bool(true));
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "editor-error",
+                                        Value::String(String::new()),
+                                    );
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    editor.mark_needs_redraw();
+                                    continue;
+                                }
+                                EffectEditMode::CreateDraft { temp_dir } => {
+                                    if let EffectEditTarget::Track { track, slot } = session.target
+                                    {
+                                        match app
+                                            .graph_controller()
+                                            .delete_custom_effect_slot(track, slot)
+                                        {
+                                            Ok(()) => {
+                                                let rt = editor.runtime_mut();
+                                                rt.set_reactive(
+                                                    "SEQ",
+                                                    "effects",
+                                                    build_effects_value(
+                                                        &state,
+                                                        track,
+                                                        &app.graph.effect_descriptors,
+                                                        &selected_steps,
+                                                    ),
+                                                );
+                                                rt.run_reactive_cycle();
+                                                editor.refresh_runtime_side_effects();
+                                                editor.refresh_visible_layouts_for_buffer_named(
+                                                    "*fx*",
+                                                );
+                                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(error) => {
+                                                editor.handle_host_event(HostEvent::Error(
+                                                    format!(
+                                                    "Failed to remove draft effect slot: {error}"
+                                                ),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    let _ = std::fs::remove_dir_all(temp_dir);
+                                }
+                            }
+                        }
                         if let Some(buf_name) = editor_buffer_name.take() {
-                            if cancelled_instrument_patcher {
+                            if cancelled_patcher {
                                 if let Err(error) = editor
                                     .runtime_mut()
                                     .eval_str(restore_instrument_patcher_layout_source())
@@ -7965,17 +8666,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             editor.remove_buffer_by_name(&buf_name);
                         }
 
-                        // Clean up temp files for new-* modes
-                        if let Some(ref mode) = editor_mode {
-                            if mode == "new-effect" {
-                                let _ = std::fs::remove_file("effects/.untitled-effect.lisp");
-                            }
-                        }
                         editor_mode = None;
-                        editor_effect_name = None;
-                        editor_effect_slot = None;
-                        editor_effect_bus = None;
-
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
                         rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
@@ -8241,10 +8932,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             editor.remove_buffer_by_name(&buf_name);
                         }
                         editor_mode = None;
-                        editor_effect_name = None;
-                        editor_effect_slot = None;
-                        editor_effect_bus = None;
-
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
                         rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
@@ -8288,6 +8975,120 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "SEQ",
                         "editor-error",
                         Value::String(format!("Failed to restore instrument: {error}")),
+                    );
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    editor.mark_needs_redraw();
+                }
+            }
+        }
+
+        if let Some(completed_cancel_restore) =
+            pending_effect_cancel_restore.as_ref().and_then(|pending| {
+                match pending.receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("Effect restore compile thread crashed".to_string()))
+                    }
+                }
+            })
+        {
+            let pending = pending_effect_cancel_restore
+                .take()
+                .expect("completed effect cancel restore must have pending state");
+            let session = pending.session;
+            match completed_cancel_restore {
+                Ok(result) => {
+                    match apply_compiled_effect_edit_session(
+                        &mut app,
+                        &session,
+                        &session.name,
+                        result,
+                    ) {
+                        Ok(()) => {
+                            if let Some(buf_name) = editor_buffer_name.take() {
+                                if let Err(error) = editor
+                                    .runtime_mut()
+                                    .eval_str(restore_instrument_patcher_layout_source())
+                                {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Failed to restore main editor layout: {error:?}"
+                                    )));
+                                }
+                                editor.refresh_runtime_side_effects();
+                                editor.remove_buffer_by_name(&buf_name);
+                            }
+                            editor_mode = None;
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
+                            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-buffer-name",
+                                Value::String(String::new()),
+                            );
+                            match session.target {
+                                EffectEditTarget::Track { track, .. } => {
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "effects",
+                                        build_effects_value(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                }
+                                EffectEditTarget::Bus { .. } => {
+                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "bus-effects",
+                                        build_bus_effects_value_for_selection(
+                                            &app,
+                                            Some(&selected_steps),
+                                        ),
+                                    );
+                                }
+                            }
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            editor.refresh_visible_layouts_for_buffer_named("*fx*");
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            editor.handle_host_event(HostEvent::Status(
+                                "Editor cancelled".to_string(),
+                            ));
+                            editor.mark_needs_redraw();
+                        }
+                        Err(error) => {
+                            effect_edit_session = Some(session);
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(format!("Failed to restore effect: {error}")),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            editor.mark_needs_redraw();
+                        }
+                    }
+                }
+                Err(error) => {
+                    effect_edit_session = Some(session);
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive("SEQ", "editor-canceling", Value::Bool(false));
+                    rt.set_reactive(
+                        "SEQ",
+                        "editor-error",
+                        Value::String(format!("Failed to restore effect: {error}")),
                     );
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
@@ -8378,6 +9179,117 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "SEQ",
                             "editor-error",
                             Value::String("Instrument preview compile thread crashed".to_string()),
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                    }
+                }
+            }
+        }
+
+        if let Some(completed_preview) =
+            pending_effect_preview
+                .as_ref()
+                .and_then(|pending| match pending.receiver.try_recv() {
+                    Ok(result) => Some(Ok((
+                        pending.generation,
+                        pending.source.clone(),
+                        pending.layout.clone(),
+                        result,
+                    ))),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(())),
+                })
+        {
+            let _ = pending_effect_preview.take();
+            match completed_preview {
+                Ok((generation, source, layout, compile_result)) => {
+                    if let Some(session) = effect_edit_session.as_mut() {
+                        if session.preview_generation == generation {
+                            match compile_result {
+                                Ok(result) => {
+                                    let name = session.name.clone();
+                                    match apply_compiled_effect_edit_session(
+                                        &mut app, session, &name, result,
+                                    ) {
+                                        Ok(()) => {
+                                            session.last_valid_source = source;
+                                            session.last_valid_layout = layout;
+                                            session.visible_revision_valid = true;
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-error",
+                                                Value::String(String::new()),
+                                            );
+                                            match session.target {
+                                                EffectEditTarget::Track { track, .. } => {
+                                                    rt.set_reactive(
+                                                        "SEQ",
+                                                        "effects",
+                                                        build_effects_value(
+                                                            &state,
+                                                            track,
+                                                            &app.graph.effect_descriptors,
+                                                            &selected_steps,
+                                                        ),
+                                                    );
+                                                }
+                                                EffectEditTarget::Bus { .. } => {
+                                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                                    sync_bus_mixer_state(rt, &app);
+                                                    rt.set_reactive(
+                                                        "SEQ",
+                                                        "bus-effects",
+                                                        build_bus_effects_value_for_selection(
+                                                            &app,
+                                                            Some(&selected_steps),
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            editor.refresh_visible_layouts_for_buffer_named("*fx*");
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Previewed effect '{}'",
+                                                session.name
+                                            )));
+                                        }
+                                        Err(error) => {
+                                            session.visible_revision_valid = false;
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-error",
+                                                Value::String(error),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    session.visible_revision_valid = false;
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(()) => {
+                    if let Some(session) = effect_edit_session.as_mut() {
+                        session.visible_revision_valid = false;
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-error",
+                            Value::String("Effect preview compile thread crashed".to_string()),
                         );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();

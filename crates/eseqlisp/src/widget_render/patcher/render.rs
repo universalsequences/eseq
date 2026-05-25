@@ -1670,16 +1670,16 @@ fn push_node_label(
     } else {
         NODE_FONT_SIZE
     };
-    let baseline_row = if node.kind == NodeKind::CodeIsland {
+    let text_row = if node.kind == NodeKind::CodeIsland {
         rect.row + 0.55 * zoom
     } else {
-        rect.row + 0.36 * zoom
+        rect.row + (rect.height - zoom) * 0.5
     };
     let text_col = rect.col + NODE_TEXT_COL_OFFSET * zoom;
     if let Some(edit) = edit {
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
-                row: baseline_row,
+                row: text_row,
                 col: text_col,
                 align_width: rect.width - 1.84 * zoom,
                 h_align: 0.0,
@@ -1697,7 +1697,7 @@ fn push_node_label(
     let bg = crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0);
     prims.push(MetalPrimitive::ProportionalText(
         MetalProportionalTextPrimitive {
-            row: baseline_row,
+            row: text_row,
             col: text_col,
             align_width: rect.width - 1.84 * zoom,
             h_align: 0.0,
@@ -1713,7 +1713,7 @@ fn push_node_label(
             + cursor_x_from_char_cache(&label, font_size, tail_start, viewport.cell_w) * zoom;
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
-                row: baseline_row,
+                row: text_row,
                 col: tail_col,
                 align_width: (rect.col + rect.width - tail_col - 0.92 * zoom).max(0.0),
                 h_align: 0.0,

@@ -55,6 +55,16 @@ fn instrument_display_name(name: &str) -> String {
 }
 
 impl App {
+    fn compile_saved_effect(&self, name: &str) -> Result<lisp_effect::CompileResult, String> {
+        let source_path = lisp_effect::effect_source_path(name);
+        let source = std::fs::read_to_string(&source_path).map_err(|e| e.to_string())?;
+        lisp_effect::compile_and_load_with_asset_base(
+            &source,
+            self.graph.sample_rate,
+            source_path.parent(),
+        )
+    }
+
     fn sync_scratch_runtime_descriptors(&self) {
         self.state.set_scratch_runtime_descriptors(
             self.graph.effect_descriptors.clone(),
@@ -807,30 +817,9 @@ impl App {
         target_slot: usize,
         name: &str,
     ) -> Result<usize, String> {
-        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
-        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let result = self.compile_saved_effect(name)?;
         let slot_idx = self.prepare_custom_effect_insert_slot(track, target_slot)?;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_custom_slot_wiring(track, slot_idx);
-        let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
-        let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
-        let node_ids = unsafe {
-            lisp_effect::add_effect_to_chain_at(
-                self.graph.lg.0,
-                slot_id,
-                &result.manifest,
-                &result.lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
-                existing,
-                existing_modulator,
-                ext_mod_inputs.as_ref(),
-            )
-        }?;
-        self.apply_effect_to_slot(track, slot_idx, node_ids, name, &result.manifest);
-        self.editor.lisp_libs.push(result.lib);
+        self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
         Ok(slot_idx)
     }
 
@@ -1883,8 +1872,9 @@ impl App {
     }
 
     pub fn start_effect_compile(&mut self, name: &str, slot_idx: usize) {
-        let source = match lisp_effect::load_effect_source(name) {
-            Ok(s) => s,
+        let source_path = lisp_effect::effect_source_path(name);
+        let source = match std::fs::read_to_string(&source_path) {
+            Ok(source) => source,
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
                 return;
@@ -1892,8 +1882,13 @@ impl App {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let sample_rate = self.graph.sample_rate;
+        let asset_base = source_path.parent().map(|path| path.to_path_buf());
         std::thread::spawn(move || {
-            let result = lisp_effect::compile_and_load(&source, sample_rate);
+            let result = lisp_effect::compile_and_load_with_asset_base(
+                &source,
+                sample_rate,
+                asset_base.as_deref(),
+            );
             let _ = tx.send(result);
         });
         self.editor.pending_compile = Some(PendingCompile {
@@ -1957,59 +1952,22 @@ impl App {
         }
     }
 
-    pub fn apply_compiled_effect(
+    pub fn apply_compiled_effect_to_slot_sync(
         &mut self,
         result: lisp_effect::CompileResult,
         name: &str,
         slot_idx: usize,
         track: usize,
-    ) {
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_custom_slot_wiring(track, slot_idx);
-
-        let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
-        let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
-        match unsafe {
-            lisp_effect::add_effect_to_chain_at(
-                self.graph.lg.0,
-                slot_id,
-                &result.manifest,
-                &result.lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
-                existing,
-                existing_modulator,
-                ext_mod_inputs.as_ref(),
-            )
-        } {
-            Ok(node_ids) => {
-                self.apply_effect_to_slot(track, slot_idx, node_ids, name, &result.manifest);
-                self.editor.lisp_libs.push(result.lib);
-                self.ui.effect_tab = EffectTab::Slot(slot_idx);
-                self.ui.effect_param_cursor = 0;
-                self.ui.effect_scroll_offset = 0;
-                self.ui.focused_region = Region::Params;
-                self.ui.params_column = 1;
-                self.editor.status_message = Some((format!("Loaded '{}'", name), Instant::now()));
-            }
-            Err(e) => {
-                self.editor.status_message = Some((format!("Error: {}", e), Instant::now()));
-            }
-        }
-    }
-
-    pub fn load_saved_effect_to_slot_sync(
-        &mut self,
-        track: usize,
-        slot_idx: usize,
-        name: &str,
     ) -> Result<(), String> {
-        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
-        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        if slot_idx >= self.graph.effect_descriptors[track].len() {
+            return Err("Invalid effect slot".to_string());
+        }
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
             self.resolve_custom_slot_wiring(track, slot_idx);
+
         let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
         let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
         let node_ids = unsafe {
@@ -2029,6 +1987,39 @@ impl App {
         }?;
         self.apply_effect_to_slot(track, slot_idx, node_ids, name, &result.manifest);
         self.editor.lisp_libs.push(result.lib);
+        self.ui.effect_tab = EffectTab::Slot(slot_idx);
+        self.ui.effect_param_cursor = 0;
+        self.ui.effect_scroll_offset = 0;
+        self.ui.focused_region = Region::Params;
+        self.ui.params_column = 1;
+        Ok(())
+    }
+
+    pub fn apply_compiled_effect(
+        &mut self,
+        result: lisp_effect::CompileResult,
+        name: &str,
+        slot_idx: usize,
+        track: usize,
+    ) {
+        match self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track) {
+            Ok(()) => {
+                self.editor.status_message = Some((format!("Loaded '{}'", name), Instant::now()));
+            }
+            Err(error) => {
+                self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
+            }
+        }
+    }
+
+    pub fn load_saved_effect_to_slot_sync(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        let result = self.compile_saved_effect(name)?;
+        self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
         Ok(())
     }
 
@@ -2221,49 +2212,9 @@ impl App {
         target_slot: usize,
         name: &str,
     ) -> Result<usize, String> {
-        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
-        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let result = self.compile_saved_effect(name)?;
         let slot_idx = self.prepare_bus_effect_insert_slot(bus_idx, target_slot)?;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
-        let existing_modulator = self
-            .buses
-            .get(bus_idx)
-            .and_then(|bus| bus.effect_slots.get(slot_idx))
-            .map(|slot| slot.modulator_node_id as i32)
-            .filter(|node_id| *node_id > 0);
-        let node_ids = unsafe {
-            lisp_effect::add_effect_to_chain_at(
-                self.graph.lg.0,
-                slot_id,
-                &result.manifest,
-                &result.lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
-                existing,
-                existing_modulator,
-                None,
-            )
-        }?;
-        let desc = self.build_bus_effect_descriptor(name, &result.manifest);
-        let bus = self
-            .buses
-            .get_mut(bus_idx)
-            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
-        bus.effect_descriptors[slot_idx] = desc;
-        bus.effect_slots[slot_idx] = EffectSlotSnapshot::new_default_with_modulator(
-            &bus.effect_descriptors[slot_idx],
-            node_ids.effect_node_id as u32,
-            node_ids.modulator_node_id.unwrap_or(0) as u32,
-        );
-        if slot_idx < bus.custom_effect_names.len() {
-            bus.custom_effect_names[slot_idx] = Some(name.to_string());
-        }
-        self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
-        self.push_all_delay_bpm();
-        self.editor.lisp_libs.push(result.lib);
+        self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)?;
         Ok(slot_idx)
     }
 
@@ -2393,8 +2344,23 @@ impl App {
                 bus_idx + 1
             ));
         }
-        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
-        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let result = self.compile_saved_effect(name)?;
+        self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)
+    }
+
+    pub fn apply_compiled_bus_effect_to_slot_sync(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        name: &str,
+        result: lisp_effect::CompileResult,
+    ) -> Result<(), String> {
+        if bus_idx >= lisp_effect::MAX_BUS_FX_CHAINS {
+            return Err(format!(
+                "Bus {} is outside the current bus FX registry limit",
+                bus_idx + 1
+            ));
+        }
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
             self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
         let existing_modulator = self

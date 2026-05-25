@@ -367,6 +367,7 @@ pub struct EffectRenderOptions {
     pub block_size: usize,
     pub frames: usize,
     pub param_overrides: Vec<(String, f32)>,
+    pub input_overrides: Vec<(usize, f32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -382,7 +383,15 @@ pub struct EffectRenderReport {
 }
 
 pub fn compile_and_load(source: &str, sample_rate: u32) -> Result<CompileResult, String> {
-    let json = compile_lisp(source, sample_rate)?;
+    compile_and_load_with_asset_base(source, sample_rate, None)
+}
+
+pub fn compile_and_load_with_asset_base(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+) -> Result<CompileResult, String> {
+    let json = compile_lisp_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
     let lib = load_dylib(&manifest.dylib_path)?;
     Ok(CompileResult { manifest, lib })
@@ -514,6 +523,14 @@ fn output_dir() -> PathBuf {
 }
 
 pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
+    compile_lisp_with_asset_base(source, sample_rate, None)
+}
+
+pub fn compile_lisp_with_asset_base(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+) -> Result<String, String> {
     let dir = output_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
 
@@ -529,11 +546,16 @@ pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
     let tool_path = std::env::current_dir()
         .unwrap_or_default()
         .join("tools/DGenLisp");
-    let output = std::process::Command::new(&tool_path)
+    let mut command = std::process::Command::new(&tool_path);
+    command
         .args(["compile", src_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", &dylib_name])
-        .args(["--sample-rate", &sample_rate.to_string()])
+        .args(["--sample-rate", &sample_rate.to_string()]);
+    if let Some(asset_base) = asset_base {
+        command.args(["--asset-base", asset_base.to_str().unwrap_or(".")]);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("Failed to run DGenLisp: {e}"))?;
 
@@ -1208,19 +1230,23 @@ pub unsafe fn add_effect_to_chain_at(
 pub const EFFECT_TEMPLATE: &str = r#"; DGenLisp stereo effect
 ;
 ; Params: (def name (param name @min 0 @max 1 @default 0.5))
+; Modulatable: add @mod true @mod-mode additive
+;   then use (mod name) to read the modulated value
 ; Delay:  (def h (history N)), (read-history h delay_samples), (write-history h sample)
 ; Math:   +, -, *, /, sin, cos, tan, atan, atan2, tanh, clamp, min, max, mix
 ; Filters: (onepole input coeff)
 
-(def input (in 1 @name signal))
+(def input_l (in 1 @name Left))
+(def input_r (in 2 @name Right))
 (def mix-amt (param mix @min 0 @max 1 @default 0.5))
 
 ; -- Your processing here --
-(def processed input)
+(def processed_l input_l)
+(def processed_r input_r)
 
 ; -- Stereo output --
-(out (mix input processed mix-amt) 1 @name Left)
-(out (mix input processed mix-amt) 2 @name Right)
+(out (mix input_l processed_l mix-amt) 1 @name Left)
+(out (mix input_r processed_r mix-amt) 2 @name Right)
 "#;
 
 pub struct LispEditResult {
@@ -2463,24 +2489,33 @@ pub fn render_loaded_effect_for_test(
     memory_write.copy_from_slice(&memory_read);
 
     for (name, value) in &options.param_overrides {
-        let param = manifest
-            .params
-            .iter()
-            .find(|param| param.name == *name)
-            .ok_or_else(|| format!("unknown effect parameter '{name}'"))?;
-        if param.cell_id >= total_slots {
+        if let Some(param) = manifest.params.iter().find(|param| param.name == *name) {
+            if param.cell_id >= total_slots {
+                return Err(format!(
+                    "parameter '{}' cell {} is outside memory size {}",
+                    param.name, param.cell_id, total_slots
+                ));
+            }
+            for lane in 0..param.cell_span {
+                let idx = param.cell_id + lane;
+                if idx < total_slots {
+                    memory_read[idx] = *value;
+                    memory_write[idx] = *value;
+                }
+            }
+            continue;
+        }
+
+        let Some(cell_id) = host_mod_descriptor_param_cell(manifest, name) else {
+            return Err(format!("unknown effect parameter '{name}'"));
+        };
+        if cell_id >= total_slots {
             return Err(format!(
-                "parameter '{}' cell {} is outside memory size {}",
-                param.name, param.cell_id, total_slots
+                "parameter '{name}' cell {cell_id} is outside memory size {total_slots}"
             ));
         }
-        for lane in 0..param.cell_span {
-            let idx = param.cell_id + lane;
-            if idx < total_slots {
-                memory_read[idx] = *value;
-                memory_write[idx] = *value;
-            }
-        }
+        memory_read[cell_id] = *value;
+        memory_write[cell_id] = *value;
     }
 
     let n_inputs = manifest.n_inputs.max(2);
@@ -2509,6 +2544,11 @@ pub fn render_loaded_effect_for_test(
             input_buffers[1][frame] = right;
             input_reference.push(left);
             input_reference.push(right);
+        }
+        for &(channel, value) in &options.input_overrides {
+            if let Some(buffer) = input_buffers.get_mut(channel) {
+                buffer.fill(value);
+            }
         }
         let input_ptrs: Vec<*mut f32> = input_buffers
             .iter_mut()
@@ -2573,6 +2613,20 @@ pub fn render_loaded_effect_for_test(
         first_nonzero_frame,
         first_samples: rendered.into_iter().take(32).collect(),
     })
+}
+
+fn host_mod_descriptor_param_cell(manifest: &DGenManifest, name: &str) -> Option<usize> {
+    for dest in &manifest.mod_destinations {
+        if name == format!("__dgen_mod_active__{}", dest.name) {
+            return Some(dest.active_cell_id);
+        }
+        for lane in &dest.depth_lanes {
+            if name == format!("mod {} slot {} amt", dest.name, lane.slot) {
+                return Some(lane.depth_cell_id);
+            }
+        }
+    }
+    None
 }
 
 // ── Instrument editor flow ──
@@ -9488,6 +9542,53 @@ mod tests {
             .expect("effect compiler should inject shared preamble helpers");
         assert_eq!(result.manifest.n_inputs, 2);
         assert_eq!(result.manifest.n_outputs, 2);
+    }
+
+    #[test]
+    fn custom_effect_mod_input_changes_mod_accessor_output_when_active() {
+        let source = r#"
+            (def input_l (in 1 @name Left))
+            (def input_r (in 2 @name Right))
+            (def mod1 (in 3 @name mod1 @modulator 1))
+            (def mod2 (in 4 @name mod2 @modulator 2))
+            (def mod3 (in 5 @name mod3 @modulator 3))
+            (def mod4 (in 6 @name mod4 @modulator 4))
+            (param xyz @default 0.25 @min 0.0 @max 1.0 @mod true @mod-mode additive)
+            (def amount (mod xyz))
+            (out (* input_l amount) 1 @name Left)
+            (out (* input_r amount) 2 @name Right)
+        "#;
+
+        let render = |mod_value: f32| {
+            super::render_effect_source_for_test(
+                source,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size: 128,
+                    frames: 2048,
+                    param_overrides: vec![
+                        ("__dgen_mod_active__xyz".to_string(), 1.0),
+                        ("mod xyz slot 1 amt".to_string(), 0.5),
+                    ],
+                    input_overrides: vec![(2, mod_value)],
+                },
+            )
+            .expect("effect should compile and render")
+        };
+
+        let unmodulated = render(0.0);
+        let modulated = render(1.0);
+        let diff = unmodulated
+            .first_samples
+            .iter()
+            .zip(modulated.first_samples.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+
+        assert!(
+            diff > 0.01,
+            "expected mod1 input to affect (mod xyz), diff={diff}"
+        );
     }
 
     #[test]

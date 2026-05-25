@@ -121,10 +121,10 @@ pub fn validate_effect_dsp_source(source: &str) -> Result<(), String> {
 
     validate_forward_references(source, &exprs)?;
 
+    let mut mod_declared_params = Vec::new();
     let mut mod_accessor_params = Vec::new();
     let mut direct_mod_refs = Vec::new();
-    let mut mod_metadata_params = Vec::new();
-    let mut modulator_inputs = Vec::new();
+    let mut declared_modulator_inputs = Vec::new();
     let mut inputs = Vec::new();
     let mut outputs = Vec::new();
 
@@ -135,10 +135,17 @@ pub fn validate_effect_dsp_source(source: &str) -> Result<(), String> {
         if let Some(error) = malformed_param_like_form_error(expr) {
             return Err(error);
         }
+        if let Some(name) = declared_modulator_input_name(expr) {
+            declared_modulator_inputs.push(name);
+        }
+        if let Some(param) = param_declared_with_mod(expr) {
+            mod_declared_params.push(param);
+        }
         collect_mod_accessor_params(expr, &mut mod_accessor_params);
+        if is_modulator_input_declaration(expr) {
+            continue;
+        }
         collect_direct_modulator_refs(expr, &mut direct_mod_refs);
-        collect_effect_mod_metadata_params(expr, &mut mod_metadata_params);
-        collect_effect_modulator_inputs(expr, &mut modulator_inputs);
         if let Some(input) = effect_input_decl(expr) {
             inputs.push(input);
         }
@@ -147,12 +154,28 @@ pub fn validate_effect_dsp_source(source: &str) -> Result<(), String> {
         }
     }
 
+    mod_declared_params.sort();
+    mod_declared_params.dedup();
     mod_accessor_params.sort();
     mod_accessor_params.dedup();
-    if !mod_accessor_params.is_empty() {
+    declared_modulator_inputs.sort();
+    declared_modulator_inputs.dedup();
+
+    let mut non_mod_params = mod_accessor_params
+        .iter()
+        .filter(|param| !mod_declared_params.contains(param))
+        .cloned()
+        .collect::<Vec<_>>();
+    non_mod_params.sort();
+    non_mod_params.dedup();
+    if !non_mod_params.is_empty() {
+        let locations = non_mod_params
+            .iter()
+            .map(|param| param_with_line(source, param))
+            .collect::<Vec<_>>();
         return Err(format!(
-            "effects cannot use `(mod param_name)` because effect parameters are not host-modulatable yet. Read these effect parameter(s) directly by name instead: {}.",
-            mod_accessor_params.join(", ")
+            "dsp.lisp uses `(mod param_name)` for effect parameter(s) not declared with `@mod true`: {}. Declare intentional effect modulation targets with `@mod true @mod-mode additive`, or read ordinary/internal controls directly by name.",
+            locations.join(", ")
         ));
     }
 
@@ -160,27 +183,42 @@ pub fn validate_effect_dsp_source(source: &str) -> Result<(), String> {
     direct_mod_refs.dedup();
     if !direct_mod_refs.is_empty() {
         return Err(format!(
-            "effects cannot read host modulation input(s): {}. Do not declare or use mod1..mod4 or legacy mod5..mod10/ext1..ext4 in effect DSP.",
+            "dsp.lisp directly reads host modulator input(s): {}. Declare modulator inputs only when params use @mod true, then read the host-modulated parameter with `(mod param_name)`; the effect mod matrix chooses which configured Mod slot drives that param.",
             direct_mod_refs.join(", ")
         ));
     }
 
-    mod_metadata_params.sort();
-    mod_metadata_params.dedup();
-    if !mod_metadata_params.is_empty() {
+    let required = ["mod1", "mod2", "mod3", "mod4"];
+    let mut extra = declared_modulator_inputs
+        .iter()
+        .filter(|name| !required.iter().any(|required| *required == name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    extra.sort();
+    extra.dedup();
+    if !extra.is_empty() {
         return Err(format!(
-            "effects cannot declare host-modulatable parameters yet. Remove `@mod true`/`@mod-mode` metadata from: {}.",
-            mod_metadata_params.join(", ")
+            "dsp.lisp declares unsupported host modulator input(s): {}. Effects expose exactly four configurable host modulation slots after stereo audio inputs: `(def mod1 (in 3 @name mod1 @modulator 1))` through `(def mod4 (in 6 @name mod4 @modulator 4))`.",
+            extra.join(", ")
         ));
     }
 
-    modulator_inputs.sort();
-    modulator_inputs.dedup();
-    if !modulator_inputs.is_empty() {
-        return Err(format!(
-            "effects cannot declare `@modulator` inputs. Remove modulation input declaration(s): {}.",
-            modulator_inputs.join(", ")
-        ));
+    if !mod_declared_params.is_empty() {
+        let missing = required
+            .iter()
+            .filter(|name| {
+                !declared_modulator_inputs
+                    .iter()
+                    .any(|declared| declared == *name)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "dsp.lisp declares host-modulatable effect parameter(s) with `@mod true` but is missing modulator input declaration(s): {}. Declare exactly the four configurable effect modulation slots: `(def mod1 (in 3 @name mod1 @modulator 1))` through `(def mod4 (in 6 @name mod4 @modulator 4))`, when any effect param uses `@mod true`.",
+                missing.join(", ")
+            ));
+        }
     }
 
     require_named_channel(&inputs, 1, "left", "input")?;
@@ -510,55 +548,6 @@ struct NamedChannel {
     name: Option<String>,
 }
 
-fn collect_effect_mod_metadata_params(expr: &Expression, params: &mut Vec<String>) {
-    let Expression::List(items) = expr else {
-        return;
-    };
-    if matches!(items.first(), Some(Expression::Symbol(head)) if head == "param") {
-        let name = match items.get(1) {
-            Some(Expression::Symbol(name)) => name.clone(),
-            _ => "<unnamed>".to_string(),
-        };
-        if items.iter().any(|item| {
-            matches!(
-                item,
-                Expression::Symbol(symbol) if symbol == "@mod" || symbol == "@mod-mode"
-            )
-        }) {
-            params.push(name);
-        }
-    }
-    for item in items {
-        collect_effect_mod_metadata_params(item, params);
-    }
-}
-
-fn collect_effect_modulator_inputs(expr: &Expression, inputs: &mut Vec<String>) {
-    let Expression::List(items) = expr else {
-        return;
-    };
-    if matches!(items.first(), Some(Expression::Symbol(head)) if head == "def") {
-        let name = match items.get(1) {
-            Some(Expression::Symbol(name)) => name.clone(),
-            _ => "<unnamed>".to_string(),
-        };
-        if expr_contains_symbol(expr, "@modulator") {
-            inputs.push(name);
-        }
-    }
-    for item in items {
-        collect_effect_modulator_inputs(item, inputs);
-    }
-}
-
-fn expr_contains_symbol(expr: &Expression, needle: &str) -> bool {
-    match expr {
-        Expression::Symbol(symbol) => symbol == needle,
-        Expression::List(items) => items.iter().any(|item| expr_contains_symbol(item, needle)),
-        _ => false,
-    }
-}
-
 fn effect_input_decl(expr: &Expression) -> Option<NamedChannel> {
     let Expression::List(items) = expr else {
         return None;
@@ -664,18 +653,60 @@ mod tests {
     }
 
     #[test]
-    fn effect_validator_rejects_host_modulation_forms() {
+    fn effect_validator_accepts_host_modulation_forms() {
+        validate_effect_dsp_source(
+            r#"
+            (def in_l (in 1 @name left))
+            (def in_r (in 2 @name right))
+            (def mod1 (in 3 @name mod1 @modulator 1))
+            (def mod2 (in 4 @name mod2 @modulator 2))
+            (def mod3 (in 5 @name mod3 @modulator 3))
+            (def mod4 (in 6 @name mod4 @modulator 4))
+            (param depth @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+            (out (* in_l (mod depth)) 1 @name left)
+            (out (* in_r (mod depth)) 2 @name right)
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn effect_validator_rejects_direct_modulator_reads() {
         let err = validate_effect_dsp_source(
             r#"
             (def in_l (in 1 @name left))
             (def in_r (in 2 @name right))
+            (def mod1 (in 3 @name mod1 @modulator 1))
+            (def mod2 (in 4 @name mod2 @modulator 2))
+            (def mod3 (in 5 @name mod3 @modulator 3))
+            (def mod4 (in 6 @name mod4 @modulator 4))
             (param depth @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
             (out (* in_l (mod depth)) 1 @name left)
             (out (* in_r mod1) 2 @name right)
             "#,
         )
         .unwrap_err();
-        assert!(err.contains("effects cannot use `(mod param_name)`"));
+        assert!(err.contains("directly reads host modulator input"));
+        assert!(err.contains("mod1"));
+    }
+
+    #[test]
+    fn effect_validator_rejects_modulatable_param_without_modulator_inputs() {
+        let err = validate_effect_dsp_source(
+            r#"
+            (def in_l (in 1 @name left))
+            (def in_r (in 2 @name right))
+            (param depth @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+            (out (* in_l (mod depth)) 1 @name left)
+            (out (* in_r (mod depth)) 2 @name right)
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("@mod true"));
+        assert!(err.contains("missing modulator input"));
+        assert!(err.contains("mod1"));
+        assert!(err.contains("mod4"));
     }
 
     #[test]

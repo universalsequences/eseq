@@ -361,6 +361,19 @@ fn selected_voice_mod_source_indices(
     })
 }
 
+fn selected_voice_mod_source_indices_for_optional_slot(
+    desc: &sequencer::effects::EffectDescriptor,
+    slot: Option<&sequencer::effects::EffectSlotState>,
+    plock_step: Option<usize>,
+) -> Vec<usize> {
+    if let Some(slot) = slot {
+        return selected_voice_mod_source_indices(desc, slot, plock_step);
+    }
+    sequencer::voice_modulator::selected_source_param_indices(&desc.params, |_, param| {
+        param.default
+    })
+}
+
 fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDescriptor) -> bool {
     matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. })
         || matches!(pdesc.kind, sequencer::effects::ParamKind::Enum { .. })
@@ -2106,9 +2119,8 @@ pub(crate) fn build_effects_value(
                 })
                 .collect();
 
-            let source_actual = slot
-                .map(|slot| selected_voice_mod_source_indices(desc, slot, plock_step))
-                .unwrap_or_default();
+            let source_actual =
+                selected_voice_mod_source_indices_for_optional_slot(desc, slot, plock_step);
             let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
             let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
             for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
@@ -3622,17 +3634,12 @@ pub(crate) fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Va
 }
 
 /// Build list of available effect names from the effects/ directory.
-/// Prepends "+ New Effect" as a special entry for inline creation.
 pub(crate) fn build_available_effects() -> Value {
     let names = sequencer::lisp_effect::list_saved_effects();
-    let mut items: Vec<Rc<RefCell<Value>>> = vec![Rc::new(RefCell::new(Value::String(
-        "+ New Effect".to_string(),
-    )))];
-    items.extend(
-        names
-            .into_iter()
-            .map(|n| Rc::new(RefCell::new(Value::String(n)))),
-    );
+    let items: Vec<Rc<RefCell<Value>>> = names
+        .into_iter()
+        .map(|n| Rc::new(RefCell::new(Value::String(n))))
+        .collect();
     Value::List(items)
 }
 
@@ -5413,6 +5420,21 @@ mod tests {
             .join("\n")
     }
 
+    fn find_layout_text_containing<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        needle: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if matches!(node.props.get("text"), Some(Value::String(text)) if text.contains(needle)) {
+            return Some(node);
+        }
+        if matches!(node.props.get("label"), Some(Value::String(text)) if text.contains(needle)) {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_text_containing(child, needle))
+    }
+
     #[test]
     fn metal_seq_browser_instrument_tab_builds_instrument_tree() {
         let editor = browser_editor_on_instrument_tab();
@@ -5426,6 +5448,56 @@ mod tests {
             value_contains_string(tree, "digitone") || value_contains_string(tree, "minimoog"),
             "instrument tab should render saved instruments"
         );
+    }
+
+    #[test]
+    fn metal_seq_audio_effect_tree_excludes_new_effect_action() {
+        let tree = build_audio_effect_tree("+ New Effect");
+        assert!(
+            !value_contains_string(&tree, "new-audio-effect"),
+            "effect creation should be a sidebar button, not a tree item"
+        );
+        assert!(
+            !value_contains_string(&tree, "+ New Effect"),
+            "effect creation should be a sidebar button, not a tree label"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_audio_fx_tab_renders_new_effect_button_outside_tree() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"audio-fx\")")
+            .expect("select audio fx tab");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
+        assert!(value_contains_string(tree, "+ New Effect"));
+        assert!(
+            value_contains_string(tree, "No audio effects found."),
+            "test native returns an empty effect tree; the button must not come from tree items"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-enter-new-effect-editor)")
+            .expect("enter new effect editor");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "enter-new-effect-editor");
+                assert_eq!(payload, &Value::Map(Default::default()));
+            }
+            other => panic!("expected enter-new-effect-editor host command, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5454,6 +5526,107 @@ mod tests {
         assert!(
             !value_contains_string(tree, "Save & Add"),
             "new instrument editor should use finalization copy"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_new_effect_editor_uses_finalize_controls() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-active", Value::Bool(true));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-effect".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser
+            .widget_tree
+            .as_ref()
+            .expect("browser widget tree")
+            .clone();
+        assert!(value_contains_string(&tree, "New Effect"));
+        assert!(value_contains_string(&tree, "Draft patch"));
+        assert!(value_contains_string(&tree, "track "));
+        assert!(value_contains_string(&tree, "Save as"));
+        assert!(value_contains_string(&tree, "effect-name"));
+        assert!(value_contains_string(&tree, "Save & Add"));
+        assert!(
+            !value_contains_string(&tree, "Search samples"),
+            "new effect editor should replace the sample browser chrome"
+        );
+
+        let layout = editor
+            .runtime_mut()
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((28.0, 13.0)))
+            .expect("new effect editor sidebar should lay out");
+        for label in ["New Effect", "Draft patch", "Save as", "Save & Add"] {
+            let node = find_layout_text_containing(&layout, label)
+                .unwrap_or_else(|| panic!("expected visible editor text: {label}"));
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.width > 0.0
+                    && node.rect.height > 0.0,
+                "editor text should have a finite nonzero rect for {label}: {:?}",
+                node.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_explicit_refresh_updates_inactive_samples_editor_panel() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let browser_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        assert_ne!(
+            editor.active_buffer_idx(),
+            browser_idx,
+            "test setup should exercise the inactive-buffer refresh path"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-active", Value::Bool(true));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-effect".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-refresh-buffer)")
+            .expect("explicit sidebar refresh should render the samples buffer");
+        editor.refresh_runtime_side_effects();
+
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
+        assert!(value_contains_string(tree, "New Effect"));
+        assert!(value_contains_string(tree, "effect-name"));
+        assert!(value_contains_string(tree, "Save & Add"));
+        assert!(
+            !value_contains_string(tree, "Search samples"),
+            "explicit refresh should replace stale sample browser content"
         );
     }
 
@@ -12593,10 +12766,25 @@ mod tests {
         assert_finite_layout_tree(&layout);
         let selector = find_layout_node_by_debug_name(&layout, "effect-mod-selector")
             .expect("effect mods selector should render");
+        let inline_body = find_layout_node_by_debug_name(&layout, "effect-mods-inline-body")
+            .expect("effect mods inline body should render");
+        let control_panel = find_layout_node_by_debug_name(&layout, "effect-mod-control-panel")
+            .expect("effect mods control panel should render");
         assert!(
             selector.rect.width > 0.0 && selector.rect.height > 0.0,
             "effect selector must have a nonzero rect: {:?}",
             selector.rect
+        );
+        assert!(
+            control_panel.rect.height >= inline_body.rect.height - 0.1,
+            "effect mods black panel should fill the inline body height; panel={:?}, body={:?}",
+            control_panel.rect,
+            inline_body.rect
+        );
+        assert!(
+            control_panel.rect.height > 6.5,
+            "effect mods black panel should use the available fixed effect panel height, got {:?}",
+            control_panel.rect
         );
         assert!(
             find_layout_node_by_debug_name(&layout, "effect-lfo-source-editor").is_some(),
@@ -12605,6 +12793,332 @@ mod tests {
         assert!(
             layout_has_double_click(&layout),
             "modulatable effect cutoff should render an interactive modulation wrapper"
+        );
+    }
+
+    #[test]
+    fn custom_audio_effect_mods_button_reopens_after_close() {
+        fn test_mod_target(depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-1.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]))
+        }
+
+        fn layout_node_contains_string(node: &eseqlisp::layout::LayoutNode, needle: &str) -> bool {
+            node.props
+                .values()
+                .any(|value| value_contains_string(value, needle))
+                || node
+                    .children
+                    .iter()
+                    .any(|child| layout_node_contains_string(child, needle))
+        }
+
+        fn find_clickable_node_containing<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            needle: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if let Some(child) = node
+                .children
+                .iter()
+                .find_map(|child| find_clickable_node_containing(child, needle))
+            {
+                return Some(child);
+            }
+            if node.props.contains_key("on-click") && layout_node_contains_string(node, needle) {
+                return Some(node);
+            }
+            None
+        }
+
+        fn find_effect_mods_button_rect(
+            editor: &eseqlisp::Editor,
+        ) -> eseqlisp::layout::Rect {
+            let layout = editor.widget_layout().expect("custom effect layout");
+            let panel = find_layout_node_by_debug_name(
+                &layout,
+                "audio-fx-panel-root-0-toggle-effect",
+            )
+            .expect("custom effect panel should render");
+            let header = find_layout_node_by_debug_name(panel, "audio-fx-panel-header")
+                .expect("custom effect header should render");
+            let button = find_clickable_node_containing(header, "mods")
+                .expect("custom effect mods button should be clickable");
+            assert!(
+                button.rect.row >= header.rect.row - 0.05
+                    && button.rect.row + button.rect.height
+                        <= header.rect.row + header.rect.height + 0.05,
+                "mods button hit area should stay inside the FX header; button={:?} header={:?}",
+                button.rect,
+                header.rect
+            );
+            let hit = eseqlisp::layout::hit_test_layout(
+                &layout,
+                button.rect.row + button.rect.height * 0.85,
+                button.rect.col + button.rect.width * 0.5,
+            )
+            .expect("mods button lower hit area should hit a widget");
+            assert_eq!(
+                hit.widget_id, button.widget_id,
+                "mods button lower hit area should hit the button, got {} {:?}",
+                hit.widget_type, hit.rect
+            );
+            button.rect
+        }
+
+        fn assert_effect_mods_open(editor: &mut eseqlisp::Editor, expected: bool, context: &str) {
+            assert_eq!(
+                editor
+                    .runtime_mut()
+                    .eval_str("effect-mods-open")
+                    .expect("read effect mods open"),
+                Some(Value::Bool(expected)),
+                "{context}"
+            );
+        }
+
+        fn click_effect_mods_button(editor: &mut eseqlisp::Editor) {
+            let rect = find_effect_mods_button_rect(editor);
+            let col = rect.col + rect.width * 0.5;
+            let row = rect.row + rect.height * 0.85;
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: col.floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                160,
+                18,
+                col,
+                row,
+            );
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Up(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: col.floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                160,
+                18,
+                col,
+                row,
+            );
+            editor.refresh_runtime_side_effects();
+        }
+
+        let mut cutoff = test_param_map("cutoff", 1, 1200.0, 20.0, 20_000.0);
+        cutoff.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        cutoff.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                11.0, 1.0, 0.5,
+            )]))),
+        );
+        let effect = Value::Map(HashMap::from([
+            (
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String("toggle-effect".to_string()))),
+            ),
+            (
+                "slot-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            ),
+            (
+                "builtin".to_string(),
+                Rc::new(RefCell::new(Value::Bool(false))),
+            ),
+            (
+                "params".to_string(),
+                Rc::new(RefCell::new(test_list(vec![
+                    Value::Map(cutoff),
+                    Value::Map(test_param_map("mix", 2, 0.5, 0.0, 1.0)),
+                ]))),
+            ),
+            (
+                "modulators".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                ]))]))),
+            ),
+            (
+                "sources".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            30,
+                            1.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![Value::Map(test_param_map(
+                            "rate", 31, 2.0, 0.1, 20.0,
+                        ))]))),
+                    ),
+                ]))]))),
+            ),
+        ]));
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![effect])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom effect mods toggle status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+
+        assert_effect_mods_open(&mut editor, false, "mods should start closed");
+        for (context, expected) in [
+            ("first mods click should open", true),
+            ("second mods click should close", false),
+            ("third mods click should reopen", true),
+        ] {
+            click_effect_mods_button(&mut editor);
+            assert_effect_mods_open(&mut editor, expected, context);
+        }
+    }
+
+    #[test]
+    fn effect_source_dropdown_keeps_options_without_slot_state() {
+        fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow())
+        }
+
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let effects = build_effects_value(&state, 0, &[vec![desc]], &selected);
+
+        let Value::List(slots) = effects else {
+            panic!("effects value should be a list");
+        };
+        let first_slot = slots
+            .first()
+            .expect("descriptor should produce an effect row")
+            .borrow();
+        let sources = map_get(&first_slot, "sources").expect("effect should expose sources");
+        let Value::List(source_sections) = &*sources else {
+            panic!("sources should be a list: {sources:?}");
+        };
+        let mod1 = source_sections
+            .first()
+            .expect("mod1 source section should exist")
+            .borrow();
+        let source_param = map_get(&mod1, "source-param")
+            .expect("mod1 should keep its source-param even before slot state is synced");
+        let options = map_get(&source_param, "options").expect("source-param should have options");
+        let Value::List(options) = &*options else {
+            panic!("source options should be a list: {options:?}");
+        };
+        let labels = options
+            .iter()
+            .map(|value| match &*value.borrow() {
+                Value::String(label) => label.clone(),
+                other => panic!("source option should be a string, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
         );
     }
 
