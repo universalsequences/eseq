@@ -459,10 +459,12 @@ impl App {
             &self.tracks,
             &self.graph.track_instrument_types,
         );
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx == current_pattern {
-                *snapshot = current_snapshot.clone();
+        {
+            let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+                if pattern_idx == current_pattern {
+                    *snapshot = current_snapshot.clone();
+                }
             }
         }
 
@@ -3060,5 +3062,67 @@ impl App {
             },
             tick: 0,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audiograph::LiveGraphPtr;
+    use crate::recorder::MasterRecorder;
+    use crate::sequencer::{default_empty_effect_chain, SequencerState};
+    use crate::ui::AudioBuses;
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    fn test_app_with_track() -> App {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let (keyboard_tx, _keyboard_rx) = mpsc::channel();
+        let mut app = App::new(
+            state,
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app
+    }
+
+    #[test]
+    fn add_midi_fx_to_track_publishes_snapshot_without_deadlocking_pattern_bank() {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut app = test_app_with_track();
+            let _ = ready_tx.send(());
+            let result = app.add_midi_fx_to_track_sync(0, "arp");
+            let published_chain = app
+                .state
+                .latest_scheduler_snapshot()
+                .tracks
+                .first()
+                .map(|track| track.params.midi_fx_chain.clone())
+                .unwrap_or_default();
+            let _ = done_tx.send((result, published_chain));
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("test app should initialize");
+        let (result, published_chain) = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("adding MIDI FX should not block on pattern_bank");
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(published_chain, vec!["arp".to_string()]);
     }
 }
