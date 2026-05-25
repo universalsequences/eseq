@@ -4081,6 +4081,9 @@ impl Editor {
             self.show_transient_message(report.failure_message());
         }
         self.refresh_runtime_side_effects();
+        if report.success {
+            self.sync_layout_to_active_leaf();
+        }
         self.sync_runtime_context();
         self.mark_needs_redraw();
     }

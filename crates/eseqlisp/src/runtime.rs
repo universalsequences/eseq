@@ -1809,6 +1809,14 @@ impl Runtime {
         }
     }
 
+    pub fn lisp_source_paths(&self) -> Vec<PathBuf> {
+        self.vm.source_manager.module_graph().known_paths()
+    }
+
+    pub fn lisp_source_revision(&self) -> u64 {
+        self.vm.source_manager.module_graph().revision()
+    }
+
     #[cfg(test)]
     pub(crate) fn profile_eval_str(
         &mut self,

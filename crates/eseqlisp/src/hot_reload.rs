@@ -42,6 +42,7 @@ pub struct ModuleRecord {
 #[derive(Debug, Clone, Default)]
 pub struct ModuleGraph {
     modules: HashMap<PathBuf, ModuleRecord>,
+    revision: u64,
 }
 
 impl ModuleGraph {
@@ -51,6 +52,7 @@ impl ModuleGraph {
         source_hash: u64,
         source_revision: u64,
         defined_symbols: HashSet<String>,
+        children: HashSet<PathBuf>,
         diagnostics: Vec<String>,
     ) -> HashSet<String> {
         let old = self
@@ -66,6 +68,23 @@ impl ModuleGraph {
             changed.extend(old.defined_symbols.iter().cloned());
             changed.extend(defined_symbols.iter().cloned());
         }
+
+        for removed_child in old.children.difference(&children) {
+            if let Some(child_record) = self.modules.get_mut(removed_child) {
+                child_record.parents.remove(&path);
+            }
+        }
+        for child in &children {
+            self.modules
+                .entry(child.clone())
+                .or_insert_with(|| ModuleRecord {
+                    path: child.clone(),
+                    ..ModuleRecord::default()
+                })
+                .parents
+                .insert(path.clone());
+        }
+
         let record = self
             .modules
             .entry(path.clone())
@@ -76,27 +95,10 @@ impl ModuleGraph {
         record.source_hash = source_hash;
         record.source_revision = source_revision;
         record.defined_symbols = defined_symbols;
+        record.children = children;
         record.last_successful_diagnostics = diagnostics;
+        self.revision = self.revision.wrapping_add(1);
         changed
-    }
-
-    pub fn record_load(&mut self, parent: PathBuf, child: PathBuf) {
-        self.modules
-            .entry(parent.clone())
-            .or_insert_with(|| ModuleRecord {
-                path: parent.clone(),
-                ..ModuleRecord::default()
-            })
-            .children
-            .insert(child.clone());
-        self.modules
-            .entry(child.clone())
-            .or_insert_with(|| ModuleRecord {
-                path: child,
-                ..ModuleRecord::default()
-            })
-            .parents
-            .insert(parent);
     }
 
     pub fn record_render_root(&mut self, module: &Path, node_id: u32) {
@@ -144,6 +146,10 @@ impl ModuleGraph {
         paths
     }
 
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn debug_lines(&self) -> Vec<String> {
         let mut records = self.modules.values().collect::<Vec<_>>();
         records.sort_by(|a, b| a.path.cmp(&b.path));
@@ -179,6 +185,7 @@ pub struct SourceManager {
     overlays: HashMap<PathBuf, OverlayRecord>,
     load_stack: Vec<PathBuf>,
     module_graph: ModuleGraph,
+    pending_children: HashMap<PathBuf, HashSet<PathBuf>>,
     changed_symbols: HashSet<String>,
     diagnostics: Vec<String>,
 }
@@ -196,6 +203,7 @@ impl SourceManager {
             overlays: HashMap::new(),
             load_stack: Vec::new(),
             module_graph: ModuleGraph::default(),
+            pending_children: HashMap::new(),
             changed_symbols: HashSet::new(),
             diagnostics: Vec::new(),
         }
@@ -219,6 +227,7 @@ impl SourceManager {
     pub fn begin_transaction(&mut self) {
         self.changed_symbols.clear();
         self.diagnostics.clear();
+        self.pending_children.clear();
     }
 
     pub fn changed_symbols(&self) -> HashSet<String> {
@@ -258,7 +267,10 @@ impl SourceManager {
     pub fn load_source(&mut self, path: &str) -> Result<LoadedSource, String> {
         let resolved = self.resolve_load_path(path);
         if let Some(parent) = self.load_stack.last().cloned() {
-            self.module_graph.record_load(parent, resolved.clone());
+            self.pending_children
+                .entry(parent)
+                .or_default()
+                .insert(resolved.clone());
         }
         self.source_for_canonical_path(resolved)
     }
@@ -293,6 +305,7 @@ impl SourceManager {
     }
 
     pub fn enter_module(&mut self, path: PathBuf) {
+        self.pending_children.entry(path.clone()).or_default();
         self.load_stack.push(path);
     }
 
@@ -312,14 +325,20 @@ impl SourceManager {
         defined_symbols: HashSet<String>,
         diagnostics: Vec<String>,
     ) {
+        let children = self.pending_children.remove(&path).unwrap_or_default();
         let changed = self.module_graph.record_module(
             path,
             hash_source(source),
             revision,
             defined_symbols,
+            children,
             diagnostics,
         );
         self.changed_symbols.extend(changed);
+    }
+
+    pub fn discard_module_loads(&mut self, path: &Path) {
+        self.pending_children.remove(path);
     }
 
     pub fn record_render_root(&mut self, node_id: u32) {

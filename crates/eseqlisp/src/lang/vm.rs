@@ -1999,6 +1999,8 @@ impl VM {
                 defined_symbols,
                 Vec::new(),
             );
+        } else {
+            self.source_manager.discard_module_loads(&path);
         }
         result
     }

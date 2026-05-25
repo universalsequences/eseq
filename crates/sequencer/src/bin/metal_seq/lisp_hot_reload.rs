@@ -1,22 +1,25 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use eseqlisp::{Editor, ReloadReport};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-const SCAN_INTERVAL: Duration = Duration::from_millis(300);
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(150);
 
 #[derive(Debug)]
 pub(crate) struct LispHotReloadWatcher {
     receiver: Receiver<PathBuf>,
+    watcher: RecommendedWatcher,
+    watched_dirs: BTreeSet<PathBuf>,
+    watched_files: BTreeSet<PathBuf>,
     pending: BTreeSet<PathBuf>,
     last_event_at: Option<Instant>,
 }
 
 impl LispHotReloadWatcher {
-    pub(crate) fn start(root: impl Into<PathBuf>) -> Option<Self> {
+    pub(crate) fn start(paths: impl IntoIterator<Item = PathBuf>) -> Option<Self> {
         if std::env::var("METAL_SEQ_DISABLE_LISP_HOT_RELOAD")
             .ok()
             .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
@@ -25,38 +28,109 @@ impl LispHotReloadWatcher {
             return None;
         }
 
-        let root = root.into();
-        eprintln!(
-            "metal_seq: Lisp hot reload watcher scanning {}",
-            root.display()
-        );
         let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("lisp-hot-reload-watch".to_string())
-            .spawn(move || {
-                let mut known = snapshot_lisp_files(&root);
-                loop {
-                    std::thread::sleep(SCAN_INTERVAL);
-                    let next = snapshot_lisp_files(&root);
-                    for (path, modified) in &next {
-                        if known.get(path) != Some(modified) {
-                            let _ = tx.send(path.clone());
-                        }
+        let watcher = RecommendedWatcher::new(
+            move |result: notify::Result<Event>| match result {
+                Ok(event) => {
+                    if !is_reload_event(&event.kind) {
+                        return;
                     }
-                    known = next;
+                    for path in event.paths {
+                        let _ = tx.send(path);
+                    }
                 }
-            })
-            .ok()?;
+                Err(error) => {
+                    eprintln!("metal_seq: Lisp hot reload watcher error: {error}");
+                }
+            },
+            Config::default(),
+        )
+        .ok()?;
 
-        Some(Self {
+        let mut watcher = Self {
             receiver: rx,
+            watcher,
+            watched_dirs: BTreeSet::new(),
+            watched_files: BTreeSet::new(),
             pending: BTreeSet::new(),
             last_event_at: None,
-        })
+        };
+        watcher.set_watched_paths(paths);
+        eprintln!(
+            "metal_seq: Lisp hot reload watcher observing {} files in {} dirs",
+            watcher.watched_files.len(),
+            watcher.watched_dirs.len()
+        );
+        Some(watcher)
+    }
+
+    pub(crate) fn set_watched_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        let next_files = paths
+            .into_iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("lisp"))
+            .map(|path| watch_path(&path))
+            .collect::<BTreeSet<_>>();
+        let desired_dirs = next_files
+            .iter()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect::<BTreeSet<_>>();
+
+        if next_files == self.watched_files && desired_dirs == self.watched_dirs {
+            return;
+        }
+
+        let mut active_dirs = self.watched_dirs.clone();
+        for dir in self.watched_dirs.difference(&desired_dirs) {
+            if let Err(error) = self.watcher.unwatch(dir) {
+                eprintln!(
+                    "metal_seq: Lisp hot reload failed to unwatch {}: {error}",
+                    dir.display()
+                );
+            }
+            active_dirs.remove(dir);
+        }
+        for dir in desired_dirs.difference(&self.watched_dirs) {
+            match self.watcher.watch(dir, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    active_dirs.insert(dir.clone());
+                }
+                Err(error) => {
+                    eprintln!(
+                        "metal_seq: Lisp hot reload failed to watch {}: {error}",
+                        dir.display()
+                    );
+                }
+            };
+        }
+
+        let active_files = next_files
+            .into_iter()
+            .filter(|path| {
+                path.parent()
+                    .is_some_and(|parent| active_dirs.contains(parent))
+            })
+            .collect::<BTreeSet<_>>();
+        let changed =
+            active_files.len() != self.watched_files.len() || active_dirs != self.watched_dirs;
+        self.watched_files = active_files;
+        self.watched_dirs = active_dirs;
+        self.pending
+            .retain(|path| self.watched_files.contains(path));
+        if changed {
+            eprintln!(
+                "metal_seq: Lisp hot reload watcher now observing {} files in {} dirs",
+                self.watched_files.len(),
+                self.watched_dirs.len()
+            );
+        }
     }
 
     pub(crate) fn poll_ready_paths(&mut self) -> Vec<PathBuf> {
         while let Ok(path) = self.receiver.try_recv() {
+            let path = watch_path(&path);
+            if !self.watched_files.contains(&path) {
+                continue;
+            }
             self.pending.insert(path);
             self.last_event_at = Some(Instant::now());
         }
@@ -70,6 +144,10 @@ impl LispHotReloadWatcher {
         self.last_event_at = None;
         std::mem::take(&mut self.pending).into_iter().collect()
     }
+}
+
+fn is_reload_event(kind: &EventKind) -> bool {
+    !matches!(kind, EventKind::Access(_))
 }
 
 pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, paths: Vec<PathBuf>) -> bool {
@@ -218,44 +296,39 @@ fn refresh_clean_open_buffer(editor: &mut Editor, buffer_idx: usize, text: &str)
         scroll_top.min(editor.buffers[buffer_idx].lines.len().saturating_sub(1));
 }
 
-fn snapshot_lisp_files(root: &Path) -> BTreeMap<PathBuf, Option<SystemTime>> {
-    let mut out = BTreeMap::new();
-    collect_lisp_files(root, &mut out);
-    out
-}
-
-fn collect_lisp_files(path: &Path, out: &mut BTreeMap<PathBuf, Option<SystemTime>>) {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if name.starts_with('.') || matches!(name, "target" | "audiograph") {
-            continue;
-        }
-        if path.is_dir() {
-            collect_lisp_files(&path, out);
-            continue;
-        }
-        if path.extension().and_then(|ext| ext.to_str()) == Some("lisp") {
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .ok();
-            out.insert(canonical, modified);
-        }
-    }
-}
-
 fn same_path(a: &Path, b: &Path) -> bool {
     let a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
     let b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
     a == b
+}
+
+fn watch_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| absolute_normalized_path(path))
+}
+
+fn absolute_normalized_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    normalize_path(&absolute)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 #[cfg(test)]

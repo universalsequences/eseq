@@ -272,6 +272,106 @@ fn hot_reload_root_load_uses_dirty_child_overlay() {
 }
 
 #[test]
+fn hot_reload_replaces_module_graph_children_on_successful_root_eval() {
+    let dir = hot_reload_temp_dir("eseqlisp-hot-graph-edges");
+    let root = dir.join("root.lisp");
+    let child = dir.join("child.lisp");
+    std::fs::write(
+        &root,
+        r#"(load "child.lisp")
+(effect-buffer "*hot-graph*" (label graph-label))"#,
+    )
+    .unwrap();
+    std::fs::write(&child, r#"(def graph-label "child")"#).unwrap();
+
+    let mut runtime = Runtime::new();
+    let source = std::fs::read_to_string(&root).unwrap();
+    let report = runtime.eval_source_transactional(Some(root.clone()), &source, Vec::new());
+    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+
+    std::fs::write(
+        &root,
+        r#"(def graph-label "root")
+(effect-buffer "*hot-graph*" (label graph-label))"#,
+    )
+    .unwrap();
+    let source = std::fs::read_to_string(&root).unwrap();
+    let report = runtime.eval_source_transactional(Some(root.clone()), &source, Vec::new());
+    assert!(
+        report.success,
+        "root reload without child failed: {:?}",
+        report.diagnostics
+    );
+
+    std::fs::write(&child, r#"(def graph-label "leaf")"#).unwrap();
+    let report = runtime.reload_paths_transactional(vec![child.clone()], Vec::new());
+    let canonical_child = std::fs::canonicalize(&child).unwrap();
+    assert!(
+        report.success,
+        "leaf reload after root stopped loading it failed: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        report.evaluated_path.as_deref(),
+        Some(canonical_child.as_path()),
+        "stale graph edges must not escalate a detached leaf reload back to the old root"
+    );
+}
+
+#[test]
+fn hot_reload_active_named_buffer_syncs_active_tile_layout_cache() {
+    let dir = hot_reload_temp_dir("eseqlisp-hot-active-layout-sync");
+    let root = dir.join("root.lisp");
+    std::fs::write(
+        &root,
+        r#"(effect-buffer "*hot-active*" (label "before"))"#,
+    )
+    .unwrap();
+
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(80, 20);
+    let source = std::fs::read_to_string(&root).unwrap();
+    let report = editor
+        .runtime_mut()
+        .eval_source_transactional(Some(root.clone()), &source, Vec::new());
+    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    editor.process_lisp_reload_report(report);
+
+    let hot_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*hot-active*")
+        .expect("hot-active buffer")
+        .id;
+    editor.set_active_buffer(hot_id);
+    editor.update_tile_rects(80, 20);
+    editor.sync_layout_to_active_leaf();
+    let active_layout = editor
+        .active_leaf()
+        .cached_layout
+        .as_deref()
+        .expect("active tile should have an initial cached layout");
+    assert!(layout_label_node(active_layout, "before").is_some());
+
+    std::fs::write(&root, r#"(effect-buffer "*hot-active*" (label "after"))"#).unwrap();
+    let report = editor
+        .runtime_mut()
+        .reload_paths_transactional(vec![root], Vec::new());
+    assert!(report.success, "hot reload failed: {:?}", report.diagnostics);
+    editor.process_lisp_reload_report(report);
+
+    let active_layout = editor
+        .active_leaf()
+        .cached_layout
+        .as_deref()
+        .expect("active tile should keep a cached layout after hot reload");
+    assert!(
+        layout_label_node(active_layout, "after").is_some(),
+        "active tile cache should reflect the hot-reloaded runtime layout without a buffer switch"
+    );
+}
+
+#[test]
 fn hot_reload_leaf_eval_rerenders_owner_root_and_rolls_back_bad_source() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-leaf");
     let root = dir.join("root.lisp");
