@@ -700,6 +700,683 @@ fn patch_node_position(patch: &Patch, node_id: &str) -> (f32, f32) {
         .position
 }
 
+#[derive(Clone, Debug)]
+struct ExpectedPersistenceNode {
+    view_key: String,
+    node_id: String,
+    position: (f32, f32),
+}
+
+#[derive(Clone, Debug)]
+struct ExpectedPersistenceConnection {
+    view_key: String,
+    from_node: String,
+    from_output: usize,
+    to_node: String,
+    to_input: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ExpectedPersistenceSegment {
+    view_key: String,
+    from_node: String,
+    from_output: usize,
+    to_node: String,
+    to_input: usize,
+    segment_row: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PersistenceExpectations {
+    nodes: Vec<ExpectedPersistenceNode>,
+    connections: Vec<ExpectedPersistenceConnection>,
+    segments: Vec<ExpectedPersistenceSegment>,
+    source_contains: Vec<String>,
+    source_not_contains: Vec<String>,
+}
+
+fn expected_node(view_key: &str, node_id: &str, position: (f32, f32)) -> ExpectedPersistenceNode {
+    ExpectedPersistenceNode {
+        view_key: view_key.to_string(),
+        node_id: node_id.to_string(),
+        position,
+    }
+}
+
+fn expected_connection(
+    view_key: &str,
+    from_node: &str,
+    from_output: usize,
+    to_node: &str,
+    to_input: usize,
+) -> ExpectedPersistenceConnection {
+    ExpectedPersistenceConnection {
+        view_key: view_key.to_string(),
+        from_node: from_node.to_string(),
+        from_output,
+        to_node: to_node.to_string(),
+        to_input,
+    }
+}
+
+fn expected_segment(
+    view_key: &str,
+    from_node: &str,
+    from_output: usize,
+    to_node: &str,
+    to_input: usize,
+    segment_row: f32,
+) -> ExpectedPersistenceSegment {
+    ExpectedPersistenceSegment {
+        view_key: view_key.to_string(),
+        from_node: from_node.to_string(),
+        from_output,
+        to_node: to_node.to_string(),
+        to_input,
+        segment_row,
+    }
+}
+
+fn generated_persistence_source(seed: u64) -> String {
+    let inline_amount = match seed % 4 {
+        0 => "0.125",
+        1 => "0.25",
+        2 => "0.5",
+        _ => "0.75",
+    };
+    let nested_tail = match seed % 3 {
+        0 => "(def folded (fold shaped 0.33))",
+        1 => "(def folded (fold (* shaped 0.8) 0.33))",
+        _ => "(def folded (fold (mix shaped phase 0.2) 0.33))",
+    };
+    format!(
+        "(defmacro fold (sig amt) (def shaped (mix sig amt {inline_amount})) shaped)\n\
+         (def gate (in 1 @name gate))\n\
+         (def pitch (in 2 @name pitch))\n\
+         (def velocity (in 3 @name velocity))\n\
+         (def trigger (in 4 @name trigger))\n\
+         (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)\n\
+         (def rate 0.5)\n\
+         (def env (adsr gate trigger 5 120 0.8 180))\n\
+         (def phase (phasor pitch))\n\
+         (def tri (triangle phase 0.1))\n\
+         (def shaped (* tri (mod gain)))\n\
+         {nested_tail}\n\
+         (out folded 1 @name audio)\n"
+    )
+}
+
+fn persistence_position(seed: u64, ordinal: usize, scope_bias: f32) -> (f32, f32) {
+    let x = 7.25 + scope_bias + ((seed as usize * 13 + ordinal * 17) % 89) as f32 + 0.125;
+    let y = 5.5 + scope_bias * 0.5 + ((seed as usize * 19 + ordinal * 11) % 61) as f32 + 0.375;
+    (x, y)
+}
+
+fn move_all_persistence_nodes(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    patch: &Patch,
+    seed: u64,
+    scope_bias: f32,
+    expectations: &mut PersistenceExpectations,
+) {
+    for (idx, node) in patch.nodes.iter().enumerate() {
+        let position = persistence_position(seed, idx, scope_bias);
+        set_node_edit_position(state, view_key, node, position, node_display_label(node));
+        expectations
+            .nodes
+            .push(expected_node(view_key, &node.id, position));
+    }
+}
+
+fn set_created_node_position(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+    position: (f32, f32),
+) {
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(view_key, node_id))
+        .unwrap_or_else(|| panic!("missing created node edit {view_key}::{node_id}"))
+        .position = position;
+}
+
+fn source_connection_for_input<'a>(
+    patch: &'a Patch,
+    to_node: &str,
+    to_input: usize,
+) -> &'a PatchConnection {
+    patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == to_node && connection.to_input == to_input)
+        .unwrap_or_else(|| panic!("missing source connection into {to_node}:{to_input}"))
+}
+
+fn source_connection_for_input_opt<'a>(
+    patch: &'a Patch,
+    to_node: &str,
+    to_input: usize,
+) -> Option<&'a PatchConnection> {
+    patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == to_node && connection.to_input == to_input)
+}
+
+fn persistence_patch_for_view<'a>(patch: &'a Patch, view_key: &str) -> &'a Patch {
+    if view_key == "root" {
+        return patch;
+    }
+    let macro_name = view_key
+        .strip_prefix("macro:")
+        .unwrap_or_else(|| panic!("unsupported view key {view_key}"));
+    &patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == macro_name)
+        .unwrap_or_else(|| panic!("missing macro patch {macro_name}"))
+        .patch
+}
+
+fn persistence_payload_source_and_layout(node: &LayoutNode, case_name: &str) -> (String, String) {
+    let payload = patcher_writeback_payload(node);
+    let Value::Map(map) = payload else {
+        panic!("{case_name}: expected writeback payload map");
+    };
+    assert_eq!(
+        map.get("status").map(|value| value.borrow().clone()),
+        Some(Value::Keyword("valid".to_string())),
+        "{case_name}: expected valid writeback payload, got {map:?}"
+    );
+    let source = match map.get("source").map(|value| value.borrow().clone()) {
+        Some(Value::String(source)) => source,
+        other => panic!("{case_name}: expected emitted source string, got {other:?}"),
+    };
+    let layout = match map.get("layout").map(|value| value.borrow().clone()) {
+        Some(Value::String(layout)) => layout,
+        other => panic!("{case_name}: expected emitted layout string, got {other:?}"),
+    };
+    (source, layout)
+}
+
+fn assert_close_position(
+    case_name: &str,
+    view_key: &str,
+    node_id: &str,
+    actual: (f32, f32),
+    expected: (f32, f32),
+) {
+    assert!(
+        (actual.0 - expected.0).abs() < 0.0001 && (actual.1 - expected.1).abs() < 0.0001,
+        "{case_name}: {view_key}::{node_id} position changed: expected {expected:?}, got {actual:?}"
+    );
+}
+
+fn assert_persistence_expectations(
+    case_name: &str,
+    emitted_source: &str,
+    emitted_layout: &str,
+    reloaded: &Patch,
+    expectations: &PersistenceExpectations,
+) {
+    for needle in &expectations.source_contains {
+        assert!(
+            emitted_source.contains(needle),
+            "{case_name}: emitted source did not contain `{needle}`:\n{emitted_source}"
+        );
+    }
+    for needle in &expectations.source_not_contains {
+        assert!(
+            !emitted_source.contains(needle),
+            "{case_name}: emitted source unexpectedly contained `{needle}`:\n{emitted_source}"
+        );
+    }
+
+    let layout_json: serde_json::Value =
+        serde_json::from_str(emitted_layout).unwrap_or_else(|error| {
+            panic!("{case_name}: emitted layout should be valid JSON: {error}")
+        });
+    for expected in &expectations.nodes {
+        let layout_node = if expected.view_key == "root" {
+            &layout_json["root"]["nodes"][&expected.node_id]
+        } else {
+            let macro_name = expected.view_key.strip_prefix("macro:").unwrap();
+            &layout_json["macros"][macro_name]["nodes"][&expected.node_id]
+        };
+        let layout_x = layout_node["x"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{case_name}: missing layout x for {:?}", expected));
+        let layout_y = layout_node["y"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{case_name}: missing layout y for {:?}", expected));
+        assert_close_position(
+            case_name,
+            &expected.view_key,
+            &expected.node_id,
+            (layout_x as f32, layout_y as f32),
+            expected.position,
+        );
+
+        let patch = persistence_patch_for_view(reloaded, &expected.view_key);
+        let actual = patch_node_position(patch, &expected.node_id);
+        assert_close_position(
+            case_name,
+            &expected.view_key,
+            &expected.node_id,
+            actual,
+            expected.position,
+        );
+    }
+
+    for expected in &expectations.connections {
+        let patch = persistence_patch_for_view(reloaded, &expected.view_key);
+        assert!(
+            patch.connections.iter().any(|connection| {
+                connection.from_node == expected.from_node
+                    && connection.from_output == expected.from_output
+                    && connection.to_node == expected.to_node
+                    && connection.to_input == expected.to_input
+            }),
+            "{case_name}: missing expected connection {:?}; connections={:?}",
+            expected,
+            patch
+                .connections
+                .iter()
+                .map(source_connection_id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    for expected in &expectations.segments {
+        let patch = persistence_patch_for_view(reloaded, &expected.view_key);
+        let connection = patch
+            .connections
+            .iter()
+            .find(|connection| {
+                connection.from_node == expected.from_node
+                    && connection.from_output == expected.from_output
+                    && connection.to_node == expected.to_node
+                    && connection.to_input == expected.to_input
+            })
+            .unwrap_or_else(|| panic!("{case_name}: missing segmented connection {expected:?}"));
+        let segment = connection
+            .segment
+            .unwrap_or_else(|| panic!("{case_name}: missing segment for {expected:?}"));
+        assert!(
+            segment.is_segmented,
+            "{case_name}: segment should be enabled"
+        );
+        assert!(
+            (segment.segment_row - expected.segment_row).abs() < 0.0001,
+            "{case_name}: segment row changed for {:?}: expected {}, got {}",
+            expected,
+            expected.segment_row,
+            segment.segment_row
+        );
+    }
+}
+
+fn build_persistence_case(
+    seed: u64,
+    path: &std::path::Path,
+) -> (LayoutNode, PatcherInteractionState, PersistenceExpectations) {
+    fs::write(path, generated_persistence_source(seed)).unwrap();
+    let node = patcher_test_node(path);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let mode = seed % 8;
+    let mut state = PatcherInteractionState::default();
+    let mut expectations = PersistenceExpectations::default();
+
+    match mode {
+        0 => {
+            move_all_persistence_nodes(
+                &mut state,
+                "root",
+                &root_patch,
+                seed,
+                0.0,
+                &mut expectations,
+            );
+            for macro_patch in &root_patch.macros {
+                move_all_persistence_nodes(
+                    &mut state,
+                    &format!("macro:{}", macro_patch.name),
+                    &macro_patch.patch,
+                    seed + 17,
+                    45.0,
+                    &mut expectations,
+                );
+            }
+        }
+        1 => {
+            let literal_position = persistence_position(seed, 0, 10.0);
+            let phasor_position = persistence_position(seed, 1, 10.0);
+            let literal = allocate_created_text_node(&mut state, "root", "0.5");
+            let phasor = allocate_created_text_node(&mut state, "root", "phasor trigger");
+            set_created_node_position(&mut state, "root", &literal, literal_position);
+            set_created_node_position(&mut state, "root", &phasor, phasor_position);
+            if let Some(old) = source_connection_for_input_opt(&root_patch, "tri", 1) {
+                state
+                    .edit_state
+                    .deleted_connections
+                    .insert(connection_edit_key("root", &source_connection_id(old)));
+            }
+            connect_output_to_input(&mut state, "root", &literal, &phasor, 0);
+            connect_output_to_input(&mut state, "root", &phasor, "tri", 1);
+            expectations
+                .nodes
+                .push(expected_node("root", "value1", literal_position));
+            expectations
+                .nodes
+                .push(expected_node("root", "phasor1", phasor_position));
+            expectations
+                .connections
+                .push(expected_connection("root", "value1", 0, "phasor1", 0));
+            expectations
+                .connections
+                .push(expected_connection("root", "trigger", 0, "phasor1", 1));
+            expectations
+                .connections
+                .push(expected_connection("root", "phasor1", 0, "tri", 1));
+            expectations
+                .source_contains
+                .push("(def value1 0.5)".to_string());
+            expectations
+                .source_contains
+                .push("(def phasor1 (phasor value1 trigger))".to_string());
+            expectations
+                .source_contains
+                .push("(def tri (triangle phase phasor1))".to_string());
+            expectations
+                .source_not_contains
+                .push("(def phasor1 (phasor 0.5".to_string());
+        }
+        2 => {
+            let mul_position = persistence_position(seed, 0, 20.0);
+            let cos_position = persistence_position(seed, 1, 20.0);
+            let multiply = allocate_created_text_node(&mut state, "root", "* 2");
+            let cosine = allocate_created_text_node(&mut state, "root", "cos");
+            set_created_node_position(&mut state, "root", &multiply, mul_position);
+            set_created_node_position(&mut state, "root", &cosine, cos_position);
+            let old = source_connection_for_input(&root_patch, "tri", 0);
+            state
+                .edit_state
+                .deleted_connections
+                .insert(connection_edit_key("root", &source_connection_id(old)));
+            connect_output_to_input(&mut state, "root", "phase", &multiply, 0);
+            connect_output_to_input(&mut state, "root", &multiply, &cosine, 0);
+            connect_output_to_input(&mut state, "root", &cosine, "tri", 0);
+            expectations
+                .nodes
+                .push(expected_node("root", "mul1", mul_position));
+            expectations
+                .nodes
+                .push(expected_node("root", "cos1", cos_position));
+            expectations
+                .connections
+                .push(expected_connection("root", "phase", 0, "mul1", 0));
+            expectations
+                .connections
+                .push(expected_connection("root", "mul1", 0, "cos1", 0));
+            expectations
+                .connections
+                .push(expected_connection("root", "cos1", 0, "tri", 0));
+            expectations
+                .source_contains
+                .push("(def mul1 (* phase 2.0))".to_string());
+            expectations
+                .source_contains
+                .push("(def cos1 (cos mul1))".to_string());
+            expectations
+                .source_contains
+                .push("(def tri (triangle cos1 0.1))".to_string());
+        }
+        3 => {
+            for (idx, connection) in root_patch.connections.iter().take(4).enumerate() {
+                let row = 18.25 + seed as f32 * 0.5 + idx as f32 * 3.75;
+                set_connection_segment_edit(
+                    &mut state,
+                    "root",
+                    connection,
+                    Some(CableSegmentInfo {
+                        is_segmented: true,
+                        segment_row: row,
+                    }),
+                );
+                expectations.segments.push(expected_segment(
+                    "root",
+                    &connection.from_node,
+                    connection.from_output,
+                    &connection.to_node,
+                    connection.to_input,
+                    row,
+                ));
+            }
+            move_all_persistence_nodes(
+                &mut state,
+                "root",
+                &root_patch,
+                seed,
+                5.0,
+                &mut expectations,
+            );
+        }
+        4 => {
+            let macro_patch = root_patch
+                .macros
+                .iter()
+                .find(|macro_patch| macro_patch.name == "fold")
+                .unwrap();
+            let literal_position = persistence_position(seed, 0, 55.0);
+            let phasor_position = persistence_position(seed, 1, 55.0);
+            let literal = allocate_created_text_node(&mut state, "macro:fold", "0.125");
+            let phasor = allocate_created_text_node(&mut state, "macro:fold", "phasor amt");
+            set_created_node_position(&mut state, "macro:fold", &literal, literal_position);
+            set_created_node_position(&mut state, "macro:fold", &phasor, phasor_position);
+            if let Some(old) = source_connection_for_input_opt(&macro_patch.patch, "shaped", 2) {
+                state
+                    .edit_state
+                    .deleted_connections
+                    .insert(connection_edit_key(
+                        "macro:fold",
+                        &source_connection_id(old),
+                    ));
+            }
+            connect_output_to_input(&mut state, "macro:fold", &literal, &phasor, 0);
+            connect_output_to_input(&mut state, "macro:fold", &phasor, "shaped", 2);
+            expectations
+                .nodes
+                .push(expected_node("macro:fold", "value1", literal_position));
+            expectations
+                .nodes
+                .push(expected_node("macro:fold", "phasor1", phasor_position));
+            expectations.connections.push(expected_connection(
+                "macro:fold",
+                "value1",
+                0,
+                "phasor1",
+                0,
+            ));
+            expectations.connections.push(expected_connection(
+                "macro:fold",
+                "amt",
+                0,
+                "phasor1",
+                1,
+            ));
+            expectations.connections.push(expected_connection(
+                "macro:fold",
+                "phasor1",
+                0,
+                "shaped",
+                2,
+            ));
+            expectations
+                .source_contains
+                .push("(def value1 0.125)".to_string());
+            expectations
+                .source_contains
+                .push("(def phasor1 (phasor value1 amt))".to_string());
+            expectations
+                .source_contains
+                .push("(def shaped (mix sig amt phasor1))".to_string());
+            expectations
+                .source_not_contains
+                .push("(def phasor1 (phasor 0.125".to_string());
+        }
+        5 => {
+            let value_position = persistence_position(seed, 0, 25.0);
+            let shaper_position = persistence_position(seed, 1, 25.0);
+            let value = allocate_created_text_node(&mut state, "root", "0.875");
+            let shaper = allocate_created_text_node(&mut state, "root", "mix phase 0.25");
+            set_created_node_position(&mut state, "root", &value, value_position);
+            set_created_node_position(&mut state, "root", &shaper, shaper_position);
+            let old = source_connection_for_input(&root_patch, "shaped", 0);
+            state
+                .edit_state
+                .deleted_connections
+                .insert(connection_edit_key("root", &source_connection_id(old)));
+            connect_output_to_input(&mut state, "root", &value, &shaper, 0);
+            connect_output_to_input(&mut state, "root", &shaper, "shaped", 0);
+            expectations
+                .nodes
+                .push(expected_node("root", "value1", value_position));
+            expectations
+                .nodes
+                .push(expected_node("root", "mix1", shaper_position));
+            expectations
+                .connections
+                .push(expected_connection("root", "value1", 0, "mix1", 0));
+            expectations
+                .connections
+                .push(expected_connection("root", "phase", 0, "mix1", 1));
+            expectations
+                .connections
+                .push(expected_connection("root", "mix1", 0, "shaped", 0));
+            expectations
+                .source_contains
+                .push("(def mix1 (mix value1 phase 0.25))".to_string());
+        }
+        6 => {
+            let rate = root_patch
+                .nodes
+                .iter()
+                .find(|node| node.id == "rate")
+                .expect("fixture should project source constant rate");
+            let position = persistence_position(seed, 0, 35.0);
+            set_node_edit_position(&mut state, "root", rate, position, node_display_label(rate));
+            state
+                .edit_state
+                .nodes
+                .get_mut(&node_edit_key("root", &rate.id))
+                .unwrap()
+                .text = "phasor".to_string();
+            expectations
+                .nodes
+                .push(expected_node("root", "rate", position));
+            expectations
+                .source_contains
+                .push("(def rate (phasor))".to_string());
+            expectations
+                .source_not_contains
+                .push("(def rate phasor)".to_string());
+        }
+        _ => {
+            move_all_persistence_nodes(
+                &mut state,
+                "root",
+                &root_patch,
+                seed,
+                12.0,
+                &mut expectations,
+            );
+            let macro_patch = root_patch
+                .macros
+                .iter()
+                .find(|macro_patch| macro_patch.name == "fold")
+                .unwrap();
+            move_all_persistence_nodes(
+                &mut state,
+                "macro:fold",
+                &macro_patch.patch,
+                seed + 23,
+                65.0,
+                &mut expectations,
+            );
+            let connection = root_patch
+                .connections
+                .iter()
+                .find(|connection| connection.to_node == "folded")
+                .unwrap_or_else(|| root_patch.connections.first().unwrap());
+            let row = 27.75 + seed as f32;
+            set_connection_segment_edit(
+                &mut state,
+                "root",
+                connection,
+                Some(CableSegmentInfo {
+                    is_segmented: true,
+                    segment_row: row,
+                }),
+            );
+            expectations.segments.push(expected_segment(
+                "root",
+                &connection.from_node,
+                connection.from_output,
+                &connection.to_node,
+                connection.to_input,
+                row,
+            ));
+        }
+    }
+
+    (node, state, expectations)
+}
+
+fn run_persistence_case(seed: u64) {
+    let case_name = format!("persistence-seed-{seed}");
+    let path = temp_patcher_dsp_path(&case_name);
+    let (node, state, expectations) = build_persistence_case(seed, &path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, state);
+
+    let (source, layout) = persistence_payload_source_and_layout(&node, &case_name);
+    fs::write(&path, &source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&path), &layout).unwrap();
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+
+    let (_path, reloaded) = load_patch_from_props(&node.props).unwrap();
+    assert_persistence_expectations(&case_name, &source, &layout, &reloaded, &expectations);
+
+    let second_layout =
+        sidecar::current_layout_json(&reloaded, &PatcherInteractionState::default()).unwrap();
+    let first_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    let second_json: serde_json::Value = serde_json::from_str(&second_layout).unwrap();
+    assert_eq!(
+        second_json, first_json,
+        "{case_name}: reload/materialize changed persisted layout sidecar"
+    );
+}
+
+fn run_patcher_persistence_fuzz(seed_count: u64) {
+    for seed in 0..seed_count {
+        run_persistence_case(seed);
+    }
+}
+
+#[test]
+fn patcher_persistence_fuzz_default() {
+    run_patcher_persistence_fuzz(16);
+}
+
+#[test]
+#[ignore = "larger deterministic patcher persistence corpus"]
+fn patcher_persistence_fuzz_stress() {
+    run_patcher_persistence_fuzz(96);
+}
+
 #[test]
 fn reset_patcher_state_for_path_clears_registered_stable_widget_state() {
     let path = temp_patcher_dsp_path("patcher-reset-stable-key");
@@ -717,6 +1394,37 @@ fn reset_patcher_state_for_path_clears_registered_stable_widget_state() {
     assert!(
         get_patcher_interaction_state(key).selected_nodes.is_empty(),
         "mode reset should clear stable-widget keyed patcher interaction state"
+    );
+}
+
+#[test]
+fn patcher_state_key_separates_paths_even_when_stable_widget_id_is_reused() {
+    let draft_path = temp_patcher_dsp_path("patcher-stable-key-draft");
+    let final_path = temp_patcher_dsp_path("patcher-stable-key-final");
+    fs::write(&draft_path, "(def input (in 1 @name input))\n(out input)").unwrap();
+    fs::write(&final_path, "(def input (in 1 @name input))\n(out input)").unwrap();
+
+    let mut draft_node = patcher_test_node(&draft_path);
+    draft_node.stable_widget_id = Some(112_358);
+    let mut final_node = patcher_test_node(&final_path);
+    final_node.stable_widget_id = draft_node.stable_widget_id;
+
+    let draft_key = patcher_state_key(&draft_node);
+    let final_key = patcher_state_key(&final_node);
+    assert_ne!(
+        draft_key, final_key,
+        "a reused patcher widget slot must not carry draft edit state into a different source path"
+    );
+
+    let mut draft_state = PatcherInteractionState::default();
+    draft_state.selected_nodes.insert("input".to_string());
+    set_patcher_interaction_state(draft_key, draft_state);
+
+    assert!(
+        get_patcher_interaction_state(final_key)
+            .selected_nodes
+            .is_empty(),
+        "opening a finalized patch in the same widget slot should start from its own path state"
     );
 }
 
@@ -1694,6 +2402,96 @@ fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
         .find(|patch_node| patch_node.id == "mul1")
         .expect("finalized patch should reload generated multiply node");
     assert_eq!(mul.position, placed_position);
+}
+
+#[test]
+fn agentic_created_macro_save_payload_reopens_with_visible_instance_layout() {
+    let path = temp_patcher_dsp_path("patcher-agentic-created-macro-layout");
+    fs::write(
+        &path,
+        "(def input (in 1 @name input))\n(out input 1 @name audio)\n",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    load_patch_from_props(&node.props).unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (12.0, 8.0));
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).unwrap();
+    bubble.generation = 1;
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    resolve_agentic_bubble(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        1,
+        "softfold",
+        "(defmacro softfold (sig) (tanh sig))",
+    )
+    .unwrap();
+
+    let mut state = get_patcher_interaction_state(key);
+    let visible = debug_patch_for_state(&node, &state, "root").unwrap();
+    let macro_instance = visible
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "softfold")
+        .expect("visible agentic macro instance");
+    let macro_instance_id = macro_instance.id.clone();
+    let input_to_audio = visible
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "input" && connection.to_node == "audio")
+        .expect("input should initially feed the output");
+    let placed_position = (91.25, 37.5);
+    set_node_edit_position(
+        &mut state,
+        "root",
+        macro_instance,
+        placed_position,
+        node_display_label(macro_instance),
+    );
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(input_to_audio),
+        ));
+    connect_output_to_input(&mut state, "root", "input", &macro_instance_id, 0);
+    connect_output_to_input(&mut state, "root", &macro_instance_id, "audio", 0);
+    set_patcher_interaction_state(key, state);
+
+    let payload = patcher_writeback_payload(&node);
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+    let source = match map.get("source").map(|value| value.borrow().clone()) {
+        Some(Value::String(source)) => source,
+        other => panic!("expected emitted source string, got {other:?}; payload={map:?}"),
+    };
+    let layout = match map.get("layout").map(|value| value.borrow().clone()) {
+        Some(Value::String(layout)) => layout,
+        other => panic!("expected emitted layout string, got {other:?}; payload={map:?}"),
+    };
+
+    let final_path = temp_patcher_dsp_path("patcher-agentic-created-macro-final");
+    fs::write(&final_path, source).unwrap();
+    fs::write(sidecar::sidecar_path_for_source(&final_path), layout).unwrap();
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let final_node = patcher_test_node(&final_path);
+    let (_path, reloaded) = load_patch_from_props(&final_node.props).unwrap();
+    let reloaded_instance = reloaded
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "softfold")
+        .expect("reloaded macro instance");
+    assert_eq!(reloaded_instance.position, placed_position);
 }
 
 #[test]
@@ -3601,6 +4399,69 @@ fn writeback_constant_text_edit_to_param_rewrites_binding_references() {
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
         "(param xyz)\n(def phasor1 (phasor xyz))"
+    );
+}
+
+#[test]
+fn writeback_constant_text_edit_to_known_operator_emits_call_not_symbol_literal() {
+    let source = r#"
+        (def rate 0.5)
+        (def phasor1 (phasor rate))
+    "#;
+    let patch = parse(source);
+    let rate = patch.nodes.iter().find(|node| node.id == "rate").unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", rate, node_display_label(rate));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &rate.id))
+        .unwrap()
+        .text = "phasor".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert_eq!(emitted, "(def rate (phasor))\n(def phasor1 (phasor rate))");
+    let roundtrip = parse(&emitted);
+    let rate = roundtrip
+        .nodes
+        .iter()
+        .find(|node| node.id == "rate")
+        .expect("edited constant should reload as a source-owned phasor node");
+    assert_eq!(rate.op, "phasor");
+    assert_eq!(node_display_label(rate), "phasor");
+}
+
+#[test]
+fn writeback_created_literal_does_not_alias_existing_equal_constant_binding() {
+    let source = r#"
+        (def rate 0.5)
+        (def trigger (in 4 @name trigger))
+        (def phase (phasor trigger))
+        (def tri (triangle phase 0.1))
+    "#;
+    let root_patch = parse(source);
+    let mut state = PatcherInteractionState::default();
+    let literal = allocate_created_text_node(&mut state, "root", "0.5");
+    let phasor = allocate_created_text_node(&mut state, "root", "phasor trigger");
+    connect_output_to_input(&mut state, "root", &literal, &phasor, 0);
+    connect_output_to_input(&mut state, "root", &phasor, "tri", 1);
+    if let Some(old) = source_connection_for_input_opt(&root_patch, "tri", 1) {
+        state
+            .edit_state
+            .deleted_connections
+            .insert(connection_edit_key("root", &source_connection_id(old)));
+    }
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def value1 0.5)")
+            && emitted.contains("(def phasor1 (phasor value1 trigger))")
+            && emitted.contains("(def tri (triangle phase phasor1))"),
+        "created visible literal should get its own binding instead of reusing `rate`:\n{emitted}"
+    );
+    assert!(
+        !emitted.contains("(def phasor1 (phasor rate trigger))"),
+        "created literal must not alias the existing equal-valued rate binding:\n{emitted}"
     );
 }
 

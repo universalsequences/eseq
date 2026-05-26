@@ -73,14 +73,13 @@ pub(super) fn patcher_state_key_from_parts(
     stable_widget_id: Option<u64>,
     props: &HashMap<String, Value>,
 ) -> u64 {
-    stable_widget_id.unwrap_or_else(|| {
-        let mut hasher = DefaultHasher::new();
-        "patcher".hash(&mut hasher);
-        prop_str(props, "path").hash(&mut hasher);
-        prop_str(props, "file").hash(&mut hasher);
-        prop_str(props, "intent").hash(&mut hasher);
-        hasher.finish()
-    })
+    let mut hasher = DefaultHasher::new();
+    "patcher".hash(&mut hasher);
+    stable_widget_id.hash(&mut hasher);
+    prop_str(props, "path").hash(&mut hasher);
+    prop_str(props, "file").hash(&mut hasher);
+    prop_str(props, "intent").hash(&mut hasher);
+    hasher.finish()
 }
 
 pub(super) fn get_patcher_pan_state(key: u64) -> PatcherPanState {

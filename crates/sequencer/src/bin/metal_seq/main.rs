@@ -1147,7 +1147,10 @@ fn patcher_layout_sidecar_path_for_dsp(dsp_path: &Path) -> PathBuf {
 fn copy_patcher_layout_sidecar(source_dsp: &Path, target_dsp: &Path) -> std::io::Result<()> {
     let source_layout = patcher_layout_sidecar_path_for_dsp(source_dsp);
     if !source_layout.exists() {
-        return Ok(());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("missing layout sidecar '{}'", source_layout.display()),
+        ));
     }
     let target_layout = patcher_layout_sidecar_path_for_dsp(target_dsp);
     if let Some(parent) = target_layout.parent() {
@@ -8151,6 +8154,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(layout) = session.last_valid_layout.as_deref() {
                                         if let Err(e) =
                                             write_patcher_layout_sidecar(&final_dsp, layout)
+                                        {
+                                            let _ = std::fs::remove_dir_all(&final_dir);
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-error",
+                                                Value::String(format!(
+                                                    "Failed to save layout: {e}"
+                                                )),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            continue;
+                                        }
+                                    } else if let EffectEditMode::CreateDraft { temp_dir } =
+                                        &session.mode
+                                    {
+                                        let source_dsp = temp_dir.join("dsp.lisp");
+                                        if let Err(e) =
+                                            copy_patcher_layout_sidecar(&source_dsp, &final_dsp)
                                         {
                                             let _ = std::fs::remove_dir_all(&final_dir);
                                             let rt = editor.runtime_mut();

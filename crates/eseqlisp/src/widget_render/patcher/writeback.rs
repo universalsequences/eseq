@@ -1910,6 +1910,9 @@ fn materialized_created_node_binding(
     view_key: &str,
     edit: &super::state::PatcherNodeEdit,
 ) -> Result<Option<String>, WriteBackError> {
+    if created_literal_expr(edit).is_some() {
+        return Ok(None);
+    }
     let expr = match created_value_expression(
         document,
         root_patch,
@@ -4585,6 +4588,11 @@ fn edited_expression_for_node(
     }
 
     if node.kind == NodeKind::Constant {
+        if let Ok(Expression::Symbol(symbol)) = parse_single_expression(trimmed)
+            && document.is_known_operator(&symbol)
+        {
+            return Ok(Expression::List(vec![Expression::Symbol(symbol)]));
+        }
         return parse_single_expression(trimmed)
             .or_else(|_| parse_single_expression(&format!("({trimmed})")));
     }

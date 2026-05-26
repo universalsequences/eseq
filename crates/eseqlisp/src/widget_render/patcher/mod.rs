@@ -1353,38 +1353,61 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     };
 
     let root_patch = match load_patch_from_props(&node.props) {
-        Ok((_, patch)) => Some(patch),
+        Ok((_, patch)) => patch,
         Err(error) => {
             debug_log_writeback_event(
                 "layout-source-load-failed",
                 format!("path={path_str}\nintent={intent:?}\nerror={error}"),
             );
-            None
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                (
+                    "diagnostic",
+                    Value::String(format!(
+                        "failed to load current patch for layout persistence: {error}"
+                    )),
+                ),
+            ]);
         }
     };
 
     match emit_patch_writeback_result(&source, intent, &state) {
         Ok(result) => {
-            let layout = root_patch.and_then(|root_patch| {
-                match parse_patch_source(&result.source, intent) {
-                    Ok(mut emitted_patch) => match sidecar::emitted_layout_json_with_node_map(
-                        &mut emitted_patch,
-                        &root_patch,
-                        &state,
-                        &result.generated_node_ids,
-                    ) {
-                        Ok(layout) => Some(layout),
-                        Err(error) => {
-                            eprintln!("failed to build emitted patcher layout: {error}");
-                            None
-                        }
-                    },
+            let layout = match parse_patch_source(&result.source, intent) {
+                Ok(mut emitted_patch) => match sidecar::emitted_layout_json_with_node_map(
+                    &mut emitted_patch,
+                    &root_patch,
+                    &state,
+                    &result.generated_node_ids,
+                ) {
+                    Ok(layout) => layout,
                     Err(error) => {
-                        eprintln!("failed to parse emitted patch for layout persistence: {error}");
-                        None
+                        return map_value(vec![
+                            ("status", Value::Keyword("invalid".to_string())),
+                            ("path", Value::String(path_str)),
+                            (
+                                "diagnostic",
+                                Value::String(format!(
+                                    "failed to build emitted patcher layout: {error}"
+                                )),
+                            ),
+                        ]);
                     }
+                },
+                Err(error) => {
+                    return map_value(vec![
+                        ("status", Value::Keyword("invalid".to_string())),
+                        ("path", Value::String(path_str)),
+                        (
+                            "diagnostic",
+                            Value::String(format!(
+                                "failed to parse emitted patch for layout persistence: {error}"
+                            )),
+                        ),
+                    ]);
                 }
-            });
+            };
             debug_log_writeback_event(
                 "payload-valid",
                 format!(
@@ -1392,14 +1415,12 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
                     result.source
                 ),
             );
-            let mut entries = vec![
+            let entries = vec![
                 ("status", Value::Keyword("valid".to_string())),
                 ("path", Value::String(path_str)),
                 ("source", Value::String(result.source)),
+                ("layout", Value::String(layout)),
             ];
-            if let Some(layout) = layout {
-                entries.push(("layout", Value::String(layout)));
-            }
             map_value(entries)
         }
         Err(error) => {
