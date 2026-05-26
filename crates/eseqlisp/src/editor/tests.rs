@@ -743,6 +743,108 @@ fn hot_reload_effect_buffer_keeps_subtree_reactive_dependencies_after_body_reloa
 }
 
 #[test]
+fn hot_reload_replaces_module_subtree_effects_instead_of_accumulating_them() {
+    let dir = hot_reload_temp_dir("eseqlisp-hot-subtree-effect-count");
+    let root = dir.join("root.lisp");
+    let child = dir.join("child.lisp");
+    std::fs::write(&root, r#"(load "child.lisp")"#).unwrap();
+    std::fs::write(
+        &child,
+        r#"(effect-buffer "*hot-subtree-count*"
+  (v-stack
+    (subtree :key "row"
+      (label (fmt "count: {}" APP.count)))))"#,
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new();
+    runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_or_create_file_buffer(&root).unwrap();
+    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    let child_module = std::fs::canonicalize(&child).unwrap_or_else(|_| child.clone());
+
+    let root_source = editor.active_buffer().text();
+    let overlays = editor.snapshot_file_backed_sources();
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(root.clone()), &root_source, overlays);
+    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    editor.process_lisp_reload_report(report);
+    assert_eq!(
+        editor
+            .runtime()
+            .debug_effect_count_for_module(&child_module),
+        2,
+        "initial child module should own one top-level effect and one subtree effect"
+    );
+
+    let hot_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*hot-subtree-count*")
+        .map(|buffer| buffer.id)
+        .expect("hot-subtree-count buffer");
+    editor.set_active_buffer(hot_id);
+
+    let child_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.path.as_ref() == Some(&child))
+        .unwrap();
+    for revision in 0..3 {
+        editor.buffers[child_idx].set_text(&format!(
+            r#"(effect-buffer "*hot-subtree-count*"
+  (v-stack
+    (subtree :key "row"
+      (v-stack
+        (label (fmt "count: {{}}" APP.count))
+        (label "reload-{revision}")))))"#
+        ));
+        editor.buffers[child_idx].dirty = true;
+        let leaf_source = editor.buffers[child_idx].text();
+        let overlays = editor.snapshot_file_backed_sources();
+        let report =
+            editor
+                .runtime_mut()
+                .eval_source_transactional(Some(child.clone()), &leaf_source, overlays);
+        assert!(
+            report.success,
+            "child reload {revision} failed: {:?}",
+            report.diagnostics
+        );
+        editor.process_lisp_reload_report(report);
+        assert_eq!(
+            editor
+                .runtime()
+                .debug_effect_count_for_module(&child_module),
+            2,
+            "reload {revision} should replace stale child subtree effects, not accumulate them"
+        );
+    }
+
+    let outcome =
+        editor
+            .runtime_mut()
+            .set_reactive("APP", "count", Value::Number(2.0));
+    assert!(
+        outcome.effects_dirty,
+        "remaining subtree effect should stay subscribed to APP.count"
+    );
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    let tree = editor
+        .runtime
+        .current_widget_tree()
+        .expect("active hot-subtree-count tree");
+    assert!(
+        widget_has_label_text(&tree, "reload-2"),
+        "reactive rerender should use the latest reloaded subtree body"
+    );
+}
+
+#[test]
 fn hot_reload_active_effect_buffer_updates_after_reactive_change() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-active-reactive");
     let root = dir.join("root.lisp");

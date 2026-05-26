@@ -1987,7 +1987,7 @@ impl VM {
                 .push(format!("{}: {error}", path.display()));
             VMError::ParseError
         })?;
-        self.clear_top_level_effects_for_module(&path);
+        self.clear_effects_for_module(&path);
         self.source_manager.enter_module(path.clone());
         let result = self.eval_str(source);
         self.source_manager.leave_module();
@@ -2209,7 +2209,7 @@ impl VM {
         });
     }
 
-    pub fn clear_top_level_effects_for_module(&mut self, module: &std::path::Path) {
+    pub fn clear_effects_for_module(&mut self, module: &std::path::Path) {
         let ids = self
             .dag
             .nodes
@@ -2217,7 +2217,6 @@ impl VM {
             .filter_map(|(id, node)| match node {
                 ReactiveNode::Effect {
                     source_module: Some(source_module),
-                    subtree_root_id: None,
                     ..
                 } if source_module == module => Some(*id),
                 _ => None,
@@ -2226,6 +2225,23 @@ impl VM {
         for id in ids {
             self.dag.remove_node(id);
         }
+    }
+
+    #[cfg(test)]
+    pub fn effect_count_for_module(&self, module: &std::path::Path) -> usize {
+        self.dag
+            .nodes
+            .values()
+            .filter(|node| {
+                matches!(
+                    node,
+                    ReactiveNode::Effect {
+                        source_module: Some(source_module),
+                        ..
+                    } if source_module == module
+                )
+            })
+            .count()
     }
 
     fn upsert_top_level_effect_node(

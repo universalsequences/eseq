@@ -1621,7 +1621,7 @@ impl Runtime {
 
         let eval_result = if let Some(path) = evaluated_path.clone() {
             if eval_source.contains("(effect") || eval_source.contains("(effect-buffer") {
-                self.vm.clear_top_level_effects_for_module(&path);
+                self.vm.clear_effects_for_module(&path);
             }
             self.vm
                 .eval_module_source(path, &eval_source, eval_revision)
@@ -1737,7 +1737,7 @@ impl Runtime {
             };
             evaluated_path = Some(loaded.path.clone());
             if loaded.text.contains("(effect") || loaded.text.contains("(effect-buffer") {
-                self.vm.clear_top_level_effects_for_module(&loaded.path);
+                self.vm.clear_effects_for_module(&loaded.path);
             }
             if let Err(error) =
                 self.vm
@@ -2390,6 +2390,11 @@ impl Runtime {
     #[cfg(test)]
     pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {
         std::mem::take(&mut self.rendered_layouts)
+    }
+
+    #[cfg(test)]
+    pub fn debug_effect_count_for_module(&self, module: &std::path::Path) -> usize {
+        self.vm.effect_count_for_module(module)
     }
 
     pub fn current_widget_tree(&self) -> Option<Value> {
