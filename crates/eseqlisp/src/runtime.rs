@@ -49,6 +49,12 @@ pub struct ReactiveFlushStats {
     pub pending_subtree_patch_count: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ClearedEffectSource {
+    pub source_buffer_id: Option<BufferId>,
+    pub runtime_generation: u64,
+}
+
 struct ActiveSubtreeReplacement {
     source_buffer_id: Option<BufferId>,
     target: EffectTarget,
@@ -706,7 +712,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_widget_tree: Option<Value>,
     pub pending_buffer_widget_trees: Vec<PendingUiUpdate>,
     pub pending_create_buffer: Option<String>,
-    pub pending_cleared_effect_sources: Vec<Option<BufferId>>,
+    pub pending_cleared_effect_sources: Vec<ClearedEffectSource>,
     pub pending_switch_buffer: Option<String>,
     pub pending_set_text: Option<String>,
     pub pending_set_lines: Option<Vec<String>>,
@@ -994,6 +1000,7 @@ pub struct Runtime {
     deferred_layout_invalidated: bool,
     current_widget_tree: Option<Value>,
     current_committed_ui_snapshot: Option<CommittedBufferUiSnapshot>,
+    current_committed_ui_snapshot_generation: u64,
     layout_cols: f32,
     layout_rows: f32,
     layout_aspect: f32,
@@ -1020,6 +1027,7 @@ struct RuntimeStateSnapshot {
     deferred_layout_invalidated: bool,
     current_widget_tree: Option<Value>,
     current_committed_ui_snapshot: Option<CommittedBufferUiSnapshot>,
+    current_committed_ui_snapshot_generation: u64,
     last_ui_invalidation_trace: Option<UiInvalidationTrace>,
 }
 
@@ -1054,6 +1062,7 @@ impl Runtime {
             deferred_layout_invalidated: false,
             current_widget_tree: None,
             current_committed_ui_snapshot: None,
+            current_committed_ui_snapshot_generation: 0,
             layout_cols: 80.0,
             layout_rows: 24.0,
             layout_aspect: 1.0,
@@ -1537,6 +1546,7 @@ impl Runtime {
             deferred_layout_invalidated: self.deferred_layout_invalidated,
             current_widget_tree: self.current_widget_tree.clone(),
             current_committed_ui_snapshot: self.current_committed_ui_snapshot.clone(),
+            current_committed_ui_snapshot_generation: self.current_committed_ui_snapshot_generation,
             last_ui_invalidation_trace: self.last_ui_invalidation_trace.clone(),
         }
     }
@@ -1556,6 +1566,8 @@ impl Runtime {
         self.deferred_layout_invalidated = snapshot.deferred_layout_invalidated;
         self.current_widget_tree = snapshot.current_widget_tree;
         self.current_committed_ui_snapshot = snapshot.current_committed_ui_snapshot;
+        self.current_committed_ui_snapshot_generation =
+            snapshot.current_committed_ui_snapshot_generation;
         self.last_ui_invalidation_trace = snapshot.last_ui_invalidation_trace;
     }
 
@@ -2318,7 +2330,7 @@ impl Runtime {
         self.shared.borrow_mut().pending_create_buffer.take()
     }
 
-    pub(crate) fn take_pending_cleared_effect_sources(&mut self) -> Vec<Option<BufferId>> {
+    pub(crate) fn take_pending_cleared_effect_sources(&mut self) -> Vec<ClearedEffectSource> {
         std::mem::take(&mut self.shared.borrow_mut().pending_cleared_effect_sources)
     }
 
@@ -2405,6 +2417,19 @@ impl Runtime {
         self.current_committed_ui_snapshot.clone()
     }
 
+    pub fn current_committed_ui_snapshot_generation(&self) -> Option<u64> {
+        self.current_committed_ui_snapshot
+            .as_ref()
+            .map(|_| self.current_committed_ui_snapshot_generation)
+    }
+
+    fn commit_current_ui_snapshot(&mut self, snapshot: Option<CommittedBufferUiSnapshot>) {
+        self.current_committed_ui_snapshot = snapshot;
+        self.current_committed_ui_snapshot_generation = self
+            .current_committed_ui_snapshot_generation
+            .wrapping_add(1);
+    }
+
     pub fn current_subtree_roots_for_field(&self, namespace: &str, field: &str) -> Vec<u64> {
         let Some(snapshot) = self.current_committed_ui_snapshot.as_ref() else {
             return Vec::new();
@@ -2432,6 +2457,7 @@ impl Runtime {
     ) -> Option<Arc<LayoutNode>> {
         let saved_tree = self.current_widget_tree.clone();
         let saved_committed_snapshot = self.current_committed_ui_snapshot.clone();
+        let saved_committed_snapshot_generation = self.current_committed_ui_snapshot_generation;
         let saved_layout = self.current_layout.clone();
         let saved_revision = self.layout_revision;
         let saved_dirty = self.dirty_widget_ids.clone();
@@ -2454,16 +2480,17 @@ impl Runtime {
         // both relayout work and profiling noise.
         self.current_layout = None;
         self.current_widget_tree = Some(tree.deep_clone());
-        self.current_committed_ui_snapshot = Some(CommittedBufferUiSnapshot::from_tree(
+        self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
             tree.deep_clone(),
             None,
             Vec::new(),
-        ));
+        )));
         self.relayout_current_tree();
         let snapshot = self.current_layout.clone();
 
         self.current_widget_tree = saved_tree;
         self.current_committed_ui_snapshot = saved_committed_snapshot;
+        self.current_committed_ui_snapshot_generation = saved_committed_snapshot_generation;
         self.current_layout = saved_layout;
         self.layout_revision = saved_revision;
         self.dirty_widget_ids = saved_dirty;
@@ -2484,7 +2511,7 @@ impl Runtime {
     /// Used when switching to a buffer/tile that has no widget tree.
     pub fn clear_current_widget_tree(&mut self) {
         self.current_widget_tree = None;
-        self.current_committed_ui_snapshot = None;
+        self.commit_current_ui_snapshot(None);
         self.current_layout = None;
         self.reactive_registry
             .replace_widget_bindings_from_layout(None);
@@ -2515,11 +2542,12 @@ impl Runtime {
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
         self.current_widget_tree = Some(tree.deep_clone());
-        self.current_committed_ui_snapshot = Some(CommittedBufferUiSnapshot::from_tree(
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
             tree.deep_clone(),
-            self.shared.borrow().current_buffer_id,
+            current_buffer_id,
             Vec::new(),
-        ));
+        )));
         self.relayout_current_tree();
     }
 
@@ -2527,11 +2555,12 @@ impl Runtime {
     /// without clearing reactive effects.
     pub fn restore_widget_tree(&mut self, tree: Value) {
         self.current_widget_tree = Some(tree.deep_clone());
-        self.current_committed_ui_snapshot = Some(CommittedBufferUiSnapshot::from_tree(
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
             tree.deep_clone(),
-            self.shared.borrow().current_buffer_id,
+            current_buffer_id,
             Vec::new(),
-        ));
+        )));
         self.relayout_current_tree();
         // Force layout revision bump so GPU caches rebuild
         self.layout_revision = self.layout_revision.wrapping_add(1);
@@ -2554,13 +2583,14 @@ impl Runtime {
         }
         self.widget_id_offset = widget_id_offset;
         self.current_widget_tree = Some(tree.clone());
-        self.current_committed_ui_snapshot = snapshot.or_else(|| {
+        let snapshot = snapshot.or_else(|| {
             Some(CommittedBufferUiSnapshot::from_tree(
                 tree,
                 self.shared.borrow().current_buffer_id,
                 Vec::new(),
             ))
         });
+        self.commit_current_ui_snapshot(snapshot);
         if let Some(layout) = cached_layout {
             self.current_layout = Some(layout);
             self.reactive_registry
@@ -2582,13 +2612,14 @@ impl Runtime {
     ) {
         self.widget_id_offset = widget_id_offset;
         self.current_widget_tree = Some(tree.clone());
-        self.current_committed_ui_snapshot = snapshot.or_else(|| {
+        let snapshot = snapshot.or_else(|| {
             Some(CommittedBufferUiSnapshot::from_tree(
                 tree,
                 self.shared.borrow().current_buffer_id,
                 Vec::new(),
             ))
         });
+        self.commit_current_ui_snapshot(snapshot);
         self.relayout_current_tree();
         self.layout_revision = self.layout_revision.wrapping_add(1);
     }
@@ -2620,7 +2651,7 @@ impl Runtime {
             return false;
         };
         self.current_widget_tree = Some(merged.tree.clone());
-        self.current_committed_ui_snapshot = Some(merged);
+        self.commit_current_ui_snapshot(Some(merged));
         if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
             trace.subtree_failure_reason = None;
         }
@@ -2648,7 +2679,7 @@ impl Runtime {
             return false;
         };
         self.current_widget_tree = Some(merged.tree.clone());
-        self.current_committed_ui_snapshot = Some(merged);
+        self.commit_current_ui_snapshot(Some(merged));
         if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
             trace.subtree_failure_reason = None;
         }
@@ -2691,17 +2722,20 @@ impl Runtime {
     pub fn clear_layout_effects(&mut self) {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.clear_effects_for_owner(current_buffer_id);
-        self.shared
-            .borrow_mut()
-            .pending_cleared_effect_sources
-            .push(current_buffer_id);
         self.current_layout = None;
         self.reactive_registry
             .replace_widget_bindings_from_layout(None);
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
         self.current_widget_tree = None;
-        self.current_committed_ui_snapshot = None;
+        self.commit_current_ui_snapshot(None);
+        self.shared
+            .borrow_mut()
+            .pending_cleared_effect_sources
+            .push(ClearedEffectSource {
+                source_buffer_id: current_buffer_id,
+                runtime_generation: self.current_committed_ui_snapshot_generation,
+            });
         #[cfg(test)]
         self.rendered_layouts.clear();
     }
@@ -2831,20 +2865,22 @@ impl Runtime {
                                 .is_some_and(|current| *current == pending.tree);
                             if !unchanged {
                                 self.current_widget_tree = Some(pending.tree.deep_clone());
-                                self.current_committed_ui_snapshot =
-                                    Some(CommittedBufferUiSnapshot::from_tree(
+                                self.commit_current_ui_snapshot(Some(
+                                    CommittedBufferUiSnapshot::from_tree(
                                         pending.tree.deep_clone(),
                                         pending.source_buffer_id,
                                         pending.reactive_dependencies.clone(),
-                                    ));
+                                    ),
+                                ));
                                 active_tree_changed = true;
                             } else {
-                                self.current_committed_ui_snapshot =
-                                    Some(CommittedBufferUiSnapshot::from_tree(
+                                self.commit_current_ui_snapshot(Some(
+                                    CommittedBufferUiSnapshot::from_tree(
                                         pending.tree.deep_clone(),
                                         pending.source_buffer_id,
                                         pending.reactive_dependencies.clone(),
-                                    ));
+                                    ),
+                                ));
                             }
                         }
                     }

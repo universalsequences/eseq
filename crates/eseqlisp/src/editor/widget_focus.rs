@@ -2,9 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::layout::LayoutNode;
 use crate::vm::Value;
-use crate::widget_render::{WidgetKeyEvent, handle_event, map_key_event};
+use crate::widget_render::{handle_event, map_key_event, WidgetKeyEvent};
 
-use super::{Editor, key_str};
+use super::{key_str, Editor};
 
 impl Editor {
     pub(super) fn set_focused_widget(&mut self, node: LayoutNode) {
@@ -464,8 +464,12 @@ impl Editor {
     }
 
     pub(super) fn save_current_widget_tree(&mut self) {
-        if let Some(snapshot) = self.runtime.current_committed_ui_snapshot() {
-            self.active_buffer_mut().adopt_committed_ui_snapshot(snapshot);
+        if let Some(runtime_generation) = self.runtime.current_committed_ui_snapshot_generation() {
+            let Some(snapshot) = self.runtime.current_committed_ui_snapshot() else {
+                return;
+            };
+            self.active_buffer_mut()
+                .adopt_runtime_committed_ui_snapshot(snapshot, runtime_generation);
         } else if let Some(tree) = self.runtime.current_widget_tree() {
             let source = self.active_buffer().widget_tree_source;
             self.active_buffer_mut().set_widget_tree(Some(tree), source);
@@ -536,7 +540,6 @@ impl Editor {
             }
         }
     }
-
 }
 
 fn same_focus_identity(a: &LayoutNode, b: &LayoutNode) -> bool {

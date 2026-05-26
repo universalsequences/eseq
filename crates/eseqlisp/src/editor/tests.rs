@@ -165,12 +165,13 @@ fn widget_label_text(value: &Value) -> Option<String> {
                     }
                 }
             }
-            map.get("children").and_then(|children| match &*children.borrow() {
-                Value::List(children) => children
-                    .iter()
-                    .find_map(|child| widget_label_text(&child.borrow())),
-                _ => None,
-            })
+            map.get("children")
+                .and_then(|children| match &*children.borrow() {
+                    Value::List(children) => children
+                        .iter()
+                        .find_map(|child| widget_label_text(&child.borrow())),
+                    _ => None,
+                })
         }
         _ => None,
     }
@@ -226,7 +227,9 @@ fn hot_reload_root_load_uses_dirty_child_overlay() {
 
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.open_or_create_file_buffer(&root).unwrap();
-    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    editor
+        .create_file_buffer(&child, BufferMode::ESeqLisp)
+        .unwrap();
     let child_idx = editor
         .buffers
         .iter()
@@ -237,9 +240,10 @@ fn hot_reload_root_load_uses_dirty_child_overlay() {
 
     let source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
-    let report = editor
-        .runtime_mut()
-        .eval_source_transactional(Some(root.clone()), &source, overlays);
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(root.clone()), &source, overlays);
     assert!(report.success, "reload failed: {:?}", report.diagnostics);
     editor.process_lisp_reload_report(report);
 
@@ -249,7 +253,10 @@ fn hot_reload_root_load_uses_dirty_child_overlay() {
         .find(|buffer| buffer.name == "*hot*")
         .expect("hot buffer");
     assert_eq!(
-        hot.widget_tree.as_ref().and_then(widget_label_text).as_deref(),
+        hot.widget_tree
+            .as_ref()
+            .and_then(widget_label_text)
+            .as_deref(),
         Some("dirty")
     );
     let hot_id = hot.id;
@@ -287,7 +294,11 @@ fn hot_reload_replaces_module_graph_children_on_successful_root_eval() {
     let mut runtime = Runtime::new();
     let source = std::fs::read_to_string(&root).unwrap();
     let report = runtime.eval_source_transactional(Some(root.clone()), &source, Vec::new());
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
 
     std::fs::write(
         &root,
@@ -322,19 +333,20 @@ fn hot_reload_replaces_module_graph_children_on_successful_root_eval() {
 fn hot_reload_active_named_buffer_syncs_active_tile_layout_cache() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-active-layout-sync");
     let root = dir.join("root.lisp");
-    std::fs::write(
-        &root,
-        r#"(effect-buffer "*hot-active*" (label "before"))"#,
-    )
-    .unwrap();
+    std::fs::write(&root, r#"(effect-buffer "*hot-active*" (label "before"))"#).unwrap();
 
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.set_layout_viewport(80, 20);
     let source = std::fs::read_to_string(&root).unwrap();
-    let report = editor
-        .runtime_mut()
-        .eval_source_transactional(Some(root.clone()), &source, Vec::new());
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(root.clone()), &source, Vec::new());
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let hot_id = editor
@@ -357,7 +369,11 @@ fn hot_reload_active_named_buffer_syncs_active_tile_layout_cache() {
     let report = editor
         .runtime_mut()
         .reload_paths_transactional(vec![root], Vec::new());
-    assert!(report.success, "hot reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "hot reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let active_layout = editor
@@ -394,10 +410,15 @@ fn hot_reload_active_named_buffer_does_not_auto_focus_first_widget() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.set_layout_viewport(80, 20);
     let source = std::fs::read_to_string(&root).unwrap();
-    let report = editor
-        .runtime_mut()
-        .eval_source_transactional(Some(root.clone()), &source, Vec::new());
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(root.clone()), &source, Vec::new());
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let hot_id = editor
@@ -433,7 +454,11 @@ fn hot_reload_active_named_buffer_does_not_auto_focus_first_widget() {
     let report = editor
         .runtime_mut()
         .reload_paths_transactional(vec![root], Vec::new());
-    assert!(report.success, "hot reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "hot reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     assert_eq!(
@@ -458,13 +483,20 @@ fn hot_reload_leaf_eval_rerenders_owner_root_and_rolls_back_bad_source() {
 
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.open_or_create_file_buffer(&root).unwrap();
-    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    editor
+        .create_file_buffer(&child, BufferMode::ESeqLisp)
+        .unwrap();
     let root_source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
-    let report = editor
-        .runtime_mut()
-        .eval_source_transactional(Some(root.clone()), &root_source, overlays);
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(root.clone()), &root_source, overlays);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let child_idx = editor
@@ -476,10 +508,15 @@ fn hot_reload_leaf_eval_rerenders_owner_root_and_rolls_back_bad_source() {
     editor.buffers[child_idx].dirty = true;
     let leaf_source = editor.buffers[child_idx].text();
     let overlays = editor.snapshot_file_backed_sources();
-    let report = editor
-        .runtime_mut()
-        .eval_source_transactional(Some(child.clone()), &leaf_source, overlays);
-    assert!(report.success, "leaf reload failed: {:?}", report.diagnostics);
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(child.clone()), &leaf_source, overlays);
+    assert!(
+        report.success,
+        "leaf reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
     let hot_idx = editor
         .buffers
@@ -530,14 +567,20 @@ fn hot_reload_effect_buffer_body_update_survives_dependency_rerender() {
 
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.open_or_create_file_buffer(&root).unwrap();
-    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    editor
+        .create_file_buffer(&child, BufferMode::ESeqLisp)
+        .unwrap();
     let root_source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
     let report =
         editor
             .runtime_mut()
             .eval_source_transactional(Some(root.clone()), &root_source, overlays);
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let child_idx = editor
@@ -559,7 +602,11 @@ fn hot_reload_effect_buffer_body_update_survives_dependency_rerender() {
         editor
             .runtime_mut()
             .eval_source_transactional(Some(child), &leaf_source, overlays);
-    assert!(report.success, "body reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "body reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let hot = editor
@@ -591,14 +638,20 @@ fn hot_reload_effect_buffer_keeps_reactive_dependencies_after_body_reload() {
     runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor.open_or_create_file_buffer(&root).unwrap();
-    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    editor
+        .create_file_buffer(&child, BufferMode::ESeqLisp)
+        .unwrap();
     let root_source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
     let report =
         editor
             .runtime_mut()
             .eval_source_transactional(Some(root.clone()), &root_source, overlays);
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let child_idx = editor
@@ -626,10 +679,9 @@ fn hot_reload_effect_buffer_keeps_reactive_dependencies_after_body_reload() {
     );
     editor.process_lisp_reload_report(report);
 
-    let outcome =
-        editor
-            .runtime_mut()
-            .set_reactive("APP", "count", Value::Number(2.0));
+    let outcome = editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(2.0));
     assert!(
         outcome.effects_dirty,
         "reloaded effect-buffer should stay subscribed to APP.count"
@@ -675,14 +727,20 @@ fn hot_reload_effect_buffer_keeps_subtree_reactive_dependencies_after_body_reloa
     runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor.open_or_create_file_buffer(&root).unwrap();
-    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    editor
+        .create_file_buffer(&child, BufferMode::ESeqLisp)
+        .unwrap();
     let root_source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
     let report =
         editor
             .runtime_mut()
             .eval_source_transactional(Some(root.clone()), &root_source, overlays);
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let child_idx = editor
@@ -712,10 +770,9 @@ fn hot_reload_effect_buffer_keeps_subtree_reactive_dependencies_after_body_reloa
     );
     editor.process_lisp_reload_report(report);
 
-    let outcome =
-        editor
-            .runtime_mut()
-            .set_reactive("APP", "count", Value::Number(2.0));
+    let outcome = editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(2.0));
     assert!(
         outcome.effects_dirty,
         "reloaded subtree should stay subscribed to APP.count"
@@ -761,7 +818,9 @@ fn hot_reload_replaces_module_subtree_effects_instead_of_accumulating_them() {
     runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor.open_or_create_file_buffer(&root).unwrap();
-    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    editor
+        .create_file_buffer(&child, BufferMode::ESeqLisp)
+        .unwrap();
     let child_module = std::fs::canonicalize(&child).unwrap_or_else(|_| child.clone());
 
     let root_source = editor.active_buffer().text();
@@ -770,7 +829,11 @@ fn hot_reload_replaces_module_subtree_effects_instead_of_accumulating_them() {
         editor
             .runtime_mut()
             .eval_source_transactional(Some(root.clone()), &root_source, overlays);
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
     assert_eq!(
         editor
@@ -805,10 +868,11 @@ fn hot_reload_replaces_module_subtree_effects_instead_of_accumulating_them() {
         editor.buffers[child_idx].dirty = true;
         let leaf_source = editor.buffers[child_idx].text();
         let overlays = editor.snapshot_file_backed_sources();
-        let report =
-            editor
-                .runtime_mut()
-                .eval_source_transactional(Some(child.clone()), &leaf_source, overlays);
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(child.clone()),
+            &leaf_source,
+            overlays,
+        );
         assert!(
             report.success,
             "child reload {revision} failed: {:?}",
@@ -824,10 +888,9 @@ fn hot_reload_replaces_module_subtree_effects_instead_of_accumulating_them() {
         );
     }
 
-    let outcome =
-        editor
-            .runtime_mut()
-            .set_reactive("APP", "count", Value::Number(2.0));
+    let outcome = editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(2.0));
     assert!(
         outcome.effects_dirty,
         "remaining subtree effect should stay subscribed to APP.count"
@@ -863,14 +926,20 @@ fn hot_reload_active_effect_buffer_updates_after_reactive_change() {
     runtime.register_reactive("APP", vec![("count", Value::Number(1.0))], true);
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor.open_or_create_file_buffer(&root).unwrap();
-    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    editor
+        .create_file_buffer(&child, BufferMode::ESeqLisp)
+        .unwrap();
     let root_source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
     let report =
         editor
             .runtime_mut()
             .eval_source_transactional(Some(root.clone()), &root_source, overlays);
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let hot_id = editor
@@ -909,10 +978,9 @@ fn hot_reload_active_effect_buffer_updates_after_reactive_change() {
     editor.process_lisp_reload_report(report);
     editor.set_active_buffer(hot_id);
 
-    let outcome =
-        editor
-            .runtime_mut()
-            .set_reactive("APP", "count", Value::Number(2.0));
+    let outcome = editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(2.0));
     assert!(
         outcome.effects_dirty,
         "active reloaded subtree should stay subscribed to APP.count"
@@ -964,14 +1032,20 @@ fn hot_reload_active_effect_buffer_keeps_selection_and_button_state_reactive() {
     );
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor.open_or_create_file_buffer(&root).unwrap();
-    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    editor
+        .create_file_buffer(&child, BufferMode::ESeqLisp)
+        .unwrap();
     let root_source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
     let report =
         editor
             .runtime_mut()
             .eval_source_transactional(Some(root.clone()), &root_source, overlays);
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
     let hot_id = editor
@@ -1055,13 +1129,21 @@ fn hot_reload_preserves_existing_defstate_values() {
     editor.open_or_create_file_buffer(&root).unwrap();
     let source = editor.active_buffer().text();
     let overlays = editor.snapshot_file_backed_sources();
-    let report = editor
-        .runtime_mut()
-        .eval_source_transactional(Some(root.clone()), &source, overlays);
-    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(root.clone()), &source, overlays);
+    assert!(
+        report.success,
+        "initial reload failed: {:?}",
+        report.diagnostics
+    );
     editor.process_lisp_reload_report(report);
 
-    editor.runtime.eval_str(r#"(set! hot-state "changed")"#).unwrap();
+    editor
+        .runtime
+        .eval_str(r#"(set! hot-state "changed")"#)
+        .unwrap();
     editor.runtime.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
@@ -1089,7 +1171,10 @@ fn hot_reload_preserves_existing_defstate_values() {
         .find(|buffer| buffer.name == "*hot-state*")
         .expect("hot-state buffer");
     assert_eq!(
-        hot.widget_tree.as_ref().and_then(widget_label_text).as_deref(),
+        hot.widget_tree
+            .as_ref()
+            .and_then(widget_label_text)
+            .as_deref(),
         Some("changed")
     );
 }
@@ -2398,14 +2483,12 @@ fn typing_exact_special_form_keeps_completion_popup_open() {
 
     assert_eq!(editor.active_buffer().text(), "(def");
     assert!(editor.completion_state().is_some());
-    assert!(
-        editor
-            .completion_state()
-            .unwrap()
-            .items
-            .iter()
-            .any(|item| item.label == "def")
-    );
+    assert!(editor
+        .completion_state()
+        .unwrap()
+        .items
+        .iter()
+        .any(|item| item.label == "def"));
 }
 
 #[test]
@@ -2423,6 +2506,37 @@ fn no_op_runtime_side_effect_refresh_keeps_completion_popup_open() {
 
     assert_eq!(editor.active_buffer().text(), "(de");
     assert!(editor.completion_state().is_some());
+}
+
+#[test]
+fn no_op_runtime_side_effect_refresh_does_not_resync_committed_widget_snapshot() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def level (state 0))
+            (effect
+              (hslider :min 0 :max 1 :value level :on-change |v| (set! level v)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    assert!(editor.active_buffer().committed_ui_snapshot.is_some());
+
+    let widget_tree_revision = editor.active_buffer().widget_tree_revision;
+    let committed_ui_revision = editor.active_buffer().committed_ui_revision;
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(
+        editor.active_buffer().widget_tree_revision,
+        widget_tree_revision
+    );
+    assert_eq!(
+        editor.active_buffer().committed_ui_revision,
+        committed_ui_revision
+    );
 }
 
 #[test]
@@ -3475,7 +3589,10 @@ fn tree_sample_drag_drops_on_compatible_box_target() {
         crate::widget_render::active_drop_hover_target().is_some(),
         "compatible drop target should become the active hover target during drag"
     );
-    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::DragCopy
+    );
     editor.handle_mouse_precise(
         mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
         0,
@@ -3610,7 +3727,10 @@ fn box_drag_payload_drops_on_compatible_box_target() {
         24.0,
         0.4,
     );
-    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::DragCopy
+    );
     editor.handle_mouse_precise(
         mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
         0,
@@ -3636,7 +3756,9 @@ fn box_drag_drops_on_target_inside_scrolled_container() {
         if node.stable_key.as_deref() == Some(key) {
             return Some(node);
         }
-        node.children.iter().find_map(|child| find_by_key(child, key))
+        node.children
+            .iter()
+            .find_map(|child| find_by_key(child, key))
     }
 
     let runtime = Runtime::new();
@@ -3701,7 +3823,10 @@ fn box_drag_drops_on_target_inside_scrolled_container() {
         24.0,
         1.4,
     );
-    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::DragCopy
+    );
     editor.handle_mouse_precise(
         mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 1),
         0,
@@ -3785,7 +3910,10 @@ fn tree_sample_drag_cursor_starts_after_pointer_moves_past_threshold() {
         crate::widget_render::active_drop_hover_target().is_some(),
         "drag hover should start once the pointer moves past the gesture threshold"
     );
-    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::DragCopy
+    );
 
     editor.handle_mouse_precise(
         mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
@@ -3950,7 +4078,10 @@ fn typed_widget_drag_can_drop_on_another_tile() {
         drop.1,
         1,
     );
-    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::DragCopy
+    );
     editor.handle_tiled_mouse_precise(
         mouse_event(
             MouseEventKind::Up(MouseButton::Left),
@@ -4057,7 +4188,10 @@ fn typed_widget_drag_can_drop_on_horizontally_scrolled_target_tile() {
         drop.1,
         0,
     );
-    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::DragCopy
+    );
     editor.handle_tiled_mouse_precise(
         mouse_event(
             MouseEventKind::Up(MouseButton::Left),
@@ -4084,7 +4218,9 @@ fn scrolled_tree_double_click_and_drag_use_visible_row() {
         if node.stable_key.as_deref() == Some(key) {
             return Some(node);
         }
-        node.children.iter().find_map(|child| find_by_key(child, key))
+        node.children
+            .iter()
+            .find_map(|child| find_by_key(child, key))
     }
 
     let items = (0..20)
@@ -5181,7 +5317,10 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
         knob.props.get("mod-ranges")
     );
     assert!(
-        matches!(knob.props.get("mod-range-0-depth"), Some(Value::ReactiveRef { .. })),
+        matches!(
+            knob.props.get("mod-range-0-depth"),
+            Some(Value::ReactiveRef { .. })
+        ),
         "flat reactive mod range props should be accepted by knob-number: {:?}",
         knob.props.get("mod-range-0-depth")
     );
@@ -5224,7 +5363,9 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     let text = primitives
         .iter()
         .filter_map(|primitive| match primitive {
-            crate::widget_render::MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+            crate::widget_render::MetalPrimitive::ProportionalText(text) => {
+                Some(text.text.as_str())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -5234,7 +5375,10 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
     assert_eq!(range_uniforms[0], [0.956, 0.5, 0.375, 0.0]);
     assert!((range_uniforms[1][0] - 0.895).abs() < 0.000_01);
     assert_eq!(&range_uniforms[1][1..], &[0.5, 0.75, 1.0]);
-    assert!(text.contains(&"cut"), "expected knob label text primitive: {text:?}");
+    assert!(
+        text.contains(&"cut"),
+        "expected knob label text primitive: {text:?}"
+    );
 }
 
 #[test]
@@ -6087,7 +6231,11 @@ fn buffer_list_native_order_tracks_recent_buffer_switches() {
     editor.open_scratch_buffer("*gain*", "");
     editor.set_active_buffer(grid_id);
 
-    let value = editor.runtime_mut().eval_str("(buffer-list)").unwrap().unwrap();
+    let value = editor
+        .runtime_mut()
+        .eval_str("(buffer-list)")
+        .unwrap()
+        .unwrap();
     let Value::List(items) = value else {
         panic!("expected buffer-list to return a list");
     };
@@ -6608,10 +6756,14 @@ fn touchpad_scroll_rematerializes_virtual_stack_on_next_frame() {
         1,
         "coalesced scroll burst should produce one relayout on the next frame"
     );
-    let scrolled_layout = scrolled_frame.widget_layout.expect("scrolled widget layout");
+    let scrolled_layout = scrolled_frame
+        .widget_layout
+        .expect("scrolled widget layout");
     let scrolled_rendered = crate::layout::format_layout_tree_lines(&scrolled_layout, 0);
     assert!(
-        scrolled_rendered.iter().any(|line| line.contains("item-10")),
+        scrolled_rendered
+            .iter()
+            .any(|line| line.contains("item-10")),
         "scroll relayout should rematerialize the visible virtual rows: {scrolled_rendered:?}"
     );
     assert!(

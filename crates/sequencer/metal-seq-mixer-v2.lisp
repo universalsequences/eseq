@@ -402,7 +402,7 @@
     :show-value false
     :font-size 9 :label-font-size 5
     :text-color :dim :label-color :dim
-    :width 4.7 :height 1.8 :knob-size 1.84
+    :width 4.7  :height 2.0 :knob-size 1.44
     :on-change (lambda (v)
       (do
         (mixer-v2-clear-delete-target)

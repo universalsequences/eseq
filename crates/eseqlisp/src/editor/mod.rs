@@ -4351,11 +4351,18 @@ impl Editor {
     }
 
     fn sync_active_buffer_widget_snapshot_from_runtime(&mut self) {
+        let Some(runtime_generation) = self.runtime.current_committed_ui_snapshot_generation()
+        else {
+            return;
+        };
+        if self.active_buffer().committed_ui_runtime_generation == Some(runtime_generation) {
+            return;
+        }
         let Some(snapshot) = self.runtime.current_committed_ui_snapshot() else {
             return;
         };
         let buffer = self.active_buffer_mut();
-        buffer.adopt_committed_ui_snapshot(snapshot);
+        buffer.adopt_runtime_committed_ui_snapshot(snapshot, runtime_generation);
         buffer.view_mode = ViewMode::UiOnly;
     }
 
@@ -5027,13 +5034,18 @@ impl Editor {
             }
         }
 
-        for source_buffer_id in self.runtime.take_pending_cleared_effect_sources() {
+        for cleared_source in self.runtime.take_pending_cleared_effect_sources() {
             let target_indices = self
                 .buffers
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, buffer)| {
-                    (buffer.widget_tree_source == source_buffer_id).then_some(idx)
+                    let clear_is_current = buffer
+                        .committed_ui_runtime_generation
+                        .is_none_or(|generation| generation <= cleared_source.runtime_generation);
+                    (clear_is_current
+                        && buffer.widget_tree_source == cleared_source.source_buffer_id)
+                        .then_some(idx)
                 })
                 .collect::<Vec<_>>();
             for idx in target_indices {
@@ -5164,17 +5176,16 @@ impl Editor {
                         .and_then(|snapshot| {
                             snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
                         });
-                    let upgraded_subtree_root =
-                        upgraded_subtree_root.and_then(|subtree_root_id| {
-                            self.buffers[buffer_idx]
-                                .replace_widget_subtree(
-                                    subtree_root_id,
-                                    pending.tree.deep_clone(),
-                                    pending.source_buffer_id,
-                                    pending.reactive_dependencies.clone(),
-                                )
-                                .then_some(subtree_root_id)
-                        });
+                    let upgraded_subtree_root = upgraded_subtree_root.and_then(|subtree_root_id| {
+                        self.buffers[buffer_idx]
+                            .replace_widget_subtree(
+                                subtree_root_id,
+                                pending.tree.deep_clone(),
+                                pending.source_buffer_id,
+                                pending.reactive_dependencies.clone(),
+                            )
+                            .then_some(subtree_root_id)
+                    });
                     if let Some(subtree_root_id) = upgraded_subtree_root {
                         if debug_ui_updates_enabled() {
                             eprintln!(

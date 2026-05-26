@@ -1191,6 +1191,55 @@ mod tests {
         )
     }
 
+    fn mixer_send_knob() -> Value {
+        build_widget(
+            "knob-number",
+            vec![
+                kw("label"),
+                s("A"),
+                kw("value"),
+                num(0.5),
+                kw("min"),
+                num(0.0),
+                kw("max"),
+                num(1.0),
+                kw("decimals"),
+                num(2.0),
+                kw("show-value"),
+                Value::Bool(false),
+                kw("font-size"),
+                num(9.0),
+                kw("label-font-size"),
+                num(5.0),
+                kw("width"),
+                num(4.7),
+                kw("height"),
+                num(1.8),
+                kw("knob-size"),
+                num(1.84),
+            ],
+        )
+    }
+
+    #[test]
+    fn knob_number_hit_test_covers_visible_mixer_send_knob_lower_half() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&mixer_send_knob()).expect("knob layout");
+
+        let declared_height = 1.8_f32;
+        let knob_size = 1.84_f32;
+        let top_label_band = (declared_height * 0.45).max(0.72);
+        let visible_knob_bottom = layout.rect.row + top_label_band + knob_size;
+        let hit_row = layout.rect.row + 2.2;
+        let hit_col = layout.rect.col + layout.rect.width * 0.5;
+        assert!(hit_row > layout.rect.row + declared_height);
+        assert!(hit_row < visible_knob_bottom);
+
+        let hit = hit_test_layout(&layout, hit_row, hit_col)
+            .expect("visible lower half of mixer send knob should be hittable");
+        assert_eq!(hit.widget_type, "knob-number");
+    }
+
     /// Build a vslider: (vslider :height h)
     fn vslider(height: f64) -> Value {
         build_widget("vslider", vec![kw("height"), num(height)])

@@ -66,6 +66,7 @@ pub struct Buffer {
     pub widget_tree_revision: u64,
     pub committed_ui_snapshot: Option<CommittedBufferUiSnapshot>,
     pub committed_ui_revision: u64,
+    pub committed_ui_runtime_generation: Option<u64>,
     pub view_mode: ViewMode,
     pub text_styles: Vec<BufferTextStyle>,
 }
@@ -153,6 +154,7 @@ impl Buffer {
             widget_tree_revision: 0,
             committed_ui_snapshot: None,
             committed_ui_revision: 0,
+            committed_ui_runtime_generation: None,
             view_mode: ViewMode::Both,
             text_styles: Vec::new(),
         }
@@ -240,6 +242,19 @@ impl Buffer {
         self.set_committed_ui_snapshot(Some(snapshot));
     }
 
+    pub fn adopt_runtime_committed_ui_snapshot(
+        &mut self,
+        snapshot: CommittedBufferUiSnapshot,
+        runtime_generation: u64,
+    ) {
+        self.widget_tree = Some(snapshot.tree.clone());
+        self.widget_tree_source = snapshot.source_buffer_id;
+        self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
+        self.committed_ui_snapshot = Some(snapshot);
+        self.committed_ui_revision = self.committed_ui_revision.wrapping_add(1);
+        self.committed_ui_runtime_generation = Some(runtime_generation);
+    }
+
     pub fn set_committed_ui_snapshot(&mut self, snapshot: Option<CommittedBufferUiSnapshot>) {
         let unchanged = self
             .committed_ui_snapshot
@@ -252,6 +267,7 @@ impl Buffer {
         }
         self.committed_ui_snapshot = snapshot;
         self.committed_ui_revision = self.committed_ui_revision.wrapping_add(1);
+        self.committed_ui_runtime_generation = None;
     }
 
     pub fn clear_committed_ui_snapshot(&mut self) {
@@ -1644,6 +1660,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_snapshot_adoption_records_generation_identity() {
+        let tree = widget("root", 1, 1, vec![widget("knob", 2, 2, vec![])]);
+        let snapshot = CommittedBufferUiSnapshot::from_tree(tree.clone(), Some(9), Vec::new());
+        let mut buffer = Buffer::new(9, "*ui*");
+
+        buffer.adopt_runtime_committed_ui_snapshot(snapshot.clone(), 42);
+        assert_eq!(buffer.widget_tree_revision, 1);
+        assert_eq!(buffer.committed_ui_revision, 1);
+        assert_eq!(buffer.committed_ui_runtime_generation, Some(42));
+
+        buffer.adopt_runtime_committed_ui_snapshot(snapshot.clone(), 42);
+        assert_eq!(buffer.widget_tree_revision, 2);
+        assert_eq!(buffer.committed_ui_revision, 2);
+
+        buffer.adopt_runtime_committed_ui_snapshot(snapshot, 43);
+        assert_eq!(buffer.widget_tree_revision, 3);
+        assert_eq!(buffer.committed_ui_revision, 3);
+        assert_eq!(buffer.committed_ui_runtime_generation, Some(43));
+        assert_eq!(buffer.widget_tree.as_ref(), Some(&tree));
+    }
+
+    #[test]
     fn committed_snapshot_replacing_subtrees_updates_multiple_siblings() {
         let tree = widget(
             "root",
@@ -1718,13 +1756,9 @@ mod tests {
     }
 
     #[test]
-    fn committed_snapshot_replacing_subtrees_ignores_stale_nested_replacement_when_parent_updates() {
-        let tree = widget(
-            "root",
-            1,
-            1,
-            vec![widget("panel-closed", 2, 2, vec![])],
-        );
+    fn committed_snapshot_replacing_subtrees_ignores_stale_nested_replacement_when_parent_updates()
+    {
+        let tree = widget("root", 1, 1, vec![widget("panel-closed", 2, 2, vec![])]);
         let snapshot = CommittedBufferUiSnapshot::from_tree(
             tree,
             Some(7),
@@ -1746,7 +1780,12 @@ mod tests {
                 ),
                 (
                     2,
-                    widget("panel-open", 22, 2, vec![widget("fresh-child", 44, 4, vec![])]),
+                    widget(
+                        "panel-open",
+                        22,
+                        2,
+                        vec![widget("fresh-child", 44, 4, vec![])],
+                    ),
                     vec![ReactiveFieldKey {
                         namespace: "UI".to_string(),
                         field: "panel".to_string(),
@@ -1817,7 +1856,12 @@ mod tests {
                 ),
                 (
                     2,
-                    widget("panel-open", 22, 2, vec![widget("fresh-child", 44, 4, vec![])]),
+                    widget(
+                        "panel-open",
+                        22,
+                        2,
+                        vec![widget("fresh-child", 44, 4, vec![])],
+                    ),
                     vec![ReactiveFieldKey {
                         namespace: "UI".to_string(),
                         field: "panel".to_string(),
@@ -1845,12 +1889,7 @@ mod tests {
 
     #[test]
     fn committed_snapshot_replacing_subtrees_rejects_unknown_root_without_valid_parent() {
-        let tree = widget(
-            "root",
-            1,
-            1,
-            vec![widget("panel-closed", 2, 2, vec![])],
-        );
+        let tree = widget("root", 1, 1, vec![widget("panel-closed", 2, 2, vec![])]);
         let snapshot = CommittedBufferUiSnapshot::from_tree(
             tree,
             Some(7),
