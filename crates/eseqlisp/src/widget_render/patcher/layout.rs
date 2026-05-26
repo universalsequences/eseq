@@ -5,7 +5,10 @@ use super::geometry::{
     patch_input_indices, patch_input_slot_counts, patch_output_counts, port_x_offset,
 };
 use super::metrics::{LAYER_SPACING, NODE_COLUMN_GAP, VIEW_PADDING_X, VIEW_PADDING_Y};
-use super::model::{CableSegmentInfo, ConnectionKind, NodeKind, Patch};
+use super::model::{
+    CableSegmentInfo, ConnectionKind, NodeKind, Patch, connection_touches_hidden_inline_node,
+    hidden_inline_node_ids,
+};
 
 const CROSSING_MIN_ITERATIONS: usize = 6;
 const HISTORY_LOCALITY_WEIGHT: f32 = 3.0;
@@ -36,6 +39,7 @@ struct WorkNode {
     width: f32,
     height: f32,
     is_history: bool,
+    is_hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +91,7 @@ impl LayoutGraph {
         let input_indices = patch_input_indices(patch);
         let input_slot_counts_by_id = patch_input_slot_counts(patch, &input_indices);
         let output_counts_by_id = patch_output_counts(patch);
+        let hidden_node_ids = hidden_inline_node_ids(patch);
 
         let mut id_to_idx = HashMap::new();
         for (idx, node) in patch.nodes.iter().enumerate() {
@@ -98,9 +103,14 @@ impl LayoutGraph {
         let mut output_counts = Vec::with_capacity(patch.nodes.len());
         let mut real_nodes = Vec::with_capacity(patch.nodes.len());
         for (idx, node) in patch.nodes.iter().enumerate() {
+            let hidden = hidden_node_ids.contains(&node.id);
             let input_count = input_slot_counts_by_id.get(&node.id).copied().unwrap_or(0);
             let output_count = output_counts_by_id.get(&node.id).copied().unwrap_or(0);
-            let (width, height) = node_size_for_ports(node, input_count, output_count);
+            let (width, height) = if hidden {
+                (0.0, 0.0)
+            } else {
+                node_size_for_ports(node, input_count, output_count)
+            };
             input_slot_counts.push(input_count);
             output_counts.push(output_count);
             real_nodes.push(WorkNode {
@@ -111,6 +121,7 @@ impl LayoutGraph {
                 width,
                 height,
                 is_history: node.kind == NodeKind::History,
+                is_hidden: hidden,
             });
             input_slots.push(
                 input_indices
@@ -122,6 +133,9 @@ impl LayoutGraph {
 
         let mut real_edges = Vec::new();
         for connection in &patch.connections {
+            if connection_touches_hidden_inline_node(connection, &hidden_node_ids) {
+                continue;
+            }
             let (Some(&from), Some(&to)) = (
                 id_to_idx.get(connection.from_node.as_str()),
                 id_to_idx.get(connection.to_node.as_str()),
@@ -295,6 +309,7 @@ impl LayoutGraph {
                     width: DUMMY_NODE_WIDTH,
                     height: 0.1,
                     is_history: false,
+                    is_hidden: false,
                 });
                 self.ordering_edges.push(OrderingEdge {
                     from: previous,
@@ -488,6 +503,7 @@ impl LayoutGraph {
 
             for work_idx in rank.iter().copied() {
                 match self.work_nodes[work_idx].kind {
+                    WorkNodeKind::Real(_) if self.work_nodes[work_idx].is_hidden => {}
                     WorkNodeKind::Real(real_idx)
                         if !is_stacked_param(real_idx, rank, &self.work_nodes, patch) =>
                     {
@@ -934,6 +950,9 @@ impl LayoutGraph {
 
         let mut blocking_ranges = Vec::new();
         for (idx, node) in patch.nodes.iter().enumerate() {
+            if self.real_nodes[idx].is_hidden {
+                continue;
+            }
             if idx == from || idx == to {
                 continue;
             }
@@ -1191,6 +1210,9 @@ fn rank_metrics(rank: &[usize], nodes: &[WorkNode], patch: &Patch) -> RankMetric
     }
 
     for work_idx in rank {
+        if nodes[*work_idx].is_hidden {
+            continue;
+        }
         if let WorkNodeKind::Real(real_idx) = nodes[*work_idx].kind {
             if stacks_params && stacked_params.contains(&real_idx) {
                 continue;

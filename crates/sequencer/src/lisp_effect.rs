@@ -2637,7 +2637,7 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 ; Modulatable: add @mod true @mod-mode additive
 ;   then use (mod name) to read the modulated value
 ; Envelope: (adsr gate trigger attack_ms decay_ms sustain release_ms)
-; Oscillators: (sin expr), (phasor freq_hz), (noise)
+; Oscillators: (phasor freq_hz), (sin expr), (noise)
 ; Math: +, -, *, /, sin, cos, tan, atan, atan2, tanh, clamp, min, max
 ; Constants: twopi, samplerate
 
@@ -2652,17 +2652,19 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 
 ; -- Parameters --
 (param attack  @default 5    @min 0   @max 1000 @unit ms)
-(param release @default 200  @min 10  @max 5000 @unit ms)
+(param decay   @default 120  @min 1   @max 2000 @unit ms)
+(param sustain @default 0.8  @min 0   @max 1)
+(param release @default 180  @min 1   @max 5000 @unit ms)
 (param gain    @default 0.5  @min 0   @max 1    @mod true @mod-mode additive)
 
 ; -- Envelope --
-(def env (adsr gate trigger attack 100 1 release))
+(def env (adsr gate trigger attack decay sustain release))
 
 ; -- Oscillator --
-(def osc (sin (* (phasor pitch) twopi)))
+(def phase (phasor pitch))
 
 ; -- Output --
-(out (* osc env velocity (mod gain)) 1 @name audio)
+(out (* phase env velocity (mod gain)) 1 @name audio)
 "#;
 
 pub struct InstrumentEditResult {

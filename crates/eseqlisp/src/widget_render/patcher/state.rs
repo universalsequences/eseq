@@ -19,8 +19,9 @@ use super::metrics::{
 };
 use super::model::{
     ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef,
-    MacroPatch, MacroSignature, NodeKind, OutputPortRef, Patch, PatchConnection, PatchNode,
-    PatcherIntent, SourceOwner,
+    InputPresentation, MacroPatch, MacroSignature, NodeKind, OutputPortRef, ParamNodeInfo, Patch,
+    PatchConnection, PatchNode, PatcherIntent, SourceOwner, hidden_inline_node_ids,
+    refresh_patch_inline_inputs,
 };
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
@@ -227,6 +228,7 @@ pub(super) struct PatchEditState {
     pub(super) deleted_nodes: HashSet<String>,
     pub(super) connections: HashMap<String, PatcherConnectionEdit>,
     pub(super) deleted_connections: HashSet<String>,
+    pub(super) input_presentations: HashMap<String, PatcherInputPresentationEdit>,
     pub(super) created_macros: HashMap<String, PatcherMacroEdit>,
     pub(super) next_created_node: u64,
     pub(super) next_created_connection: u64,
@@ -284,6 +286,14 @@ pub(super) struct PatcherConnectionEdit {
 pub(super) enum PatcherConnectionOrigin {
     Source { source_connection_id: String },
     Created { created_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PatcherInputPresentationEdit {
+    pub(super) view_key: String,
+    pub(super) node_id: String,
+    pub(super) input_index: usize,
+    pub(super) presentation: InputPresentation,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -578,9 +588,11 @@ pub(super) fn ordered_patch_nodes<'a>(
     state: &PatcherInteractionState,
     view_key: &str,
 ) -> Vec<&'a PatchNode> {
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     let by_id = patch
         .nodes
         .iter()
+        .filter(|node| !hidden_node_ids.contains(&node.id))
         .map(|node| (node.id.as_str(), node))
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();
@@ -597,6 +609,7 @@ pub(super) fn ordered_patch_nodes<'a>(
         patch
             .nodes
             .iter()
+            .filter(|node| !hidden_node_ids.contains(&node.id))
             .filter(|node| !seen.contains(node.id.as_str())),
     );
     ordered
@@ -651,6 +664,10 @@ pub(super) fn connection_id_from_ports(from: &OutputPortRef, to: &InputPortRef) 
 
 pub(super) fn connection_edit_key(view_key: &str, connection_id: &str) -> String {
     format!("{view_key}::{connection_id}")
+}
+
+pub(super) fn input_presentation_key(view_key: &str, node_id: &str, input_index: usize) -> String {
+    format!("{view_key}::{node_id}:{input_index}")
 }
 
 pub(super) fn allocate_created_node(
@@ -748,13 +765,38 @@ pub(super) fn allocate_created_connection(
                 created_id: id.clone(),
             },
             from,
-            to,
+            to: to.clone(),
             kind: ConnectionKind::Forward,
             segment: None,
         },
     );
+    set_input_presentation_override(
+        state,
+        view_key,
+        &to.node_id,
+        to.input_index,
+        InputPresentation::Cable,
+    );
     debug_log_edit_event(&action, state);
     id
+}
+
+pub(super) fn set_input_presentation_override(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+    input_index: usize,
+    presentation: InputPresentation,
+) {
+    state.edit_state.input_presentations.insert(
+        input_presentation_key(view_key, node_id, input_index),
+        PatcherInputPresentationEdit {
+            view_key: view_key.to_string(),
+            node_id: node_id.to_string(),
+            input_index,
+            presentation,
+        },
+    );
 }
 
 pub(super) fn set_connection_segment_edit(
@@ -1023,6 +1065,16 @@ pub(super) fn patch_with_interaction_state(
         {
             connection.segment = edit.segment;
         }
+        let presentation_key =
+            input_presentation_key(view_key, &connection.to_node, connection.to_input);
+        if let Some(edit) = interaction_state
+            .edit_state
+            .input_presentations
+            .get(&presentation_key)
+        {
+            connection.presentation = edit.presentation;
+            connection.presentation_override = Some(edit.presentation);
+        }
     }
     for edit in interaction_state
         .edit_state
@@ -1067,9 +1119,12 @@ pub(super) fn patch_with_interaction_state(
                 to_input: edit.to.input_index,
                 kind: edit.kind,
                 segment: edit.segment,
+                presentation: InputPresentation::Cable,
+                presentation_override: Some(InputPresentation::Cable),
                 source: None,
             }),
     );
+    refresh_patch_inline_inputs(&mut patch);
     patch
 }
 
@@ -1314,6 +1369,8 @@ fn apply_node_text_override(
     node.label = edited.label;
     node.args = edited.args;
     node.outputs = edited.outputs;
+    node.param = edited.param;
+    node.inline_inputs = edited.inline_inputs;
     node.diagnostic = edited.diagnostic;
 }
 
@@ -1335,6 +1392,8 @@ pub(super) fn node_from_editor_text(
             outputs: Vec::new(),
             position,
             width: None,
+            param: None,
+            inline_inputs: Vec::new(),
             diagnostic: None,
             source: None,
         };
@@ -1372,6 +1431,8 @@ pub(super) fn node_from_editor_text(
         }
     };
 
+    let param = editor_param_node_info(&op, &args);
+
     PatchNode {
         id: id.to_string(),
         op: op.clone(),
@@ -1395,6 +1456,8 @@ pub(super) fn node_from_editor_text(
             }),
         position,
         width: None,
+        param,
+        inline_inputs: Vec::new(),
         diagnostic: parse_diagnostic.or_else(|| {
             let known =
                 dgenlisp_operator_names().contains(&op) || macro_signatures.contains_key(&op);
@@ -1411,4 +1474,22 @@ pub(super) fn node_from_editor_text(
         }),
         source: None,
     }
+}
+
+fn editor_param_node_info(op: &str, args: &[ArgValue]) -> Option<ParamNodeInfo> {
+    if op != "param" {
+        return None;
+    }
+    let name = match args.first() {
+        Some(ArgValue::Literal(name)) => name.clone(),
+        _ => return None,
+    };
+    let modulatable = args.windows(2).any(|pair| {
+        matches!(
+            (&pair[0], &pair[1]),
+            (ArgValue::Literal(key), ArgValue::Literal(value))
+                if key == "@mod" && value == "true"
+        )
+    });
+    Some(ParamNodeInfo { name, modulatable })
 }

@@ -26,29 +26,13 @@ pub(super) fn node_display_label(node: &PatchNode) -> String {
         _ => node.label.as_str(),
     };
     let mut label = base.to_string();
-    let display_start = if matches!(
-        node.args.first(),
-        Some(ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr)
-    ) {
-        1
-    } else {
-        0
-    };
-    let last_literal = node
-        .args
-        .iter()
-        .enumerate()
-        .skip(display_start)
-        .filter_map(|(idx, arg)| match arg {
-            ArgValue::Literal(value) if value != "<expr>" => Some(idx),
-            _ => None,
-        })
-        .last();
-    let Some(last_literal) = last_literal else {
-        return label;
-    };
-    for arg in node.args.iter().take(last_literal + 1).skip(display_start) {
-        match arg {
+    for idx in node_display_input_slots(node) {
+        if let Some(inline) = node.inline_inputs.get(idx).and_then(|input| input.as_ref()) {
+            label.push(' ');
+            label.push_str(&inline.label());
+            continue;
+        }
+        match &node.args[idx] {
             ArgValue::Literal(value) if value != "<expr>" => {
                 label.push(' ');
                 label.push_str(value);
@@ -60,6 +44,60 @@ pub(super) fn node_display_label(node: &PatchNode) -> String {
         }
     }
     label
+}
+
+pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
+    let display_start = if matches!(
+        node.args.first(),
+        Some(ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr)
+    ) {
+        1
+    } else {
+        0
+    };
+    let last_displayed = node
+        .args
+        .iter()
+        .enumerate()
+        .skip(display_start)
+        .filter_map(|(idx, arg)| match arg {
+            _ if node
+                .inline_inputs
+                .get(idx)
+                .and_then(|input| input.as_ref())
+                .is_some() =>
+            {
+                Some(idx)
+            }
+            ArgValue::Literal(value) if value != "<expr>" => Some(idx),
+            _ => None,
+        })
+        .last();
+    let Some(last_displayed) = last_displayed else {
+        return Vec::new();
+    };
+    node
+        .args
+        .iter()
+        .enumerate()
+        .take(last_displayed + 1)
+        .skip(display_start)
+        .filter_map(|(idx, arg)| {
+            if node
+                .inline_inputs
+                .get(idx)
+                .and_then(|input| input.as_ref())
+                .is_some()
+            {
+                return Some(idx);
+            }
+            match arg {
+                ArgValue::Literal(value) if value != "<expr>" => Some(idx),
+                ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr => Some(idx),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 pub(super) fn node_size(node: &PatchNode) -> (f32, f32) {

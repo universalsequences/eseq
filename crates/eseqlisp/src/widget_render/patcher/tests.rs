@@ -7,7 +7,10 @@ use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
 use super::geometry::*;
 use super::interaction::*;
 use super::metrics::*;
-use super::model::{CableEndpoint, InputPortRef, OutputPortRef};
+use super::model::{
+    CableEndpoint, InputPortRef, InputPresentation, OutputPortRef,
+    connection_touches_hidden_inline_node, hidden_inline_node_ids,
+};
 use super::project::dgenlisp_operator_names;
 use super::render::*;
 use super::state::*;
@@ -820,13 +823,26 @@ fn move_all_persistence_nodes(
     scope_bias: f32,
     expectations: &mut PersistenceExpectations,
 ) {
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     for (idx, node) in patch.nodes.iter().enumerate() {
+        if hidden_node_ids.contains(&node.id) {
+            continue;
+        }
         let position = persistence_position(seed, idx, scope_bias);
         set_node_edit_position(state, view_key, node, position, node_display_label(node));
         expectations
             .nodes
             .push(expected_node(view_key, &node.id, position));
     }
+}
+
+fn visible_persistence_connections(patch: &Patch) -> Vec<&PatchConnection> {
+    let hidden_node_ids = hidden_inline_node_ids(patch);
+    patch
+        .connections
+        .iter()
+        .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
+        .collect()
 }
 
 fn set_created_node_position(
@@ -1135,7 +1151,11 @@ fn build_persistence_case(
                 .push("(def tri (triangle cos1 0.1))".to_string());
         }
         3 => {
-            for (idx, connection) in root_patch.connections.iter().take(4).enumerate() {
+            for (idx, connection) in visible_persistence_connections(&root_patch)
+                .into_iter()
+                .take(4)
+                .enumerate()
+            {
                 let row = 18.25 + seed as f32 * 0.5 + idx as f32 * 3.75;
                 set_connection_segment_edit(
                     &mut state,
@@ -1449,6 +1469,8 @@ fn node_size_uses_cached_proportional_character_widths() {
         outputs: Vec::new(),
         position: (0.0, 0.0),
         width: None,
+        param: None,
+        inline_inputs: Vec::new(),
         diagnostic: None,
         source: None,
     };
@@ -2917,15 +2939,35 @@ fn param_references_project_as_connections_not_literal_args() {
         node_display_label(param),
         "param size @min 0 @max 3000 @default 300"
     );
-    assert_eq!(node_display_label(delay), "delay");
+    assert_eq!(node_display_label(delay), "delay size");
     assert!(
         patch.connections.iter().any(|connection| {
             connection.from_node == param.id
                 && connection.to_node == delay.id
                 && connection.to_input == 1
+                && connection.presentation == InputPresentation::InlineRawParam
         }),
         "{:#?}",
         patch.connections
+    );
+}
+
+#[test]
+fn def_wrapped_param_references_can_inline_from_source_node_metadata() {
+    let patch = parse(
+        r#"
+            (def size (param size @min 0 @max 3000 @default 300))
+            (def input (in 1))
+            (def delayed (delay input size))
+            "#,
+    );
+    let delay = patch.nodes.iter().find(|node| node.op == "delay").unwrap();
+    let size_connection = source_connection_for_input(&patch, &delay.id, 1);
+
+    assert_eq!(node_display_label(delay), "delay size");
+    assert_eq!(
+        size_connection.presentation,
+        InputPresentation::InlineRawParam
     );
 }
 
@@ -4094,6 +4136,8 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         outputs: vec!["out".to_string()],
         position: (0.0, 0.0),
         width: None,
+        param: None,
+        inline_inputs: Vec::new(),
         diagnostic: None,
         source: None,
     });
@@ -4104,6 +4148,8 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         to_input: 0,
         kind: ConnectionKind::Forward,
         segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
         source: None,
     });
     macro_patch.connections.push(PatchConnection {
@@ -4113,6 +4159,8 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         to_input: 0,
         kind: ConnectionKind::Forward,
         segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
         source: None,
     });
 
@@ -7586,6 +7634,434 @@ fn inline_literals_reserve_semantic_input_slots_without_rendering_ports() {
 
     assert_eq!(gain_endpoint, second);
     assert!(first.0 < second.0);
+}
+
+#[test]
+fn direct_non_mod_params_inline_on_non_first_inlets() {
+    let patch = parse(
+        r#"
+            (def gate (in 1 @name gate))
+            (def trigger (in 2 @name trigger))
+            (param attack @default 5)
+            (param decay @default 120)
+            (param sustain @default 0.8)
+            (param release @default 180)
+            (def env (adsr gate trigger attack decay sustain release))
+            "#,
+    );
+    let env = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "env")
+        .expect("env node");
+
+    assert_eq!(
+        node_display_label(env),
+        "adsr ? attack decay sustain release"
+    );
+    assert_eq!(node_display_input_slots(env), vec![1, 2, 3, 4, 5]);
+    for (input_index, name) in [
+        (2, "attack"),
+        (3, "decay"),
+        (4, "sustain"),
+        (5, "release"),
+    ] {
+        let connection = source_connection_for_input(&patch, "env", input_index);
+        assert_eq!(connection.presentation, InputPresentation::InlineRawParam);
+        assert_eq!(connection.presentation_override, None);
+        assert_eq!(
+            env.inline_inputs
+                .get(input_index)
+                .and_then(|input| input.as_ref())
+                .map(|input| input.label()),
+            Some(name.to_string())
+        );
+    }
+    assert_eq!(
+        source_connection_for_input(&patch, "env", 0).presentation,
+        InputPresentation::Cable
+    );
+    assert_eq!(
+        source_connection_for_input(&patch, "env", 1).presentation,
+        InputPresentation::Cable
+    );
+
+    let input_indices = patch_input_indices(&patch);
+    assert_eq!(
+        input_indices.get("env").map(Vec::as_slice),
+        Some(&[0, 1][..])
+    );
+}
+
+#[test]
+fn inline_params_keep_placeholder_for_cabled_second_inlet() {
+    let patch = parse(
+        r#"
+            (def gate (in 1 @name gate))
+            (def trigger (in 2 @name trigger))
+            (param amp_attack @default 5)
+            (param amp_decay @default 120)
+            (param amp_sustain @default 0.8)
+            (param amp_release @default 180)
+            (def env (adsr gate trigger amp_attack amp_decay amp_sustain amp_release))
+            "#,
+    );
+    let env = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "env")
+        .expect("env node");
+
+    assert_eq!(
+        node_display_label(env),
+        "adsr ? amp_attack amp_decay amp_sustain amp_release"
+    );
+    assert_eq!(node_display_input_slots(env), vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        patch_input_indices(&patch).get("env").map(Vec::as_slice),
+        Some(&[0, 1][..])
+    );
+}
+
+#[test]
+fn writeback_preserves_cabled_second_inlet_when_editing_later_inline_param() {
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (def trigger (in 2 @name trigger))
+        (param attack @default 5)
+        (param decay @default 120)
+        (param sustain @default 0.8)
+        (param release @default 180)
+        (def env (adsr gate trigger attack decay sustain release))
+    "#;
+    let patch = parse(source);
+    let env = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "env")
+        .expect("env node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", env, node_display_label(env));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "env"))
+        .unwrap()
+        .text = "adsr ? attack decay sustain 240".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    assert!(
+        emitted.contains("(def env (adsr gate trigger attack decay sustain 240.0))"),
+        "{emitted}"
+    );
+    assert!(!emitted.contains("(adsr gate ?"), "{emitted}");
+}
+
+#[test]
+fn modulatable_params_inline_only_when_read_through_nested_mod() {
+    let direct = parse(
+        r#"
+            (def signal (in 1))
+            (param gain @default 0.5 @mod true @mod-mode additive)
+            (def scaled (* signal gain))
+            "#,
+    );
+    let scaled = direct
+        .nodes
+        .iter()
+        .find(|node| node.id == "scaled")
+        .expect("scaled node");
+    let gain_connection = source_connection_for_input(&direct, "scaled", 1);
+    assert_eq!(gain_connection.presentation, InputPresentation::Cable);
+    assert_eq!(scaled.inline_inputs.get(1).and_then(|input| input.as_ref()), None);
+    assert_eq!(
+        patch_input_indices(&direct).get("scaled").map(Vec::as_slice),
+        Some(&[0, 1][..])
+    );
+
+    let modulated = parse(
+        r#"
+            (def signal (in 1))
+            (param gain @default 0.5 @mod true @mod-mode additive)
+            (def scaled (* signal (mod gain)))
+            "#,
+    );
+    let mod_connection = source_connection_for_input(&modulated, "scaled", 1);
+    assert_eq!(
+        mod_connection.presentation,
+        InputPresentation::InlineModParam
+    );
+    assert!(modulated.nodes.iter().any(|node| node.op == "mod"));
+    let scaled = modulated
+        .nodes
+        .iter()
+        .find(|node| node.id == "scaled")
+        .expect("scaled node");
+    assert_eq!(node_display_label(scaled), "* gain~");
+    assert_eq!(
+        patch_input_indices(&modulated).get("scaled").map(Vec::as_slice),
+        Some(&[0][..])
+    );
+    assert!(
+        ordered_patch_nodes(&modulated, &PatcherInteractionState::default(), "root")
+            .iter()
+            .all(|node| node.op != "mod")
+    );
+}
+
+#[test]
+fn generated_layout_sidecar_omits_inlined_mod_nodes_and_cables() {
+    let patch = parse(
+        r#"
+            (def signal (in 1))
+            (param gain @default 0.5 @mod true @mod-mode additive)
+            (def scaled (* signal (mod gain)))
+            "#,
+    );
+    let scaled = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "scaled")
+        .expect("scaled node");
+    let mod_node = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "mod")
+        .expect("nested mod node");
+    assert_eq!(node_display_label(scaled), "* gain~");
+    assert!(hidden_inline_node_ids(&patch).contains(&mod_node.id));
+
+    let layout_json: serde_json::Value =
+        serde_json::from_str(&sidecar::current_layout_json(
+            &patch,
+            &PatcherInteractionState::default(),
+        )
+        .unwrap())
+        .unwrap();
+    assert!(
+        layout_json["root"]["nodes"]
+            .as_object()
+            .expect("layout nodes")
+            .get(&mod_node.id)
+            .is_none(),
+        "hidden inline mod node should not be persisted as a visible layout node"
+    );
+    assert!(
+        layout_json["root"]["cables"]
+            .as_object()
+            .into_iter()
+            .flat_map(|cables| cables.keys())
+            .all(|key| !key.contains(&mod_node.id)),
+        "hidden inline mod cables should not be persisted as visible cables"
+    );
+    assert!(
+        layout_json["root"].get("inputPresentation").is_none(),
+        "default inline-mod presentation should not need a sidecar override"
+    );
+}
+
+#[test]
+fn cable_presentation_override_exposes_default_inline_param() {
+    let patch = parse(
+        r#"
+            (def gate (in 1 @name gate))
+            (def trigger (in 2 @name trigger))
+            (param attack @default 5)
+            (param release @default 180)
+            (def env (adsr gate trigger attack 120 0.8 release))
+            "#,
+    );
+    assert_eq!(
+        source_connection_for_input(&patch, "env", 2).presentation,
+        InputPresentation::InlineRawParam
+    );
+
+    let mut state = PatcherInteractionState::default();
+    set_input_presentation_override(&mut state, "root", "env", 2, InputPresentation::Cable);
+    let patched = patch_with_interaction_state(patch.clone(), &state, "root");
+    let env = patched
+        .nodes
+        .iter()
+        .find(|node| node.id == "env")
+        .expect("env node");
+    let attack_connection = source_connection_for_input(&patched, "env", 2);
+
+    assert_eq!(attack_connection.presentation, InputPresentation::Cable);
+    assert_eq!(
+        attack_connection.presentation_override,
+        Some(InputPresentation::Cable)
+    );
+    assert_eq!(env.inline_inputs.get(2).and_then(|input| input.as_ref()), None);
+
+    let layout_json: serde_json::Value =
+        serde_json::from_str(&sidecar::current_layout_json(&patch, &state).unwrap()).unwrap();
+    assert_eq!(
+        layout_json["root"]["inputPresentation"]["env:2"],
+        "cable"
+    );
+}
+
+#[test]
+fn editor_mod_suffix_expands_to_mod_expression_and_inline_mod_sidecar() {
+    let source = r#"
+        (def signal (in 1))
+        (param cutoff @default 1000 @mod true @mod-mode additive)
+        (def filtered (svf signal cutoff 1 0))
+        (out filtered 1)
+    "#;
+    let root_patch = parse(source);
+    let filtered = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", filtered, node_display_label(filtered));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "filtered"))
+        .unwrap()
+        .text = "svf cutoff~ 1 0".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def filtered (svf signal (mod cutoff) 1.0 0.0))"),
+        "expected cutoff~ to write back as a canonical mod expression:\n{emitted}"
+    );
+
+    let mut emitted_patch = parse_patch_source(&emitted, PatcherIntent::Instrument).unwrap();
+    let layout_json: serde_json::Value = serde_json::from_str(
+        &sidecar::emitted_layout_json_with_node_map(
+            &mut emitted_patch,
+            &root_patch,
+            &state,
+            &HashMap::new(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        layout_json["root"]["inputPresentation"]["filtered:1"],
+        "inline-mod-param"
+    );
+    let filtered = emitted_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    assert_eq!(node_display_label(filtered), "svf cutoff~ 1 0");
+}
+
+#[test]
+fn editor_mod_suffix_requires_modulatable_param() {
+    let source = r#"
+        (def signal (in 1))
+        (param cutoff @default 1000)
+        (def filtered (svf signal cutoff 1 0))
+    "#;
+    let root_patch = parse(source);
+    let filtered = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", filtered, node_display_label(filtered));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "filtered"))
+        .unwrap()
+        .text = "svf cutoff~ 1 0".to_string();
+
+    let error = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap_err();
+    match error {
+        WriteBackError::InvalidEdit { reason, .. } => {
+            assert!(reason.contains("requires `cutoff` to be declared as a modulatable param"));
+        }
+        other => panic!("expected invalid edit for non-modulatable cutoff~, got {other:?}"),
+    }
+}
+
+#[test]
+fn writeback_created_modulatable_param_can_feed_created_inline_mod_shorthand() {
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (def mod2 (in 6 @name mod2 @modulator 2))
+        (def mod3 (in 7 @name mod3 @modulator 3))
+        (def mod4 (in 8 @name mod4 @modulator 4))
+
+        (param attack @default 5 @min 0 @max 1000 @unit ms)
+        (param decay @default 120 @min 1 @max 2000 @unit ms)
+        (param sustain @default 0.8 @min 0 @max 1)
+        (param release @default 180 @min 1 @max 5000 @unit ms)
+        (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+
+        (def env (adsr gate trigger attack decay sustain release))
+        (def phase (phasor pitch))
+        (out (* phase env velocity (mod gain)) 1 @name audio)
+    "#;
+    let patch = parse(source);
+    let phase_to_multiply = patch
+        .connections
+        .iter()
+        .find(|connection| {
+            connection.from_node == "phase"
+                && patch
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == connection.to_node)
+                    .is_some_and(|node| node.op == "*")
+        })
+        .expect("starter patch should connect phase into the final multiply");
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(phase_to_multiply),
+        ));
+    let _triparam = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param triparam @default 0.5 @min 0 @max 1 @mod true @mod-mode additive",
+    );
+    let triangle = allocate_created_text_node(&mut state, "root", "triangle triparam~");
+    connect_output_to_input(&mut state, "root", "phase", &triangle, 0);
+    connect_output_to_input(
+        &mut state,
+        "root",
+        &triangle,
+        &phase_to_multiply.to_node,
+        phase_to_multiply.to_input,
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    assert!(
+        emitted.contains(
+            "(param triparam @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)"
+        ),
+        "{emitted}"
+    );
+    assert!(
+        emitted.contains("(def triangle1 (triangle phase (mod triparam)))"),
+        "{emitted}"
+    );
+    assert!(
+        emitted.contains("(out (* triangle1 env velocity (mod gain)) 1 @name audio)"),
+        "{emitted}"
+    );
+    assert!(!emitted.contains("triparam~"), "{emitted}");
+    parse_patch_source(&emitted, PatcherIntent::Instrument).unwrap();
 }
 
 #[test]
@@ -13979,6 +14455,8 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
             outputs: vec!["out".to_string()],
             position: (2.0, 2.0),
             width: None,
+            param: None,
+            inline_inputs: Vec::new(),
             diagnostic: None,
             source: None,
         }],

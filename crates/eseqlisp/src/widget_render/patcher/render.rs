@@ -5,16 +5,16 @@ use super::super::text_input::{
     cursor_x_from_char_cache, selection_range as text_selection_range, text_width_from_char_cache,
     wrap_text_to_measured_lines,
 };
-use super::super::{CellBuffer, styled_cell};
 #[cfg(target_os = "macos")]
 use super::super::{
-    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive, MetalPrimitive,
-    MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds, z_layer,
+    ndc_bounds, z_layer, MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive,
+    MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
+    WidgetInstance, WidgetViewport,
 };
+use super::super::{styled_cell, CellBuffer};
 #[cfg(target_os = "macos")]
 use crate::layout::LayoutNode;
-use crate::layout::{Rect, f64_to_f32};
+use crate::layout::{f64_to_f32, Rect};
 use crate::theme;
 use crate::vm::Value;
 
@@ -31,19 +31,20 @@ use super::metrics::{
     PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
 use super::model::{
-    ArgValue, BindingTarget, ConnectionKind, InputPortRef, NodeKind, OutputPortRef, Patch,
-    PatchConnection, PatchNode, SourceOwner,
+    ArgValue, BindingTarget, ConnectionKind, InputPortRef, InputPresentation, NodeKind,
+    OutputPortRef, Patch, PatchConnection, PatchNode, SourceOwner,
+    connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
+use super::project::dgenlisp_operator_documentation;
 #[cfg(target_os = "macos")]
 use super::project::OperatorPortDocumentation;
-use super::project::dgenlisp_operator_documentation;
 use super::state::{
-    AgenticBubbleState, AgenticBubbleTarget, AlignmentGuide, AlignmentGuideKind,
-    PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState, PatcherPanState,
-    PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
-    get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
-    ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
-    set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
+    active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
+    get_patcher_pan_state, max_node_z_index, node_z_index, ordered_patch_nodes,
+    patch_with_interaction_state, patcher_breadcrumb, patcher_state_key, set_patcher_pan_state,
+    source_connection_id, sync_patcher_z_order, AgenticBubbleState, AgenticBubbleTarget,
+    AlignmentGuide, AlignmentGuideKind, PatcherDragState, PatcherInteractionState, PatcherPanState,
+    PatcherTextEdit, PatcherZSlot, PATCHER_Z_SLOTS_PER_NODE,
 };
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
@@ -654,8 +655,15 @@ fn draw_patch_with_view_key(
         Some(PatcherDragState::CableEndpoint { cable_id, .. }) => Some(cable_id.as_str()),
         _ => None,
     };
+    let hidden_node_ids = hidden_inline_node_ids(patch);
 
     for connection in &patch.connections {
+        if connection.presentation != InputPresentation::Cable {
+            continue;
+        }
+        if connection_touches_hidden_inline_node(connection, &hidden_node_ids) {
+            continue;
+        }
         let connection_id = source_connection_id(connection);
         if dragged_cable == Some(connection_id.as_str()) {
             continue;
@@ -741,6 +749,8 @@ fn draw_patch_with_view_key(
             to_input: 0,
             kind: ConnectionKind::Forward,
             segment: None,
+            presentation: InputPresentation::Cable,
+            presentation_override: None,
             source: None,
         };
         push_cable_handles(&mut cable_prims, &preview_connection, start, end, zoom);
@@ -1337,6 +1347,8 @@ fn push_preview_cable(
         to_input: 0,
         kind,
         segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
         source: None,
     };
     push_cable(prims, start, end, &connection, 0.0, zoom, selected);

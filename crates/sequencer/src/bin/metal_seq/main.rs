@@ -316,8 +316,7 @@ const NEW_INSTRUMENT_STARTER_DSP: &str = r#"(def gate (in 1 @name gate))
 
 (def env (adsr gate trigger attack decay sustain release))
 (def phase (phasor pitch))
-(def osc (scale phase 0 1 -1 1))
-(out (* osc env velocity (mod gain)) 1 @name audio)
+(out (* phase env velocity (mod gain)) 1 @name audio)
 "#;
 
 fn create_new_instrument_draft_dir() -> Result<PathBuf, String> {
@@ -1714,8 +1713,7 @@ mod tests {
             );
         }
         assert!(source.contains("(def env (adsr gate trigger attack decay sustain release))"));
-        assert!(source.contains("(def osc (scale phase 0 1 -1 1))"));
-        assert!(source.contains("(out (* osc env velocity (mod gain)) 1 @name audio)"));
+        assert!(source.contains("(out (* phase env velocity (mod gain)) 1 @name audio)"));
     }
 
     #[test]

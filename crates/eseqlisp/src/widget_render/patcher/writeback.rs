@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
-use super::display::node_display_label;
+use super::display::{node_display_input_slots, node_display_label};
 use super::lisp::{node_kind_for_op, parse_patch_source, positional_args, symbol_at};
 use super::model::{
     ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
@@ -122,6 +122,7 @@ pub(super) fn emit_patch_writeback_result(
     interaction_state: &PatcherInteractionState,
 ) -> Result<PatchWritebackResult, WriteBackError> {
     let mut document = SourceDocument::parse(source)?;
+    register_created_modulatable_params(&mut document, interaction_state);
     let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
     apply_created_macro_writeback(&mut document, &root_patch, interaction_state)?;
     let effective_root_patch = patch_with_created_macros(root_patch.clone(), interaction_state);
@@ -1367,6 +1368,31 @@ fn created_macro_instance_is_connected(
         })
 }
 
+fn register_created_modulatable_params(
+    document: &mut SourceDocument,
+    interaction_state: &PatcherInteractionState,
+) {
+    for edit in interaction_state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| created_param_edit(edit))
+    {
+        let Ok(Expression::List(items)) = parse_created_node_text(edit) else {
+            continue;
+        };
+        let Some(name) = symbol_at(&items, 1) else {
+            continue;
+        };
+        if expression_has_true_attribute(&items, "@mod") {
+            document.register_virtual_modulatable_param(
+                scope_for_view_key(&edit.view_key),
+                name.to_string(),
+            );
+        }
+    }
+}
+
 fn connection_edit_touches_created_value(
     interaction_state: &PatcherInteractionState,
     edit: &PatcherConnectionEdit,
@@ -2487,7 +2513,13 @@ fn created_node_expression(
         }
         items[item_index] = value;
     }
-    Ok(expr)
+    expand_editor_mod_shorthand_expr(expr, document, &scope_for_view_key(view_key)).map_err(
+        |reason| WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: edit.id.clone(),
+            reason,
+        },
+    )
 }
 
 fn normalize_created_node_inline_args(
@@ -4591,17 +4623,22 @@ fn edited_expression_for_node(
         if let Ok(Expression::Symbol(symbol)) = parse_single_expression(trimmed)
             && document.is_known_operator(&symbol)
         {
-            return Ok(Expression::List(vec![Expression::Symbol(symbol)]));
+            return expand_editor_mod_shorthand_for_node(
+                Expression::List(vec![Expression::Symbol(symbol)]),
+                source_expr,
+                document,
+            );
         }
         return parse_single_expression(trimmed)
-            .or_else(|_| parse_single_expression(&format!("({trimmed})")));
+            .or_else(|_| parse_single_expression(&format!("({trimmed})")))
+            .and_then(|expr| expand_editor_mod_shorthand_for_node(expr, source_expr, document));
     }
 
     if node.kind == NodeKind::Param
         && !trimmed.starts_with("param")
         && let Ok(expr) = parse_single_expression(trimmed)
     {
-        return Ok(expr);
+        return expand_editor_mod_shorthand_for_node(expr, source_expr, document);
     }
 
     let edited = parse_single_expression(&format!("({trimmed})"))?;
@@ -4618,7 +4655,11 @@ fn edited_expression_for_node(
     {
         let mut merged = original_items.clone();
         merged[0] = edited_items[0].clone();
-        return Ok(Expression::List(merged));
+        return expand_editor_mod_shorthand_for_node(
+            Expression::List(merged),
+            Some(source_expr),
+            document,
+        );
     }
 
     if node_display_omits_first_input(node)
@@ -4627,14 +4668,113 @@ fn edited_expression_for_node(
         && let Some(first_input_item) =
             positional_item_index(original_items, 0).and_then(|idx| original_items.get(idx))
     {
+        if let Some(merged) = merge_edited_inline_inputs(node, original_items, &edited_items) {
+            return expand_editor_mod_shorthand_for_node(
+                Expression::List(merged),
+                Some(source_expr),
+                document,
+            );
+        }
         let mut merged = Vec::with_capacity(edited_items.len() + 1);
         merged.push(edited_items[0].clone());
         merged.push(first_input_item.clone());
         merged.extend(edited_items.iter().skip(1).cloned());
-        return Ok(Expression::List(merged));
+        return expand_editor_mod_shorthand_for_node(
+            Expression::List(merged),
+            Some(source_expr),
+            document,
+        );
     }
 
-    Ok(Expression::List(edited_items))
+    expand_editor_mod_shorthand_for_node(Expression::List(edited_items), source_expr, document)
+}
+
+fn merge_edited_inline_inputs(
+    node: &PatchNode,
+    original_items: &[Expression],
+    edited_items: &[Expression],
+) -> Option<Vec<Expression>> {
+    let input_slots = node_display_input_slots(node);
+    if input_slots.is_empty() || edited_items.len().saturating_sub(1) != input_slots.len() {
+        return None;
+    }
+    let mut merged = original_items.to_vec();
+    if merged.is_empty() {
+        return None;
+    }
+    merged[0] = edited_items[0].clone();
+    for (token_idx, input_index) in input_slots.into_iter().enumerate() {
+        let replacement = &edited_items[token_idx + 1];
+        if editor_placeholder_expr(replacement)
+            && node.args.get(input_index).is_some_and(|arg| {
+                matches!(arg, ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr)
+            })
+        {
+            continue;
+        }
+        let item_index = positional_item_index(&merged, input_index)?;
+        merged[item_index] = replacement.clone();
+    }
+    Some(merged)
+}
+
+fn editor_placeholder_expr(expr: &Expression) -> bool {
+    matches!(expr, Expression::Symbol(symbol) if symbol == "?")
+}
+
+fn expand_editor_mod_shorthand_for_node(
+    expr: Expression,
+    source_expr: Option<&SourceExprId>,
+    document: &SourceDocument,
+) -> Result<Expression, String> {
+    let scope = source_expr
+        .map(|expr| expr.form_id.scope.clone())
+        .unwrap_or(SourceScopeId::Root);
+    expand_editor_mod_shorthand_expr(expr, document, &scope)
+}
+
+fn expand_editor_mod_shorthand_expr(
+    expr: Expression,
+    document: &SourceDocument,
+    scope: &SourceScopeId,
+) -> Result<Expression, String> {
+    match expr {
+        Expression::Symbol(symbol) => expand_editor_mod_shorthand_symbol(symbol, document, scope),
+        Expression::List(items) => {
+            let mut expanded = Vec::with_capacity(items.len());
+            for (idx, item) in items.into_iter().enumerate() {
+                if idx == 0 {
+                    expanded.push(item);
+                } else {
+                    expanded.push(expand_editor_mod_shorthand_expr(item, document, scope)?);
+                }
+            }
+            Ok(Expression::List(expanded))
+        }
+        other => Ok(other),
+    }
+}
+
+fn expand_editor_mod_shorthand_symbol(
+    symbol: String,
+    document: &SourceDocument,
+    scope: &SourceScopeId,
+) -> Result<Expression, String> {
+    let Some(name) = symbol.strip_suffix('~') else {
+        return Ok(Expression::Symbol(symbol));
+    };
+    if name.is_empty() || !is_symbol_name(name) {
+        return Err(format!("invalid mod shorthand `{symbol}`"));
+    }
+    if !document.param_is_modulatable(scope, name) {
+        return Err(format!(
+            "`{symbol}` requires `{name}` to be declared as a modulatable param"
+        ));
+    }
+    Ok(Expression::List(vec![
+        Expression::Symbol("mod".to_string()),
+        Expression::Symbol(name.to_string()),
+    ]))
 }
 
 fn node_display_omits_first_input(node: &PatchNode) -> bool {
@@ -4662,6 +4802,7 @@ fn parse_single_expression(source: &str) -> Result<Expression, String> {
 struct SourceDocument {
     forms: Vec<DocumentForm>,
     macros: HashMap<String, MacroDocument>,
+    virtual_modulatable_params: HashSet<(SourceScopeId, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -4714,7 +4855,11 @@ impl SourceDocument {
                 });
             }
         }
-        Ok(Self { forms, macros })
+        Ok(Self {
+            forms,
+            macros,
+            virtual_modulatable_params: HashSet::new(),
+        })
     }
 
     fn expr(&self, expr_id: &SourceExprId) -> Option<&Expression> {
@@ -5081,6 +5226,27 @@ impl SourceDocument {
         self.form_expr(&form_id.scope, form_id.index)
             .and_then(host_modulator_def_name)
             .is_some()
+    }
+
+    fn param_is_modulatable(&self, scope: &SourceScopeId, name: &str) -> bool {
+        if self
+            .virtual_modulatable_params
+            .contains(&(scope.clone(), name.to_string()))
+        {
+            return true;
+        }
+        self.scope_forms(scope).iter().any(|expr| {
+            let Expression::List(items) = expr else {
+                return false;
+            };
+            symbol_at(items, 0) == Some("param")
+                && symbol_at(items, 1) == Some(name)
+                && expression_has_true_attribute(items, "@mod")
+        })
+    }
+
+    fn register_virtual_modulatable_param(&mut self, scope: SourceScopeId, name: String) {
+        self.virtual_modulatable_params.insert((scope, name));
     }
 
     fn form_expr_mut(&mut self, scope: &SourceScopeId, index: usize) -> Option<&mut Expression> {
