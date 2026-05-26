@@ -1,9 +1,14 @@
 ;; Track-level parameter, accumulator, and parameter-lock panels.
+(def fx-track-bus-send-field (bus)
+  (str "tp-bus-" bus "-send"))
+
 (def fx-track-bus-send-control (send)
   (v-stack :align :center :gap 0.25
     (h-stack :gap 0.25 :align :baseline
       (label (substring (get send :name) 0 8) :font-size 9 :color :dim :bg :transparent)
-      (number-picker :value (get send :amount) :min 0 :max 1 :decimals 2
+      (number-picker
+        :value (bind-seq (fx-track-bus-send-field (get send :bus-idx)))
+        :min 0 :max 1 :decimals 2
         :noui true :font-size 9 :text-color :dim
         :on-change (lambda (v)
           (do
@@ -13,7 +18,7 @@
         :width 4 :height 1))
     (box :width 8 :height 2
       (hslider :min 0 :max 1
-        :value (get send :amount)
+        :value (bind-seq (fx-track-bus-send-field (get send :bus-idx)))
         :material (aqua-slider-material)
         :on-change (lambda (v)
           (do

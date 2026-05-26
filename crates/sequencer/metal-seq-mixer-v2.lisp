@@ -384,10 +384,13 @@
       "B"
       (substring name 0 3))))
 
+(def mixer-v2-send-field (track bus)
+  (str "track-" track "-bus-" bus "-send"))
+
 (def mixer-v2-send-knob (track send)
   (knob-number :label (mixer-v2-send-label (get send :name))
     :key (str "mixer-v2-track-" track "-send-" (get send :bus-idx))
-    :value (get send :amount)
+    :value (bind-seq (mixer-v2-send-field track (get send :bus-idx)))
     :min 0 :max 1 :decimals 2
     :show-value false
     :font-size 9 :label-font-size 8

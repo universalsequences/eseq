@@ -946,6 +946,93 @@ pub(crate) fn build_all_track_bus_sends(app: &ui::App, state: &Arc<SequencerStat
     Value::List(items)
 }
 
+pub(crate) fn track_bus_send_field(track: usize, bus_idx: usize) -> String {
+    format!("track-{track}-bus-{bus_idx}-send")
+}
+
+pub(crate) fn current_track_bus_send_field(bus_idx: usize) -> String {
+    format!("tp-bus-{bus_idx}-send")
+}
+
+pub(crate) fn track_bus_send_amount(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    bus_idx: usize,
+) -> Option<f32> {
+    let bus = app.buses.get(bus_idx)?;
+    if bus.id == sequencer::sequencer::BusId::MIX {
+        return None;
+    }
+    let tp = state.pattern.track_params.get(track)?;
+    Some(
+        tp.sends()
+            .iter()
+            .find(|send| send.destination == bus.id)
+            .map(|send| send.amount)
+            .unwrap_or(0.0),
+    )
+}
+
+pub(crate) fn sync_track_bus_send_binding_field(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    bus_idx: usize,
+) {
+    if let Some(amount) = track_bus_send_amount(app, state, track, bus_idx) {
+        rt.set_reactive(
+            "SEQ",
+            &track_bus_send_field(track, bus_idx),
+            Value::Number(amount as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_track_bus_send_binding_fields(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+) {
+    for track in 0..state.active_track_count() {
+        for (bus_idx, bus) in app.buses.iter().enumerate() {
+            if bus.id != sequencer::sequencer::BusId::MIX {
+                sync_track_bus_send_binding_field(rt, app, state, track, bus_idx);
+            }
+        }
+    }
+}
+
+pub(crate) fn sync_current_track_bus_send_binding_field(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    bus_idx: usize,
+) {
+    if let Some(amount) = track_bus_send_amount(app, state, track, bus_idx) {
+        rt.set_reactive(
+            "SEQ",
+            &current_track_bus_send_field(bus_idx),
+            Value::Number(amount as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_current_track_bus_send_binding_fields(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+) {
+    for (bus_idx, bus) in app.buses.iter().enumerate() {
+        if bus.id != sequencer::sequencer::BusId::MIX {
+            sync_current_track_bus_send_binding_field(rt, app, state, track, bus_idx);
+        }
+    }
+}
+
 pub(crate) fn build_mod_routes(state: &Arc<SequencerState>) -> Value {
     let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
     let routes = state
@@ -1031,6 +1118,7 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
         "track-bus-sends",
         build_all_track_bus_sends(app, state),
     );
+    sync_track_bus_send_binding_fields(rt, app, state);
     rt.set_reactive("SEQ", "mod-routes", build_mod_routes(state));
     rt.set_reactive("SEQ", "track-mutes", build_track_mutes(state));
     rt.set_reactive("SEQ", "track-solos", build_track_solos(state));
@@ -3932,6 +4020,7 @@ pub(crate) fn sync_track_params(
         build_track_output_options(app),
     );
     rt.set_reactive("SEQ", "tp-bus-sends", build_track_bus_sends(app, tp));
+    sync_current_track_bus_send_binding_fields(rt, app, state, track);
     rt.set_reactive(
         "SEQ",
         "tp-num-steps",
@@ -6467,6 +6556,23 @@ mod tests {
         )
     }
 
+    fn test_track_bus_send(bus_idx: usize, name: &str, amount: f64) -> Value {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "bus-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
+        );
+        map.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name.to_string()))),
+        );
+        map.insert(
+            "amount".to_string(),
+            Rc::new(RefCell::new(Value::Number(amount))),
+        );
+        Value::Map(map)
+    }
+
     fn test_delete_target_number(payload: &Value, field: &str) -> Option<usize> {
         let Value::Map(map) = payload else {
             return None;
@@ -7850,30 +7956,8 @@ mod tests {
         ]);
         let empty_plocks = test_bool_list(&[false; 16]);
         let one_track_bus_sends = test_list(vec![
-            Value::Map({
-                let mut map = std::collections::HashMap::new();
-                map.insert(
-                    "name".to_string(),
-                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                );
-                map.insert(
-                    "value".to_string(),
-                    Rc::new(RefCell::new(Value::Number(0.0))),
-                );
-                map
-            }),
-            Value::Map({
-                let mut map = std::collections::HashMap::new();
-                map.insert(
-                    "name".to_string(),
-                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                );
-                map.insert(
-                    "value".to_string(),
-                    Rc::new(RefCell::new(Value::Number(0.0))),
-                );
-                map
-            }),
+            test_track_bus_send(0, "Bus A", 0.0),
+            test_track_bus_send(1, "Bus B", 0.0),
         ]);
 
         editor.runtime_mut().register_reactive(
@@ -7897,6 +7981,10 @@ mod tests {
                     test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
                 ),
                 ("track-bus-sends", test_list(vec![one_track_bus_sends])),
+                ("track-0-bus-0-send", Value::Number(0.0)),
+                ("track-0-bus-1-send", Value::Number(0.0)),
+                ("tp-bus-0-send", Value::Number(0.0)),
+                ("tp-bus-1-send", Value::Number(0.0)),
                 ("track-steps", test_list(vec![steps.clone()])),
                 ("track-num-steps", test_number_list(&[16.0])),
                 (
@@ -9342,40 +9430,12 @@ mod tests {
                 (
                     "track-bus-sends",
                     test_list(vec![test_list(vec![
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "bus-idx".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map.insert(
-                                "name".to_string(),
-                                Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                            );
-                            map.insert(
-                                "amount".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map
-                        }),
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "bus-idx".to_string(),
-                                Rc::new(RefCell::new(Value::Number(1.0))),
-                            );
-                            map.insert(
-                                "name".to_string(),
-                                Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                            );
-                            map.insert(
-                                "amount".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map
-                        }),
+                        test_track_bus_send(0, "Bus A", 0.0),
+                        test_track_bus_send(1, "Bus B", 0.0),
                     ])]),
                 ),
+                ("track-0-bus-0-send", Value::Number(0.0)),
+                ("track-0-bus-1-send", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
@@ -14691,75 +14751,19 @@ mod tests {
                     "track-bus-sends",
                     test_list(vec![
                         test_list(vec![
-                            Value::Map({
-                                let mut map = std::collections::HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map
-                            }),
-                            Value::Map({
-                                let mut map = std::collections::HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(1.0))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map
-                            }),
+                            test_track_bus_send(1, "Bus A", 0.0),
+                            test_track_bus_send(2, "Bus B", 0.0),
                         ]),
                         test_list(vec![
-                            Value::Map({
-                                let mut map = std::collections::HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map
-                            }),
-                            Value::Map({
-                                let mut map = std::collections::HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(1.0))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map
-                            }),
+                            test_track_bus_send(1, "Bus A", 0.0),
+                            test_track_bus_send(2, "Bus B", 0.0),
                         ]),
                     ]),
                 ),
+                ("track-0-bus-1-send", Value::Number(0.0)),
+                ("track-0-bus-2-send", Value::Number(0.0)),
+                ("track-1-bus-1-send", Value::Number(0.0)),
+                ("track-1-bus-2-send", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("track-peak-1", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
@@ -15090,6 +15094,31 @@ mod tests {
             .current_layout
             .clone()
             .expect("mixer layout should be available");
+        let send_knob = find_node_by_stable_key(&layout, "mixer-v2-track-0-send-1")
+            .expect("track 1 Bus A send knob");
+        assert!(matches!(
+            send_knob.props.get("value"),
+            Some(Value::ReactiveRef {
+                namespace,
+                field,
+                ..
+            }) if namespace == "SEQ" && field == "track-0-bus-1-send"
+        ));
+        assert!(
+            send_knob.rect.width > 0.0 && send_knob.rect.height > 0.0,
+            "track send knob should have a finite visible rect: {:?}",
+            send_knob.rect
+        );
+        let send_knob_widget_id = send_knob.widget_id;
+        let _ = editor.take_dirty_widget_ids();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-0-bus-1-send", Value::Number(0.42));
+        assert_eq!(
+            editor.take_dirty_widget_ids(),
+            vec![send_knob_widget_id],
+            "send amount binding should dirty only the send knob widget"
+        );
         let drop_zone = find_node_by_stable_key(&layout, "mixer-v2-sample-drop-zone")
             .expect("sample drop zone");
         assert!(

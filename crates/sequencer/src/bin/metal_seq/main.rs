@@ -3772,8 +3772,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let Some(bus) = app.buses.get(bus_idx) else {
                                     continue;
                                 };
+                                if bus.id == sequencer::sequencer::BusId::MIX {
+                                    continue;
+                                }
                                 let track = payload_track
                                     .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+                                if track >= state.active_track_count() {
+                                    continue;
+                                }
                                 let mut sends = app.state.pattern.track_params[track].sends();
                                 if let Some(send) =
                                     sends.iter_mut().find(|send| send.destination == bus.id)
@@ -3791,20 +3797,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ui::AppCommand::SetTrackSends { track, sends },
                                 );
                                 let rt = editor.runtime_mut();
-                                sync_track_mixer_state(rt, &app, &state);
-                                if track == current_track.load(Ordering::Relaxed) {
-                                    sync_track_params(rt, &app, &state, track, &selected_steps);
-                                    sync_fx_param_binding_fields(
-                                        rt,
-                                        &app,
-                                        &state,
-                                        track,
-                                        &selected_steps,
+                                sync_track_bus_send_binding_field(rt, &app, &state, track, bus_idx);
+                                let current = current_track.load(Ordering::Relaxed);
+                                if track == current {
+                                    sync_current_track_bus_send_binding_field(
+                                        rt, &app, &state, track, bus_idx,
                                     );
                                 }
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }

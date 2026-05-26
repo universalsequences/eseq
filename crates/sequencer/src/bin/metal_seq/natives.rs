@@ -616,6 +616,33 @@ pub(crate) fn init_runtime(
                     Value::Number(0.0),
                 ));
             }
+            for track in 0..track_count {
+                for (bus_idx, bus) in app.buses.iter().enumerate() {
+                    if bus.id == sequencer::sequencer::BusId::MIX {
+                        continue;
+                    }
+                    fields.push((
+                        Box::leak(track_bus_send_field(track, bus_idx).into_boxed_str()),
+                        Value::Number(
+                            track_bus_send_amount(&app, &state, track, bus_idx).unwrap_or(0.0)
+                                as f64,
+                        ),
+                    ));
+                }
+            }
+            if track_count > 0 {
+                for (bus_idx, bus) in app.buses.iter().enumerate() {
+                    if bus.id == sequencer::sequencer::BusId::MIX {
+                        continue;
+                    }
+                    fields.push((
+                        Box::leak(current_track_bus_send_field(bus_idx).into_boxed_str()),
+                        Value::Number(
+                            track_bus_send_amount(&app, &state, 0, bus_idx).unwrap_or(0.0) as f64,
+                        ),
+                    ));
+                }
+            }
             for idx in 0..MAX_STEPS {
                 fields.push((
                     Box::leak(format!("playhead-active-{idx}").into_boxed_str()),
