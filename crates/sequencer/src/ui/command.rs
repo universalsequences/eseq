@@ -2,11 +2,9 @@
 //!
 //! All mutations to `app.state.pattern.*` or `app.state.transport.*` that need
 //! to be visible to the audio thread should go through `apply_command`.  After
-//! executing the command, `apply_command` calls
-//! `app.state.publish_scheduler_snapshot()` so that any future snapshot-based
-//! audio-thread readers can pick up the change.  (Currently `publish` is a
-//! cheap no-op because the audio thread reads atomics directly; the hook is
-//! here for the planned Arc<SequencerSnapshot> architecture.)
+//! executing a command that affects event scheduling, `apply_command` publishes
+//! a scheduler snapshot. Continuous live controls that are pushed directly to
+//! the audio graph intentionally skip that publish path.
 //!
 //! Pure UI-state changes (cursor movement, mode changes, etc.) can also be
 //! routed through `apply_command` for uniformity — they just don't trigger a
@@ -557,15 +555,17 @@ pub fn apply_command(app: &mut App, cmd: AppCommand) {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{apply_command, sanitize_pasted_step_snapshot, AppCommand};
+    use super::{
+        apply_command, command_mutates_sequencer_state, sanitize_pasted_step_snapshot, AppCommand,
+    };
     use crate::audiograph::LiveGraphPtr;
     use crate::effects::{
         EffectDescriptor, InstrumentModulationTarget, ParamDescriptor, ParamKind, ParamScaling,
     };
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, SequencerState, StepSlotPlocks, StepSnapshot, SwingResolution,
-        Timebase, NUM_PARAMS,
+        default_empty_effect_chain, SequencerState, StepSlotPlocks, StepSnapshot,
+        TrackSendSnapshot, SwingResolution, Timebase, NUM_PARAMS,
     };
     use crate::ui::{App, AudioBuses};
 
@@ -669,6 +669,42 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.graph.effect_descriptors = vec![vec![desc]];
         app
+    }
+
+    #[test]
+    fn live_mixer_commands_do_not_publish_scheduler_snapshots() {
+        assert!(!command_mutates_sequencer_state(&AppCommand::SetTrackVolume {
+            track: 0,
+            value: 0.8,
+        }));
+        assert!(!command_mutates_sequencer_state(&AppCommand::SetTrackPan {
+            track: 0,
+            value: -0.25,
+        }));
+        assert!(!command_mutates_sequencer_state(&AppCommand::SetTrackSends {
+            track: 0,
+            sends: vec![TrackSendSnapshot {
+                destination: crate::sequencer::BusId(1),
+                amount: 0.5,
+            }],
+        }));
+        assert!(!command_mutates_sequencer_state(
+            &AppCommand::SetMasterVolume { value: 1.1 }
+        ));
+    }
+
+    #[test]
+    fn sequenced_pattern_commands_publish_scheduler_snapshots() {
+        assert!(command_mutates_sequencer_state(&AppCommand::ToggleStep {
+            track: 0,
+            step: 0,
+        }));
+        assert!(command_mutates_sequencer_state(&AppCommand::SetInstrumentParam {
+            track: 0,
+            param_idx: 0,
+            value: 0.5,
+        }));
+        assert!(command_mutates_sequencer_state(&AppCommand::SetBpm { bpm: 128 }));
     }
 
     #[test]
@@ -818,14 +854,26 @@ mod tests {
     }
 }
 
-/// Returns `true` for commands that write to `app.state.pattern` or
-/// `app.state.transport` and therefore need a snapshot publish.
+/// Returns `true` for commands whose state changes must be visible to the
+/// scheduler's immutable pattern snapshot.
 ///
-/// Currently all `AppCommand` variants mutate sequencer or transport state,
-/// so this always returns `true`.  The function exists as a hook for future
-/// pure-UI command variants that should NOT trigger a publish.
-fn command_mutates_sequencer_state(_cmd: &AppCommand) -> bool {
-    true
+/// Continuous live-mixer controls are pushed directly to the audio graph by
+/// `execute_command`. Publishing a full scheduler snapshot for each drag tick
+/// makes the app loop perform broad pattern/UI sync work even though event
+/// scheduling cannot observe those fields.
+fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
+    !matches!(
+        cmd,
+        AppCommand::SetTrackVolume { .. }
+            | AppCommand::AdjustTrackVolume { .. }
+            | AppCommand::SetTrackPan { .. }
+            | AppCommand::AdjustTrackPan { .. }
+            | AppCommand::SetTrackSend { .. }
+            | AppCommand::AdjustTrackSend { .. }
+            | AppCommand::SetTrackSends { .. }
+            | AppCommand::SetMasterVolume { .. }
+            | AppCommand::AdjustMasterVolume { .. }
+    )
 }
 
 fn execute_command(app: &mut App, cmd: AppCommand) {

@@ -344,7 +344,7 @@
         (seq-set-track-volume i (mixer-v2-event-volume event))))
     (h-stack :gap 0.06 :align :center
       (mixer-v2-volume-triangle
-        :value (bind-seq-nth "track-volumes" i)
+        :value (bind-seq (mixer-v2-track-volume-field i))
         :on-click (lambda (sx sy region)
           (do
             (mixer-v2-clear-delete-target)
@@ -387,6 +387,12 @@
 
 (def mixer-v2-send-field (track bus)
   (str "track-" track "-bus-" bus "-send"))
+
+(def mixer-v2-track-volume-field (track)
+  (str "track-" track "-volume"))
+
+(def mixer-v2-track-pan-field (track)
+  (str "track-" track "-pan"))
 
 (def mixer-v2-send-knob (track send)
   (knob-number :label (mixer-v2-send-label (get send :name))
@@ -435,7 +441,7 @@
         (h-stack :gap 1.6 :align :center
           (knob-number :label "pan"
             :key (str "mixer-v2-track-pan-" i)
-            :value (bind-seq-nth "track-pans" i)
+            :value (bind-seq (mixer-v2-track-pan-field i))
             :min -1 :max 1 :decimals 2
             :font-size 9 :label-font-size 8
             :text-color :dim :label-color :dim

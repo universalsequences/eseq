@@ -45,7 +45,7 @@ fn log_native_callback_error(vm: &VM, native_name: &str, index: usize, error: &V
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReactiveSource {
     NamespaceField { namespace: String, field: String },
     LocalState { name: String },
@@ -252,6 +252,8 @@ pub struct ReactiveDag {
     pub edges: HashMap<NodeId, HashSet<NodeId>>,
     pub dirty_nodes: HashSet<NodeId>,
     pub next_id: NodeId,
+    namespace_field_sources: HashMap<String, HashMap<String, NodeId>>,
+    local_state_sources: HashMap<String, NodeId>,
 }
 
 pub fn format_lisp_value(value: &Value) -> String {
@@ -1653,6 +1655,8 @@ impl ReactiveDag {
             edges: HashMap::new(),
             dirty_nodes: HashSet::new(),
             next_id: 0,
+            namespace_field_sources: HashMap::new(),
+            local_state_sources: HashMap::new(),
         }
     }
 
@@ -1668,11 +1672,22 @@ impl ReactiveDag {
             | ReactiveNode::Derived { id, .. }
             | ReactiveNode::Effect { id, .. } => *id,
         };
+        if let Some(source) = self.nodes.get(&id).and_then(|node| match node {
+            ReactiveNode::Source { source, .. } => Some(source.clone()),
+            _ => None,
+        }) {
+            self.unindex_source_node(&source, id);
+        }
+        if let ReactiveNode::Source { source, .. } = &node {
+            self.index_source_node(source, id);
+        }
         self.nodes.insert(id, node);
     }
 
     pub fn remove_node(&mut self, id: NodeId) {
-        self.nodes.remove(&id);
+        if let Some(ReactiveNode::Source { source, .. }) = self.nodes.remove(&id) {
+            self.unindex_source_node(&source, id);
+        }
         self.edges.remove(&id);
         self.dirty_nodes.remove(&id);
         for dependents in self.edges.values_mut() {
@@ -1803,13 +1818,67 @@ impl ReactiveDag {
         }
     }
 
+    fn index_source_node(&mut self, source: &ReactiveSource, id: NodeId) {
+        match source {
+            ReactiveSource::NamespaceField { namespace, field } => {
+                self.namespace_field_sources
+                    .entry(namespace.clone())
+                    .or_default()
+                    .insert(field.clone(), id);
+            }
+            ReactiveSource::LocalState { name } => {
+                self.local_state_sources.insert(name.clone(), id);
+            }
+        }
+    }
+
+    fn unindex_source_node(&mut self, source: &ReactiveSource, id: NodeId) {
+        match source {
+            ReactiveSource::NamespaceField { namespace, field } => {
+                let should_remove_namespace = if let Some(fields) =
+                    self.namespace_field_sources.get_mut(namespace)
+                {
+                    if fields.get(field) == Some(&id) {
+                        fields.remove(field);
+                    }
+                    fields.is_empty()
+                } else {
+                    false
+                };
+                if should_remove_namespace {
+                    self.namespace_field_sources.remove(namespace);
+                }
+            }
+            ReactiveSource::LocalState { name } => {
+                if self.local_state_sources.get(name) == Some(&id) {
+                    self.local_state_sources.remove(name);
+                }
+            }
+        }
+    }
+
+    pub fn find_namespace_field_source_node(
+        &self,
+        namespace: &str,
+        field: &str,
+    ) -> Option<NodeId> {
+        self.namespace_field_sources
+            .get(namespace)
+            .and_then(|fields| fields.get(field))
+            .copied()
+    }
+
+    pub fn find_local_state_source_node(&self, name: &str) -> Option<NodeId> {
+        self.local_state_sources.get(name).copied()
+    }
+
     pub fn find_source_node(&self, source: &ReactiveSource) -> Option<NodeId> {
-        self.nodes.iter().find_map(|(id, node)| match node {
-            ReactiveNode::Source {
-                source: current, ..
-            } if current == source => Some(*id),
-            _ => None,
-        })
+        match source {
+            ReactiveSource::NamespaceField { namespace, field } => {
+                self.find_namespace_field_source_node(namespace, field)
+            }
+            ReactiveSource::LocalState { name } => self.find_local_state_source_node(name),
+        }
     }
 
     pub fn chunk_idx(&self, id: NodeId) -> Option<usize> {
@@ -2660,16 +2729,16 @@ impl VM {
     }
 
     fn get_or_create_source_node(&mut self, namespace: &str, field: &str) -> NodeId {
-        let source = ReactiveSource::NamespaceField {
-            namespace: namespace.to_string(),
-            field: field.to_string(),
-        };
-        if let Some(id) = self.dag.find_source_node(&source) {
+        if let Some(id) = self.dag.find_namespace_field_source_node(namespace, field) {
             return id;
         }
 
         let id = self.dag.alloc_id();
         let value = self.current_reactive_value(namespace, field);
+        let source = ReactiveSource::NamespaceField {
+            namespace: namespace.to_string(),
+            field: field.to_string(),
+        };
         self.dag.add_node(ReactiveNode::Source {
             id,
             source,
@@ -2680,12 +2749,8 @@ impl VM {
     }
 
     pub fn has_reactive_subscribers(&self, namespace: &str, field: &str) -> bool {
-        let source = ReactiveSource::NamespaceField {
-            namespace: namespace.to_string(),
-            field: field.to_string(),
-        };
         self.dag
-            .find_source_node(&source)
+            .find_namespace_field_source_node(namespace, field)
             .and_then(|id| self.dag.nodes.get(&id))
             .is_some_and(|node| match node {
                 ReactiveNode::Source { dependents, .. } => !dependents.is_empty(),
@@ -2699,16 +2764,16 @@ impl VM {
         name: &str,
         initial: Value,
     ) -> NodeId {
-        let source = ReactiveSource::LocalState {
-            name: name.to_string(),
-        };
-        if let Some(id) = self.dag.find_source_node(&source) {
+        if let Some(id) = self.dag.find_local_state_source_node(name) {
             if !self.preserve_state_on_redefinition {
                 self.mark_source_dependents_dirty(id, initial);
             }
             return id;
         }
 
+        let source = ReactiveSource::LocalState {
+            name: name.to_string(),
+        };
         self.dag.add_node(ReactiveNode::Source {
             id: node_id,
             source,
@@ -3772,7 +3837,9 @@ impl VM {
 
 #[cfg(test)]
 mod tests {
-    use super::{VM, Value};
+    use std::collections::HashSet;
+
+    use super::{EffectTarget, ReactiveDag, ReactiveNode, ReactiveSource, VM, Value};
 
     #[test]
     fn eval_str_grows_global_storage_for_large_programs() {
@@ -3807,5 +3874,47 @@ mod tests {
             .expect("macro definition");
 
         assert!(vm.eval_str("(again 1)").is_err());
+    }
+
+    #[test]
+    fn reactive_dag_indexes_source_nodes() {
+        let mut dag = ReactiveDag::new();
+        let source = ReactiveSource::NamespaceField {
+            namespace: "SEQ".to_string(),
+            field: "send-a".to_string(),
+        };
+        dag.add_node(ReactiveNode::Source {
+            id: 7,
+            source: source.clone(),
+            value: Value::Number(0.0),
+            dependents: HashSet::new(),
+        });
+
+        assert_eq!(dag.find_source_node(&source), Some(7));
+
+        dag.add_node(ReactiveNode::Effect {
+            id: 7,
+            chunk_idx: 0,
+            callable: None,
+            source_buffer_id: None,
+            source_module: None,
+            target: EffectTarget::BufferId(None),
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            symbol_dependencies: HashSet::new(),
+            dirty: false,
+        });
+        assert_eq!(dag.find_source_node(&source), None);
+
+        dag.add_node(ReactiveNode::Source {
+            id: 8,
+            source: source.clone(),
+            value: Value::Number(1.0),
+            dependents: HashSet::new(),
+        });
+        assert_eq!(dag.find_source_node(&source), Some(8));
+        dag.remove_node(8);
+        assert_eq!(dag.find_source_node(&source), None);
     }
 }

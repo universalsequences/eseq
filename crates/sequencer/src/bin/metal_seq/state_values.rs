@@ -920,6 +920,52 @@ pub(crate) fn build_track_pans(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn track_volume_field(track: usize) -> String {
+    format!("track-{track}-volume")
+}
+
+pub(crate) fn track_pan_field(track: usize) -> String {
+    format!("track-{track}-pan")
+}
+
+pub(crate) fn sync_track_volume_binding_field(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+) {
+    if let Some(tp) = state.pattern.track_params.get(track) {
+        rt.set_reactive(
+            "SEQ",
+            &track_volume_field(track),
+            Value::Number(tp.get_volume() as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_track_pan_binding_field(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+) {
+    if let Some(tp) = state.pattern.track_params.get(track) {
+        rt.set_reactive(
+            "SEQ",
+            &track_pan_field(track),
+            Value::Number(tp.get_pan() as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_track_volume_pan_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+) {
+    for track in 0..state.active_track_count() {
+        sync_track_volume_binding_field(rt, state, track);
+        sync_track_pan_binding_field(rt, state, track);
+    }
+}
+
 pub(crate) fn build_track_outputs(app: &ui::App, state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
@@ -1112,6 +1158,7 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
     );
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
     rt.set_reactive("SEQ", "track-pans", build_track_pans(state));
+    sync_track_volume_pan_binding_fields(rt, state);
     rt.set_reactive("SEQ", "track-outputs", build_track_outputs(app, state));
     rt.set_reactive(
         "SEQ",
@@ -4343,21 +4390,15 @@ fn build_track_output_options(app: &ui::App) -> Value {
     Value::List(labels)
 }
 
-fn build_track_bus_sends(app: &ui::App, tp: &sequencer::sequencer::TrackParams) -> Value {
+fn build_track_bus_sends(app: &ui::App, _tp: &sequencer::sequencer::TrackParams) -> Value {
     use std::collections::HashMap;
 
-    let sends = tp.sends();
     let items = app
         .buses
         .iter()
         .enumerate()
         .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
         .map(|(bus_idx, bus)| {
-            let amount = sends
-                .iter()
-                .find(|send| send.destination == bus.id)
-                .map(|send| send.amount)
-                .unwrap_or(0.0);
             let mut map = HashMap::new();
             map.insert(
                 "bus-idx".to_string(),
@@ -4366,10 +4407,6 @@ fn build_track_bus_sends(app: &ui::App, tp: &sequencer::sequencer::TrackParams) 
             map.insert(
                 "name".to_string(),
                 Rc::new(RefCell::new(Value::String(bus.name.clone()))),
-            );
-            map.insert(
-                "amount".to_string(),
-                Rc::new(RefCell::new(Value::Number(amount as f64))),
             );
             Rc::new(RefCell::new(Value::Map(map)))
         })
