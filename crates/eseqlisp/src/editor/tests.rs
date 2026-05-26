@@ -935,6 +935,112 @@ fn hot_reload_active_effect_buffer_updates_after_reactive_change() {
 }
 
 #[test]
+fn hot_reload_active_effect_buffer_keeps_selection_and_button_state_reactive() {
+    let dir = hot_reload_temp_dir("eseqlisp-hot-active-selection-state");
+    let root = dir.join("root.lisp");
+    let child = dir.join("child.lisp");
+    std::fs::write(&root, r#"(load "child.lisp")"#).unwrap();
+    std::fs::write(
+        &child,
+        r#"(effect-buffer "*hot-selection*"
+  (v-stack
+    (subtree :key "track-0"
+      (v-stack
+        (label (if (= APP.selected 0) "track-0-selected" "track-0-idle"))
+        (label (if APP.muted "track-0-muted" "track-0-unmuted"))))
+    (subtree :key "track-1"
+      (label (if (= APP.selected 1) "track-1-selected" "track-1-idle")))))"#,
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new();
+    runtime.register_reactive(
+        "APP",
+        vec![
+            ("selected", Value::Number(0.0)),
+            ("muted", Value::Bool(false)),
+        ],
+        true,
+    );
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_or_create_file_buffer(&root).unwrap();
+    editor.create_file_buffer(&child, BufferMode::ESeqLisp).unwrap();
+    let root_source = editor.active_buffer().text();
+    let overlays = editor.snapshot_file_backed_sources();
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(root.clone()), &root_source, overlays);
+    assert!(report.success, "initial reload failed: {:?}", report.diagnostics);
+    editor.process_lisp_reload_report(report);
+
+    let hot_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*hot-selection*")
+        .map(|buffer| buffer.id)
+        .expect("hot-selection buffer");
+    editor.set_active_buffer(hot_id);
+
+    let child_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.path.as_ref() == Some(&child))
+        .unwrap();
+    editor.buffers[child_idx].set_text(
+        r#"(effect-buffer "*hot-selection*"
+  (v-stack
+    (subtree :key "track-0"
+      (v-stack
+        (label (if (= APP.selected 0) "track-0-selected" "track-0-idle"))
+        (label (if APP.muted "track-0-muted" "track-0-unmuted"))
+        (label "after-reload")))
+    (subtree :key "track-1"
+      (label (if (= APP.selected 1) "track-1-selected" "track-1-idle")))))"#,
+    );
+    editor.buffers[child_idx].dirty = true;
+    let leaf_source = editor.buffers[child_idx].text();
+    let overlays = editor.snapshot_file_backed_sources();
+    let report =
+        editor
+            .runtime_mut()
+            .eval_source_transactional(Some(child), &leaf_source, overlays);
+    assert!(
+        report.success,
+        "active selection reload failed: {:?}",
+        report.diagnostics
+    );
+    editor.process_lisp_reload_report(report);
+    editor.set_active_buffer(hot_id);
+
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "selected", Value::Number(1.0));
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "muted", Value::Bool(true));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let tree = editor
+        .runtime
+        .current_widget_tree()
+        .expect("active hot-selection tree");
+    assert!(
+        widget_has_label_text(&tree, "track-1-selected"),
+        "active selection subtree should update after hot reload"
+    );
+    assert!(
+        widget_has_label_text(&tree, "track-0-muted"),
+        "active button-style subtree should update after hot reload"
+    );
+    assert!(
+        widget_has_label_text(&tree, "after-reload"),
+        "reactive update should preserve hot-reloaded subtree body"
+    );
+}
+
+#[test]
 fn hot_reload_preserves_existing_defstate_values() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-defstate");
     let root = dir.join("root.lisp");
@@ -5601,6 +5707,65 @@ fn named_effect_buffer_nested_subtree_updates_when_inactive() {
     assert!(
         updated_rendered.contains("\"7\""),
         "inactive named buffer subtree should update in place: {updated_rendered}"
+    );
+}
+
+#[test]
+fn active_named_buffer_batches_multiple_subtree_updates_into_one_relayout() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+    editor.runtime_mut().register_reactive(
+        "APP",
+        vec![
+            ("left-level", Value::Number(2.0)),
+            ("right-level", Value::Number(3.0)),
+        ],
+        true,
+    );
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*controls*"
+              (v-stack
+                (subtree :key "left-label"
+                  (label (fmt "left:{}" APP.left-level)))
+                (subtree :key "right-label"
+                  (label (fmt "right:{}" APP.right-level)))))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .unwrap()
+        .id;
+    editor.set_active_buffer(controls_id);
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "left-level", Value::Number(7.0));
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "right-level", Value::Number(9.0));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let trace = editor
+        .runtime()
+        .last_ui_invalidation_trace()
+        .expect("reactive invalidation trace");
+    assert_eq!(trace.pending_subtree_patch_count, 2);
+    assert_eq!(trace.subtree_failure_reason, None);
+    let tree = editor.runtime.current_widget_tree().unwrap();
+    let rendered = crate::vm::format_lisp_value(&tree);
+    assert!(
+        rendered.contains("\"left:7\"") && rendered.contains("\"right:9\""),
+        "batched active subtree update should apply both patches: {rendered}"
     );
 }
 

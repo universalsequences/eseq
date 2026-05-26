@@ -27,12 +27,20 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
-use crate::vm::{EffectTarget, PendingUiUpdate, Value, format_lisp_value};
+use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
 use commands::key_str;
 use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
+
+struct EditorSubtreeReplacement {
+    buffer_idx: usize,
+    source_buffer_id: Option<BufferId>,
+    subtree_root_id: u64,
+    tree: Value,
+    reactive_dependencies: Vec<ReactiveFieldKey>,
+}
 
 fn metal_tile_content_viewport(
     rect: &Rect,
@@ -4864,6 +4872,95 @@ impl Editor {
         true
     }
 
+    fn flush_active_subtree_replacements(
+        &mut self,
+        replacements: &mut Vec<EditorSubtreeReplacement>,
+    ) {
+        if replacements.is_empty() {
+            return;
+        }
+        while let Some(buffer_idx) = replacements
+            .first()
+            .map(|replacement| replacement.buffer_idx)
+        {
+            let mut group = Vec::new();
+            let mut remaining = Vec::new();
+            for replacement in replacements.drain(..) {
+                if replacement.buffer_idx == buffer_idx {
+                    group.push(replacement);
+                } else {
+                    remaining.push(replacement);
+                }
+            }
+            *replacements = remaining;
+
+            let common_source = group
+                .first()
+                .and_then(|first| {
+                    group
+                        .iter()
+                        .all(|replacement| replacement.source_buffer_id == first.source_buffer_id)
+                        .then_some(first.source_buffer_id)
+                })
+                .flatten();
+            let batch = group
+                .iter()
+                .map(|replacement| {
+                    (
+                        replacement.subtree_root_id,
+                        replacement.tree.deep_clone(),
+                        replacement.reactive_dependencies.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let batch_replaced = {
+                let buffer = &mut self.buffers[buffer_idx];
+                let replaced = buffer.replace_widget_subtrees(&batch, common_source);
+                if replaced {
+                    buffer.view_mode = ViewMode::UiOnly;
+                }
+                replaced
+            };
+            let mut any_replaced = batch_replaced;
+            if !batch_replaced {
+                for replacement in &group {
+                    let replaced = {
+                        let buffer = &mut self.buffers[buffer_idx];
+                        let replaced = buffer.replace_widget_subtree(
+                            replacement.subtree_root_id,
+                            replacement.tree.deep_clone(),
+                            replacement.source_buffer_id,
+                            replacement.reactive_dependencies.clone(),
+                        );
+                        if replaced {
+                            buffer.view_mode = ViewMode::UiOnly;
+                        }
+                        replaced
+                    };
+                    if replaced {
+                        any_replaced = true;
+                    }
+                }
+            }
+            if !any_replaced {
+                continue;
+            }
+            if self.active_buffer_idx() == buffer_idx {
+                crate::widget_render::clear_overlay();
+                if let Some(tree) = self.buffers[buffer_idx].widget_tree.clone() {
+                    let snapshot = self.buffers[buffer_idx].committed_ui_snapshot.clone();
+                    let buffer_id = self.buffers[buffer_idx].id as u64;
+                    self.runtime.adopt_current_widget_tree_snapshot(
+                        tree,
+                        snapshot,
+                        buffer_id * 100_000,
+                    );
+                }
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+    }
+
     pub fn refresh_runtime_side_effects(&mut self) {
         self.lisp_bindings = self.default_lisp_bindings.clone();
         self.lisp_bindings.extend(self.runtime.lisp_bindings());
@@ -5014,9 +5111,11 @@ impl Editor {
         }
 
         let mut inactive_buffers_to_refresh: HashMap<usize, Option<Vec<u64>>> = HashMap::new();
+        let mut active_subtree_replacements = Vec::<EditorSubtreeReplacement>::new();
         for pending in self.runtime.take_pending_buffer_widget_trees() {
             match pending {
                 PendingUiUpdate::FullTree(pending) => {
+                    self.flush_active_subtree_replacements(&mut active_subtree_replacements);
                     let buffer_idx = match pending.target {
                         EffectTarget::BufferId(Some(id)) => {
                             let Some(idx) = self.buffers.iter().position(|buffer| buffer.id == id)
@@ -5158,6 +5257,16 @@ impl Editor {
                         )
                     });
                     let is_active = self.active_buffer_idx() == buffer_idx;
+                    if is_active {
+                        active_subtree_replacements.push(EditorSubtreeReplacement {
+                            buffer_idx,
+                            source_buffer_id,
+                            subtree_root_id,
+                            tree,
+                            reactive_dependencies,
+                        });
+                        continue;
+                    }
                     let replaced = {
                         let buffer = &mut self.buffers[buffer_idx];
                         let replaced = buffer.replace_widget_subtree(
@@ -5172,24 +5281,11 @@ impl Editor {
                         replaced
                     };
                     if replaced {
-                        if is_active {
-                            crate::widget_render::clear_overlay();
-                            let runtime_replaced = self.runtime.replace_current_subtree(
-                                subtree_root_id,
-                                tree,
-                                reactive_dependencies,
-                            );
-                            if !runtime_replaced {
-                                self.restore_runtime_widget_tree_from_buffer(buffer_idx);
-                            }
-                            self.remap_focused_widget_after_layout_change();
-                        } else {
-                            inactive_buffers_to_refresh
-                                .entry(buffer_idx)
-                                .or_insert_with(|| Some(Vec::new()))
-                                .as_mut()
-                                .map(|roots| roots.push(subtree_root_id));
-                        }
+                        inactive_buffers_to_refresh
+                            .entry(buffer_idx)
+                            .or_insert_with(|| Some(Vec::new()))
+                            .as_mut()
+                            .map(|roots| roots.push(subtree_root_id));
                     }
                     self.trace_ui_tree_event_with(
                         &buffer_name,
@@ -5210,6 +5306,7 @@ impl Editor {
                 }
             }
         }
+        self.flush_active_subtree_replacements(&mut active_subtree_replacements);
         for (buffer_idx, subtree_roots) in inactive_buffers_to_refresh {
             match subtree_roots {
                 Some(subtree_roots) => {

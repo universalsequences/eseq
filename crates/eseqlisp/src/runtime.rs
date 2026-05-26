@@ -2574,22 +2574,23 @@ impl Runtime {
         }
     }
 
-    pub fn replace_current_subtree(
+    pub fn adopt_current_widget_tree_snapshot(
         &mut self,
-        subtree_root_id: u64,
         tree: Value,
-        reactive_dependencies: Vec<ReactiveFieldKey>,
-    ) -> bool {
-        let replaced = self.replace_current_subtree_without_relayout(
-            subtree_root_id,
-            tree,
-            reactive_dependencies,
-        );
-        if replaced {
-            self.relayout_current_tree();
-            self.layout_revision = self.layout_revision.wrapping_add(1);
-        }
-        replaced
+        snapshot: Option<CommittedBufferUiSnapshot>,
+        widget_id_offset: u64,
+    ) {
+        self.widget_id_offset = widget_id_offset;
+        self.current_widget_tree = Some(tree.clone());
+        self.current_committed_ui_snapshot = snapshot.or_else(|| {
+            Some(CommittedBufferUiSnapshot::from_tree(
+                tree,
+                self.shared.borrow().current_buffer_id,
+                Vec::new(),
+            ))
+        });
+        self.relayout_current_tree();
+        self.layout_revision = self.layout_revision.wrapping_add(1);
     }
 
     fn replace_current_subtree_without_relayout(
@@ -2931,10 +2932,6 @@ impl Runtime {
             return;
         };
         let mut dirty_widget_ids = Vec::new();
-        let failure_reason = self
-            .current_layout
-            .as_ref()
-            .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree));
         if let Some(existing) = self.current_layout.as_ref()
             && let Some(updated) = reuse_layout_node(existing.as_ref(), tree, &mut dirty_widget_ids)
         {
@@ -2954,6 +2951,10 @@ impl Runtime {
                 .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
         }
+        let failure_reason = self
+            .current_layout
+            .as_ref()
+            .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree));
         let engine = if let Some(measurer) = self.text_measurer.as_deref() {
             LayoutEngine::with_text_measurer_exact(
                 self.layout_cols,

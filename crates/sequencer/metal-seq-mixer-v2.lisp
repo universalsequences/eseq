@@ -244,8 +244,9 @@
       :transition (dict :brightness 0.08 :ease :smoothstep))))
 
 (def mixer-v2-mod-port-row (track)
+     (box :height 0.8 :width :fill 
   (h-stack :key (str "mixer-v2-mod-ports-" track)
-    :width 9.8 :height 1.1 :gap 0.42 :align :center
+    :width 9.8 :height 0.1 :gap 0.42 :align :center
     (mixer-v2-mod-port
       :key (str "mixer-v2-mod-out-" track)
       :patch-port true
@@ -286,7 +287,7 @@
           :on-cable-click (lambda (source dest input)
             (mixer-v2-select-mod-route source dest input))
           :on-click |x y r| (mixer-v2-mod-in-click track input)
-          :on-mouse-up |x y r| (mixer-v2-mod-in-click track input))))))
+          :on-mouse-up |x y r| (mixer-v2-mod-in-click track input)))))))
 
 (defwidget mixer-v2-volume-triangle
   :width 1.35 :height 4.24
@@ -393,9 +394,9 @@
     :value (bind-seq (mixer-v2-send-field track (get send :bus-idx)))
     :min 0 :max 1 :decimals 2
     :show-value false
-    :font-size 9 :label-font-size 8
+    :font-size 9 :label-font-size 5
     :text-color :dim :label-color :dim
-    :width 4.7 :height 1.5 :knob-size 1.34
+    :width 4.7 :height 1.8 :knob-size 1.84
     :on-change (lambda (v)
       (do
         (mixer-v2-clear-delete-target)
@@ -417,7 +418,7 @@
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (mixer-v2-drop-on-track event))
       :on-click (lambda (event) (mixer-v2-select-track i))
-      (v-stack :gap 0.15
+      (v-stack :gap 0.25
         (dropdown :value (nth SEQ.track-outputs i)
           :key (str "mixer-v2-track-output-" i)
           :options SEQ.track-output-options
@@ -430,6 +431,7 @@
         (h-stack :gap 0.05
           (each sends |send send-idx|
             (mixer-v2-send-knob i send)))
+	(box :width :fill :height 0.2)
         (h-stack :gap 1.6 :align :center
           (knob-number :label "pan"
             :key (str "mixer-v2-track-pan-" i)

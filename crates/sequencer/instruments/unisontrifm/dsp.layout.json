@@ -1,0 +1,513 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 119.23503,
+        "y": 29.347767
+      },
+      "add1": {
+        "x": 60.316265,
+        "y": 32.188137
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 6.6800003
+      },
+      "audio": {
+        "x": 119.348274,
+        "y": 33.524208
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 9.360001
+      },
+      "env": {
+        "x": 132.28911,
+        "y": 18.98
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 17.400002
+      },
+      "gate": {
+        "x": 159.72073,
+        "y": 4.0
+      },
+      "mix1": {
+        "x": 93.796036,
+        "y": 24.878511
+      },
+      "mod#0": {
+        "x": 152.58911,
+        "y": 18.98
+      },
+      "myparam": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "osc": {
+        "x": 159.13637,
+        "y": 25.662498
+      },
+      "phase": {
+        "x": 162.09067,
+        "y": 18.98
+      },
+      "pitch": {
+        "x": 116.30649,
+        "y": 4.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 14.720001
+      },
+      "semitone-offset-hz1": {
+        "x": 100.2832,
+        "y": 17.4
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 12.040001
+      },
+      "trigger": {
+        "x": 179.50061,
+        "y": 4.0
+      },
+      "unison-detune-51_unison-detune-52_unison-detune-53_unison-detune-54_unison-detune-55": {
+        "x": 82.84258,
+        "y": 18.98
+      },
+      "value1": {
+        "x": 70.958595,
+        "y": 20.7756
+      },
+      "velocity": {
+        "x": 136.82172,
+        "y": 4.0
+      },
+      "xop1": {
+        "x": 87.76502,
+        "y": 20.7756
+      },
+      "xop2": {
+        "x": 100.2832,
+        "y": 20.524235
+      },
+      "xop3": {
+        "x": 49.378765,
+        "y": 28.285398
+      },
+      "xop4": {
+        "x": 59.364815,
+        "y": 28.285398
+      },
+      "xop5": {
+        "x": 70.21272,
+        "y": 27.867989
+      },
+      "xop6": {
+        "x": 81.670906,
+        "y": 28.285398
+      },
+      "xop7": {
+        "x": 93.01507,
+        "y": 29.004786
+      }
+    },
+    "cables": {
+      "*#0:0->audio:0": {
+        "segmented": true,
+        "y": 29.793747
+      },
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 15.010001
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 22.491247
+      },
+      "gain:0->mod#0:0": {
+        "segmented": true,
+        "y": 18.98
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 12.28
+      },
+      "mod#0:0->*#0:3": {
+        "segmented": true,
+        "y": 21.251247
+      },
+      "phase:0->osc:0": {
+        "segmented": true,
+        "y": 23.731249
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 11.04
+      },
+      "pitch:0->unison-detune-51_unison-detune-52_unison-detune-53_unison-detune-54_unison-detune-55:0": {
+        "segmented": true,
+        "y": 13.5199995
+      },
+      "pitch:0->xop1:0": {
+        "segmented": true,
+        "y": 11.04
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 16.650002
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 15.830001
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 14.139999
+      },
+      "unison-detune-51_unison-detune-52_unison-detune-53_unison-detune-54_unison-detune-55:0->xop3:0": {
+        "segmented": true,
+        "y": 22.491247
+      },
+      "unison-detune-51_unison-detune-52_unison-detune-53_unison-detune-54_unison-detune-55:1->xop4:0": {
+        "segmented": true,
+        "y": 22.491247
+      },
+      "unison-detune-51_unison-detune-52_unison-detune-53_unison-detune-54_unison-detune-55:2->xop5:0": {
+        "segmented": true,
+        "y": 22.491247
+      },
+      "unison-detune-51_unison-detune-52_unison-detune-53_unison-detune-54_unison-detune-55:3->xop6:0": {
+        "segmented": true,
+        "y": 22.491247
+      },
+      "unison-detune-51_unison-detune-52_unison-detune-53_unison-detune-54_unison-detune-55:4->xop7:0": {
+        "segmented": true,
+        "y": 22.491247
+      },
+      "value1:0->unison-detune-51_unison-detune-52_unison-detune-53_unison-detune-54_unison-detune-55:1": {
+        "segmented": true,
+        "y": 12.28
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 12.985
+      }
+    }
+  },
+  "macros": {
+    "semitone-offset-hz": {
+      "nodes": {
+        "/#0": {
+          "x": 48.434998,
+          "y": 10.6825
+        },
+        "2": {
+          "x": 58.725,
+          "y": 10.6825
+        },
+        "hz": {
+          "x": 23.739998,
+          "y": 4.0
+        },
+        "out": {
+          "x": 23.894196,
+          "y": 30.73
+        },
+        "pow#0": {
+          "x": 48.53,
+          "y": 17.365
+        },
+        "return": {
+          "x": 23.739998,
+          "y": 24.0475
+        },
+        "semitones": {
+          "x": 48.434998,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "/#0:0->pow#0:1": {
+          "segmented": true,
+          "y": 14.193749
+        },
+        "2:0->pow#0:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "hz:0->return:0": {
+          "segmented": true,
+          "y": 14.81375
+        },
+        "pow#0:0->return:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "semitones:0->/#0:0": {
+          "segmented": true,
+          "y": 8.13125
+        }
+      }
+    },
+    "unison-detune-5": {
+      "nodes": {
+        "*#0": {
+          "x": 59.53,
+          "y": 17.365
+        },
+        "*#1": {
+          "x": 80.10999,
+          "y": 17.365
+        },
+        "-#0": {
+          "x": 92.71999,
+          "y": 17.365
+        },
+        "base_freq": {
+          "x": 17.919998,
+          "y": 4.0
+        },
+        "detune_semitones": {
+          "x": 54.89,
+          "y": 4.0
+        },
+        "out": {
+          "x": 27.449196,
+          "y": 37.4125
+        },
+        "out2": {
+          "x": 37.2408,
+          "y": 37.4125
+        },
+        "out3": {
+          "x": 80.595,
+          "y": 37.4125
+        },
+        "out4": {
+          "x": 69.145004,
+          "y": 37.4125
+        },
+        "out5": {
+          "x": 92.045,
+          "y": 37.4125
+        },
+        "r1": {
+          "x": 70.979996,
+          "y": 17.365
+        },
+        "r2": {
+          "x": 60.69,
+          "y": 24.0475
+        },
+        "r3": {
+          "x": 81.84999,
+          "y": 24.0475
+        },
+        "r4": {
+          "x": 92.55499,
+          "y": 24.0475
+        },
+        "return2": {
+          "x": 27.294998,
+          "y": 30.73
+        },
+        "return3": {
+          "x": 37.394997,
+          "y": 30.73
+        },
+        "return4": {
+          "x": 69.82,
+          "y": 24.0475
+        },
+        "return5": {
+          "x": 47.494995,
+          "y": 30.73
+        },
+        "semi_to_factor": {
+          "x": 54.89,
+          "y": 10.6825
+        }
+      },
+      "cables": {
+        "*#0:0->r2:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "*#1:0->r3:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "-#0:0->r4:0": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "base_freq:0->out:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->return2:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->return3:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->return4:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->return5:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "detune_semitones:0->semi_to_factor:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "r1:0->return4:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "r2:0->return2:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "r3:0->return3:1": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "r4:0->return5:1": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "return2:0->out2:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "return3:0->out3:0": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "return4:0->out4:0": {
+          "segmented": true,
+          "y": 31.52
+        },
+        "return5:0->out5:0": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "semi_to_factor:0->*#0:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "semi_to_factor:0->*#1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "semi_to_factor:0->-#0:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "semi_to_factor:0->r1:0": {
+          "segmented": true,
+          "y": 14.813749
+        }
+      }
+    },
+    "xop": {
+      "nodes": {
+        "cos1": {
+          "x": 7.725,
+          "y": 37.4125
+        },
+        "input": {
+          "x": 6.4942966,
+          "y": 4.0
+        },
+        "input2": {
+          "x": 37.78318,
+          "y": 2.827168
+        },
+        "mul1": {
+          "x": -0.047706604,
+          "y": 24.037615
+        },
+        "mul2": {
+          "x": 7.74,
+          "y": 30.73
+        },
+        "mul3": {
+          "x": 23.349998,
+          "y": 10.6825
+        },
+        "out": {
+          "x": 7.3941994,
+          "y": 44.094997
+        },
+        "phasor1": {
+          "x": -0.81876135,
+          "y": 10.6825
+        },
+        "phasor2": {
+          "x": 26.679295,
+          "y": 4.0
+        },
+        "triangle1": {
+          "x": 8.839062,
+          "y": 17.365
+        }
+      },
+      "cables": {
+        "cos1:0->out:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "input2:0->mul2:1": {
+          "segmented": true,
+          "y": 27.804531
+        },
+        "input:0->phasor1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "mul1:0->mul2:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "mul2:0->cos1:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mul3:0->triangle1:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "phasor1:0->triangle1:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "phasor2:0->mul3:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "triangle1:0->mul1:0": {
+          "segmented": true,
+          "y": 21.49625
+        }
+      }
+    }
+  }
+}

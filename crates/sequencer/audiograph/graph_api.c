@@ -342,9 +342,11 @@ int add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
   char *name_copy = NULL;
   if (initial_state && initial_state_size > 0) {
     initial_state_copy = malloc(initial_state_size);
-    if (initial_state_copy) {
-      memcpy(initial_state_copy, initial_state, initial_state_size);
+    if (!initial_state_copy) {
+      add_failed_id(lg, node_id);
+      return -1;
     }
+    memcpy(initial_state_copy, initial_state, initial_state_size);
   }
   if (name) {
     name_copy = strdup(name);
@@ -387,6 +389,16 @@ int add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
 
   // Return the pre-allocated node ID (which is both logical_id and array index)
   return node_id;
+}
+
+int add_gain_node(LiveGraph *lg, float gain_value, const char *name) {
+  if (!lg)
+    return -1;
+
+  float init_state[1];
+  init_state[0] = gain_value;
+  return add_node(lg, GAIN_VTABLE, GAIN_MEMORY_SIZE * sizeof(float), name, 2,
+                  1, init_state, sizeof(init_state));
 }
 
 void begin_graph_edit_batch(LiveGraph *lg) {

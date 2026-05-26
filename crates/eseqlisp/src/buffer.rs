@@ -273,6 +273,25 @@ impl Buffer {
         true
     }
 
+    pub fn replace_widget_subtrees(
+        &mut self,
+        replacements: &[(u64, Value, Vec<ReactiveFieldKey>)],
+        source: Option<BufferId>,
+    ) -> bool {
+        let Some(snapshot) = self.committed_ui_snapshot.take() else {
+            return false;
+        };
+        let Some(merged) = snapshot.clone().replacing_subtrees(replacements) else {
+            self.committed_ui_snapshot = Some(snapshot);
+            return false;
+        };
+        self.widget_tree = Some(merged.tree.clone());
+        self.widget_tree_source = source.or(merged.source_buffer_id);
+        self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
+        self.set_committed_ui_snapshot(Some(merged));
+        true
+    }
+
     pub fn replace_committed_subtree(&mut self, subtree: CommittedSubtreeSnapshot) {
         let Some(root_id) = subtree.subtree_root_id else {
             return;

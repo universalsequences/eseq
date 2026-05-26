@@ -38,7 +38,7 @@
                      (param-set-control-value fx p v)))))))))
 
 (def fx-param-grid (params fx)
-  (h-stack :gap 1.5 :padding 0
+  (h-stack :gap 1.5 :padding 0.525
     (each (chunks (visible-params params) 4) |chunk ci|
       (v-stack :gap 0.25
         (each chunk |p pi|

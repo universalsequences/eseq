@@ -228,8 +228,10 @@
     (metal-empty-track-fallback)
     (do
     (metal-sync-track-color-state)
+
+    (box :background-color :mixer-strip-bg :corner-radius 10
     (v-stack
-      :padding 2
+      :padding 1.5
       :gap 0.1
       
       ; Param mode selector
@@ -437,7 +439,7 @@
                     :color (if (= page (visible-page)) :white :dim)
                     :bg :transparent))))))))
 
-    )))))
+    ))))))
 
 ; Set mode after buffer exists (effect-buffer creates it above)
 (set-buffer-mode-for "*metal*" "seq-grid-mode")

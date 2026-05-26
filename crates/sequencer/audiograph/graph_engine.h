@@ -204,6 +204,7 @@ void process_live_block(LiveGraph *lg, int nframes);
 int add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
              const char *name, int nInputs, int nOutputs,
              const void *initial_state, size_t initial_state_size);
+int add_gain_node(LiveGraph *lg, float gain_value, const char *name);
 bool delete_node(LiveGraph *lg, int node_id);
 bool graph_connect(LiveGraph *lg, int src_node, int src_port, int dst_node,
                    int dst_port);

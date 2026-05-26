@@ -10,7 +10,7 @@
 
 (def builtin-fx-dj-mixer-loop-button (fx p)
   (button "Loop"
-    :width 10.2 :height 1.65 :padding 0 :font-size 11.0
+    :width 10.2 :height 1.2 :padding 0 :font-size 11.0
     :background-color (if (> (get p :value) 0.5) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (> (get p :value) 0.5) :black :dim)
     :on-click |x y r| (fx-toggle-effect-value fx p)))
@@ -21,7 +21,7 @@
           (length-p (builtin-fx-param params "length"))
           (loop-p (builtin-fx-param params "loop")))
       (if (and speed-p length-p loop-p)
-        (box :width 11.2 :height 8.3 :padding 0.28
+        (box :width :fill :height :fill :padding 0.28
              :background-color :fx-inner-panel-bg :corner-radius 7
           (v-stack :gap 0.26 :align :center
             (builtin-fx-dj-mixer-knob fx "speed" speed-p 2)
