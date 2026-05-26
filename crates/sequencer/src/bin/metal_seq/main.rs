@@ -9476,6 +9476,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &current_track,
             &selected_steps,
             &fx_epoch,
+            &ui_epoch,
         );
 
         // 2. Sync reactive state AFTER events

@@ -1,0 +1,599 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 36.855694,
+        "y": 41.59707
+      },
+      "add1": {
+        "x": 95.89648,
+        "y": 41.707497
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "audio": {
+        "x": 38.17373,
+        "y": 47.29265
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 6.6800003
+      },
+      "detune": {
+        "x": 4.0,
+        "y": 22.16
+      },
+      "env": {
+        "x": 93.71377,
+        "y": 16.3
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 14.720001
+      },
+      "gate": {
+        "x": 121.32547,
+        "y": 4.0
+      },
+      "mod#0": {
+        "x": 115.01376,
+        "y": 16.3
+      },
+      "modder": {
+        "x": 4.0,
+        "y": 19.48
+      },
+      "modulated1": {
+        "x": 91.04219,
+        "y": 21.66
+      },
+      "modulated2": {
+        "x": 100.543755,
+        "y": 21.66
+      },
+      "mul1": {
+        "x": 101.496475,
+        "y": 48.389996
+      },
+      "osc": {
+        "x": 73.27121,
+        "y": 22.982498
+      },
+      "phase": {
+        "x": 77.91121,
+        "y": 16.3
+      },
+      "pitch": {
+        "x": 77.91121,
+        "y": 4.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 12.040001
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 9.360001
+      },
+      "trigger": {
+        "x": 141.10535,
+        "y": 4.0
+      },
+      "unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7": {
+        "x": 94.49648,
+        "y": 28.342499
+      },
+      "velocity": {
+        "x": 98.426445,
+        "y": 4.0
+      },
+      "xy1": {
+        "x": 101.496475,
+        "y": 35.024998
+      },
+      "xy2": {
+        "x": 111.59647,
+        "y": 35.024998
+      },
+      "xy3": {
+        "x": 121.69647,
+        "y": 35.024998
+      },
+      "xy4": {
+        "x": 131.79648,
+        "y": 35.024998
+      },
+      "xy5": {
+        "x": 141.89648,
+        "y": 35.024998
+      },
+      "xy6": {
+        "x": 151.99649,
+        "y": 35.024998
+      }
+    },
+    "cables": {
+      "*#0:0->audio:0": {
+        "segmented": true,
+        "y": 43.889347
+      },
+      "add1:0->mul1:0": {
+        "segmented": true,
+        "y": 45.838745
+      },
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "detune:0->modulated1:0": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 39.487877
+      },
+      "gain:0->mod#0:0": {
+        "segmented": true,
+        "y": 16.3
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 10.94
+      },
+      "mod#0:0->*#0:3": {
+        "segmented": true,
+        "y": 38.7838
+      },
+      "modder:0->modulated2:0": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "modulated1:0->unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7:1": {
+        "segmented": true,
+        "y": 25.791248
+      },
+      "modulated2:0->xy1:1": {
+        "segmented": true,
+        "y": 31.768747
+      },
+      "modulated2:0->xy2:1": {
+        "segmented": true,
+        "y": 31.768747
+      },
+      "modulated2:0->xy3:1": {
+        "segmented": true,
+        "y": 31.768747
+      },
+      "modulated2:0->xy4:1": {
+        "segmented": true,
+        "y": 31.768747
+      },
+      "modulated2:0->xy5:1": {
+        "segmented": true,
+        "y": 31.768747
+      },
+      "modulated2:0->xy6:1": {
+        "segmented": true,
+        "y": 31.768747
+      },
+      "mul1:0->*#0:0": {
+        "segmented": true,
+        "y": 52.521248
+      },
+      "phase:0->osc:0": {
+        "segmented": true,
+        "y": 19.811247
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 9.7
+      },
+      "pitch:0->unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7:0": {
+        "segmented": true,
+        "y": 14.325
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 13.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 13.150001
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 12.179999
+      },
+      "unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7:0->xy1:0": {
+        "segmented": true,
+        "y": 33.71375
+      },
+      "unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7:1->xy2:0": {
+        "segmented": true,
+        "y": 33.71375
+      },
+      "unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7:2->xy3:0": {
+        "segmented": true,
+        "y": 33.71375
+      },
+      "unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7:3->xy4:0": {
+        "segmented": true,
+        "y": 33.71375
+      },
+      "unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7:4->xy5:0": {
+        "segmented": true,
+        "y": 33.71375
+      },
+      "unison-frequencies1_unison-frequencies2_unison-frequencies3_unison-frequencies4_unison-frequencies5_unison-frequencies6_unison-frequencies7:5->xy6:0": {
+        "segmented": true,
+        "y": 33.71375
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 40.456947
+      },
+      "xy1:0->add1:0": {
+        "segmented": true,
+        "y": 39.15625
+      },
+      "xy2:0->add1:1": {
+        "segmented": true,
+        "y": 36.954998
+      },
+      "xy3:0->add1:2": {
+        "segmented": true,
+        "y": 41.3575
+      },
+      "xy4:0->add1:3": {
+        "segmented": true,
+        "y": 40.39625
+      },
+      "xy5:0->add1:4": {
+        "segmented": true,
+        "y": 37.91625
+      },
+      "xy6:0->add1:5": {
+        "segmented": true,
+        "y": 39.15625
+      }
+    }
+  },
+  "macros": {
+    "unison-frequencies": {
+      "nodes": {
+        "*#0": {
+          "x": 62.21,
+          "y": 17.365
+        },
+        "*#1": {
+          "x": 74.82,
+          "y": 17.365
+        },
+        "*#2": {
+          "x": 86.27,
+          "y": 17.365
+        },
+        "*#3": {
+          "x": 98.88,
+          "y": 17.365
+        },
+        "*#4": {
+          "x": 110.329994,
+          "y": 17.365
+        },
+        "*#5": {
+          "x": 122.939995,
+          "y": 17.365
+        },
+        "base_freq": {
+          "x": 25.240002,
+          "y": 4.0
+        },
+        "detune_st": {
+          "x": 54.09,
+          "y": 4.0
+        },
+        "exp#0": {
+          "x": 63.95,
+          "y": 24.0475
+        },
+        "exp#1": {
+          "x": 75.979996,
+          "y": 24.0475
+        },
+        "exp#2": {
+          "x": 88.009995,
+          "y": 24.0475
+        },
+        "exp#3": {
+          "x": 100.03999,
+          "y": 24.0475
+        },
+        "exp#4": {
+          "x": 112.06999,
+          "y": 24.0475
+        },
+        "exp#5": {
+          "x": 124.09999,
+          "y": 24.0475
+        },
+        "f1": {
+          "x": 44.715004,
+          "y": 30.73
+        },
+        "f2": {
+          "x": 64.915,
+          "y": 30.73
+        },
+        "f3": {
+          "x": 85.115,
+          "y": 30.73
+        },
+        "f_1": {
+          "x": 34.615,
+          "y": 30.73
+        },
+        "f_2": {
+          "x": 54.815002,
+          "y": 30.73
+        },
+        "f_3": {
+          "x": 75.015,
+          "y": 30.73
+        },
+        "out": {
+          "x": 34.7692,
+          "y": 37.4125
+        },
+        "out2": {
+          "x": 44.560802,
+          "y": 37.4125
+        },
+        "out3": {
+          "x": 56.010803,
+          "y": 37.4125
+        },
+        "out4": {
+          "x": 67.4608,
+          "y": 37.4125
+        },
+        "out5": {
+          "x": 78.9108,
+          "y": 37.4125
+        },
+        "out6": {
+          "x": 90.360794,
+          "y": 37.4125
+        },
+        "out7": {
+          "x": 101.81079,
+          "y": 37.4125
+        },
+        "scale_val": {
+          "x": 52.93,
+          "y": 10.6825
+        }
+      },
+      "cables": {
+        "*#0:0->exp#0:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "*#1:0->exp#1:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "*#2:0->exp#2:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "*#3:0->exp#3:0": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "*#4:0->exp#4:0": {
+          "segmented": true,
+          "y": 23.35625
+        },
+        "*#5:0->exp#5:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "base_freq:0->f1:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->f2:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->f3:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->f_1:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->f_2:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->f_3:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "base_freq:0->out:0": {
+          "segmented": true,
+          "y": 18.154999
+        },
+        "detune_st:0->scale_val:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "exp#0:0->f_1:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "exp#1:0->f1:1": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "exp#2:0->f_2:1": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "exp#3:0->f2:1": {
+          "segmented": true,
+          "y": 26.318748
+        },
+        "exp#4:0->f_3:1": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "exp#5:0->f3:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "f1:0->out3:0": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "f2:0->out5:0": {
+          "segmented": true,
+          "y": 37.0625
+        },
+        "f3:0->out7:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "f_1:0->out2:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "f_2:0->out4:0": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "f_3:0->out6:0": {
+          "segmented": true,
+          "y": 32.66
+        },
+        "scale_val:0->*#0:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "scale_val:0->*#1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "scale_val:0->*#2:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "scale_val:0->*#3:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "scale_val:0->*#4:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "scale_val:0->*#5:0": {
+          "segmented": true,
+          "y": 14.813749
+        }
+      }
+    },
+    "xy": {
+      "nodes": {
+        "cos1": {
+          "x": 11.183729,
+          "y": 37.4125
+        },
+        "input": {
+          "x": 9.09873,
+          "y": 4.0
+        },
+        "input2": {
+          "x": 30.085487,
+          "y": 4.0
+        },
+        "latch1": {
+          "x": 36.541573,
+          "y": 20.94675
+        },
+        "mul1": {
+          "x": 9.761659,
+          "y": 29.2075
+        },
+        "mul2": {
+          "x": 10.533729,
+          "y": 33.309998
+        },
+        "out": {
+          "x": 17.975725,
+          "y": 24.171124
+        },
+        "phasor1": {
+          "x": 9.788026,
+          "y": 10.6825
+        },
+        "ramp2trig1": {
+          "x": 36.130722,
+          "y": 17.098217
+        },
+        "scale1": {
+          "x": 29.167458,
+          "y": 10.6825
+        },
+        "triangle1": {
+          "x": 9.5477915,
+          "y": 17.365
+        }
+      },
+      "cables": {
+        "cos1:0->out:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "input2:0->scale1:0": {
+          "segmented": true,
+          "y": 8.836249
+        },
+        "input:0->phasor1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "mul1:0->mul2:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "mul2:0->cos1:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "phasor1:0->triangle1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "scale1:0->mul2:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "triangle1:0->mul1:0": {
+          "segmented": true,
+          "y": 20.87625
+        }
+      }
+    }
+  }
+}

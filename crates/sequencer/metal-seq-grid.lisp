@@ -34,7 +34,7 @@
 (defstate remembered-step-panel-buffer "*metal*")
 (defstate lower-panel-buffer "*fx*")
 
-(def lower-fx-layout-height 10)
+(def lower-fx-layout-height 11)
 
 (def seq-step-buffer? (buffer)
   (or (= buffer "*metal*") (= buffer "*sequencer*")))

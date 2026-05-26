@@ -1,0 +1,791 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 90.170006,
+        "y": 35.172012
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "audio": {
+        "x": 92.11637,
+        "y": 41.94794
+      },
+      "bias": {
+        "x": 4.0,
+        "y": 19.48
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 6.6800003
+      },
+      "drive": {
+        "x": 4.0,
+        "y": 22.16
+      },
+      "env": {
+        "x": 111.295,
+        "y": 16.3
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 14.398254
+      },
+      "gate": {
+        "x": 143.91,
+        "y": 4.0
+      },
+      "mod#0": {
+        "x": 132.48828,
+        "y": 18.741966
+      },
+      "pitch": {
+        "x": 92.01,
+        "y": 4.0
+      },
+      "punch": {
+        "x": 4.0,
+        "y": 24.84
+      },
+      "release": {
+        "x": 4.0,
+        "y": 12.040001
+      },
+      "spinz_8081": {
+        "x": 121.14386,
+        "y": 27.02
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 9.360001
+      },
+      "trigger": {
+        "x": 166.96,
+        "y": 4.0
+      },
+      "value1": {
+        "x": 161.86739,
+        "y": 6.58
+      },
+      "value2": {
+        "x": 200.92812,
+        "y": 4.0
+      },
+      "velocity": {
+        "x": 116.22,
+        "y": 4.0
+      },
+      "wavefolder1": {
+        "x": 122.54386,
+        "y": 33.7025
+      },
+      "wet": {
+        "x": 4.0,
+        "y": 27.52
+      }
+    },
+    "cables": {
+      "*#0:0->audio:0": {
+        "segmented": true,
+        "y": 37.115112
+      },
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "bias:0->wavefolder1:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "drive:0->wavefolder1:1": {
+        "segmented": true,
+        "y": 8.610001
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 27.028748
+      },
+      "gain:0->mod#0:0": {
+        "segmented": true,
+        "y": 16.3
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 10.94
+      },
+      "mod#0:0->*#0:3": {
+        "segmented": true,
+        "y": 26.408747
+      },
+      "pitch:0->spinz_8081:1": {
+        "segmented": true,
+        "y": 18.16
+      },
+      "punch:0->spinz_8081:3": {
+        "segmented": true,
+        "y": 11.290001
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 13.970001
+      },
+      "spinz_8081:0->wavefolder1:0": {
+        "segmented": true,
+        "y": 31.151249
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 13.150001
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 12.179999
+      },
+      "trigger:0->spinz_8081:0": {
+        "segmented": true,
+        "y": 13.199999
+      },
+      "value1:0->spinz_8081:2": {
+        "segmented": true,
+        "y": 16.92
+      },
+      "value2:0->spinz_8081:4": {
+        "segmented": true,
+        "y": 16.3
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 20.431248
+      },
+      "wavefolder1:0->*#0:0": {
+        "segmented": true,
+        "y": 37.833748
+      },
+      "wet:0->wavefolder1:3": {
+        "segmented": true,
+        "y": 13.970001
+      }
+    }
+  },
+  "macros": {
+    "spinz_808": {
+      "nodes": {
+        "*#0": {
+          "x": 67.14369,
+          "y": 57.459995
+        },
+        "*#1": {
+          "x": 193.12846,
+          "y": 10.6825
+        },
+        "*#2": {
+          "x": 161.96346,
+          "y": 37.4125
+        },
+        "*#3": {
+          "x": 209.70848,
+          "y": 17.365
+        },
+        "+#0": {
+          "x": 222.12848,
+          "y": 10.6825
+        },
+        "+#1": {
+          "x": 119.53847,
+          "y": 10.6825
+        },
+        "+#2": {
+          "x": 162.63846,
+          "y": 10.6825
+        },
+        "+#3": {
+          "x": 66.66076,
+          "y": 84.19
+        },
+        "+#4": {
+          "x": 210.96349,
+          "y": 24.0475
+        },
+        "-#0": {
+          "x": 212.02847,
+          "y": 10.6825
+        },
+        "/#0": {
+          "x": 232.7488,
+          "y": 17.365
+        },
+        "/#1": {
+          "x": 141.08846,
+          "y": 17.365
+        },
+        "/#2": {
+          "x": 171.57846,
+          "y": 17.365
+        },
+        "0.0001": {
+          "x": 242.8488,
+          "y": 10.6825
+        },
+        "0.001": {
+          "x": 151.18846,
+          "y": 10.6825
+        },
+        "0.01": {
+          "x": 232.7488,
+          "y": 4.0
+        },
+        "0.01~1": {
+          "x": 141.08846,
+          "y": 4.0
+        },
+        "0.01~2": {
+          "x": 187.1757,
+          "y": 4.0
+        },
+        "0.01~3": {
+          "x": 182.83847,
+          "y": 10.6825
+        },
+        "1": {
+          "x": 242.8488,
+          "y": 17.365
+        },
+        "1~1": {
+          "x": 151.18846,
+          "y": 17.365
+        },
+        "1~2": {
+          "x": 181.67847,
+          "y": 17.365
+        },
+        "1~3": {
+          "x": 203.22847,
+          "y": 10.6825
+        },
+        "1~4": {
+          "x": 200.57848,
+          "y": 4.0
+        },
+        "900": {
+          "x": 222.31848,
+          "y": 17.365
+        },
+        "amp_env": {
+          "x": 238.46004,
+          "y": 30.73
+        },
+        "amp_h": {
+          "x": 226.95848,
+          "y": 30.73
+        },
+        "body_sweep": {
+          "x": 118.86347,
+          "y": 37.4125
+        },
+        "clip#0": {
+          "x": 237.06004,
+          "y": 37.4125
+        },
+        "d_coeff": {
+          "x": 232.7488,
+          "y": 24.0475
+        },
+        "decay": {
+          "x": 243.03879,
+          "y": 4.0
+        },
+        "distortion": {
+          "x": 162.82845,
+          "y": 4.0
+        },
+        "drive_gain": {
+          "x": 190.47847,
+          "y": 17.365
+        },
+        "dry_sig": {
+          "x": 66.51576,
+          "y": 70.825
+        },
+        "freq": {
+          "x": 66.51576,
+          "y": 44.094997
+        },
+        "hpf": {
+          "x": 63.18076,
+          "y": 110.92001
+        },
+        "k_coeff": {
+          "x": 171.57846,
+          "y": 24.0475
+        },
+        "knock_env": {
+          "x": 151.18846,
+          "y": 30.73
+        },
+        "knock_h": {
+          "x": 161.28847,
+          "y": 30.73
+        },
+        "lp_freq": {
+          "x": 205.06848,
+          "y": 30.73
+        },
+        "lpf": {
+          "x": 63.18076,
+          "y": 104.23751
+        },
+        "max#0": {
+          "x": 232.7488,
+          "y": 10.6825
+        },
+        "max#1": {
+          "x": 141.08846,
+          "y": 10.6825
+        },
+        "max#2": {
+          "x": 172.73846,
+          "y": 10.6825
+        },
+        "noise#0": {
+          "x": 151.37845,
+          "y": 4.0
+        },
+        "osc": {
+          "x": 68.56576,
+          "y": 64.142494
+        },
+        "out": {
+          "x": 68.06996,
+          "y": 124.28502
+        },
+        "p_coeff": {
+          "x": 141.08846,
+          "y": 24.0475
+        },
+        "phasor#0": {
+          "x": 67.17006,
+          "y": 50.777496
+        },
+        "pit_env": {
+          "x": 119.53847,
+          "y": 30.73
+        },
+        "pit_h": {
+          "x": 108.0369,
+          "y": 30.73
+        },
+        "pitch": {
+          "x": 66.51576,
+          "y": 4.0
+        },
+        "pre_amp": {
+          "x": 67.91576,
+          "y": 77.5075
+        },
+        "punch": {
+          "x": 93.513374,
+          "y": 4.0
+        },
+        "return": {
+          "x": 67.91576,
+          "y": 117.602516
+        },
+        "sat_clean": {
+          "x": 66.08076,
+          "y": 97.55501
+        },
+        "sat_raw": {
+          "x": 68.22084,
+          "y": 90.872505
+        },
+        "transient_noise": {
+          "x": 173.41345,
+          "y": 37.4125
+        },
+        "transient_sweep": {
+          "x": 150.51346,
+          "y": 37.4125
+        },
+        "trig": {
+          "x": 115.19853,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "*#0:0->osc:0": {
+          "segmented": true,
+          "y": 61.591248
+        },
+        "*#1:0->drive_gain:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "*#2:0->dry_sig:1": {
+          "segmented": true,
+          "y": 56.148746
+        },
+        "*#3:0->+#4:1": {
+          "segmented": true,
+          "y": 23.35625
+        },
+        "+#0:0->amp_env:0": {
+          "segmented": true,
+          "y": 18.39625
+        },
+        "+#1:0->pit_env:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "+#2:0->knock_env:0": {
+          "segmented": true,
+          "y": 24.132498
+        },
+        "+#3:0->sat_raw:0": {
+          "segmented": true,
+          "y": 88.32126
+        },
+        "+#4:0->lp_freq:0": {
+          "segmented": true,
+          "y": 26.318748
+        },
+        "-#0:0->*#3:0": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "/#0:0->d_coeff:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "/#1:0->p_coeff:1": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "/#2:0->k_coeff:1": {
+          "segmented": true,
+          "y": 23.35625
+        },
+        "0.0001:0->/#0:0": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "0.001:0->/#1:0": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "0.01:0->max#0:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "0.01~1:0->max#1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "0.01~2:0->max#2:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "0.01~3:0->/#2:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "1:0->d_coeff:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "1~1:0->p_coeff:0": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "1~2:0->k_coeff:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "1~3:0->drive_gain:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "1~4:0->-#0:0": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "900:0->+#4:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "amp_env:0->amp_h:0": {
+          "segmented": true,
+          "y": 34.31475
+        },
+        "amp_env:0->clip#0:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "amp_h:0->+#0:0": {
+          "segmented": true,
+          "y": 25.5425
+        },
+        "body_sweep:0->freq:1": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "clip#0:0->return:1": {
+          "segmented": true,
+          "y": 81.018745
+        },
+        "d_coeff:0->amp_env:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "decay:0->max#0:1": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "distortion:0->*#1:0": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "distortion:0->-#0:1": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "drive_gain:0->pre_amp:1": {
+          "segmented": true,
+          "y": 46.986248
+        },
+        "dry_sig:0->pre_amp:0": {
+          "segmented": true,
+          "y": 74.95625
+        },
+        "freq:0->phasor#0:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "hpf:0->return:0": {
+          "segmented": true,
+          "y": 115.05127
+        },
+        "k_coeff:0->knock_env:1": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "knock_env:0->*#2:0": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "knock_env:0->knock_h:0": {
+          "segmented": true,
+          "y": 34.31475
+        },
+        "knock_env:0->transient_noise:1": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "knock_env:0->transient_sweep:0": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "knock_h:0->+#2:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "lp_freq:0->lpf:1": {
+          "segmented": true,
+          "y": 67.65374
+        },
+        "lpf:0->hpf:0": {
+          "segmented": true,
+          "y": 108.36876
+        },
+        "max#0:0->/#0:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "max#1:0->/#1:1": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "max#2:0->/#2:1": {
+          "segmented": true,
+          "y": 12.6125
+        },
+        "noise#0:0->transient_noise:0": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "osc:0->dry_sig:0": {
+          "segmented": true,
+          "y": 68.27374
+        },
+        "p_coeff:0->pit_env:1": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "phasor#0:0->*#0:0": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "pit_env:0->body_sweep:0": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "pit_env:0->pit_h:0": {
+          "segmented": true,
+          "y": 34.31475
+        },
+        "pit_h:0->+#1:0": {
+          "segmented": true,
+          "y": 17.69125
+        },
+        "pitch:0->freq:0": {
+          "segmented": true,
+          "y": 24.837498
+        },
+        "pre_amp:0->+#3:0": {
+          "segmented": true,
+          "y": 81.63875
+        },
+        "punch:0->max#1:1": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "punch:0->max#2:1": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 121.733765
+        },
+        "sat_clean:0->lpf:0": {
+          "segmented": true,
+          "y": 101.686264
+        },
+        "sat_raw:0->sat_clean:0": {
+          "segmented": true,
+          "y": 95.00375
+        },
+        "transient_noise:0->dry_sig:2": {
+          "segmented": true,
+          "y": 53.668743
+        },
+        "transient_sweep:0->freq:2": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "trig:0->+#0:1": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "trig:0->+#1:1": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "trig:0->+#2:1": {
+          "segmented": true,
+          "y": 8.13125
+        }
+      }
+    },
+    "wavefolder": {
+      "nodes": {
+        "*#0": {
+          "x": 45.95,
+          "y": 10.6825
+        },
+        "*#1": {
+          "x": 45.275,
+          "y": 30.73
+        },
+        "bias": {
+          "x": 87.315,
+          "y": 4.0
+        },
+        "drive": {
+          "x": 63.105,
+          "y": 4.0
+        },
+        "dry_wet": {
+          "x": 110.365005,
+          "y": 4.0
+        },
+        "fold1": {
+          "x": 46.435,
+          "y": 24.0475
+        },
+        "fold2": {
+          "x": 46.435,
+          "y": 37.4125
+        },
+        "input": {
+          "x": 38.895,
+          "y": 4.0
+        },
+        "out": {
+          "x": 46.1042,
+          "y": 50.777496
+        },
+        "return": {
+          "x": 44.55,
+          "y": 44.094997
+        },
+        "x": {
+          "x": 45.95,
+          "y": 17.365
+        }
+      },
+      "cables": {
+        "*#0:0->x:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "*#1:0->fold2:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "bias:0->x:1": {
+          "segmented": true,
+          "y": 8.836249
+        },
+        "drive:0->*#0:1": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "dry_wet:0->return:2": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "fold1:0->*#1:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "fold2:0->return:1": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "input:0->*#0:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "input:0->return:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "x:0->fold1:0": {
+          "segmented": true,
+          "y": 20.87625
+        }
+      }
+    }
+  }
+}

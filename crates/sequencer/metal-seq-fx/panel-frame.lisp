@@ -1,7 +1,7 @@
 ;; Common panel framing, headers, and effect selection helpers.
 (def fx-panel-body (debug-name children)
   (box
-    (v-stack :gap 0 :height :fill
+    (v-stack :gap 0 
       (box :width 1 :height fx-panel-body-top-spacer-height)
       children)
     :debug-name debug-name
