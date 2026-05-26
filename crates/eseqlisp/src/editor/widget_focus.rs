@@ -464,7 +464,9 @@ impl Editor {
     }
 
     pub(super) fn save_current_widget_tree(&mut self) {
-        if let Some(tree) = self.runtime.current_widget_tree() {
+        if let Some(snapshot) = self.runtime.current_committed_ui_snapshot() {
+            self.active_buffer_mut().adopt_committed_ui_snapshot(snapshot);
+        } else if let Some(tree) = self.runtime.current_widget_tree() {
             let source = self.active_buffer().widget_tree_source;
             self.active_buffer_mut().set_widget_tree(Some(tree), source);
         }

@@ -4350,6 +4350,15 @@ impl Editor {
         self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
     }
 
+    fn sync_active_buffer_widget_snapshot_from_runtime(&mut self) {
+        let Some(snapshot) = self.runtime.current_committed_ui_snapshot() else {
+            return;
+        };
+        let buffer = self.active_buffer_mut();
+        buffer.adopt_committed_ui_snapshot(snapshot);
+        buffer.view_mode = ViewMode::UiOnly;
+    }
+
     fn restore_runtime_widget_tree_from_buffer(&mut self, buffer_idx: usize) {
         if self.active_buffer_idx() != buffer_idx {
             return;
@@ -5112,6 +5121,7 @@ impl Editor {
 
         let mut inactive_buffers_to_refresh: HashMap<usize, Option<Vec<u64>>> = HashMap::new();
         let mut active_subtree_replacements = Vec::<EditorSubtreeReplacement>::new();
+        self.sync_active_buffer_widget_snapshot_from_runtime();
         for pending in self.runtime.take_pending_buffer_widget_trees() {
             match pending {
                 PendingUiUpdate::FullTree(pending) => {

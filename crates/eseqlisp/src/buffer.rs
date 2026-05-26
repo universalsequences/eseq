@@ -229,6 +229,17 @@ impl Buffer {
         );
     }
 
+    pub fn adopt_committed_ui_snapshot(&mut self, snapshot: CommittedBufferUiSnapshot) {
+        let tree_unchanged = self.widget_tree.as_ref() == Some(&snapshot.tree);
+        let source_unchanged = self.widget_tree_source == snapshot.source_buffer_id;
+        if !tree_unchanged || !source_unchanged {
+            self.widget_tree = Some(snapshot.tree.clone());
+            self.widget_tree_source = snapshot.source_buffer_id;
+            self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
+        }
+        self.set_committed_ui_snapshot(Some(snapshot));
+    }
+
     pub fn set_committed_ui_snapshot(&mut self, snapshot: Option<CommittedBufferUiSnapshot>) {
         let unchanged = self
             .committed_ui_snapshot

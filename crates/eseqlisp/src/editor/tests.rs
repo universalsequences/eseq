@@ -5770,6 +5770,64 @@ fn active_named_buffer_batches_multiple_subtree_updates_into_one_relayout() {
 }
 
 #[test]
+fn active_full_rerender_survives_delegated_subtree_patches() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (defstate panel-open false)
+            (effect-buffer "*fx*"
+              (v-stack
+                (if panel-open
+                  (label "panel-open")
+                  (label "panel-closed"))
+                (subtree :key "stable-child"
+                  (label (if panel-open "stable-open" "stable-closed")))
+                (subtree :key (if panel-open "mode-open-key" "mode-closed-key")
+                  (label (if panel-open "mode-open" "mode-closed")))))
+            "#,
+        )
+        .expect("install structural active effect");
+    editor.refresh_runtime_side_effects();
+
+    let fx_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*fx*")
+        .expect("fx buffer")
+        .id;
+    editor.set_active_buffer(fx_id);
+    editor
+        .runtime_mut()
+        .eval_str("(set! panel-open true)")
+        .expect("open panel");
+    editor.refresh_runtime_side_effects();
+
+    let tree = editor
+        .runtime
+        .current_widget_tree()
+        .expect("active fx tree after open");
+    assert!(
+        widget_has_label_text(&tree, "panel-open"),
+        "full active rerender should keep structural panel insertion"
+    );
+    assert!(
+        widget_has_label_text(&tree, "stable-open"),
+        "stable subtree patch should still apply"
+    );
+    assert!(
+        widget_has_label_text(&tree, "mode-open"),
+        "state-dependent subtree key should come from the full rerender"
+    );
+    assert!(
+        !widget_has_label_text(&tree, "panel-closed"),
+        "delegated subtree fallback must not restore the old active buffer tree"
+    );
+}
+
+#[test]
 fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
