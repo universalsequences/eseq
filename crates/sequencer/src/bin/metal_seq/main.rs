@@ -1980,7 +1980,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_playhead: u32 = u32::MAX;
     let mut prev_transport_playhead: u32 = u32::MAX;
     let mut prev_pattern_epoch: u64 = 0;
-    let mut prev_snapshot_version: u64 = 0;
     let mut prev_current_track: usize = usize::MAX;
     let mut prev_cpu_load_bits: u32 = u32::MAX;
     let mut prev_peak_l_level = -1.0f64;
@@ -2928,7 +2927,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_bpm = bpm;
                         prev_playing = playing;
                         prev_pattern_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
-                        prev_snapshot_version = state.scheduler_snapshot_version();
                         prev_track_peak_levels.clear();
                         prev_modulator_phases = cached_modulator_phases.clone();
                         prev_modulator_levels = cached_modulator_levels.clone();
@@ -6353,7 +6351,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     prev_pattern_epoch =
                                         state.transport.pattern_epoch.load(Ordering::Relaxed);
-                                    prev_snapshot_version = state.scheduler_snapshot_version();
                                     prev_track_button_states = track_button_state_snapshot(&state);
                                     prev_track_playheads = track_playheads_snapshot(&state, &app);
                                 }
@@ -8759,7 +8756,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let cpu_load_pct = f32::from_bits(cached_cpu_load_bits);
                         let playing = state.transport.playing.load(Ordering::Relaxed);
                         let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
-                        let snap_ver = state.scheduler_snapshot_version();
                         cached_peak_l_level = meter_display_level(f32::from_bits(
                             state.transport.peak_l.load(Ordering::Relaxed),
                         ));
@@ -8887,7 +8883,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_bpm = bpm;
                         prev_playing = playing;
                         prev_pattern_epoch = epoch;
-                        prev_snapshot_version = snap_ver;
                         prev_cpu_load_bits = cached_cpu_load_bits;
                         prev_peak_l_level = cached_peak_l_level;
                         prev_peak_r_level = cached_peak_r_level;
@@ -9481,7 +9476,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed);
             let bus_playheads = bus_playhead_snapshot(&app);
             let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
-            let snap_ver = state.scheduler_snapshot_version();
             let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
             let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
@@ -9582,7 +9576,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_playhead = playhead;
                 prev_transport_playhead = transport_playhead;
                 prev_pattern_epoch = epoch;
-                prev_snapshot_version = snap_ver;
                 needs_reactive_cycle = true;
             }
 
@@ -9731,9 +9724,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut profile_pattern_reactive_cycle = false;
             let mut refresh_visible_sequencer_after_cycle = false;
             let mut refresh_visible_mixer_after_cycle = false;
-            if (epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version)
-                && !app.tracks.is_empty()
-            {
+            if epoch != prev_pattern_epoch && !app.tracks.is_empty() {
                 let profile_switch = pattern_switch_profile_enabled();
                 let profile_total_started = Instant::now();
                 let sync_names_pattern_elapsed;
@@ -9747,7 +9738,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let sync_fx_bindings_elapsed;
                 let sync_plocks_sidebar_elapsed;
                 let old_pattern_epoch = prev_pattern_epoch;
-                let old_snapshot_version = prev_snapshot_version;
                 let rt = editor.runtime_mut();
                 let started = Instant::now();
                 sync_track_name_state(rt, &mut track_names, &app);
@@ -9799,12 +9789,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_plocks_sidebar_elapsed = started.elapsed();
                 if profile_switch {
                     eprintln!(
-                        "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} snapshot {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms piano={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
+                        "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms piano={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
                         duration_ms(profile_total_started.elapsed()),
                         old_pattern_epoch,
                         epoch,
-                        old_snapshot_version,
-                        snap_ver,
                         duration_ms(sync_names_pattern_elapsed),
                         duration_ms(sync_playhead_elapsed),
                         duration_ms(sync_current_steps_elapsed),
@@ -9818,7 +9806,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 prev_pattern_epoch = epoch;
-                prev_snapshot_version = snap_ver;
                 prev_track_button_states = track_button_state_snapshot(&state);
                 needs_reactive_cycle = true;
                 refresh_visible_mixer_after_cycle |= mixer_visible;
@@ -9866,6 +9853,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                 } else {
                     sync_track_name_state(rt, &mut track_names, &app);
+                    rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                    sync_step_param_lists(rt, &state, ct);
+                    if metal_visible || sequencer_visible {
+                        sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
+                    }
                     sync_track_mixer_state(rt, &app, &state);
                     sync_bus_mixer_state(rt, &app);
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
@@ -9879,9 +9871,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         build_selection_value(&selected_steps),
                     );
                     sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
-                    if sequencer_visible {
-                        sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
-                    }
                     rt.set_reactive(
                         "SEQ",
                         "step-has-plocks",
