@@ -1577,12 +1577,18 @@ fragment float4 waveform_frag(
         }
     }
 
-    fn hash_widget_instance(instance: &WidgetInstance, hasher: &mut DefaultHasher) {
+    fn hash_widget_instance(
+        widget_type: &str,
+        instance: &WidgetInstance,
+        hasher: &mut DefaultHasher,
+    ) {
         hash_f32_array(instance.ndc_min, hasher);
         hash_f32_array(instance.ndc_max, hasher);
         hash_f32(instance.value_t, hasher);
         hash_f32(instance.orientation, hasher);
-        hash_f32(instance.itime, hasher);
+        if widget_instance_shader_uses_time(widget_type) {
+            hash_f32(instance.itime, hasher);
+        }
         hash_f32_array(instance.uniform_a, hasher);
         hash_f32_array(instance.uniform_b, hasher);
         hash_f32_array(instance.color_a, hasher);
@@ -1591,6 +1597,11 @@ fragment float4 waveform_frag(
         hash_f32_array(instance.color_d, hasher);
         hash_f32(instance.corner_radius, hasher);
         hash_f32(instance.pixel_aspect, hasher);
+    }
+
+    fn widget_instance_shader_uses_time(widget_type: &str) -> bool {
+        widget_render::sdf_widget::sdf_widget_def(widget_type)
+            .is_some_and(|definition| definition.animates)
     }
 
     fn hash_metal_primitive(primitive: &widget_render::MetalPrimitive, hasher: &mut DefaultHasher) {
@@ -1653,7 +1664,7 @@ fragment float4 waveform_frag(
                 7u8.hash(hasher);
                 widget_type.hash(hasher);
                 is_background.hash(hasher);
-                hash_widget_instance(instance, hasher);
+                hash_widget_instance(widget_type, instance, hasher);
             }
             widget_render::MetalPrimitive::PatchCable(_)
             | widget_render::MetalPrimitive::Waveform(_)
@@ -8295,6 +8306,28 @@ fragment float4 waveform_frag(
             )
         }
 
+        fn test_widget_instance_primitive(widget_type: &str, itime: f32) -> MetalPrimitive {
+            MetalPrimitive::WidgetInstance {
+                widget_type: widget_type.to_string(),
+                instance: WidgetInstance {
+                    ndc_min: [-0.5, -0.5],
+                    ndc_max: [0.5, 0.5],
+                    value_t: 0.25,
+                    orientation: 0.0,
+                    itime,
+                    uniform_a: [0.0; 4],
+                    uniform_b: [0.0; 4],
+                    color_a: [0.2, 0.3, 0.4, 1.0],
+                    color_b: [0.5, 0.6, 0.7, 1.0],
+                    color_c: [0.0; 4],
+                    color_d: [0.0; 4],
+                    corner_radius: 0.2,
+                    pixel_aspect: 1.0,
+                },
+                is_background: false,
+            }
+        }
+
         #[test]
         fn metal_button_background_is_not_followed_by_covering_box_rect() {
             let viewport = WidgetViewport {
@@ -8560,6 +8593,52 @@ fragment float4 waveform_frag(
             assert_ne!(
                 base,
                 test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 2)
+            );
+        }
+
+        #[test]
+        fn widget_run_cache_key_ignores_itime_for_non_animated_widget_instances() {
+            let mut primitives = vec![test_widget_instance_primitive("button", 1.0)];
+            let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
+            if let MetalPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
+                instance.itime = 42.0;
+            }
+
+            assert_eq!(
+                base,
+                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
+            );
+        }
+
+        #[test]
+        fn widget_run_cache_key_keeps_itime_for_animated_widget_instances() {
+            widget_render::sdf_widget::register_sdf_widget(
+                widget_render::sdf_widget::SdfWidgetDef {
+                    name: "test-cache-itime-animated".to_string(),
+                    shader_source: String::new(),
+                    sdf_expr: crate::parser::Expression::Number(0.0),
+                    state_uniforms: Vec::new(),
+                    bindable_props: Vec::new(),
+                    region_count: 0,
+                    width: 1.0,
+                    height: 1.0,
+                    paint_margin: 0.0,
+                    animates: true,
+                },
+            );
+
+            let mut primitives = vec![test_widget_instance_primitive(
+                "test-cache-itime-animated",
+                1.0,
+            )];
+            let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
+            if let MetalPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
+                instance.itime = 42.0;
+            }
+
+            assert_ne!(
+                base,
+                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
             );
         }
     }

@@ -885,7 +885,15 @@ pub fn layout_wants_animation_frames(node: &LayoutNode) -> bool {
         .is_some_and(|definition| definition.wants_animation_frames(node))
         || sdf_widget::sdf_widget_def(&node.widget_type)
             .is_some_and(|definition| definition.animates)
+        || node_uses_animated_sdf_material(node)
         || node.children.iter().any(layout_wants_animation_frames)
+}
+
+fn node_uses_animated_sdf_material(node: &LayoutNode) -> bool {
+    let Some(Value::String(shader_type)) = node.props.get(sdf_widget::SHADER_TYPE_PROP) else {
+        return false;
+    };
+    sdf_widget::sdf_widget_def(shader_type).is_some_and(|definition| definition.animates)
 }
 
 #[cfg(target_os = "macos")]
@@ -2410,6 +2418,44 @@ mod tests {
                 height: 1.0,
             },
             props: HashMap::new(),
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        assert!(layout_wants_animation_frames(&node));
+    }
+
+    #[test]
+    fn animated_sdf_material_requests_animation_frames() {
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "test-animated-material".to_string(),
+            shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0),
+            state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: true,
+        });
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "hslider".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 8.0,
+                height: 1.0,
+            },
+            props: HashMap::from([(
+                sdf_widget::SHADER_TYPE_PROP.to_string(),
+                Value::String("test-animated-material".to_string()),
+            )]),
             children: Vec::new(),
             focusable: false,
         };
