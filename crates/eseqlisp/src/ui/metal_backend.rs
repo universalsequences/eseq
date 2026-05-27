@@ -1414,6 +1414,11 @@ fragment float4 waveform_frag(
         primitives: Vec<widget_render::MetalPrimitive>,
     }
 
+    #[derive(Clone)]
+    struct CachedWidgetRunScene {
+        runs: Vec<widget_render::MetalPrimitiveRun>,
+    }
+
     struct ImageTextureResource {
         texture: Retained<ProtocolObject<dyn MTLTexture>>,
         width: u32,
@@ -1731,6 +1736,7 @@ fragment float4 waveform_frag(
         compiled_widget_runs: HashMap<WidgetRunCacheKey, CompiledWidgetRun>,
         compiled_widget_run_frame: u64,
         cached_widget_scenes: HashMap<u64, CachedWidgetScene>,
+        cached_widget_run_scenes: HashMap<u64, CachedWidgetRunScene>,
         widget_scene_last_keys: HashMap<usize, WidgetSceneCacheKey>,
         image_rotation_states: HashMap<u64, ImageRotationState>,
         stats: RenderStats,
@@ -1849,6 +1855,7 @@ fragment float4 waveform_frag(
                 compiled_widget_runs: HashMap::new(),
                 compiled_widget_run_frame: 0,
                 cached_widget_scenes: HashMap::new(),
+                cached_widget_run_scenes: HashMap::new(),
                 widget_scene_last_keys: HashMap::new(),
                 image_rotation_states: HashMap::new(),
                 stats: RenderStats::new(),
@@ -2043,10 +2050,12 @@ fragment float4 waveform_frag(
                     .note_widget_scene_dirty_bypass(dirty_widget_ids.len());
             }
 
-            let (mut primitives, _overlay) =
-                widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
+            let (runs, _overlay) =
+                widget_render::collect_metal_primitive_runs(layout, viewport, scroll_top, max_rows);
+            let mut primitives = widget_render::flatten_metal_primitive_runs(&runs);
             if self.cached_widget_scenes.len() >= 128 {
                 self.cached_widget_scenes.clear();
+                self.cached_widget_run_scenes.clear();
                 self.widget_scene_last_keys.clear();
                 self.stats.note_widget_scene_cache_clear();
             }
@@ -2056,12 +2065,14 @@ fragment float4 waveform_frag(
                     primitives: primitives.clone(),
                 },
             );
+            self.cached_widget_run_scenes
+                .insert(cache_key, CachedWidgetRunScene { runs });
             Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
             self.stats.note_widget_primitives(primitives.len());
             primitives
         }
 
-        fn update_widget_scene_cache_from_primitives(
+        fn update_widget_scene_cache_from_primitive_runs(
             &mut self,
             owner_frame_key: u64,
             layout_cache_key: u64,
@@ -2069,7 +2080,7 @@ fragment float4 waveform_frag(
             viewport: WidgetViewport,
             scroll_top: f32,
             max_rows: u16,
-            primitives: Vec<widget_render::MetalPrimitive>,
+            runs: &[widget_render::MetalPrimitiveRun],
         ) {
             if widget_render::overlay_widget_id().is_some()
                 || widget_render::layout_wants_animation_frames(layout)
@@ -2090,11 +2101,82 @@ fragment float4 waveform_frag(
                 .insert(layout_identity, cache_parts);
             if self.cached_widget_scenes.len() >= 128 {
                 self.cached_widget_scenes.clear();
+                self.cached_widget_run_scenes.clear();
                 self.widget_scene_last_keys.clear();
                 self.stats.note_widget_scene_cache_clear();
             }
+            let primitives = widget_render::flatten_metal_primitive_runs(runs);
             self.cached_widget_scenes
                 .insert(cache_key, CachedWidgetScene { primitives });
+            self.cached_widget_run_scenes.insert(
+                cache_key,
+                CachedWidgetRunScene {
+                    runs: runs.to_vec(),
+                },
+            );
+        }
+
+        fn widget_primitive_runs_for_dirty_layout(
+            &mut self,
+            owner_frame_key: u64,
+            layout_cache_key: u64,
+            layout: &crate::layout::LayoutNode,
+            dirty_widget_ids: &[u64],
+            viewport: WidgetViewport,
+            scroll_top: f32,
+            max_rows: u16,
+        ) -> (
+            Vec<widget_render::MetalPrimitiveRun>,
+            Vec<widget_render::MetalPrimitive>,
+        ) {
+            let cache_parts = self.widget_scene_cache_parts(
+                owner_frame_key,
+                layout,
+                layout_cache_key,
+                viewport,
+                scroll_top,
+                max_rows,
+            );
+            self.widget_scene_last_keys
+                .insert(cache_parts.layout_identity, cache_parts);
+            self.stats
+                .note_widget_scene_dirty_bypass(dirty_widget_ids.len());
+
+            let cache_key = self.widget_scene_cache_key(cache_parts);
+            let (runs, overlay) = if let Some(previous) =
+                self.cached_widget_run_scenes.get(&cache_key).cloned()
+            {
+                let (runs, overlay, retained_stats) =
+                    widget_render::collect_metal_primitive_runs_retained(
+                        layout,
+                        viewport,
+                        scroll_top,
+                        max_rows,
+                        &previous.runs,
+                        dirty_widget_ids,
+                    );
+                self.stats.note_widget_retained_run_collection(
+                    retained_stats.reused_runs,
+                    retained_stats.rebuilt_runs,
+                    retained_stats.missing_previous_runs,
+                    retained_stats.invalid_previous_runs,
+                );
+                (runs, overlay)
+            } else {
+                self.stats.note_widget_retained_run_collection_miss();
+                widget_render::collect_metal_primitive_runs(layout, viewport, scroll_top, max_rows)
+            };
+
+            self.update_widget_scene_cache_from_primitive_runs(
+                owner_frame_key,
+                layout_cache_key,
+                layout,
+                viewport,
+                scroll_top,
+                max_rows,
+                &runs,
+            );
+            (runs, overlay)
         }
 
         fn begin_compiled_widget_run_frame(&mut self) {
@@ -3851,23 +3933,16 @@ fragment float4 waveform_frag(
                         overlay_prims,
                         use_widget_run_cache,
                     ) = if use_widget_run_cache {
-                        let (primitive_runs, overlay) = widget_render::collect_metal_primitive_runs(
-                            layout,
-                            viewport,
-                            tile.frame.widget_scroll_top,
-                            inner_rows,
-                        );
-                        let cache_primitives =
-                            widget_render::flatten_metal_primitive_runs(&primitive_runs);
-                        self.update_widget_scene_cache_from_primitives(
-                            tile.frame.widget_content_cache_key,
-                            tile.frame.widget_layout_cache_key,
-                            layout,
-                            viewport,
-                            tile.frame.widget_scroll_top,
-                            inner_rows,
-                            cache_primitives,
-                        );
+                        let (primitive_runs, overlay) = self
+                            .widget_primitive_runs_for_dirty_layout(
+                                tile.frame.widget_content_cache_key,
+                                tile.frame.widget_layout_cache_key,
+                                layout,
+                                &tile.frame.dirty_widget_ids,
+                                viewport,
+                                tile.frame.widget_scroll_top,
+                                inner_rows,
+                            );
                         let mut offset_prims = Vec::new();
                         let mut offset_run_indices = Vec::new();
                         let mut offset_runs = Vec::new();
@@ -5448,6 +5523,11 @@ fragment float4 waveform_frag(
         widget_run_dynamic_draws: u64,
         widget_run_static_allocations: u64,
         widget_run_static_allocated_bytes: usize,
+        retained_run_collection_misses: u64,
+        retained_run_reuses: u64,
+        retained_run_rebuilds: u64,
+        retained_run_missing_previous: u64,
+        retained_run_invalid_previous: u64,
     }
 
     impl RenderStats {
@@ -5497,6 +5577,11 @@ fragment float4 waveform_frag(
                 widget_run_dynamic_draws: 0,
                 widget_run_static_allocations: 0,
                 widget_run_static_allocated_bytes: 0,
+                retained_run_collection_misses: 0,
+                retained_run_reuses: 0,
+                retained_run_rebuilds: 0,
+                retained_run_missing_previous: 0,
+                retained_run_invalid_previous: 0,
             }
         }
 
@@ -5629,6 +5714,23 @@ fragment float4 waveform_frag(
             self.widget_run_static_allocated_bytes += bytes;
         }
 
+        fn note_widget_retained_run_collection(
+            &mut self,
+            reused_runs: usize,
+            rebuilt_runs: usize,
+            missing_previous_runs: usize,
+            invalid_previous_runs: usize,
+        ) {
+            self.retained_run_reuses += reused_runs as u64;
+            self.retained_run_rebuilds += rebuilt_runs as u64;
+            self.retained_run_missing_previous += missing_previous_runs as u64;
+            self.retained_run_invalid_previous += invalid_previous_runs as u64;
+        }
+
+        fn note_widget_retained_run_collection_miss(&mut self) {
+            self.retained_run_collection_misses += 1;
+        }
+
         fn note_frame(
             &mut self,
             text_bytes: usize,
@@ -5663,7 +5765,7 @@ fragment float4 waveform_frag(
                     self.widget_scene_cache_hits as f64 * 100.0 / scene_cache_attempts as f64
                 };
                 eprintln!(
-                    "[ui-profile][metal] fps={fps:.1} scene_avg={:.2}ms prep_avg={:.2}ms upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s arena_upload={:.2}MB/s arena_allocs:{} arena_alloc_mb:{:.2} arena_frame_grows:{} draws:{} prims:{} segments:{} run_cache=hit:{}/miss:{} cached:{} dynamic:{} bypass_dirty:{} bypass_unsupported:{} bypass_complex:{} clear:{} static_allocs:{} static_alloc_mb:{:.2} prop_runs:{} prop_glyphs:{} prop_quads:{} prop_cache=hit:{}/miss:{} scene_cache=hit:{}/miss:{}({scene_cache_hit_pct:.1}%) dirty:{} dirty_ids:{} overlay:{} clear:{} miss_reason=cold:{} content:{} layout:{} widget_state:{} theme:{} focus:{} scroll:{} viewport:{}",
+                    "[ui-profile][metal] fps={fps:.1} scene_avg={:.2}ms prep_avg={:.2}ms upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s arena_upload={:.2}MB/s arena_allocs:{} arena_alloc_mb:{:.2} arena_frame_grows:{} draws:{} prims:{} segments:{} run_cache=hit:{}/miss:{} cached:{} dynamic:{} bypass_dirty:{} bypass_unsupported:{} bypass_complex:{} clear:{} static_allocs:{} static_alloc_mb:{:.2} retained_runs=reuse:{} rebuild:{} miss:{} missing_prev:{} invalid_prev:{} prop_runs:{} prop_glyphs:{} prop_quads:{} prop_cache=hit:{}/miss:{} scene_cache=hit:{}/miss:{}({scene_cache_hit_pct:.1}%) dirty:{} dirty_ids:{} overlay:{} clear:{} miss_reason=cold:{} content:{} layout:{} widget_state:{} theme:{} focus:{} scroll:{} viewport:{}",
                     self.widget_scene_build.as_secs_f64() * 1000.0 / self.frames as f64,
                     self.metal_prep.as_secs_f64() * 1000.0 / self.frames as f64,
                     self.text_bytes as f64 / (1024.0 * 1024.0) / secs,
@@ -5686,6 +5788,11 @@ fragment float4 waveform_frag(
                     self.widget_run_cache_clears,
                     self.widget_run_static_allocations,
                     self.widget_run_static_allocated_bytes as f64 / (1024.0 * 1024.0),
+                    self.retained_run_reuses,
+                    self.retained_run_rebuilds,
+                    self.retained_run_collection_misses,
+                    self.retained_run_missing_previous,
+                    self.retained_run_invalid_previous,
                     self.prop_text_runs,
                     self.prop_text_glyphs,
                     self.prop_text_quads,
@@ -5751,6 +5858,11 @@ fragment float4 waveform_frag(
             self.widget_run_dynamic_draws = 0;
             self.widget_run_static_allocations = 0;
             self.widget_run_static_allocated_bytes = 0;
+            self.retained_run_collection_misses = 0;
+            self.retained_run_reuses = 0;
+            self.retained_run_rebuilds = 0;
+            self.retained_run_missing_previous = 0;
+            self.retained_run_invalid_previous = 0;
         }
     }
 
