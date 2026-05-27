@@ -7082,6 +7082,49 @@ mod tests {
         editor
     }
 
+    fn custom_audio_fx_body_test_editor(params: Vec<Value>) -> eseqlisp::Editor {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let fx = Value::Map(test_fx_map("metadata-custom-fx", 0, params));
+        editor
+            .runtime_mut()
+            .register_reactive("TEST", vec![("fx", fx)], true);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selection? () false)
+                (def fx-clear-selected-effect () false)
+                (def custom-audio-fx-ui (fx) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-instrument-synth-ui (inst) false)
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (load "metal-seq-fx/state.lisp")
+                (def visible-params (params)
+                  (filter |p| (not (= (get p :name) "enabled")) params))
+                (load "metal-seq-fx/param-controls.lisp")
+                (load "metal-seq-fx/param-grid.lisp")
+                (load "metal-seq-fx/builtin/audio-fx.lisp")
+                (load "metal-seq-fx/panel-bodies.lisp")
+                (effect-buffer "*custom-audio-fx-body-test*"
+                  (audio-fx-panel-body TEST.fx (get TEST.fx :params)))
+                "#,
+            )
+            .expect("load custom audio effect body test lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom audio effect body test status after refresh: {status}");
+        }
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*custom-audio-fx-body-test*")
+            .expect("custom audio effect body test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(140, 18);
+        editor
+    }
+
     fn test_enum_param_map(
         name: &str,
         idx: usize,
@@ -10784,6 +10827,85 @@ mod tests {
             "fourth panel should start a new column, filter={:?} misc={:?}",
             filter_panel.rect,
             misc_panel.rect
+        );
+    }
+
+    #[test]
+    fn custom_audio_effect_fallback_groups_metadata_params_without_envelope_ui() {
+        let editor = custom_audio_fx_body_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "drive",
+                0,
+                0.4,
+                0.0,
+                1.0,
+                Some("tone"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "cutoff",
+                1,
+                1200.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "res",
+                2,
+                0.35,
+                0.0,
+                1.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("mix", 3, 0.5, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 4, 1.0, 0.0, 1.0)),
+        ]);
+        let layout = editor
+            .widget_layout()
+            .expect("custom audio effect metadata fallback layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        for (debug_name, control_name) in [
+            ("fx-param-group-tone", "fx-param-compact-knob-drive"),
+            ("fx-param-group-filter", "fx-param-compact-knob-cutoff"),
+            ("fx-param-group-misc", "fx-param-compact-knob-mix"),
+        ] {
+            let panel = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{debug_name}; layout={layout_summaries:#?}"));
+            let control =
+                find_layout_node_by_debug_name(panel, control_name).unwrap_or_else(|| {
+                    panic!("{control_name} inside {debug_name}; layout={layout_summaries:#?}")
+                });
+            assert_eq!(
+                panel.props.get("background-color").cloned(),
+                Some(Value::Keyword("instrument-group-bg".to_string())),
+                "{debug_name} should use the same subtle grouped panel surface in custom effects"
+            );
+            assert!(
+                panel.rect.width > 1.0
+                    && panel.rect.height > 1.0
+                    && control.rect.width > 1.0
+                    && control.rect.height > 1.0,
+                "{debug_name} and {control_name} should have visible measured rects, panel={:?} control={:?}",
+                panel.rect,
+                control.rect
+            );
+        }
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            0,
+            "custom effect metadata grouping should not introduce envelope UI"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "custom-audio-fx-wrapper").is_none(),
+            "custom effect without ui.lisp should use the metadata fallback"
         );
     }
 

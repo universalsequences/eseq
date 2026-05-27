@@ -6606,6 +6606,73 @@ fn writeback_created_mod_from_existing_modulatable_param_follows_modulator_input
 }
 
 #[test]
+fn effect_writeback_created_mod_from_newly_modulatable_early_param_precedes_consumers() {
+    let source = r#"
+        (param am @min 0.1 @max 320 @default 0.1)
+        (def phasor1 (phasor am))
+        (def mul3 (* phasor1 twopi))
+        (def cos1 (cos mul3))
+        (def input_l (in 1 @name Left))
+        (def mul1 (* input_l cos1))
+        (def input_r (in 2 @name Right))
+        (def mul2 (* input_r cos1))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (out (mix input_l mul1 mix-amt) 1 @name Left)
+        (out (mix input_r mul2 mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let param = patch.nodes.iter().find(|node| node.id == "am").unwrap();
+    let phasor = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phasor1")
+        .unwrap();
+    let param_to_phasor = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == param.id && connection.to_node == phasor.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text = "param am @min 0.1 @max 320 @default 0.1 @mod true @mod-mode additive".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(param_to_phasor),
+        ));
+    let mod_node = allocate_created_text_node(&mut state, "root", "mod");
+    connect_output_to_input(&mut state, "root", &param.id, &mod_node, 0);
+    connect_output_to_input(&mut state, "root", &mod_node, &phasor.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+
+    let param_index = emitted
+        .find("(param am @min 0.1 @max 320.0 @default 0.1 @mod true @mod-mode additive)")
+        .expect("edited modulatable param should be present");
+    let mod4_index = emitted
+        .find("(def mod4 (in 6 @name mod4 @modulator 4))")
+        .expect("effect modulator inputs should be present");
+    let modulated_index = emitted
+        .find("(def modulated1 (mod am))")
+        .expect("created mod accessor should be present");
+    let phasor_index = emitted
+        .find("(def phasor1 (phasor modulated1))")
+        .expect("source consumer should use created mod accessor");
+    assert!(param_index < modulated_index, "{emitted}");
+    assert!(mod4_index < modulated_index, "{emitted}");
+    assert!(modulated_index < phasor_index, "{emitted}");
+    compile_patch_source_with_dgenlisp(&emitted).unwrap();
+}
+
+#[test]
 fn writeback_created_modulatable_param_replacing_early_source_input_precedes_mod_accessor() {
     let source = r#"
         (def value1 2.0)

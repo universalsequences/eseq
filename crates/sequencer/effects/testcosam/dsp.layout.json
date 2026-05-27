@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "Left": {
+        "x": 39.885,
+        "y": 17.365
+      },
+      "Right": {
+        "x": 108.605,
+        "y": 17.365
+      },
+      "am": {
+        "x": 55.219727,
+        "y": 10.489158
+      },
+      "cos1": {
+        "x": 57.54564,
+        "y": 20.747221
+      },
+      "input_l": {
+        "x": 31.765001,
+        "y": 4.0
+      },
+      "input_r": {
+        "x": 102.225006,
+        "y": 4.0
+      },
+      "mix#0": {
+        "x": 35.245003,
+        "y": 10.6825
+      },
+      "mix#1": {
+        "x": 106.285,
+        "y": 10.6825
+      },
+      "mix-amt": {
+        "x": 54.815002,
+        "y": 4.0
+      },
+      "mul1": {
+        "x": 43.36455,
+        "y": 7.701753
+      },
+      "mul2": {
+        "x": 99.98628,
+        "y": 7.5468755
+      },
+      "mul3": {
+        "x": 56.749027,
+        "y": 17.924084
+      },
+      "phasor1": {
+        "x": 56.291855,
+        "y": 14.781887
+      }
+    },
+    "cables": {
+      "input_l:0->mix#0:0": {
+        "segmented": true,
+        "y": 8.13125
+      },
+      "input_r:0->mix#1:0": {
+        "segmented": true,
+        "y": 6.8912506
+      },
+      "mix#0:0->Left:0": {
+        "segmented": true,
+        "y": 14.813749
+      },
+      "mix#1:0->Right:0": {
+        "segmented": true,
+        "y": 13.57375
+      },
+      "mix-amt:0->mix#0:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "mix-amt:0->mix#1:2": {
+        "segmented": true,
+        "y": 5.93
+      }
+    },
+    "inputPresentation": {
+      "cos1:0": "cable",
+      "mix#0:1": "cable",
+      "mix#1:1": "cable",
+      "mul1:0": "cable",
+      "mul1:1": "cable",
+      "mul2:0": "cable",
+      "mul2:1": "cable",
+      "mul3:0": "cable",
+      "phasor1:0": "cable"
+    }
+  },
+  "macros": {}
+}

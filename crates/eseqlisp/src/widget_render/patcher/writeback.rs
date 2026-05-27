@@ -2860,7 +2860,39 @@ fn generated_def_insertion_index(
         let original_position =
             document.insertion_position_for_original_index(&scope, dependency_index);
         if host_position > original_position {
-            return Ok(GeneratedFormInsertion::CurrentPosition(host_position));
+            let moved_forms =
+                generated_consumer_form_closure(root_patch, view_key, &scope, &consumers);
+            let insertion_dependencies = generated_source_dependency_forms(
+                root_patch,
+                interaction_state,
+                view_key,
+                &scope,
+                edit,
+            );
+            if !insertion_dependencies.is_empty() {
+                document.move_forms_after_current_position_if_needed(
+                    &insertion_dependencies,
+                    &scope,
+                    host_position,
+                )?;
+                if let Some(last_dependency) = insertion_dependencies
+                    .iter()
+                    .filter(|form| form.scope == scope)
+                    .max_by_key(|form| document.form_position(form).unwrap_or(0))
+                {
+                    document
+                        .move_forms_after_dependency_if_needed(&moved_forms, last_dependency)?;
+                }
+                return Ok(GeneratedFormInsertion::AfterCurrentForms(
+                    insertion_dependencies,
+                ));
+            }
+            let insertion_position = document.move_forms_after_current_position_if_needed(
+                &moved_forms,
+                &scope,
+                host_position,
+            )?;
+            return Ok(GeneratedFormInsertion::CurrentPosition(insertion_position));
         }
     }
     Ok(GeneratedFormInsertion::OriginalIndex(dependency_index))
@@ -5360,6 +5392,47 @@ impl SourceDocument {
         Ok(())
     }
 
+    fn move_forms_after_current_position_if_needed(
+        &mut self,
+        moved: &[SourceFormId],
+        scope: &SourceScopeId,
+        position: usize,
+    ) -> Result<usize, WriteBackError> {
+        let moved_indexes = moved
+            .iter()
+            .filter(|form| &form.scope == scope)
+            .filter_map(|form| {
+                let current_position = self.form_position(form)?;
+                (current_position < position).then_some(form.index)
+            })
+            .collect::<HashSet<_>>();
+        if moved_indexes.is_empty() {
+            return Ok(position);
+        }
+
+        let insertion_position = match scope {
+            SourceScopeId::Root => move_forms_after_current_position_in_scope(
+                &mut self.forms,
+                &moved_indexes,
+                position,
+                |form| form.original_index,
+            ),
+            SourceScopeId::Macro { name } => {
+                let Some(macro_doc) = self.macros.get_mut(name) else {
+                    return Ok(position);
+                };
+                move_forms_after_current_position_in_scope(
+                    &mut macro_doc.body,
+                    &moved_indexes,
+                    position,
+                    |form| form.original_index,
+                )
+            }
+        };
+
+        Ok(insertion_position)
+    }
+
     fn emit(&self) -> String {
         self.forms_in_emit_order()
             .into_iter()
@@ -6145,6 +6218,41 @@ fn move_forms_after_dependency_in_scope<T>(
     };
     kept.splice(insert_at..insert_at, moved);
     *forms = kept;
+}
+
+fn move_forms_after_current_position_in_scope<T>(
+    forms: &mut Vec<T>,
+    moved_original_indexes: &HashSet<usize>,
+    position: usize,
+    original_index: impl Fn(&T) -> Option<usize>,
+) -> usize {
+    let mut kept = Vec::with_capacity(forms.len());
+    let mut moved = Vec::new();
+    let mut removed_before_position = 0usize;
+
+    for (current_position, form) in forms.drain(..).enumerate() {
+        if current_position < position
+            && original_index(&form).is_some_and(|index| moved_original_indexes.contains(&index))
+        {
+            removed_before_position += 1;
+            moved.push(form);
+        } else {
+            kept.push(form);
+        }
+    }
+
+    if moved.is_empty() {
+        let insertion_position = position.min(kept.len());
+        *forms = kept;
+        return insertion_position;
+    }
+
+    let insert_at = position
+        .saturating_sub(removed_before_position)
+        .min(kept.len());
+    kept.splice(insert_at..insert_at, moved);
+    *forms = kept;
+    insert_at
 }
 
 impl MacroDocument {
