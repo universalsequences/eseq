@@ -10530,6 +10530,195 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_sequencer_expanded_selection_recolors_after_empty_selection() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand current sequencer row");
+        editor.refresh_runtime_side_effects();
+
+        let initial_layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should build");
+        let slot_0_label =
+            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+                .expect("initial slot 0 label");
+        assert_eq!(
+            slot_0_label.props.get("color"),
+            Some(&Value::Keyword("dim".to_string())),
+            "empty selection should render the step label as dim"
+        );
+        let _ = editor.take_dirty_widget_ids();
+        let before_revision = editor.widget_layout_revision();
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_bool_list(&[
+                true, false, false, false, false, false, false, false, false, false, false, false,
+                false, false, false, false,
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+
+        let trace = editor
+            .runtime()
+            .last_ui_invalidation_trace()
+            .expect("selection invalidation trace");
+        assert_ne!(
+            trace.relayout_mode.as_deref(),
+            Some("full"),
+            "selection recolor should not require full active-tree layout: {trace:?}"
+        );
+        assert_eq!(
+            editor.widget_layout_revision(),
+            before_revision,
+            "selection recolor should reuse active layout"
+        );
+
+        let selected_layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should still exist");
+        let slot_0_label =
+            find_layout_node_by_stable_key(&selected_layout, "seqv-expanded-step-label-0-0")
+                .expect("selected slot 0 label");
+        assert_eq!(
+            slot_0_label.props.get("color"),
+            Some(&Value::Keyword("yellow".to_string())),
+            "selection changes from an initially empty selection should recolor step labels"
+        );
+        let slot_0_toggle =
+            find_layout_node_by_stable_key(&selected_layout, "seqv-expanded-step-toggle-0-0")
+                .expect("selected slot 0 toggle");
+        assert!(
+            layout_tree_has_bool_prop(slot_0_toggle, "selected", true),
+            "selection changes should also update the expanded toggle selected prop"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_page_boundary_reuses_active_subtree_layout() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 32);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "auto-follow", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .expect("expand two sequencer rows");
+        editor.refresh_runtime_side_effects();
+        let initial_layout = editor
+            .widget_layout()
+            .expect("expanded two-row sequencer layout should build");
+        assert_eq!(
+            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+                .and_then(|node| node.props.get("text")),
+            Some(&Value::String("1".to_string())),
+            "slot 0 should initially show absolute step 1"
+        );
+        assert_eq!(
+            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+                .and_then(|node| node.props.get("h-align")),
+            Some(&Value::Keyword("center".to_string())),
+            "fixed-width step labels should center their text under the toggle"
+        );
+        let _ = editor.take_dirty_widget_ids();
+        let before_revision = editor.widget_layout_revision();
+
+        for track in 0..2 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_page_field(track),
+                Value::Number(1.0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, 0),
+                Value::Bool(false),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, 16),
+                Value::Bool(true),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_row_field(track, 0),
+                Value::Number(-1.0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_row_field(track, 1),
+                Value::Number(0.0),
+            );
+        }
+        editor.runtime_mut().run_reactive_cycle();
+
+        let trace = editor
+            .runtime()
+            .last_ui_invalidation_trace()
+            .expect("page-boundary invalidation trace");
+        assert_eq!(
+            trace.relayout_mode.as_deref(),
+            Some("subtree-reuse"),
+            "page-boundary updates should reuse active subtree layout: {trace:?}"
+        );
+        assert_eq!(trace.relayout_failure_reason, None);
+        assert_eq!(trace.subtree_failure_reason, None);
+        assert_eq!(trace.full_buffer_reruns, 0);
+        assert_eq!(trace.subtree_reruns, 2);
+        assert_eq!(
+            editor.widget_layout_revision(),
+            before_revision,
+            "page-boundary subtree reuse should not bump the active layout revision"
+        );
+
+        let paged_layout = editor
+            .widget_layout()
+            .expect("paged expanded sequencer layout should still exist");
+        let slot_0_label =
+            find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-step-label-0-0")
+                .expect("track 0 slot 0 label after page flip");
+        assert_finite_nonzero_rect(slot_0_label, "track 0 slot 0 label after page flip");
+        assert_eq!(
+            slot_0_label.props.get("text"),
+            Some(&Value::String("17".to_string())),
+            "stable slot 0 should now display absolute step 17"
+        );
+        let slot_0_playhead =
+            find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-step-playhead-probe-0-0")
+                .expect("track 0 slot 0 playhead after page flip");
+        assert!(
+            layout_tree_has_bool_prop(slot_0_playhead, "active", true),
+            "slot 0 playhead binding should retarget to absolute step 16"
+        );
+    }
+
+    #[test]
     fn metal_seq_sequencer_expanded_timebase_uses_default_or_selected_step_plock_path() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let sequencer_id = editor

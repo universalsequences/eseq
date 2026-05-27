@@ -1,0 +1,281 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "Left": {
+        "x": 39.561337,
+        "y": 23.609577
+      },
+      "Right": {
+        "x": 146.37357,
+        "y": 19.03145
+      },
+      "bias": {
+        "x": 62.378628,
+        "y": 11.412309
+      },
+      "dampening": {
+        "x": 91.46701,
+        "y": 17.077131
+      },
+      "drive": {
+        "x": 61.82408,
+        "y": 8.610012
+      },
+      "hyster": {
+        "x": 67.36119,
+        "y": 14.367027
+      },
+      "input_l": {
+        "x": 31.765001,
+        "y": 4.0
+      },
+      "input_r": {
+        "x": 102.225006,
+        "y": 4.0
+      },
+      "mix": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "mix#0": {
+        "x": 30.002258,
+        "y": 16.922935
+      },
+      "mix#1": {
+        "x": 140.81137,
+        "y": 10.982244
+      },
+      "tape-hysteresis1": {
+        "x": 55.212605,
+        "y": 19.769611
+      },
+      "tape-hysteresis2": {
+        "x": 110.33273,
+        "y": 23.106821
+      }
+    },
+    "cables": {
+      "dampening:0->tape-hysteresis1:4": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "dampening:0->tape-hysteresis2:4": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "drive:0->tape-hysteresis1:1": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "drive:0->tape-hysteresis2:1": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "input_l:0->mix#0:0": {
+        "segmented": true,
+        "y": 8.13125
+      },
+      "input_r:0->mix#1:0": {
+        "segmented": true,
+        "y": 6.8912506
+      },
+      "mix#0:0->Left:0": {
+        "segmented": true,
+        "y": 21.22258
+      },
+      "mix#1:0->Right:0": {
+        "segmented": true,
+        "y": 13.57375
+      },
+      "mix:0->mix#0:2": {
+        "segmented": true,
+        "y": 20.650002
+      },
+      "mix:0->mix#1:2": {
+        "segmented": true,
+        "y": 20.650002
+      }
+    },
+    "inputPresentation": {
+      "mix#0:1": "cable",
+      "mix#0:2": "inline-raw-param",
+      "mix#1:1": "cable",
+      "mix#1:2": "inline-raw-param",
+      "tape-hysteresis1:0": "cable",
+      "tape-hysteresis1:1": "inline-raw-param",
+      "tape-hysteresis1:2": "cable",
+      "tape-hysteresis1:3": "inline-mod-param",
+      "tape-hysteresis1:4": "inline-raw-param",
+      "tape-hysteresis2:0": "cable",
+      "tape-hysteresis2:1": "inline-raw-param",
+      "tape-hysteresis2:2": "cable",
+      "tape-hysteresis2:3": "inline-mod-param",
+      "tape-hysteresis2:4": "inline-raw-param"
+    }
+  },
+  "macros": {
+    "tape-hysteresis": {
+      "nodes": {
+        "*#0": {
+          "x": 95.58,
+          "y": 24.0475
+        },
+        "*#1": {
+          "x": 119.79001,
+          "y": 10.6825
+        },
+        "*#2": {
+          "x": 166.23001,
+          "y": 17.365
+        },
+        "*#3": {
+          "x": 191.74501,
+          "y": 10.6825
+        },
+        "+#0": {
+          "x": 119.79001,
+          "y": 17.365
+        },
+        "1": {
+          "x": 129.89001,
+          "y": 10.6825
+        },
+        "20000": {
+          "x": 205.51501,
+          "y": 10.6825
+        },
+        "H": {
+          "x": 94.18001,
+          "y": 30.73
+        },
+        "M": {
+          "x": 95.48501,
+          "y": 37.4125
+        },
+        "bias": {
+          "x": 112.73501,
+          "y": 4.0
+        },
+        "cutoff": {
+          "x": 193.58,
+          "y": 17.365
+        },
+        "damping": {
+          "x": 191.74501,
+          "y": 4.0
+        },
+        "diff": {
+          "x": 216.96501,
+          "y": 10.6825
+        },
+        "drive": {
+          "x": 135.785,
+          "y": 4.0
+        },
+        "h_in": {
+          "x": 81.81,
+          "y": 10.6825
+        },
+        "hyster": {
+          "x": 166.23001,
+          "y": 4.0
+        },
+        "input": {
+          "x": 88.52501,
+          "y": 4.0
+        },
+        "out": {
+          "x": 95.73421,
+          "y": 50.777496
+        },
+        "return": {
+          "x": 90.26501,
+          "y": 44.094997
+        }
+      },
+      "cables": {
+        "*#0:0->H:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "*#1:0->+#0:1": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "*#2:0->H:2": {
+          "segmented": true,
+          "y": 22.20125
+        },
+        "*#3:0->cutoff:1": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "+#0:0->*#0:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "1:0->+#0:0": {
+          "segmented": true,
+          "y": 12.95375
+        },
+        "20000:0->cutoff:0": {
+          "segmented": true,
+          "y": 14.193749
+        },
+        "H:0->M:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "M:0->return:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "bias:0->H:1": {
+          "segmented": true,
+          "y": 14.89875
+        },
+        "cutoff:0->return:1": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "damping:0->*#3:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "diff:0->*#2:1": {
+          "segmented": true,
+          "y": 14.193749
+        },
+        "drive:0->*#1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "h_in:0->diff:1": {
+          "segmented": true,
+          "y": 11.4725
+        },
+        "hyster:0->*#2:0": {
+          "segmented": true,
+          "y": 11.4725
+        },
+        "input:0->*#0:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "input:0->diff:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "input:0->h_in:0": {
+          "segmented": true,
+          "y": 12.68725
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 48.22625
+        }
+      }
+    }
+  }
+}

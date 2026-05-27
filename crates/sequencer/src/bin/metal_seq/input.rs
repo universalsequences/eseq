@@ -515,7 +515,6 @@ pub(crate) fn handle_metal_command_shortcut(
     if editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
         && active_buffer_accepts_global_ui_shortcuts(editor)
-        && editor.focused_widget_id().is_none()
         && !focused_widget_captures_text_input(editor)
     {
         match (key.code, key.modifiers) {
@@ -541,6 +540,7 @@ pub(crate) fn handle_metal_command_shortcut(
                 editor.mark_needs_redraw();
                 return true;
             }
+            _ if editor.focused_widget_id().is_some() => {}
             (KeyCode::Tab, KeyModifiers::CONTROL) => {
                 let _ = editor
                     .runtime_mut()

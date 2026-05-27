@@ -676,7 +676,7 @@
     (if (< step (len plocks)) (nth plocks step) false)))
 
 (def seqv-expanded-step-selected? (track step)
-  (and (= SEQ.current-track track) (seq-has-selection?) (nth SEQ.selected-steps step)))
+  (and (= SEQ.current-track track) (nth SEQ.selected-steps step)))
 
 (def seqv-expanded-sync-current-label (track track-id)
   (nth SEQ.sync-labels
@@ -856,7 +856,7 @@
           (let ((step (seqv-expanded-step-index track track-id i))
                 (visible (seqv-expanded-step-visible? track track-id i)))
             (box :padding 0.25
-              :key (str "seqv-expanded-step-column-" track-id "-" step)
+              :key (str "seqv-expanded-step-column-" track-id "-" i)
               :background (if visible
                 (if (and (= track SEQ.current-track) (= (seqv-current-step track track-id) step))
                   "cursor-highlight"
@@ -870,7 +870,7 @@
                 (let ((step-on (and visible (seqv-step-active? track step))))
                   (if step-on
                     (vslider :height 4
-                      :key (str "seqv-expanded-step-slider-" track-id "-" step)
+                      :key (str "seqv-expanded-step-slider-" track-id "-" i)
                       :width (if (= mode 5) 2 1)
                       :min (seqv-param-slider-min mode) :max (seqv-param-slider-max mode)
                       :origin (seqv-param-origin mode)
@@ -895,7 +895,7 @@
                           (seqv-set-expanded-step-param track track-id step mode v)
                           nil)))
                     (vslider :height 4
-                      :key (str "seqv-expanded-step-slider-" track-id "-" step)
+                      :key (str "seqv-expanded-step-slider-" track-id "-" i)
                       :width (if (= mode 5) 2 1)
                       :min (seqv-param-slider-min mode) :max (seqv-param-slider-max mode)
                       :origin (seqv-param-origin mode)
@@ -920,7 +920,7 @@
                           (seqv-set-expanded-step-param track track-id step mode v)
                           nil)))))
                 (box
-                  :key (str "seqv-expanded-step-toggle-" track-id "-" step)
+                  :key (str "seqv-expanded-step-toggle-" track-id "-" i)
                   :active (if visible (if (seqv-step-active? track step) 1 0) 0)
                   :plocked (if visible (if (seqv-step-plocked? track step) 1 0) 0)
                   :selected (if visible (if (seqv-expanded-step-selected? track step) 1 0) 0)
@@ -946,14 +946,16 @@
                     :track-g (seqv-expanded-track-color-g track)
                     :track-b (seqv-expanded-track-color-b track)))
                 (label (if visible (str (+ step 1)) "")
-                  :key (str "seqv-expanded-step-label-" track-id "-" step)
+                  :key (str "seqv-expanded-step-label-" track-id "-" i)
+                  :width 2.8
+                  :h-align :center
                   :font-size 10 :bg :transparent
                   :color (if visible
                           (if (seqv-expanded-step-selected? track step)
                             :yellow
                             :dim)
                           :dim))
-                (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" step)
+                (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                   (step-playhead-dot
                     :active (bind-seq (str "track-playhead-active-" track "-" step))))))))))))
 

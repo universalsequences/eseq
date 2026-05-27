@@ -12,7 +12,7 @@ use crate::host::{BufferId, HostCommand};
 use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{
     LayoutEngine, LayoutNode, TextMeasurer, reuse_layout_failure_reason, reuse_layout_node,
-    same_layout_geometry,
+    reuse_layout_node_for_subtree_path_result, same_layout_geometry, subtree_root_paths,
 };
 use crate::reactive::ReactiveRegistry;
 use crate::vm::{
@@ -2698,6 +2698,55 @@ impl Runtime {
         true
     }
 
+    fn reuse_current_layout_for_subtrees(&mut self, subtree_roots: &[u64]) -> Result<(), String> {
+        let relayout_started = Instant::now();
+        if subtree_roots.is_empty() {
+            return Ok(());
+        }
+        let tree = self
+            .current_widget_tree
+            .as_ref()
+            .ok_or_else(|| "missing-tree".to_string())?;
+        let mut layout = self
+            .current_layout
+            .clone()
+            .ok_or_else(|| "missing-layout".to_string())?;
+        let mut roots = subtree_roots.to_vec();
+        roots.sort_unstable();
+        roots.dedup();
+        let mut dirty_widget_ids = Vec::new();
+        for subtree_root_id in roots {
+            let paths = subtree_root_paths(layout.as_ref());
+            let Some(child_path) = paths.get(&subtree_root_id) else {
+                return Err(format!("missing-subtree-path:{subtree_root_id}"));
+            };
+            let updated = reuse_layout_node_for_subtree_path_result(
+                layout.as_ref(),
+                tree,
+                child_path,
+                &mut dirty_widget_ids,
+            )
+            .map_err(|reason| format!("subtree:{subtree_root_id}:{reason}"))?;
+            layout = Arc::new(updated);
+        }
+        let mut combined_dirty_widget_ids = std::mem::take(&mut self.dirty_widget_ids);
+        combined_dirty_widget_ids.extend(dirty_widget_ids);
+        combined_dirty_widget_ids.sort_unstable();
+        combined_dirty_widget_ids.dedup();
+        self.current_layout = Some(layout);
+        self.reactive_registry
+            .replace_widget_bindings_from_layout(self.current_layout.as_deref());
+        self.dirty_widget_ids = combined_dirty_widget_ids;
+        if self.force_layout_revision_bump {
+            self.layout_revision = self.layout_revision.wrapping_add(1);
+        }
+        self.force_layout_revision_bump = false;
+        self.update_last_trace_relayout("subtree-reuse", None);
+        self.perf_stats
+            .note_relayout(true, true, relayout_started.elapsed(), None);
+        Ok(())
+    }
+
     pub(crate) fn try_upgrade_full_tree_to_current_subtree(
         &mut self,
         pending: &PendingWidgetTree,
@@ -2773,13 +2822,14 @@ impl Runtime {
         let mut subtree_reruns = 0usize;
         let mut reevaluated_subtree_roots = 0usize;
         let mut pending_subtree_patch_count = 0usize;
-        let mut active_tree_changed = false;
+        let mut active_tree_requires_full_relayout = false;
+        let mut active_changed_subtree_roots = Vec::new();
         let mut active_subtree_replacements: Vec<ActiveSubtreeReplacement> = Vec::new();
         let mut inactive_pending = Vec::new();
         let flush_active_subtree_replacements =
             |runtime: &mut Self,
              replacements: &mut Vec<ActiveSubtreeReplacement>,
-             active_tree_changed: &mut bool,
+             active_changed_subtree_roots: &mut Vec<u64>,
              fallback_pending: &mut Vec<PendingUiUpdate>| {
                 if replacements.is_empty() {
                     return;
@@ -2795,7 +2845,11 @@ impl Runtime {
                     })
                     .collect::<Vec<_>>();
                 if runtime.replace_current_subtrees_without_relayout(&batch) {
-                    *active_tree_changed = true;
+                    active_changed_subtree_roots.extend(
+                        replacements
+                            .iter()
+                            .map(|replacement| replacement.subtree_root_id),
+                    );
                 } else {
                     if trace {
                         eprintln!(
@@ -2867,7 +2921,7 @@ impl Runtime {
                             flush_active_subtree_replacements(
                                 self,
                                 &mut active_subtree_replacements,
-                                &mut active_tree_changed,
+                                &mut active_changed_subtree_roots,
                                 &mut inactive_pending,
                             );
                             full_buffer_reruns += 1;
@@ -2884,7 +2938,7 @@ impl Runtime {
                                         pending.reactive_dependencies.clone(),
                                     ),
                                 ));
-                                active_tree_changed = true;
+                                active_tree_requires_full_relayout = true;
                             } else {
                                 self.commit_current_ui_snapshot(Some(
                                     CommittedBufferUiSnapshot::from_tree(
@@ -2926,14 +2980,25 @@ impl Runtime {
         flush_active_subtree_replacements(
             self,
             &mut active_subtree_replacements,
-            &mut active_tree_changed,
+            &mut active_changed_subtree_roots,
             &mut inactive_pending,
         );
-        if active_tree_changed {
+        if active_tree_requires_full_relayout {
+            self.relayout_current_tree();
+            self.layout_revision = self.layout_revision.wrapping_add(1);
+        } else if !active_changed_subtree_roots.is_empty()
+            && let Err(reason) =
+                self.reuse_current_layout_for_subtrees(&active_changed_subtree_roots)
+        {
+            if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                trace.subtree_failure_reason = Some(reason);
+            }
             self.relayout_current_tree();
             self.layout_revision = self.layout_revision.wrapping_add(1);
         }
         if trace && pending_widget_tree_count > 0 {
+            let active_tree_changed =
+                active_tree_requires_full_relayout || !active_changed_subtree_roots.is_empty();
             eprintln!(
                 "[ui-trace][flush] complete active_changed={} active_targets={} inactive_targets={} full={} subtree={} patches={}",
                 active_tree_changed,

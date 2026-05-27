@@ -1062,14 +1062,20 @@ impl CommittedSubtreeSnapshot {
         field_to_subtree_roots: &mut HashMap<ReactiveFieldKey, Vec<u64>>,
         subtree_root_dependencies: &mut HashMap<u64, Vec<ReactiveFieldKey>>,
     ) {
-        if let Some(root_id) = self.subtree_root_id {
-            subtree_roots.insert(root_id, Arc::clone(self));
-            subtree_root_dependencies.insert(root_id, self.reactive_dependencies.clone());
+        if is_subtree_boundary(self.subtree_root_id, self.parent_subtree_root_id)
+            && let Some(root_id) = self.subtree_root_id
+        {
+            subtree_roots
+                .entry(root_id)
+                .or_insert_with(|| Arc::clone(self));
+            subtree_root_dependencies
+                .entry(root_id)
+                .or_insert_with(|| self.reactive_dependencies.clone());
             for field in &self.reactive_dependencies {
-                field_to_subtree_roots
-                    .entry(field.clone())
-                    .or_default()
-                    .push(root_id);
+                let roots = field_to_subtree_roots.entry(field.clone()).or_default();
+                if !roots.contains(&root_id) {
+                    roots.push(root_id);
+                }
             }
         }
         if let Some(widget_id) = self.stable_widget_id {
@@ -1084,6 +1090,10 @@ impl CommittedSubtreeSnapshot {
             );
         }
     }
+}
+
+fn is_subtree_boundary(root_id: Option<u64>, parent_root_id: Option<u64>) -> bool {
+    root_id.is_some() && root_id != parent_root_id
 }
 
 #[cfg(test)]

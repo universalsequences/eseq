@@ -576,13 +576,19 @@ pub fn subtree_root_paths(existing: &LayoutNode) -> HashMap<u64, Vec<usize>> {
     paths
 }
 
+fn is_subtree_boundary(root_id: Option<u64>, parent_root_id: Option<u64>) -> bool {
+    root_id.is_some() && root_id != parent_root_id
+}
+
 fn collect_subtree_root_paths(
     node: &LayoutNode,
     path: &mut Vec<usize>,
     paths: &mut HashMap<u64, Vec<usize>>,
 ) {
-    if let Some(root_id) = node.subtree_root_id {
-        paths.insert(root_id, path.clone());
+    if is_subtree_boundary(node.subtree_root_id, node.parent_subtree_root_id)
+        && let Some(root_id) = node.subtree_root_id
+    {
+        paths.entry(root_id).or_insert_with(|| path.clone());
     }
     for (idx, child) in node.children.iter().enumerate() {
         path.push(idx);
@@ -1155,6 +1161,53 @@ mod tests {
             (actual - expected).abs() < 0.000_01,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn layout_node(
+        widget_type: &str,
+        subtree_root_id: Option<u64>,
+        parent_subtree_root_id: Option<u64>,
+        children: Vec<LayoutNode>,
+    ) -> LayoutNode {
+        LayoutNode {
+            widget_id: 0,
+            stable_widget_id: None,
+            subtree_root_id,
+            parent_subtree_root_id,
+            stable_key: None,
+            widget_type: widget_type.to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            props: std::collections::HashMap::new(),
+            children,
+            focusable: false,
+        }
+    }
+
+    #[test]
+    fn subtree_root_paths_record_boundary_nodes_not_inherited_descendants() {
+        let layout = layout_node(
+            "v-stack",
+            None,
+            None,
+            vec![layout_node(
+                "box",
+                Some(11),
+                None,
+                vec![layout_node(
+                    "v-stack",
+                    Some(11),
+                    Some(11),
+                    vec![layout_node("label", Some(11), Some(11), Vec::new())],
+                )],
+            )],
+        );
+
+        assert_eq!(subtree_root_paths(&layout).get(&11), Some(&vec![0]));
     }
 
     /// Build a label widget: (label "text" :width w)

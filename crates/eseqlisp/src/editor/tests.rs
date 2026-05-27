@@ -5875,9 +5875,9 @@ fn active_named_buffer_batches_multiple_subtree_updates_into_one_relayout() {
             (effect-buffer "*controls*"
               (v-stack
                 (subtree :key "left-label"
-                  (label (fmt "left:{}" APP.left-level)))
+                  (label (fmt "left:{}" APP.left-level) :width 8))
                 (subtree :key "right-label"
-                  (label (fmt "right:{}" APP.right-level)))))
+                  (label (fmt "right:{}" APP.right-level) :width 8))))
             "#,
         )
         .unwrap();
