@@ -475,6 +475,17 @@ fn current_track_for_app(app: &mut ui::App, current_track: &Arc<AtomicUsize>) ->
     Some(track)
 }
 
+fn ensure_sequencer_current_track_visible(editor: &mut Editor, app: &ui::App, track: usize) {
+    if editor.active_buffer().name != "*sequencer*" {
+        return;
+    }
+    let Some(track_id) = app.graph.track_node_ids.get(track).map(|ids| ids.pan_id) else {
+        return;
+    };
+    let key = format!("sequencer-track-{track_id}");
+    editor.ensure_widget_stable_key_visible(&key, 1.0);
+}
+
 fn track_button_state_snapshot(state: &Arc<SequencerState>) -> Vec<(bool, bool)> {
     (0..state.active_track_count())
         .map(|track| {
@@ -2215,6 +2226,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if should_reload_custom_ui {
                             reload_custom_instrument_ui(&mut editor);
                         }
+                        ensure_sequencer_current_track_visible(
+                            &mut editor,
+                            &app,
+                            current_track.load(Ordering::Relaxed),
+                        );
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -2231,6 +2247,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             pending_drag = None;
                         }
                         editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+                        if matches!(
+                            mouse.kind,
+                            crossterm::event::MouseEventKind::Down(_)
+                                | crossterm::event::MouseEventKind::Up(_)
+                        ) {
+                            ensure_sequencer_current_track_visible(
+                                &mut editor,
+                                &app,
+                                current_track.load(Ordering::Relaxed),
+                            );
+                        }
                         backend.set_widget_cursor(editor.widget_cursor());
                     }
                 }
@@ -10084,6 +10111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if refresh_visible_sequencer_after_cycle {
                     let started = Instant::now();
                     editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                    ensure_sequencer_current_track_visible(&mut editor, &app, ct);
                     refresh_seq_elapsed = started.elapsed();
                 }
                 if refresh_visible_mixer_after_cycle {

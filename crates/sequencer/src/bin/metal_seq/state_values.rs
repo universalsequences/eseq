@@ -10038,6 +10038,83 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_sequencer_selected_track_row_can_scroll_into_view() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 8, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 12);
+
+        let layout = editor
+            .widget_layout()
+            .expect("multi-track sequencer layout should build");
+        let row = find_layout_node_by_stable_key(&layout, "sequencer-track-7")
+            .expect("last sequencer track row should render");
+        assert!(
+            row.rect.row + row.rect.height > editor.widget_scroll_top() + 12.0,
+            "fixture should start with the last track below the viewport"
+        );
+
+        assert!(
+            editor.ensure_widget_stable_key_visible("sequencer-track-7", 1.0),
+            "ensuring the last track should adjust widget scroll"
+        );
+        let scroll_top = editor.widget_scroll_top();
+        assert!(scroll_top > 0.0);
+        assert!(
+            row.rect.row + row.rect.height <= scroll_top + 12.0,
+            "last track should be visible after scrolling, row={:?} scroll_top={scroll_top}",
+            row.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_selected_track_row_can_scroll_into_view_after_height_change() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 8, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 12);
+
+        editor.ensure_widget_stable_key_visible("sequencer-track-7", 1.0);
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 7)")
+            .expect("expand selected bottom row");
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.ensure_widget_stable_key_visible("sequencer-track-7", 1.0),
+            "expanding a bottom-row track should adjust scroll to keep the larger row visible"
+        );
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded bottom-row sequencer layout should build");
+        let row = find_layout_node_by_stable_key(&layout, "sequencer-track-7")
+            .expect("expanded last sequencer track row should render");
+        let scroll_top = editor.widget_scroll_top();
+        assert!(
+            row.rect.row + row.rect.height <= scroll_top + 12.0,
+            "expanded selected row should stay in view, row={:?} scroll_top={scroll_top}",
+            row.rect
+        );
+    }
+
+    #[test]
     fn metal_seq_sequencer_expanded_rows_keep_independent_tab_and_page_state() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 32);

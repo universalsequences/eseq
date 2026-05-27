@@ -2156,6 +2156,48 @@ impl Editor {
         }
     }
 
+    pub fn ensure_widget_stable_key_visible(&mut self, stable_key: &str, margin_rows: f32) -> bool {
+        let Some((target_row, target_height)) = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| find_layout_node_by_stable_key(layout, stable_key))
+            .map(|node| (node.rect.row, node.rect.height))
+        else {
+            return false;
+        };
+        let viewport_height = self.active_leaf().widget_viewport_height.max(0.0);
+        let viewport_height = if viewport_height > 0.0 {
+            viewport_height
+        } else {
+            self.runtime.layout_rows_exact()
+        };
+        if viewport_height <= 0.0 {
+            return false;
+        }
+
+        let margin = margin_rows.max(0.0).min(viewport_height * 0.5);
+        let target_top = target_row.floor();
+        let target_bottom = (target_row + target_height).ceil();
+        let current_scroll = self.active_leaf().widget_scroll_top;
+        let desired_scroll = if target_top < current_scroll + margin {
+            target_top - margin
+        } else if target_bottom > current_scroll + viewport_height - margin {
+            target_bottom - viewport_height + margin
+        } else {
+            current_scroll
+        }
+        .clamp(0.0, self.max_widget_vertical_scroll());
+
+        if (desired_scroll - current_scroll).abs() <= f32::EPSILON {
+            return false;
+        }
+
+        self.active_leaf_mut().widget_scroll_top = desired_scroll;
+        self.mark_needs_redraw();
+        true
+    }
+
     /// Combined vertical scroll: widget scroll + text scroll.
     pub fn total_scroll_top(&self) -> f32 {
         let text_scroll = if self.active_buffer().view_mode == ViewMode::UiOnly {
@@ -6049,6 +6091,18 @@ fn max_layout_bottom(node: &crate::layout::LayoutNode) -> f32 {
         .fold(node.rect.row + node.rect.height, |bottom, child| {
             bottom.max(max_layout_bottom(child))
         })
+}
+
+fn find_layout_node_by_stable_key<'a>(
+    node: &'a crate::layout::LayoutNode,
+    stable_key: &str,
+) -> Option<&'a crate::layout::LayoutNode> {
+    if node.stable_key.as_deref() == Some(stable_key) {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_layout_node_by_stable_key(child, stable_key))
 }
 
 fn widget_tree_contains_patcher_path(value: &Value, path: &str) -> bool {
