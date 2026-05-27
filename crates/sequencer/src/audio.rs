@@ -637,8 +637,9 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     for pool in &mut data.voice_pools {
         pool.reset();
     }
-    for pool in &mut data.custom_engine_pools {
+    for (engine_id, pool) in data.custom_engine_pools.iter_mut().enumerate() {
         pool.reset();
+        crate::lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
     }
     for tracker in &mut data.gate_off_state {
         tracker.pending.clear();
@@ -1756,8 +1757,21 @@ fn render_chunk(data: &mut AudioCallbackData, output: &mut [f32]) {
     if nframes == 0 {
         return;
     }
+    publish_sampler_modulator_activity(data);
     unsafe {
         process_next_block(data.lg.0, output.as_mut_ptr(), nframes as i32);
+    }
+}
+
+fn publish_sampler_modulator_activity(data: &AudioCallbackData) {
+    for (track_idx, pool) in data.voice_pools.iter().enumerate().take(MAX_TRACKS) {
+        let mut mask = 0u64;
+        for voice_idx in 0..pool.num_voices.min(MAX_VOICES) {
+            if pool.voices[voice_idx].active {
+                mask |= 1u64 << voice_idx;
+            }
+        }
+        crate::voice_modulator::set_sampler_active_mask(track_idx, mask);
     }
 }
 
@@ -3295,6 +3309,45 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 topology_epoch,
                 f32::from_bits(data.state.transport.cpu_load_pct.load(Ordering::Relaxed)),
             );
+            let mod_stats = crate::voice_modulator::take_process_stats();
+            if mod_stats.calls > 0 {
+                eprintln!(
+                    "audio-trace: modulator-stats calls={} rendered={} disabled_custom={} disabled_sampler={} all_slots_off={} unbound_rendered={} rendered_frames={} disabled_frames={} all_slots_off_frames={}",
+                    mod_stats.calls,
+                    mod_stats.rendered_calls,
+                    mod_stats.disabled_custom_skips,
+                    mod_stats.disabled_sampler_skips,
+                    mod_stats.all_slots_off_calls,
+                    mod_stats.unbound_rendered_calls,
+                    mod_stats.rendered_frames,
+                    mod_stats.disabled_frames,
+                    mod_stats.all_slots_off_frames,
+                );
+                for stats in mod_stats.engines {
+                    eprintln!(
+                        "audio-trace: modulator-engine engine={} enabled={} calls={} rendered={} disabled={} rendered_frames={} disabled_frames={}",
+                        stats.engine_id,
+                        stats.enabled_voices,
+                        stats.calls,
+                        stats.rendered_calls,
+                        stats.disabled_skips,
+                        stats.rendered_frames,
+                        stats.disabled_frames,
+                    );
+                }
+                for stats in mod_stats.sampler_tracks {
+                    eprintln!(
+                        "audio-trace: modulator-sampler track={} active_mask=0x{:03x} calls={} rendered={} disabled={} rendered_frames={} disabled_frames={}",
+                        stats.track_idx,
+                        stats.active_mask,
+                        stats.calls,
+                        stats.rendered_calls,
+                        stats.disabled_skips,
+                        stats.rendered_frames,
+                        stats.disabled_frames,
+                    );
+                }
+            }
         }
     }
 
@@ -3390,6 +3443,7 @@ pub fn build_output_stream(
     }
     let initial_topology_epoch = state.transport.topology_epoch.load(Ordering::Relaxed);
     let trace_audio = env_flag("TINYSEQ_AUDIO_TRACE", false);
+    crate::voice_modulator::set_process_stats_enabled(trace_audio);
     if trace_audio {
         eprintln!("audio-trace: enabled");
     }

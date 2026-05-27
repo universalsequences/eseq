@@ -674,6 +674,7 @@ impl GraphController<'_> {
         let track_name = loaded.name;
         let shell = self.create_track_shell(idx, &track_name)?;
         let voices = self.build_sampler_voices(
+            idx,
             &track_name,
             buffer_id,
             sample_rate,
@@ -716,6 +717,7 @@ impl GraphController<'_> {
         let track_name = format!("Sampler {}", idx + 1);
         let shell = self.create_track_shell(idx, &track_name)?;
         let voices = self.build_sampler_voices(
+            idx,
             &track_name,
             buffer_id,
             sample_rate,
@@ -1844,6 +1846,7 @@ impl GraphController<'_> {
 
     fn build_sampler_voices(
         &mut self,
+        track_idx: usize,
         track_name: &str,
         buffer_id: i32,
         sample_rate: u32,
@@ -1877,6 +1880,8 @@ impl GraphController<'_> {
             }
 
             let mod_name = CString::new(format!("{}_mod_{}", track_name, v)).unwrap();
+            let mod_initial_state =
+                crate::voice_modulator::sampler_voice_initial_state(track_idx, v);
             let mod_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
@@ -1885,8 +1890,10 @@ impl GraphController<'_> {
                     mod_name.as_ptr(),
                     crate::voice_modulator::INPUT_COUNT as i32,
                     crate::voice_modulator::NUM_OUTPUTS as i32,
-                    std::ptr::null(),
-                    0,
+                    (&mod_initial_state
+                        as *const crate::voice_modulator::VoiceModulatorInitialState)
+                        .cast(),
+                    std::mem::size_of::<crate::voice_modulator::VoiceModulatorInitialState>(),
                 )
             };
             if mod_id < 0 {
@@ -2040,6 +2047,8 @@ impl GraphController<'_> {
             }
 
             let mod_name = CString::new(format!("{}_mod_{}", name, v)).unwrap();
+            let mod_initial_state =
+                crate::voice_modulator::custom_engine_initial_state(engine_id, v);
             let mod_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
@@ -2048,8 +2057,10 @@ impl GraphController<'_> {
                     mod_name.as_ptr(),
                     crate::voice_modulator::INPUT_COUNT as i32,
                     crate::voice_modulator::NUM_OUTPUTS as i32,
-                    std::ptr::null(),
-                    0,
+                    (&mod_initial_state
+                        as *const crate::voice_modulator::VoiceModulatorInitialState)
+                        .cast(),
+                    std::mem::size_of::<crate::voice_modulator::VoiceModulatorInitialState>(),
                 )
             };
             if mod_id < 0 {

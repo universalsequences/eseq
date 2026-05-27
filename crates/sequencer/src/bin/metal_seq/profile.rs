@@ -201,4 +201,66 @@ pub(crate) fn log_active_voice_counts(state: &SequencerState, track_names: &[Str
     if !engine_parts.is_empty() {
         eprintln!("[dgen-voice-runs] {}", engine_parts.join(" | "));
     }
+
+    let mod_stats = sequencer::voice_modulator::take_process_stats();
+    if mod_stats.calls > 0 {
+        eprintln!(
+            "[modulator-runs] calls={} rendered={} disabled_custom={} disabled_sampler={} all_slots_off={} unbound_rendered={} rendered_frames={} disabled_frames={} all_slots_off_frames={}",
+            mod_stats.calls,
+            mod_stats.rendered_calls,
+            mod_stats.disabled_custom_skips,
+            mod_stats.disabled_sampler_skips,
+            mod_stats.all_slots_off_calls,
+            mod_stats.unbound_rendered_calls,
+            mod_stats.rendered_frames,
+            mod_stats.disabled_frames,
+            mod_stats.all_slots_off_frames,
+        );
+
+        let mut mod_engine_parts = Vec::new();
+        for stats in mod_stats.engines {
+            let configured =
+                state.runtime.engine_voice_counts[stats.engine_id].load(Ordering::Relaxed);
+            if configured == 0 {
+                continue;
+            }
+            mod_engine_parts.push(format!(
+                "engine{} enabled={} configured={} calls={} rendered={} disabled={} rendered_frames={} disabled_frames={}",
+                stats.engine_id,
+                stats.enabled_voices,
+                configured,
+                stats.calls,
+                stats.rendered_calls,
+                stats.disabled_skips,
+                stats.rendered_frames,
+                stats.disabled_frames,
+            ));
+        }
+
+        if !mod_engine_parts.is_empty() {
+            eprintln!("[modulator-engine-runs] {}", mod_engine_parts.join(" | "));
+        }
+
+        let mut sampler_parts = Vec::new();
+        for stats in mod_stats.sampler_tracks {
+            let track_name = track_names
+                .get(stats.track_idx)
+                .map(String::as_str)
+                .unwrap_or("-");
+            sampler_parts.push(format!(
+                "{} active_mask=0x{:03x} calls={} rendered={} disabled={} rendered_frames={} disabled_frames={}",
+                track_name,
+                stats.active_mask,
+                stats.calls,
+                stats.rendered_calls,
+                stats.disabled_skips,
+                stats.rendered_frames,
+                stats.disabled_frames,
+            ));
+        }
+
+        if !sampler_parts.is_empty() {
+            eprintln!("[modulator-sampler-runs] {}", sampler_parts.join(" | "));
+        }
+    }
 }

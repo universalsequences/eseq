@@ -2035,6 +2035,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_cpu_ui_poll_at = Instant::now() - CPU_UI_POLL_INTERVAL;
     let mut last_voice_count_log_at = Instant::now() - VOICE_COUNT_LOG_INTERVAL;
     let log_voice_counts = std::env::var_os("TINYSEQ_LOG_VOICE_COUNTS").is_some();
+    if log_voice_counts {
+        sequencer::voice_modulator::set_process_stats_enabled(true);
+    }
     let mut cached_cpu_load_bits: u32 = 0.0f32.to_bits();
 
     eprintln!("metal_seq: entering event loop");
