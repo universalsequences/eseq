@@ -596,6 +596,7 @@ fn compile_widget_material(
     material_val: &Value,
     macros: &HashMap<String, crate::compiler::MacroDef>,
     state_binding_keys: &[String],
+    prop_binding_keys: &[String],
 ) -> Result<String, String> {
     let material_expr =
         crate::lang::sdf_codegen::value_to_expression(material_val).map_err(|e| e.to_string())?;
@@ -605,6 +606,7 @@ fn compile_widget_material(
     // For vslider, add origin_t so it gets a uniform slot.
     let mut bindings: std::collections::HashSet<String> =
         state_binding_keys.iter().cloned().collect();
+    bindings.extend(prop_binding_keys.iter().cloned());
     if widget_type == "vslider" {
         bindings.insert("origin_t".to_string());
     }
@@ -612,6 +614,9 @@ fn compile_widget_material(
     let mut hasher = DefaultHasher::new();
     widget_type.hash(&mut hasher);
     expr_to_source(&expanded).hash(&mut hasher);
+    let mut binding_keys = bindings.iter().cloned().collect::<Vec<_>>();
+    binding_keys.sort();
+    binding_keys.hash(&mut hasher);
     let cache_key = hasher.finish();
 
     if let Some(name) = MATERIAL_SHADER_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
@@ -1279,16 +1284,23 @@ impl Runtime {
                             if !matches!(material_val, Value::Nil) {
                                 let keys: Vec<String> =
                                     vm.state_bindings.keys().cloned().collect();
+                                let prop_keys = map.keys().cloned().collect::<Vec<_>>();
                                 match compile_widget_material(
                                     &wtype,
                                     &material_val,
                                     &vm.macros,
                                     &keys,
+                                    &prop_keys,
                                 ) {
                                     Ok(shader_name) => {
                                         if let Some(def) = crate::widget_render::sdf_widget::sdf_widget_def(&shader_name) {
                                             for state_name in &def.state_uniforms {
-                                                if let Some(value) = vm.read_tracked_state_value(state_name) {
+                                                let explicit_value = map
+                                                    .get(state_name)
+                                                    .map(|cell| cell.borrow().clone());
+                                                if let Some(value) = explicit_value
+                                                    .or_else(|| vm.read_tracked_state_value(state_name))
+                                                {
                                                     map.insert(
                                                         crate::widget_render::sdf_widget::shader_state_prop_name(state_name),
                                                         Rc::new(RefCell::new(value)),

@@ -326,7 +326,11 @@ pub(crate) fn init_runtime(
                 ),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
-                ("track-pans", build_track_pans(&state)),
+                (
+                    "track-pans",
+                    build_all_track_param_lists_value(&state, &app, StepParam::Pan),
+                ),
+                ("track-mixer-pans", build_track_pans(&state)),
                 ("track-outputs", build_track_outputs(&app, &state)),
                 ("track-bus-sends", build_all_track_bus_sends(&app, &state)),
                 ("mod-routes", build_mod_routes(&state)),
@@ -650,6 +654,10 @@ pub(crate) fn init_runtime(
                 ));
             }
             for track in 0..track_count {
+                fields.push((
+                    Box::leak(track_playhead_page_field(track).into_boxed_str()),
+                    Value::Number((track_active_playhead_step(&state, track) / PAGE_SIZE) as f64),
+                ));
                 for step in 0..MAX_STEPS {
                     fields.push((
                         Box::leak(track_step_active_field(track, step).into_boxed_str()),
@@ -666,6 +674,10 @@ pub(crate) fn init_runtime(
                     fields.push((
                         Box::leak(track_step_selected_field(track, step).into_boxed_str()),
                         Value::Bool(false),
+                    ));
+                    fields.push((
+                        Box::leak(track_playhead_active_field(track, step).into_boxed_str()),
+                        Value::Bool(step == track_active_playhead_step(&state, track)),
                     ));
                 }
             }

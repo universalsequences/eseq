@@ -213,6 +213,23 @@ pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
     }
 }
 
+fn current_sequencer_cursor_step(editor: &mut Editor) -> Option<usize> {
+    match editor
+        .runtime_mut()
+        .eval_str("(seqv-current-selected-step)")
+    {
+        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
+fn current_sequencer_param_mode(editor: &mut Editor) -> Option<usize> {
+    match editor.runtime_mut().eval_str("(seqv-current-param-mode)") {
+        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::widget_type_captures_text_input;
@@ -278,11 +295,21 @@ fn current_soft_step_param_target(
     editor: &mut Editor,
     current_track: &Arc<AtomicUsize>,
 ) -> Option<SoftStepParamEditTarget> {
-    if editor.active_buffer().name != "*metal*" || metal_has_selected_bus(editor) {
+    if metal_has_selected_bus(editor) {
         return None;
     }
-    let step = current_metal_cursor_step(editor)?;
-    let mode = current_metal_param_mode(editor)?;
+    let buffer_name = editor.active_buffer().name.clone();
+    let (step, mode) = match buffer_name.as_str() {
+        "*metal*" => (
+            current_metal_cursor_step(editor)?,
+            current_metal_param_mode(editor)?,
+        ),
+        "*sequencer*" => (
+            current_sequencer_cursor_step(editor)?,
+            current_sequencer_param_mode(editor)?,
+        ),
+        _ => return None,
+    };
     let param = metal_step_param_for_mode(mode)?;
     Some(SoftStepParamEditTarget {
         track: current_track.load(Ordering::Relaxed),
@@ -291,14 +318,26 @@ fn current_soft_step_param_target(
     })
 }
 
-fn current_metal_step_param_number_picker_id(editor: &Editor) -> Option<u64> {
+fn current_step_param_number_picker_key(editor: &mut Editor) -> Option<String> {
+    let buffer_name = editor.active_buffer().name.clone();
+    match buffer_name.as_str() {
+        "*metal*" => Some("metal-step-param-number-picker".to_string()),
+        "*sequencer*" => match editor
+            .runtime_mut()
+            .eval_str("(seqv-current-number-picker-key)")
+        {
+            Ok(Some(Value::String(key))) => Some(key),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn current_step_param_number_picker_id(editor: &mut Editor) -> Option<u64> {
+    let key = current_step_param_number_picker_key(editor)?;
     let layout = editor.widget_layout()?;
-    layout_node_by_stable_key(
-        &layout,
-        "metal-step-param-number-picker",
-        Some("number-picker"),
-    )
-    .map(|node| node.widget_id)
+    layout_node_by_stable_key(&layout, key.as_str(), Some("number-picker"))
+        .map(|node| node.widget_id)
 }
 
 fn numeric_edit_char(key: &crossterm::event::KeyEvent) -> Option<char> {
@@ -365,7 +404,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         let Some(target) = current_soft_step_param_target(editor, current_track) else {
             return false;
         };
-        let Some(widget_id) = current_metal_step_param_number_picker_id(editor) else {
+        let Some(widget_id) = current_step_param_number_picker_id(editor) else {
             return false;
         };
         if edit.target != Some(target) || edit.widget_id != Some(widget_id) {
@@ -413,6 +452,8 @@ pub(crate) fn handle_metal_soft_step_param_key(
             state.pattern.step_data[target.track].set(target.step, target.param, value as f32);
             state.publish_scheduler_snapshot();
             sync_step_param_lists(editor.runtime_mut(), state, target.track);
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
             edit.clear();
             editor.mark_needs_redraw();
             true
@@ -825,14 +866,19 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        handle_metal_command_shortcut, held_note_for_key, note_from_key, HeldKeyboardNote,
+        handle_metal_command_shortcut, handle_metal_soft_step_param_key, held_note_for_key,
+        note_from_key, HeldKeyboardNote, SoftStepParamEdit,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::editor::ViewMode;
+    use eseqlisp::mode::BufferMode;
+    use eseqlisp::vm::Value;
     use eseqlisp::HostCommand;
     use eseqlisp::{Editor, EditorConfig, Runtime};
-    use sequencer::sequencer::{SequencerState, StepSnapshot};
+    use sequencer::sequencer::{SequencerState, StepParam, StepSnapshot};
+    use std::cell::RefCell;
     use std::collections::HashSet;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
@@ -1243,6 +1289,124 @@ mod live_keyboard_tests {
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
             Some(eseqlisp::vm::Value::String("".to_string()))
+        );
+    }
+
+    #[test]
+    fn sequencer_soft_number_entry_edits_current_expanded_track_step() {
+        fn number_list(values: &[f64]) -> Value {
+            Value::List(
+                values
+                    .iter()
+                    .copied()
+                    .map(|value| Rc::new(RefCell::new(Value::Number(value))))
+                    .collect(),
+            )
+        }
+
+        fn list(values: Vec<Value>) -> Value {
+            Value::List(
+                values
+                    .into_iter()
+                    .map(|value| Rc::new(RefCell::new(value)))
+                    .collect(),
+            )
+        }
+
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.set_layout_viewport(80, 20);
+        let initial_values = number_list(&[1.0; 16]);
+        editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("velocities", initial_values.clone()),
+                ("track-velocities", list(vec![initial_values])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selected-bus? () false)
+                (def seqv-current-selected-step () 2)
+                (def seqv-current-param-mode () 0)
+                (def seqv-current-number-picker-key () "seqv-expanded-param-number-picker-0")
+                (defstate seqv-soft-edit-flushed 1)
+                (effect
+                  (set! seqv-soft-edit-flushed (nth (nth SEQ.track-velocities 0) 2)))
+                "#,
+            )
+            .expect("install sequencer soft edit fixture");
+        let tree = editor
+            .runtime_mut()
+            .eval_str(
+                r#"(number-picker :key "seqv-expanded-param-number-picker-0"
+                    :value 1 :min 0 :max 1 :decimals 2
+                    :width 8 :height 1.3 :font-size 11)"#,
+            )
+            .expect("build sequencer number picker")
+            .expect("number picker should produce a widget tree");
+        editor
+            .active_buffer_mut()
+            .set_widget_tree(Some(tree.clone()), None);
+        editor.runtime_mut().set_widget_tree(tree);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .widget_layout()
+            .expect("sequencer number picker should lay out");
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let mut edit = SoftStepParamEdit::default();
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            assert!(
+                handle_metal_soft_step_param_key(
+                    &mut editor,
+                    &key,
+                    &state,
+                    &current_track,
+                    &mut edit,
+                ),
+                "sequencer soft edit should consume {key:?}"
+            );
+        }
+
+        assert_eq!(
+            state.pattern.step_data[0].get(2, StepParam::Velocity),
+            0.5,
+            "sequencer numeric entry should commit through the same soft number-picker path"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(nth SEQ.velocities 2)")
+                .unwrap(),
+            Some(Value::Number(0.5)),
+            "soft edit should keep the current-track parameter mirror in sync"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(nth (nth SEQ.track-velocities 0) 2)")
+                .unwrap(),
+            Some(Value::Number(0.5)),
+            "soft edit should keep the all-track sequencer parameter mirror in sync"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("seqv-soft-edit-flushed")
+                .unwrap(),
+            Some(Value::Number(0.5)),
+            "soft edit commit should flush the reactive cycle immediately"
         );
     }
 }

@@ -1938,6 +1938,58 @@ impl ReactiveDag {
             .collect()
     }
 
+    pub fn descendant_subtree_effect_ids(&self, subtree_root_id: u64) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        let mut stack = vec![subtree_root_id];
+        let mut visited_roots = HashSet::new();
+
+        while let Some(parent_root_id) = stack.pop() {
+            if !visited_roots.insert(parent_root_id) {
+                continue;
+            }
+
+            for (id, node) in &self.nodes {
+                let ReactiveNode::Effect {
+                    subtree_root_id: Some(current_root_id),
+                    parent_subtree_root_id: Some(current_parent_root_id),
+                    ..
+                } = node
+                else {
+                    continue;
+                };
+
+                if *current_parent_root_id == parent_root_id && *current_root_id != subtree_root_id
+                {
+                    ids.push(*id);
+                    stack.push(*current_root_id);
+                }
+            }
+        }
+
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    pub fn remove_descendant_subtree_effects(&mut self, subtree_root_id: u64) -> HashSet<u64> {
+        let descendants = self
+            .descendant_subtree_effect_ids(subtree_root_id)
+            .into_iter()
+            .filter_map(|id| {
+                let root = match self.nodes.get(&id) {
+                    Some(ReactiveNode::Effect {
+                        subtree_root_id: Some(root),
+                        ..
+                    }) => Some(*root),
+                    _ => None,
+                };
+                self.remove_node(id);
+                root
+            })
+            .collect::<HashSet<_>>();
+        descendants
+    }
+
     pub fn effect_id_for_subtree_root(&self, subtree_root_id: u64) -> Option<NodeId> {
         self.nodes.iter().find_map(|(id, node)| match node {
             ReactiveNode::Effect {
@@ -2521,6 +2573,15 @@ impl VM {
         &mut self,
         owner: &RegisteredSubtreeOwner,
     ) -> Result<Value, VMError> {
+        let removed_descendants = self.dag.remove_descendant_subtree_effects(owner.root_id);
+        if !removed_descendants.is_empty() {
+            self.pending_widget_trees.retain(|pending| match pending {
+                PendingUiUpdate::ReplaceSubtree {
+                    subtree_root_id, ..
+                } => !removed_descendants.contains(subtree_root_id),
+                PendingUiUpdate::FullTree(_) => true,
+            });
+        }
         self.dag.clear_dependencies_of(owner.node_id);
         self.current_subtree_reactive_reads
             .insert(owner.root_id, HashSet::new());

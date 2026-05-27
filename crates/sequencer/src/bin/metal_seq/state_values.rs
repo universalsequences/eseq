@@ -59,6 +59,54 @@ pub(crate) fn build_all_track_num_steps_value(state: &Arc<SequencerState>, app: 
     Value::List(items)
 }
 
+fn resolved_track_timebase_label(
+    state: &Arc<SequencerState>,
+    track: usize,
+    current_track_idx: usize,
+    selected_step: Option<usize>,
+) -> String {
+    let timebase = if track == current_track_idx {
+        selected_step
+            .and_then(|step| state.pattern.timebase_plocks[track].get(step))
+            .unwrap_or_else(|| state.pattern.track_params[track].get_timebase())
+    } else {
+        state.pattern.track_params[track].get_timebase()
+    };
+    timebase.label().to_string()
+}
+
+fn build_track_timebase_labels_value(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+    current_track_idx: usize,
+    selected_step: Option<usize>,
+) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = (0..track_count)
+        .map(|track| {
+            Rc::new(RefCell::new(Value::String(resolved_track_timebase_label(
+                state,
+                track,
+                current_track_idx,
+                selected_step,
+            ))))
+        })
+        .collect();
+    Value::List(items)
+}
+
+pub(crate) fn build_all_track_timebase_labels_value(
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    let selected_step = {
+        let selected = selected_steps.lock().unwrap();
+        selected.iter().copied().min()
+    };
+    build_track_timebase_labels_value(state, app.tracks.len(), current_track_idx, selected_step)
+}
+
 fn build_track_duration_spans_value(state: &Arc<SequencerState>, track: usize) -> Value {
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
@@ -192,6 +240,27 @@ pub(crate) fn build_all_track_step_has_plocks(state: &Arc<SequencerState>, app: 
     Value::List(tracks)
 }
 
+pub(crate) fn build_all_track_param_lists_value(
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    param: StepParam,
+) -> Value {
+    let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
+        .map(|track| Rc::new(RefCell::new(build_param_list(state, track, param))))
+        .collect();
+    Value::List(tracks)
+}
+
+pub(crate) fn build_all_active_track_param_lists_value(
+    state: &Arc<SequencerState>,
+    param: StepParam,
+) -> Value {
+    let tracks: Vec<Rc<RefCell<Value>>> = (0..state.active_track_count())
+        .map(|track| Rc::new(RefCell::new(build_param_list(state, track, param))))
+        .collect();
+    Value::List(tracks)
+}
+
 pub(crate) fn track_playheads_snapshot(state: &Arc<SequencerState>, app: &ui::App) -> Vec<u32> {
     (0..app.tracks.len())
         .map(|t| state.transport.track_playheads[t].load(Ordering::Relaxed))
@@ -202,7 +271,15 @@ fn track_playhead_row_field(track: usize, row: usize) -> String {
     format!("track-playhead-row-{track}-{row}")
 }
 
-fn track_active_playhead_step(state: &Arc<SequencerState>, track: usize) -> usize {
+pub(crate) fn track_playhead_active_field(track: usize, step: usize) -> String {
+    format!("track-playhead-active-{track}-{step}")
+}
+
+pub(crate) fn track_playhead_page_field(track: usize) -> String {
+    format!("track-playhead-page-{track}")
+}
+
+pub(crate) fn track_active_playhead_step(state: &Arc<SequencerState>, track: usize) -> usize {
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .max(1)
@@ -669,12 +746,33 @@ pub(crate) fn sync_track_playhead_field_delta(
                     effects_dirty |= rt
                         .set_reactive(
                             "SEQ",
+                            &track_playhead_page_field(t),
+                            Value::Number(active_row as f64),
+                        )
+                        .effects_dirty;
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
                             &track_playhead_row_field(t, prev_active_row),
                             Value::Number(-1.0),
                         )
                         .effects_dirty;
                 }
                 if prev_active_step != active_step {
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_playhead_active_field(t, prev_active_step),
+                            Value::Bool(false),
+                        )
+                        .effects_dirty;
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_playhead_active_field(t, active_step),
+                            Value::Bool(true),
+                        )
+                        .effects_dirty;
                     effects_dirty |= rt
                         .set_reactive(
                             "SEQ",
@@ -685,6 +783,20 @@ pub(crate) fn sync_track_playhead_field_delta(
                 }
             }
         } else {
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_playhead_page_field(t),
+                    Value::Number(active_row as f64),
+                )
+                .effects_dirty;
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_playhead_active_field(t, active_step),
+                    Value::Bool(true),
+                )
+                .effects_dirty;
             effects_dirty |= rt
                 .set_reactive(
                     "SEQ",
@@ -712,8 +824,63 @@ pub(crate) fn sync_all_track_sequencer_state(
 ) {
     rt.set_reactive(
         "SEQ",
+        "track-steps",
+        build_all_track_steps_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
         "track-num-steps",
         build_all_track_num_steps_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-timebases",
+        build_all_track_timebase_labels_value(state, app, current_track_idx, selected_steps),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-duration-spans",
+        build_all_track_duration_spans_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-step-has-plocks",
+        build_all_track_step_has_plocks(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-playheads",
+        build_all_track_playheads_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-velocities",
+        build_all_track_param_lists_value(state, app, StepParam::Velocity),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-durations",
+        build_all_track_param_lists_value(state, app, StepParam::Duration),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-auxas",
+        build_all_track_param_lists_value(state, app, StepParam::AuxA),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-transposes",
+        build_all_track_param_lists_value(state, app, StepParam::Transpose),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-pans",
+        build_all_track_param_lists_value(state, app, StepParam::Pan),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-syncs",
+        build_all_track_param_lists_value(state, app, StepParam::Sync),
     );
     sync_all_track_step_binding_fields(rt, state, app, current_track_idx, selected_steps);
     sync_all_track_playhead_fields(rt, state, app);
@@ -764,6 +931,36 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
         "SEQ",
         "syncs",
         build_param_list(state, track, StepParam::Sync),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-velocities",
+        build_all_active_track_param_lists_value(state, StepParam::Velocity),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-durations",
+        build_all_active_track_param_lists_value(state, StepParam::Duration),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-transposes",
+        build_all_active_track_param_lists_value(state, StepParam::Transpose),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-auxas",
+        build_all_active_track_param_lists_value(state, StepParam::AuxA),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-pans",
+        build_all_active_track_param_lists_value(state, StepParam::Pan),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-syncs",
+        build_all_active_track_param_lists_value(state, StepParam::Sync),
     );
 }
 
@@ -1170,7 +1367,7 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
         build_track_instrument_types(app),
     );
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
-    rt.set_reactive("SEQ", "track-pans", build_track_pans(state));
+    rt.set_reactive("SEQ", "track-mixer-pans", build_track_pans(state));
     sync_track_volume_pan_binding_fields(rt, state);
     rt.set_reactive("SEQ", "track-outputs", build_track_outputs(app, state));
     rt.set_reactive(
@@ -1237,7 +1434,7 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-mixer-pans", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
@@ -1816,9 +2013,16 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-timebases", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-velocities", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-durations", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-auxas", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-transposes", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         return;
     }
@@ -5579,6 +5783,18 @@ mod tests {
         }
     }
 
+    fn layout_tree_has_bool_prop(
+        node: &eseqlisp::layout::LayoutNode,
+        prop: &str,
+        expected: bool,
+    ) -> bool {
+        layout_prop_bool(node, prop) == Some(expected)
+            || node
+                .children
+                .iter()
+                .any(|child| layout_tree_has_bool_prop(child, prop, expected))
+    }
+
     fn render_layout_cells(layout: &eseqlisp::layout::LayoutNode, cols: u16, rows: u16) -> String {
         let mut cell_buf = eseqlisp::widget_render::CellBuffer::new(cols, rows);
         eseqlisp::widget_render::render_widget_tree(layout, &mut cell_buf);
@@ -7982,6 +8198,19 @@ mod tests {
         }
     }
 
+    fn string_list_values(value: &Value) -> Vec<String> {
+        match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::String(value) => value.clone(),
+                    other => panic!("expected string list item, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected string list, got {other:?}"),
+        }
+    }
+
     #[test]
     fn duration_spans_cover_steps_held_by_active_sources() {
         let state = Arc::new(SequencerState::new(1, vec![]));
@@ -7998,6 +8227,32 @@ mod tests {
         assert!(!spans[2]);
         assert!(spans[3]);
         assert!(!spans[4]);
+    }
+
+    #[test]
+    fn sequencer_track_timebase_labels_show_current_selected_step_plock() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        state.pattern.track_params[0].set_timebase(Timebase::Sixteenth);
+        state.pattern.track_params[1].set_timebase(Timebase::Quarter);
+        state.pattern.timebase_plocks[0].set(3, Timebase::EighthTriplet);
+        state.pattern.timebase_plocks[1].set(3, Timebase::HalfTriplet);
+
+        let selected = Some(3);
+        assert_eq!(
+            string_list_values(&build_track_timebase_labels_value(&state, 2, 0, selected)),
+            ["8T", "4"],
+            "only the current track row should reflect the selected step's timebase plock"
+        );
+        assert_eq!(
+            string_list_values(&build_track_timebase_labels_value(&state, 2, 1, selected)),
+            ["16", "2T"],
+            "switching current track should resolve that track's selected-step timebase plock"
+        );
+        assert_eq!(
+            string_list_values(&build_track_timebase_labels_value(&state, 2, 0, None)),
+            ["16", "4"],
+            "without selected steps every row should show its track default timebase"
+        );
     }
 
     fn test_string_list(values: &[&str]) -> Value {
@@ -8098,6 +8353,41 @@ mod tests {
         editor
             .runtime_mut()
             .register_native("seq-piano-roll-action", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-pause-auto-follow", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-clear-selection", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
+        editor
+            .runtime_mut()
+            .register_native("seq-track-step-active?", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-set-step-param", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-set-step-param-plock", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-double-track-pattern", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-halve-track-pattern", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
@@ -8149,7 +8439,7 @@ mod tests {
                 ("track-solos", test_bool_list(&[false])),
                 ("track-muted-by-solo", test_bool_list(&[false])),
                 ("track-volumes", test_number_list(&[1.0])),
-                ("track-pans", test_number_list(&[0.0])),
+                ("track-mixer-pans", test_number_list(&[0.0])),
                 ("track-outputs", test_string_list(&["main"])),
                 (
                     "track-output-options",
@@ -8162,6 +8452,7 @@ mod tests {
                 ("tp-bus-1-send", Value::Number(0.0)),
                 ("track-steps", test_list(vec![steps.clone()])),
                 ("track-num-steps", test_number_list(&[16.0])),
+                ("track-timebases", test_string_list(&["16"])),
                 (
                     "track-duration-spans",
                     test_list(vec![test_bool_list(&[false; 16])]),
@@ -8170,6 +8461,18 @@ mod tests {
                     "track-step-has-plocks",
                     test_list(vec![empty_plocks.clone()]),
                 ),
+                ("track-velocities", test_list(vec![step_numbers.clone()])),
+                (
+                    "track-durations",
+                    test_list(vec![test_number_list(&[1.0; 16])]),
+                ),
+                ("track-auxas", test_list(vec![test_number_list(&[0.0; 16])])),
+                (
+                    "track-transposes",
+                    test_list(vec![test_number_list(&[0.0; 16])]),
+                ),
+                ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
+                ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
                 ("steps", steps.clone()),
                 ("velocities", step_numbers.clone()),
@@ -8298,6 +8601,16 @@ mod tests {
             ],
             true,
         );
+        for step in 0..16 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(0, step),
+                Value::Bool(step == 0),
+            );
+        }
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &track_playhead_page_field(0), Value::Number(0.0));
         register_test_delete_target_natives(&mut editor, 1);
 
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
@@ -8309,6 +8622,194 @@ mod tests {
             }
         }
         editor
+    }
+
+    fn set_full_grid_track_count(
+        editor: &mut eseqlisp::Editor,
+        track_count: usize,
+        step_count: usize,
+    ) {
+        let names = (0..track_count)
+            .map(|track| format!("track-{track}"))
+            .collect::<Vec<_>>();
+        let ids = (0..track_count)
+            .map(|track| Value::Number(track as f64))
+            .collect::<Vec<_>>();
+        let steps = (0..track_count)
+            .map(|track| {
+                test_list(
+                    (0..step_count)
+                        .map(|step| Value::Bool((step + track) % 2 == 0))
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let repeated_param_lists = |value: f64| {
+            (0..track_count)
+                .map(|_| test_repeated_number_list(value, step_count))
+                .collect::<Vec<_>>()
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
+        rt.set_reactive("SEQ", "track-ids", test_list(ids));
+        rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
+        rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
+        rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
+        rt.set_reactive(
+            "SEQ",
+            "record-armed",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-mutes",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-solos",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-muted-by-solo",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive("SEQ", "track-steps", test_list(steps));
+        rt.set_reactive(
+            "SEQ",
+            "track-num-steps",
+            test_repeated_number_list(step_count as f64, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-timebases",
+            test_list(
+                (0..track_count)
+                    .map(|_| Value::String("16".to_string()))
+                    .collect(),
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-duration-spans",
+            test_list(
+                (0..track_count)
+                    .map(|_| test_repeated_bool_list(false, step_count))
+                    .collect(),
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-has-plocks",
+            test_list(
+                (0..track_count)
+                    .map(|_| test_repeated_bool_list(false, step_count))
+                    .collect(),
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-playheads",
+            test_repeated_number_list(0.0, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-velocities",
+            test_list(repeated_param_lists(1.0)),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-durations",
+            test_list(repeated_param_lists(1.0)),
+        );
+        rt.set_reactive("SEQ", "track-auxas", test_list(repeated_param_lists(0.0)));
+        rt.set_reactive(
+            "SEQ",
+            "track-transposes",
+            test_list(repeated_param_lists(0.0)),
+        );
+        rt.set_reactive("SEQ", "track-pans", test_list(repeated_param_lists(0.0)));
+        rt.set_reactive("SEQ", "track-syncs", test_list(repeated_param_lists(0.0)));
+        rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
+        rt.set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_repeated_bool_list(false, step_count),
+        );
+        rt.set_reactive("SEQ", "steps", test_repeated_bool_list(true, step_count));
+        rt.set_reactive(
+            "SEQ",
+            "velocities",
+            test_repeated_number_list(1.0, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "durations",
+            test_repeated_number_list(1.0, step_count),
+        );
+        rt.set_reactive("SEQ", "auxas", test_repeated_number_list(0.0, step_count));
+        rt.set_reactive(
+            "SEQ",
+            "transposes",
+            test_repeated_number_list(0.0, step_count),
+        );
+        rt.set_reactive("SEQ", "pans", test_repeated_number_list(0.0, step_count));
+        rt.set_reactive("SEQ", "syncs", test_repeated_number_list(0.0, step_count));
+        rt.set_reactive(
+            "SEQ",
+            "step-has-plocks",
+            test_repeated_bool_list(false, step_count),
+        );
+        for track in 0..track_count {
+            for step in 0..step_count {
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_active_field(track, step),
+                    Value::Bool((step + track) % 2 == 0),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_duration_field(track, step),
+                    Value::Bool(false),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_plocked_field(track, step),
+                    Value::Bool(false),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_selected_field(track, step),
+                    Value::Bool(false),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_active_field(track, step),
+                    Value::Bool(step == 0),
+                );
+            }
+            let rows = (step_count + PAGE_SIZE - 1) / PAGE_SIZE;
+            for row in 0..rows {
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_row_field(track, row),
+                    Value::Number(if row == 0 { 0.0 } else { -1.0 }),
+                );
+            }
+            rt.set_reactive("SEQ", &track_playhead_page_field(track), Value::Number(0.0));
+        }
+    }
+
+    fn assert_finite_nonzero_rect(node: &eseqlisp::layout::LayoutNode, label: &str) {
+        assert!(
+            node.rect.width.is_finite()
+                && node.rect.width > 0.0
+                && node.rect.height.is_finite()
+                && node.rect.height > 0.0,
+            "{label} should have a finite nonzero rect: {:?}",
+            node.rect
+        );
     }
 
     fn apply_sequencer_perf_pattern(
@@ -8331,6 +8832,24 @@ mod tests {
             .collect::<Vec<_>>();
         let track_step_has_plocks = (0..track_count)
             .map(|track| sequencer_perf_plocks(track, generation, step_count))
+            .collect::<Vec<_>>();
+        let track_velocities = (0..track_count)
+            .map(|_| test_repeated_number_list(1.0, step_count))
+            .collect::<Vec<_>>();
+        let track_durations = (0..track_count)
+            .map(|_| test_repeated_number_list(1.0, step_count))
+            .collect::<Vec<_>>();
+        let track_auxas = (0..track_count)
+            .map(|_| test_repeated_number_list(0.0, step_count))
+            .collect::<Vec<_>>();
+        let track_transposes = (0..track_count)
+            .map(|_| test_repeated_number_list(0.0, step_count))
+            .collect::<Vec<_>>();
+        let track_pans = (0..track_count)
+            .map(|_| test_repeated_number_list(0.0, step_count))
+            .collect::<Vec<_>>();
+        let track_syncs = (0..track_count)
+            .map(|_| test_repeated_number_list(0.0, step_count))
             .collect::<Vec<_>>();
 
         let rt = editor.runtime_mut();
@@ -8366,7 +8885,7 @@ mod tests {
         );
         rt.set_reactive(
             "SEQ",
-            "track-pans",
+            "track-mixer-pans",
             test_repeated_number_list(0.0, track_count),
         );
         rt.set_reactive(
@@ -8383,6 +8902,15 @@ mod tests {
             "track-num-steps",
             test_repeated_number_list(step_count as f64, track_count),
         );
+        rt.set_reactive(
+            "SEQ",
+            "track-timebases",
+            test_list(
+                (0..track_count)
+                    .map(|_| Value::String("16".to_string()))
+                    .collect(),
+            ),
+        );
         rt.set_reactive("SEQ", "track-steps", test_list(track_steps));
         rt.set_reactive(
             "SEQ",
@@ -8394,6 +8922,12 @@ mod tests {
             "track-step-has-plocks",
             test_list(track_step_has_plocks),
         );
+        rt.set_reactive("SEQ", "track-velocities", test_list(track_velocities));
+        rt.set_reactive("SEQ", "track-durations", test_list(track_durations));
+        rt.set_reactive("SEQ", "track-auxas", test_list(track_auxas));
+        rt.set_reactive("SEQ", "track-transposes", test_list(track_transposes));
+        rt.set_reactive("SEQ", "track-pans", test_list(track_pans));
+        rt.set_reactive("SEQ", "track-syncs", test_list(track_syncs));
         rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
         rt.set_reactive(
             "SEQ",
@@ -8455,6 +8989,11 @@ mod tests {
                     &track_step_selected_field(track, step),
                     Value::Bool(false),
                 );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_active_field(track, step),
+                    Value::Bool(step == (generation % PAGE_SIZE)),
+                );
             }
             for row in 0..max_rows {
                 rt.set_reactive(
@@ -8467,6 +9006,7 @@ mod tests {
                     }),
                 );
             }
+            rt.set_reactive("SEQ", &track_playhead_page_field(track), Value::Number(0.0));
         }
     }
 
@@ -9279,6 +9819,771 @@ mod tests {
             16,
             "sequencer buffer should render one cell per visible step"
         );
+
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-timebase-0").is_none(),
+            "collapsed sequencer rows should not render the removed right-side timebase dropdown: {layout_summaries:#?}"
+        );
+
+        let expand =
+            find_layout_node_by_stable_key(&layout, "seqv-expand-0").unwrap_or_else(|| {
+                panic!("sequencer row expand button missing: {layout_summaries:#?}")
+            });
+        assert_eq!(expand.widget_type, "box");
+        assert!(
+            expand.rect.width.is_finite()
+                && expand.rect.width > 0.0
+                && expand.rect.height.is_finite()
+                && expand.rect.height > 0.0,
+            "sequencer row expand button should have a finite nonzero rect: {:?}",
+            expand.rect
+        );
+        assert_eq!(
+            expand.props.get("background"),
+            Some(&Value::String("seqv-ellipsis-button".to_string())),
+            "sequencer row expand control should use the SDF ellipsis widget instead of text"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_ellipsis_toggles_expanded_track_editor() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+
+        let initial_layout = editor
+            .widget_layout()
+            .expect("sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&initial_layout, "seqv-expanded-step-slider-"),
+            0,
+            "collapsed sequencer rows should not render expanded metal sliders"
+        );
+
+        let expand = find_layout_node_by_stable_key(&initial_layout, "seqv-expand-0")
+            .expect("sequencer row expand button should render");
+        let callback = expand
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("sequencer row expand button on-click");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke sequencer row expand button");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            if status.to_ascii_lowercase().contains("error") {
+                panic!("sequencer row expansion status after click: {status}");
+            }
+        }
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("seqv-expanded-track-ids")
+                .expect("read expanded track ids"),
+            Some(test_number_list(&[0.0])),
+            "ellipsis click should add the stable track id to expansion state"
+        );
+
+        let expanded_layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&expanded_layout, "seqv-step-cell-"),
+            0,
+            "expanded rows should replace the compact dot grid"
+        );
+        assert_eq!(
+            count_stable_key_prefix(&expanded_layout, "seqv-expanded-step-slider-"),
+            16,
+            "expanded row should render the metal-style step sliders"
+        );
+        assert_eq!(
+            count_stable_key_prefix(&expanded_layout, "seqv-expanded-step-toggle-"),
+            16,
+            "expanded row should render the metal-style step toggles"
+        );
+        for key in [
+            "seqv-expanded-param-tab-0-0",
+            "seqv-expanded-timebase-0",
+            "seqv-expanded-param-number-picker-0",
+            "seqv-expanded-half-0",
+            "seqv-expanded-double-0",
+            "seqv-expanded-page-0-0",
+        ] {
+            let node = find_layout_node_by_stable_key(&expanded_layout, key)
+                .unwrap_or_else(|| panic!("missing expanded control {key}"));
+            assert_finite_nonzero_rect(node, key);
+        }
+
+        let first_tab =
+            find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-param-tab-0-0")
+                .expect("expanded first tab should render");
+        let track_name = find_layout_node_by_stable_key(&expanded_layout, "seqv-select-0")
+            .expect("expanded row track-name block should render");
+        assert!(
+            first_tab.rect.col < track_name.rect.col,
+            "expanded editor should start from the row's left edge, not after the track header"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_rows_keep_independent_tab_and_page_state() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 32);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .expect("expand two sequencer rows");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded two-track sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&layout, "seqv-expanded-step-slider-"),
+            32,
+            "two expanded rows should render independent metal-style slider grids"
+        );
+
+        let tab_track_0 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-2")
+            .expect("track 0 aux tab");
+        let tab_track_1 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-1-4")
+            .expect("track 1 pan tab");
+        editor
+            .runtime_mut()
+            .invoke(
+                tab_track_0
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("track 0 tab callback"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("select track 0 aux tab");
+        editor
+            .runtime_mut()
+            .invoke(
+                tab_track_1
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("track 1 tab callback"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("select track 1 pan tab");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-param-mode 0)")
+                .unwrap(),
+            Some(Value::Number(2.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-param-mode 1)")
+                .unwrap(),
+            Some(Value::Number(4.0))
+        );
+
+        let paged_layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should rebuild after tab clicks");
+        let track_0_page_1 =
+            find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-page-0-1")
+                .expect("track 0 page 2");
+        editor
+            .runtime_mut()
+            .invoke(
+                track_0_page_1
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("track 0 page callback"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("select track 0 second page");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-current-page 0 0)")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-current-page 1 1)")
+                .unwrap(),
+            Some(Value::Number(0.0))
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_cursor_highlight_uses_current_track_cursor() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do
+                  (seqv-track-menu-click 0)
+                  (seqv-track-menu-click 1)
+                  (seqv-set-cursor-step 0 6)
+                  (set! cursor-step 3))",
+            )
+            .expect("expand rows and seed cursors");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded two-track sequencer layout should build");
+        let current_track_cursor =
+            find_layout_node_by_stable_key(&layout, "seqv-expanded-step-column-1-3")
+                .expect("current track cursor column should render");
+        assert_eq!(
+            current_track_cursor.props.get("background"),
+            Some(&Value::String("cursor-highlight".to_string())),
+            "current expanded row should highlight the shared current-track cursor"
+        );
+
+        let inactive_track_cursor =
+            find_layout_node_by_stable_key(&layout, "seqv-expanded-step-column-0-6")
+                .expect("inactive track cursor column should render");
+        assert!(
+            !matches!(
+                inactive_track_cursor.props.get("background"),
+                Some(Value::String(background)) if background == "cursor-highlight"
+            ),
+            "inactive expanded rows should not show an independent cursor highlight"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(cursor-right)")
+            .expect("move sequencer cursor right");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-current-step 1 1)")
+                .unwrap(),
+            Some(Value::Number(4.0)),
+            "arrow movement should move the expanded editor cursor for the current track"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_row_controls_activate_target_track_before_mutating() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-clear-selection", move |_args, _ctx| {
+                    calls.lock().unwrap().push("clear".to_string());
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-track", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(track)) => *track as usize,
+                        _ => usize::MAX,
+                    };
+                    calls.lock().unwrap().push(format!("track:{track}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param", move |args, _ctx| {
+                    let step = match args.first() {
+                        Some(Value::Number(step)) => *step as usize,
+                        _ => usize::MAX,
+                    };
+                    let param = match args.get(1) {
+                        Some(Value::Keyword(param)) => param.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("param:{step}:{param}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-double-track-pattern", move |_args, _ctx| {
+                    calls.lock().unwrap().push("double".to_string());
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-halve-track-pattern", move |_args, _ctx| {
+                    calls.lock().unwrap().push("halve".to_string());
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 1)")
+            .expect("expand second sequencer row");
+        editor.refresh_runtime_side_effects();
+        calls.lock().unwrap().clear();
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded second-row sequencer layout should build");
+        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-1-0")
+            .expect("second row first step slider");
+        editor
+            .runtime_mut()
+            .invoke(
+                slider
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("expanded row slider on-change"),
+                vec![Value::Number(0.42)],
+            )
+            .expect("change inactive expanded row slider");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["clear", "track:1", "param:0:velocity"],
+            "slider edits on an inactive expanded row should activate that row before mutating"
+        );
+
+        calls.lock().unwrap().clear();
+        let double_button = find_layout_node_by_stable_key(&layout, "seqv-expanded-double-1")
+            .expect("second row double button");
+        editor
+            .runtime_mut()
+            .invoke(
+                double_button
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("expanded row double on-click"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("click expanded row double");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["clear", "track:1", "double"],
+            "double pattern should target the expanded row's track"
+        );
+
+        calls.lock().unwrap().clear();
+        let half_button = find_layout_node_by_stable_key(&layout, "seqv-expanded-half-1")
+            .expect("second row half button");
+        editor
+            .runtime_mut()
+            .invoke(
+                half_button
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("expanded row half on-click"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("click expanded row half");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["clear", "track:1", "halve"],
+            "halve pattern should target the expanded row's track"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_current_row_slider_uses_plock_path_for_selected_step() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_bool_list(&[
+                true, false, false, false, false, false, false, false, false, false, false, false,
+                false, false, false, false,
+            ]),
+        );
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param-plock", move |args, _ctx| {
+                    let param = match args.first() {
+                        Some(Value::Keyword(param)) => param.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("plock:{param}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand current sequencer row");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should build");
+        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+            .expect("current row selected step slider");
+        editor
+            .runtime_mut()
+            .invoke(
+                slider
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("expanded current row slider on-change"),
+                vec![Value::Number(0.77)],
+            )
+            .expect("change selected current row slider");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["plock:velocity"],
+            "selected current-row slider edits should use the p-lock path"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_playhead_uses_per_track_active_fields() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand current sequencer row");
+        editor.refresh_runtime_side_effects();
+
+        let initial_layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should build");
+        let step_0 = find_layout_node_by_stable_key(
+            &initial_layout,
+            "seqv-expanded-step-playhead-probe-0-0",
+        )
+        .expect("expanded step 0 playhead probe");
+        let step_1 = find_layout_node_by_stable_key(
+            &initial_layout,
+            "seqv-expanded-step-playhead-probe-0-1",
+        )
+        .expect("expanded step 1 playhead probe");
+        assert!(layout_tree_has_bool_prop(step_0, "active", true));
+        assert!(layout_tree_has_bool_prop(step_1, "active", false));
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_playhead_active_field(0, 0),
+            Value::Bool(false),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_playhead_active_field(0, 1),
+            Value::Bool(true),
+        );
+        editor.refresh_runtime_side_effects();
+        let moved_layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should rebuild after playhead move");
+        let moved_step_0 =
+            find_layout_node_by_stable_key(&moved_layout, "seqv-expanded-step-playhead-probe-0-0")
+                .expect("expanded step 0 playhead probe after move");
+        let moved_step_1 =
+            find_layout_node_by_stable_key(&moved_layout, "seqv-expanded-step-playhead-probe-0-1")
+                .expect("expanded step 1 playhead probe after move");
+        assert!(layout_tree_has_bool_prop(moved_step_0, "active", false));
+        assert!(layout_tree_has_bool_prop(moved_step_1, "active", true));
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_playhead_tick_does_not_rebuild_rows() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 32);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor
+            .runtime_mut()
+            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .expect("expand two sequencer rows");
+        editor.refresh_runtime_side_effects();
+        editor
+            .widget_layout()
+            .expect("expanded two-row sequencer layout should build");
+
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        for track in 0..2 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, 0),
+                Value::Bool(false),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, 1),
+                Value::Bool(true),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_row_field(track, 0),
+                Value::Number(1.0),
+            );
+        }
+        editor.runtime_mut().run_reactive_cycle();
+        let pending = editor.runtime_mut().take_pending_buffer_widget_trees();
+        let pending_summary = pending
+            .iter()
+            .map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(tree) => {
+                    let tree_debug = format!("{:?}", tree.tree);
+                    let preview = tree_debug.chars().take(160).collect::<String>();
+                    format!(
+                        "full target={:?} expanded-row={} collapsed-row={} playhead-probe={} tree={preview}",
+                        tree.target,
+                        value_contains_string(&tree.tree, "seqv-expanded-step-slider-"),
+                        value_contains_string(&tree.tree, "seqv-playhead-row-"),
+                        value_contains_string(&tree.tree, "seqv-expanded-step-playhead-probe-")
+                    )
+                }
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree {
+                    target,
+                    subtree_root_id,
+                    tree,
+                    ..
+                } => {
+                    let tree_debug = format!("{tree:?}");
+                    let preview = tree_debug.chars().take(160).collect::<String>();
+                    format!(
+                        "subtree#{subtree_root_id} target={target:?} expanded-row={} collapsed-row={} playhead-probe={} tree={preview}",
+                        value_contains_string(tree, "seqv-expanded-step-slider-"),
+                        value_contains_string(tree, "seqv-playhead-row-"),
+                        value_contains_string(tree, "seqv-expanded-step-playhead-probe-")
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let sequencer_updates = pending
+            .iter()
+            .filter(|pending| {
+                matches!(
+                    pending.target(),
+                    eseqlisp::vm::EffectTarget::BufferName(name) if name == "*sequencer*"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            sequencer_updates.is_empty(),
+            "per-step playhead ticks should update bound props without rebuilding sequencer rows; got {} sequencer updates out of {} pending updates: {pending_summary:?}",
+            sequencer_updates.len(),
+            pending.len()
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_timebase_uses_default_or_selected_step_plock_path() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 20);
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let has_selection = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-track", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(track)) => track.to_string(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("track:{track}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        editor
+            .runtime_mut()
+            .register_native("seq-pause-auto-follow", |_args, _ctx| Ok(Value::Bool(true)));
+        {
+            let has_selection = Arc::clone(&has_selection);
+            editor
+                .runtime_mut()
+                .register_native("seq-has-selection?", move |_args, _ctx| {
+                    Ok(Value::Bool(has_selection.load(Ordering::Relaxed)))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-timebase", move |args, _ctx| {
+                    let label = match args.first() {
+                        Some(Value::String(label)) => label.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("default:{label}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-plock-timebase", move |args, _ctx| {
+                    let label = match args.first() {
+                        Some(Value::String(label)) => label.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("plock:{label}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand sequencer row");
+        editor.refresh_runtime_side_effects();
+        calls.lock().unwrap().clear();
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-timebase-0").is_none(),
+            "collapsed-row timebase dropdown should stay removed"
+        );
+        let timebase = find_layout_node_by_stable_key(&layout, "seqv-expanded-timebase-0")
+            .expect("expanded sequencer row timebase should render");
+        let callback = timebase
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("expanded sequencer row timebase on-change");
+
+        editor
+            .runtime_mut()
+            .invoke(callback.clone(), vec![Value::String("8".to_string())])
+            .expect("invoke expanded sequencer row default timebase");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["track:0", "default:8"],
+            "without selected steps the expanded row dropdown should update the track default"
+        );
+
+        calls.lock().unwrap().clear();
+        has_selection.store(true, Ordering::Relaxed);
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::String("4T".to_string())])
+            .expect("invoke expanded sequencer row selected-step timebase");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["track:0", "plock:4T"],
+            "with selected steps on the current expanded row the dropdown should p-lock timebase"
+        );
     }
 
     #[test]
@@ -9588,7 +10893,7 @@ mod tests {
                     })]),
                 ),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
-                ("track-pans", test_list(vec![Value::Number(0.0)])),
+                ("track-mixer-pans", test_list(vec![Value::Number(0.0)])),
                 (
                     "track-outputs",
                     test_list(vec![Value::String("main".to_string())]),
@@ -9719,7 +11024,7 @@ mod tests {
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
         editor.runtime_mut().set_reactive(
             "SEQ",
-            "track-pans",
+            "track-mixer-pans",
             test_list(vec![Value::Number(-0.35)]),
         );
         editor.runtime_mut().run_reactive_cycle();
@@ -15838,7 +17143,7 @@ mod tests {
                     test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
                 ),
                 (
-                    "track-pans",
+                    "track-mixer-pans",
                     test_list(vec![Value::Number(0.0), Value::Number(0.0)]),
                 ),
                 (

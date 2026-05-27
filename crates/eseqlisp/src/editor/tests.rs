@@ -8302,6 +8302,58 @@ fn vslider_material_includes_origin_t_state() {
 }
 
 #[test]
+fn vslider_material_captures_explicit_props_as_uniforms() {
+    use crate::widget_render::sdf_widget::sdf_widget_def;
+
+    let mut rt = Runtime::new();
+    let result = rt
+        .eval_str(
+            r#"
+                (vslider :min 0 :max 1 :value 0.5
+                  :track-r 0.8 :track-g 0.4 :track-b 0.2
+                  :material (material :color (rgba track-r track-g track-b 1)))
+                "#,
+        )
+        .unwrap()
+        .unwrap();
+
+    let Value::Map(map) = &result else {
+        panic!("vslider should return a map");
+    };
+    let Value::String(shader_name) = &*map
+        .get("__shader_type")
+        .expect("vslider with :material should have __shader_type")
+        .borrow()
+    else {
+        panic!("__shader_type should be a string");
+    };
+    let def = sdf_widget_def(shader_name).expect("shader should be registered");
+    assert_eq!(
+        def.state_uniforms,
+        vec![
+            "origin_t".to_string(),
+            "track-r".to_string(),
+            "track-g".to_string(),
+            "track-b".to_string()
+        ]
+    );
+    assert!(
+        def.shader_source.contains("sdf_state_track_r"),
+        "track-r should compile as a state uniform"
+    );
+    for (prop, expected) in [
+        ("shader-state-track-r", 0.8),
+        ("shader-state-track-g", 0.4),
+        ("shader-state-track-b", 0.2),
+    ] {
+        let Value::Number(actual) = &*map.get(prop).expect(prop).borrow() else {
+            panic!("{prop} should be a number");
+        };
+        assert!((actual - expected).abs() < 0.001);
+    }
+}
+
+#[test]
 fn slider_material_caches_identical_expressions() {
     let mut rt = Runtime::new();
     // Compile two sliders with the same material
