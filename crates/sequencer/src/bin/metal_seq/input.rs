@@ -519,6 +519,28 @@ pub(crate) fn handle_metal_command_shortcut(
         && !focused_widget_captures_text_input(editor)
     {
         match (key.code, key.modifiers) {
+            (KeyCode::Char('a') | KeyCode::Char('A'), modifiers)
+                if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                    && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
+                let command = if editor.active_buffer().name == "*sequencer*" {
+                    "(seqv-select-all-current-track-steps)"
+                } else {
+                    "(select-all-steps)"
+                };
+                let _ = editor.runtime_mut().eval_str(command);
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "selected-steps",
+                    build_selection_value(selected_steps),
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                editor.refresh_visible_layouts_for_buffer_named("*metal*");
+                editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                editor.mark_needs_redraw();
+                return true;
+            }
             (KeyCode::Tab, KeyModifiers::CONTROL) => {
                 let _ = editor
                     .runtime_mut()
@@ -536,7 +558,12 @@ pub(crate) fn handle_metal_command_shortcut(
             (KeyCode::Tab, KeyModifiers::SHIFT) => {
                 let _ = editor
                     .runtime_mut()
-                    .eval_str("(seq-toggle-metal-sequencer-main)");
+                    .eval_str("(seq-toggle-current-track-expanded-main)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Char('h') | KeyCode::Char('H'), KeyModifiers::CONTROL) => {
+                let _ = editor.runtime_mut().eval_str("(seqv-collapse-all-tracks)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
@@ -866,8 +893,8 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        handle_metal_command_shortcut, handle_metal_soft_step_param_key, held_note_for_key,
-        note_from_key, HeldKeyboardNote, SoftStepParamEdit,
+        build_selection_value, handle_metal_command_shortcut, handle_metal_soft_step_param_key,
+        held_note_for_key, note_from_key, HeldKeyboardNote, SoftStepParamEdit,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::editor::ViewMode;
@@ -958,7 +985,7 @@ mod live_keyboard_tests {
                 r#"
                 (defstate tab-target "")
                 (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
-                (def seq-toggle-metal-sequencer-main () (set! tab-target "sequencer"))
+                (def seq-toggle-current-track-expanded-main () (set! tab-target "expand"))
                 (def seq-toggle-piano-roll-placement () (set! tab-target "placement"))
                 "#,
             )
@@ -992,7 +1019,7 @@ mod live_keyboard_tests {
         ));
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("sequencer".to_string()))
+            Some(eseqlisp::vm::Value::String("expand".to_string()))
         );
 
         assert!(handle_metal_command_shortcut(
@@ -1006,6 +1033,116 @@ mod live_keyboard_tests {
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
             Some(eseqlisp::vm::Value::String("placement".to_string()))
+        );
+    }
+
+    #[test]
+    fn control_h_collapses_expanded_sequencer_tracks() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate seqv-expanded-track-ids '(0 1))
+                (def seqv-collapse-all-tracks () (set! seqv-expanded-track-ids '()))
+                "#,
+            )
+            .expect("install collapse handler");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("seqv-expanded-track-ids")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::List(vec![]))
+        );
+    }
+
+    #[test]
+    fn command_or_control_a_selects_current_sequencer_track_steps() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![("selected-steps", build_selection_value(&selected_steps))],
+            true,
+        );
+        {
+            let selected_steps = Arc::clone(&selected_steps);
+            editor
+                .runtime_mut()
+                .register_native("seq-select-all-steps", move |_args, _ctx| {
+                    let mut selected_steps = selected_steps.lock().unwrap();
+                    selected_steps.clear();
+                    selected_steps.extend(0..16);
+                    Ok(Value::Number(16.0))
+                });
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate selected-bus 1)
+                (defstate select-all-count 0)
+                (def seqv-select-all-current-track-steps ()
+                  (do
+                    (set! selected-bus -1)
+                    (set! select-all-count (+ select-all-count 1))
+                    (seq-select-all-steps)))
+                "#,
+            )
+            .expect("install select-all handler");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(eseqlisp::vm::Value::Number(-1.0))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("select-all-count").unwrap(),
+            Some(eseqlisp::vm::Value::Number(1.0))
+        );
+        let selected_value = editor
+            .runtime_mut()
+            .eval_str("SEQ.selected-steps")
+            .unwrap()
+            .expect("selected steps reactive value");
+        let Value::List(items) = selected_value else {
+            panic!("selected steps should be a list");
+        };
+        assert!(
+            items
+                .iter()
+                .take(16)
+                .all(|item| matches!(*item.borrow(), Value::Bool(true))),
+            "Cmd+A should synchronously publish the selected-step reactive list"
         );
     }
 

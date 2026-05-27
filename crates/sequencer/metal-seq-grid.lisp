@@ -30,8 +30,8 @@
 (bind-key "ESC" "seq-clear-ui-selection")
 
 (defstate piano-roll-placement :bottom)
-(defstate step-panel-buffer "*metal*")
-(defstate remembered-step-panel-buffer "*metal*")
+(defstate step-panel-buffer "*sequencer*")
+(defstate remembered-step-panel-buffer "*sequencer*")
 (defstate lower-panel-buffer "*fx*")
 
 (def lower-fx-layout-height 11)
@@ -159,20 +159,21 @@
     (seq-open-piano-roll-main)
     (seq-open-piano-roll-bottom)))
 
-(def seq-toggle-metal-sequencer-main ()
-  (let ((next-buffer
-          (if (= (seq-current-step-buffer) "*sequencer*")
-            "*metal*"
-            "*sequencer*")))
-    (do
-      (set! remembered-step-panel-buffer next-buffer)
-      (if (= step-panel-buffer "*piano-roll*")
-        nil
-        (set! step-panel-buffer next-buffer))
-      (set-window-buffer next-buffer)
-      (if (= lower-panel-buffer "*piano-roll*")
-        (seq-apply-piano-roll-layout)
-        (seq-apply-fx-layout)))))
+(def seq-show-sequencer-main ()
+  (do
+    (set! remembered-step-panel-buffer "*sequencer*")
+    (if (= step-panel-buffer "*piano-roll*")
+      nil
+      (set! step-panel-buffer "*sequencer*"))
+    (set-window-buffer "*sequencer*")
+    (if (= lower-panel-buffer "*piano-roll*")
+      (seq-apply-piano-roll-layout)
+      (seq-apply-fx-layout))))
+
+(def seq-toggle-current-track-expanded-main ()
+  (do
+    (seq-show-sequencer-main)
+    (seqv-toggle-current-track-expanded)))
 
 (def seq-toggle-piano-roll-main ()
   (if (= step-panel-buffer "*piano-roll*")
@@ -473,17 +474,19 @@
   (if (= param-mode 3) 0 2))
 
 (def seq-grid-handle-key (key text)
-  (if (= key "LEFT")
-    (do (cursor-left) true)
-    (if (= key "RIGHT")
-      (do (cursor-right) true)
-      (if (= key "C-a")
-        (do (select-all-steps) true)
-        (if (or (= key "BS") (= key "Delete"))
-          (do (delete-selected-steps) true)
-          (if (= key "RET")
-            (do (cursor-toggle) true)
-            false))))))
+  (if (= (current-buffer-name) "*sequencer*")
+    (seqv-handle-key key text)
+    (if (= key "LEFT")
+      (do (cursor-left) true)
+      (if (= key "RIGHT")
+        (do (cursor-right) true)
+        (if (= key "C-a")
+          (do (select-all-steps) true)
+          (if (or (= key "BS") (= key "Delete"))
+            (do (delete-selected-steps) true)
+            (if (= key "RET")
+              (do (cursor-toggle) true)
+              false)))))))
 
 (def goto-page (page)
   (do
@@ -510,6 +513,7 @@
 (mode-bind-key "seq-grid-mode" "BS" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "Delete" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "RET" "cursor-toggle")
+(mode-bind-key "seq-grid-mode" "C-h" "seqv-collapse-all-tracks")
 
 (def set-vel-mode () (set! param-mode 0))
 (mode-bind-key "seq-grid-mode" "v" "set-vel-mode")

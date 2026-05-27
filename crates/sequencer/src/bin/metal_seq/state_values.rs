@@ -9088,7 +9088,10 @@ mod tests {
             .eval_str(r#"(set-window-buffer "*fx*")"#)
             .expect("switch to fx buffer");
         editor.refresh_runtime_side_effects();
-        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seqv-handle-key "C-a" nil)"#)
+            .expect("route select-all through sequencer key handler");
 
         assert_eq!(
             editor.runtime_mut().eval_str("selected-count").unwrap(),
@@ -9143,7 +9146,7 @@ mod tests {
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
-            Some(Value::String("*metal*".to_string()))
+            Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
@@ -9163,7 +9166,7 @@ mod tests {
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
-            Some(Value::String("*metal*".to_string())),
+            Some(Value::String("*sequencer*".to_string())),
             "changing placement while closed must not open or move piano roll"
         );
 
@@ -9193,7 +9196,7 @@ mod tests {
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
-            Some(Value::String("*metal*".to_string()))
+            Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
@@ -9593,7 +9596,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_full_grid_empty_metal_buffer_is_centered_and_does_not_y_scroll_on_load() {
+    fn metal_seq_full_grid_empty_sequencer_buffer_does_not_y_scroll_on_load() {
         use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
 
         fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -9616,44 +9619,37 @@ mod tests {
         }
 
         let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
-        let metal_tile = frame
+        let sequencer_tile = frame
             .tiles
             .iter()
-            .find(|tile| tile.frame.buffer_name == "*metal*")
-            .expect("full grid layout should contain *metal* tile");
-        let metal_tile_id = metal_tile.tile_id;
-        let layout = metal_tile
+            .find(|tile| tile.frame.buffer_name == "*sequencer*")
+            .expect("full grid layout should default to a *sequencer* tile");
+        let sequencer_tile_id = sequencer_tile.tile_id;
+        let layout = sequencer_tile
             .frame
             .widget_layout
             .as_ref()
-            .expect("metal tile should have widget layout");
-        let prompt = find_layout_node_by_text(layout, "Select a sound to create a track")
-            .expect("empty metal prompt should be present in tiled startup layout");
-        let prompt_center = prompt.rect.row + prompt.rect.height * 0.5;
+            .expect("sequencer tile should have widget layout");
         let viewport_height = editor
             .tile_root
-            .find_leaf(metal_tile_id)
-            .expect("metal tile leaf should exist")
+            .find_leaf(sequencer_tile_id)
+            .expect("sequencer tile leaf should exist")
             .widget_viewport_height;
         let content_bottom = layout_bottom(layout);
 
         assert!(
-            (prompt_center - viewport_height * 0.5).abs() <= 2.0,
-            "empty *metal* prompt should be centered in its tiled viewport; prompt={:?}, viewport={viewport_height:.3}, content_bottom={content_bottom:.3}",
-            prompt.rect
-        );
-        assert!(
             content_bottom <= viewport_height + 0.01,
-            "empty *metal* content should fit tiled viewport without scroll overflow; content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
+            "empty *sequencer* content should fit tiled viewport without scroll overflow; content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
         );
 
         let before = editor
             .tile_root
-            .find_leaf(metal_tile_id)
-            .expect("metal tile leaf should exist")
+            .find_leaf(sequencer_tile_id)
+            .expect("sequencer tile leaf should exist")
             .widget_scroll_top;
-        let scroll_col = (metal_tile.rect.col + metal_tile.rect.width * 0.5).floor() as u16;
-        let scroll_row = (metal_tile.rect.row + metal_tile.rect.height * 0.5).floor() as u16;
+        let scroll_col = (sequencer_tile.rect.col + sequencer_tile.rect.width * 0.5).floor() as u16;
+        let scroll_row =
+            (sequencer_tile.rect.row + sequencer_tile.rect.height * 0.5).floor() as u16;
         editor.handle_tiled_mouse_precise(
             mouse_event(MouseEventKind::ScrollDown, scroll_col, scroll_row),
             scroll_col as f32 + 0.5,
@@ -9662,13 +9658,13 @@ mod tests {
         );
         let after = editor
             .tile_root
-            .find_leaf(metal_tile_id)
-            .expect("metal tile leaf should still exist")
+            .find_leaf(sequencer_tile_id)
+            .expect("sequencer tile leaf should still exist")
             .widget_scroll_top;
 
         assert_eq!(
             after, before,
-            "empty *metal* tiled startup layout fits but wheel scroll changed; tile_id={metal_tile_id}, content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
+            "empty *sequencer* tiled startup layout fits but wheel scroll changed; tile_id={sequencer_tile_id}, content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
         );
     }
 
@@ -10107,6 +10103,63 @@ mod tests {
                 .unwrap(),
             Some(Value::Number(4.0)),
             "arrow movement should move the expanded editor cursor for the current track"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_keyboard_shortcuts_target_current_track() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (seqv-set-param-mode 0 4)
+                  (seqv-set-param-mode 1 0)
+                  (set! selected-bus 1)
+                  (set! seqv-expanded-track-ids '(0 1)))
+                "#,
+            )
+            .expect("seed sequencer shortcut state");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-param-mode 0)")
+                .unwrap(),
+            Some(Value::Number(4.0)),
+            "parameter shortcuts should not mutate inactive expanded rows"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-param-mode 1)")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "duration shortcut should select duration for the current track"
+        );
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(Value::Number(1.0)),
+            "plain parameter shortcuts should not disturb bus selection"
         );
     }
 

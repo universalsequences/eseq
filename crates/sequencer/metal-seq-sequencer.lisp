@@ -127,6 +127,61 @@
 (def seqv-current-number-picker-key ()
   (str "seqv-expanded-param-number-picker-" (seqv-current-track-id)))
 
+(def seqv-select-current-param-mode (mode)
+  (seqv-set-param-mode (seqv-current-track-id) mode))
+
+(def seqv-param-mode-for-key (key)
+  (if (not (= (len key) 1))
+    -1
+    (if (or (= key "v") (= key "V"))
+      0
+      (if (or (= key "d") (= key "D"))
+        1
+        (if (or (= key "a") (= key "A"))
+          2
+          (if (or (= key "t") (= key "T"))
+            3
+            (if (or (= key "p") (= key "P"))
+              4
+              (if (or (= key "s") (= key "S"))
+                5
+                -1))))))))
+
+(def seqv-select-all-current-track-steps ()
+  (do
+    (set! selected-bus -1)
+    (select-all-steps)))
+
+(def seqv-collapse-all-tracks ()
+  (set! seqv-expanded-track-ids '()))
+
+(def seqv-toggle-current-track-expanded ()
+  (let ((track-id (seqv-current-track-id)))
+    (do
+      (set! selected-bus -1)
+      (set! seqv-expanded-track-ids
+        (if (seqv-track-expanded? track-id)
+          (seqv-list-remove seqv-expanded-track-ids track-id)
+          (append seqv-expanded-track-ids (list track-id)))))))
+
+(def seqv-handle-key (key text)
+  (let ((mode (seqv-param-mode-for-key key)))
+    (if (>= mode 0)
+      (do (seqv-select-current-param-mode mode) true)
+      (if (= key "LEFT")
+        (do (cursor-left) true)
+        (if (= key "RIGHT")
+          (do (cursor-right) true)
+          (if (= key "C-a")
+            (do (seqv-select-all-current-track-steps) true)
+            (if (or (= key "C-h") (= key "C-H"))
+              (do (seqv-collapse-all-tracks) true)
+              (if (or (= key "BS") (= key "Delete"))
+                (do (delete-selected-steps) true)
+                (if (= key "RET")
+                  (do (cursor-toggle) true)
+                  false)))))))))
+
 (def seqv-track-menu-click (track)
   (let ((track-id (seqv-track-id track)))
     (do
