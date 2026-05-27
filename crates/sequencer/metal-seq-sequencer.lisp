@@ -439,24 +439,25 @@
     (if (= seqv-drag-track track)
       (do
         (seq-set-track track)
-        (step-select-drag-over step evt))
+        (step-select-drag-over-for-track track step evt))
       nil)))
 
 (def seqv-step-pointer-down (track step evt)
-  (do
-    (set! selected-bus -1)
-    (seq-set-track track)
-    (set! seqv-drag-track track)
-    (if (and (seq-track-step-active? track step) (not (selection-click? evt)) (seqv-duration-edge? evt))
-      (do
-        (set! seqv-duration-drag-source step)
-        (set! step-click-pending nil)
-        (set! step-drag-anchor nil)
-        (set! step-move-last nil)
-        (cool-off-follow)
-        (set! cursor-step step)
-        (seqv-set-duration-from-drag track step step))
-      (step-pointer-down step evt))))
+  (let ((use-selection (= SEQ.current-track track)))
+    (do
+      (set! selected-bus -1)
+      (seq-set-track track)
+      (set! seqv-drag-track track)
+      (if (and (seq-track-step-active? track step) (not (selection-click? evt)) (seqv-duration-edge? evt))
+        (do
+          (set! seqv-duration-drag-source step)
+          (set! step-click-pending nil)
+          (set! step-drag-anchor nil)
+          (set! step-move-last nil)
+          (cool-off-follow)
+          (set! cursor-step step)
+          (seqv-set-duration-from-drag track step step))
+        (step-pointer-down-for-track track step evt use-selection)))))
 
 (def seqv-step-pointer-up (track step evt)
   (do
@@ -706,14 +707,15 @@
     (seqv-activate-track-for-edit track)
     (seqv-set-expanded-cursor track track-id step)
     (set! cursor-step step)
-    (step-select-drag-over step evt)))
+    (step-select-drag-over-for-track track step evt)))
 
 (def seqv-expanded-step-pointer-down (track track-id step evt)
-  (do
-    (seqv-activate-track-for-edit track)
-    (seqv-set-expanded-cursor track track-id step)
-    (set! cursor-step step)
-    (step-pointer-down step evt)))
+  (let ((use-selection (= SEQ.current-track track)))
+    (do
+      (seqv-activate-track-for-edit track)
+      (seqv-set-expanded-cursor track track-id step)
+      (set! cursor-step step)
+      (step-pointer-down-for-track track step evt use-selection))))
 
 (def seqv-expanded-step-pointer-up (track track-id step evt)
   (do

@@ -5141,6 +5141,73 @@ mod tests {
         (runtime, steps, toggles, moves)
     }
 
+    fn track_qualified_step_gesture_runtime() -> (
+        Runtime,
+        Arc<Mutex<Vec<Vec<bool>>>>,
+        Arc<Mutex<Vec<(usize, usize)>>>,
+    ) {
+        let steps = Arc::new(Mutex::new(vec![
+            vec![false, true, false, false],
+            vec![false, false, false, false],
+        ]));
+        let current_track = Arc::new(Mutex::new(0usize));
+        let toggles = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str("(defstate cursor-step 0)")
+            .expect("define cursor step");
+        runtime
+            .eval_str(
+                "(def SEQ (dict :current-track 1 :selected-steps '(false false false false)))",
+            )
+            .expect("define stale SEQ test map");
+        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
+        runtime.register_native("seq-select-step-range", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("seq-move-step-drag", |_args, _ctx| Ok(Value::Bool(true)));
+        {
+            let current_track = current_track.clone();
+            runtime.register_native("seq-set-track", move |args, _ctx| {
+                let Some(Value::Number(track)) = args.first() else {
+                    return Err("seq-set-track: expected track".into());
+                };
+                *current_track.lock().unwrap() = *track as usize;
+                Ok(Value::Number(*track))
+            });
+        }
+        {
+            let steps = steps.clone();
+            runtime.register_native("seq-track-step-active?", move |args, _ctx| {
+                let (Some(Value::Number(track)), Some(Value::Number(step))) =
+                    (args.first(), args.get(1))
+                else {
+                    return Err("seq-track-step-active?: expected track and step".into());
+                };
+                Ok(Value::Bool(
+                    steps.lock().unwrap()[*track as usize][*step as usize],
+                ))
+            });
+        }
+        {
+            let steps = steps.clone();
+            let current_track = current_track.clone();
+            let toggles = toggles.clone();
+            runtime.register_native("seq-toggle-step", move |args, _ctx| {
+                let Some(Value::Number(step)) = args.first() else {
+                    return Err("seq-toggle-step: expected step".into());
+                };
+                let track = *current_track.lock().unwrap();
+                let step = *step as usize;
+                let mut steps = steps.lock().unwrap();
+                steps[track][step] = !steps[track][step];
+                toggles.lock().unwrap().push((track, step));
+                Ok(Value::Bool(steps[track][step]))
+            });
+        }
+        load_step_gesture_source(&mut runtime);
+        (runtime, steps, toggles)
+    }
+
     fn bool_list_source(values: &[bool]) -> String {
         let items = values
             .iter()
@@ -5219,6 +5286,40 @@ mod tests {
         );
         assert!(toggles.lock().unwrap().is_empty());
         assert_eq!(*moves.lock().unwrap(), vec![(2, 4)]);
+    }
+
+    #[test]
+    fn track_qualified_step_click_ignores_stale_reactive_current_track() {
+        let (mut runtime, steps, toggles) = track_qualified_step_gesture_runtime();
+
+        runtime
+            .eval_str("(seq-set-track 0)")
+            .expect("host switches to clicked track before gesture handling");
+        runtime
+            .eval_str("(step-pointer-down-for-track 0 1 (dict) false)")
+            .expect("pointer down on active step in clicked track");
+        runtime
+            .eval_str("(step-select-drag-over-for-track 0 1 (dict))")
+            .expect("same-step drag jitter should not enter paint-on mode");
+
+        assert!(
+            toggles.lock().unwrap().is_empty(),
+            "pointer-down and same-step jitter must not toggle an already-active step off through stale SEQ.current-track"
+        );
+
+        runtime
+            .eval_str("(step-pointer-up 1 (dict))")
+            .expect("pointer up on clicked step");
+
+        assert_eq!(
+            *toggles.lock().unwrap(),
+            vec![(0, 1)],
+            "a plain click on an active step in another track should toggle exactly once"
+        );
+        assert!(
+            !steps.lock().unwrap()[0][1],
+            "the clicked active step should end off"
+        );
     }
 
     #[test]

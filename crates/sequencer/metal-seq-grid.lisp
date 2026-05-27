@@ -354,7 +354,7 @@
     (set! step-drag-anchor step)
     (seq-select-step-range step step)))
 
-(def step-select-drag-over (step evt)
+(def step-select-drag-over-for-track (track step evt)
   (if (selection-click? evt)
     (do
       (set! step-click-pending nil)
@@ -369,7 +369,7 @@
         (set! step-click-pending nil)
         (cool-off-follow)
         (set! cursor-step step)
-        (if (= (seq-track-step-active? SEQ.current-track step) step-toggle-drag-value)
+        (if (= (seq-track-step-active? track step) step-toggle-drag-value)
           nil
           (seq-toggle-step step)))
       (if (= step-move-last nil)
@@ -383,14 +383,17 @@
             (set! step-move-last step)
             (set! cursor-step step)))))))
 
-(def step-pointer-down (step evt)
+(def step-select-drag-over (step evt)
+  (step-select-drag-over-for-track SEQ.current-track step evt))
+
+(def step-pointer-down-for-track (track step evt use-selection)
   (if (selection-click? evt)
     (step-select-drag-start step evt)
     (do
       (cool-off-follow)
       (set! cursor-step step)
       (set! step-drag-anchor nil)
-      (if (or (seq-track-step-active? SEQ.current-track step) (step-selected? step))
+      (if (or (seq-track-step-active? track step) (and use-selection (step-selected? step)))
         (do
           (set! step-move-last step)
           (set! step-click-pending step)
@@ -399,7 +402,10 @@
           (set! step-move-last nil)
           (set! step-click-pending nil)
           (set! step-toggle-drag-value true)
-          (step-select-drag-over step evt))))))
+          (step-select-drag-over-for-track track step evt))))))
+
+(def step-pointer-down (step evt)
+  (step-pointer-down-for-track SEQ.current-track step evt true))
 
 (def step-pointer-up (step evt)
   (do
