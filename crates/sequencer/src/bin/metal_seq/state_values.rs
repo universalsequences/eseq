@@ -331,6 +331,22 @@ fn insert_string_prop(
     );
 }
 
+fn insert_param_ui_metadata(
+    map: &mut HashMap<String, Rc<RefCell<Value>>>,
+    metadata: Option<&sequencer::effects::ParamUiMetadata>,
+) {
+    let Some(metadata) = metadata else { return };
+    if let Some(group) = &metadata.group {
+        insert_string_prop(map, "group", group);
+    }
+    if let Some(env) = &metadata.env {
+        insert_string_prop(map, "env", env);
+    }
+    if let Some(role) = &metadata.role {
+        insert_string_prop(map, "role", role);
+    }
+}
+
 fn instrument_slot_param_value(
     slot: &sequencer::effects::EffectSlotState,
     desc: &sequencer::effects::EffectDescriptor,
@@ -956,10 +972,7 @@ pub(crate) fn sync_track_pan_binding_field(
     }
 }
 
-pub(crate) fn sync_track_volume_pan_binding_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-) {
+pub(crate) fn sync_track_volume_pan_binding_fields(rt: &mut Runtime, state: &Arc<SequencerState>) {
     for track in 0..state.active_track_count() {
         sync_track_volume_binding_field(rt, state, track);
         sync_track_pan_binding_field(rt, state, track);
@@ -2250,6 +2263,7 @@ pub(crate) fn build_effects_value(
                     if let Some(targets) = modulation_targets.get(&param_idx) {
                         insert_mod_metadata(&mut pmap, targets);
                     }
+                    insert_param_ui_metadata(&mut pmap, pdesc.ui_metadata.as_ref());
                     Some(Rc::new(RefCell::new(Value::Map(pmap))))
                 })
                 .collect();
@@ -3326,6 +3340,7 @@ pub(crate) fn build_instrument_panel_value(
         options: Option<&Vec<String>>,
         value_field: Option<String>,
         mod_targets: Option<&Vec<UiModMetadata>>,
+        ui_metadata: Option<&sequencer::effects::ParamUiMetadata>,
     ) {
         let is_boolean_name = name == "enabled" || name == "sync";
         let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -3444,6 +3459,7 @@ pub(crate) fn build_instrument_panel_value(
                 Rc::new(RefCell::new(Value::List(target_values))),
             );
         }
+        insert_param_ui_metadata(&mut pmap, ui_metadata);
         out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
 
@@ -3552,6 +3568,7 @@ pub(crate) fn build_instrument_panel_value(
         None,
         Some(instrument_base_note_value_field(track)),
         None,
+        None,
     );
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
@@ -3592,6 +3609,7 @@ pub(crate) fn build_instrument_panel_value(
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
+                None,
             );
         } else {
             push_param(
@@ -3607,6 +3625,7 @@ pub(crate) fn build_instrument_panel_value(
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
                 modulation_targets.get(&param_idx),
+                pdesc.ui_metadata.as_ref(),
             );
         }
     }
@@ -3648,6 +3667,7 @@ pub(crate) fn build_instrument_panel_value(
                 plock_step
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                None,
                 None,
             );
             if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
@@ -4617,6 +4637,7 @@ mod tests {
             node_param_idx: 0,
             node_param_span: 1,
             host_control: None,
+            ui_metadata: None,
         };
         let target = sequencer::effects::InstrumentModulationTarget {
             base_param_idx: 0,
@@ -6971,10 +6992,6 @@ mod tests {
             Rc::new(RefCell::new(Value::String(name.to_string()))),
         );
         param.insert(
-            "group".to_string(),
-            Rc::new(RefCell::new(Value::String("main".to_string()))),
-        );
-        param.insert(
             "idx".to_string(),
             Rc::new(RefCell::new(Value::Number(idx as f64))),
         );
@@ -6985,6 +7002,84 @@ mod tests {
         param.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(min))));
         param.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(max))));
         param
+    }
+
+    fn test_param_map_with_ui_metadata(
+        name: &str,
+        idx: usize,
+        value: f64,
+        min: f64,
+        max: f64,
+        group: Option<&str>,
+        env: Option<&str>,
+        role: Option<&str>,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut param = test_param_map(name, idx, value, min, max);
+        if let Some(group) = group {
+            param.insert(
+                "group".to_string(),
+                Rc::new(RefCell::new(Value::String(group.to_string()))),
+            );
+        }
+        if let Some(env) = env {
+            param.insert(
+                "env".to_string(),
+                Rc::new(RefCell::new(Value::String(env.to_string()))),
+            );
+        }
+        if let Some(role) = role {
+            param.insert(
+                "role".to_string(),
+                Rc::new(RefCell::new(Value::String(role.to_string()))),
+            );
+        }
+        param
+    }
+
+    fn load_param_grid_test_lisp(editor: &mut eseqlisp::Editor) {
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selection? () false)
+                (def fx-clear-selected-effect () false)
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (load "metal-seq-fx/state.lisp")
+                (def visible-params (params)
+                  (filter |p| (not (= (get p :name) "enabled")) params))
+                (load "metal-seq-fx/param-controls.lisp")
+                (load "metal-seq-fx/param-grid.lisp")
+                "#,
+            )
+            .expect("load param grid test lisp");
+    }
+
+    fn param_grid_test_editor(params: Vec<Value>) -> eseqlisp::Editor {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let fx = Value::Map(test_fx_map("metadata-effect", 0, params.clone()));
+        editor.runtime_mut().register_reactive(
+            "TEST",
+            vec![("params", test_list(params)), ("fx", fx)],
+            true,
+        );
+        load_param_grid_test_lisp(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect-buffer "*param-grid-test*" (fx-param-grid TEST.params TEST.fx))"#)
+            .expect("create param grid test buffer");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("param grid test lisp status after refresh: {status}");
+        }
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*param-grid-test*")
+            .expect("param grid test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(140, 18);
+        editor
     }
 
     fn test_enum_param_map(
@@ -10399,6 +10494,862 @@ mod tests {
             "Reverb fallback param grid should have visible labels, mix={:?} size={:?}",
             mix.rect,
             size.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_without_metadata_uses_flat_fallback() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map("mix", 0, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("size", 1, 0.2, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 2, 1.0, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("flat param grid layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-group-").is_none(),
+            "flat fallback should not render metadata group panels"
+        );
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let mix = find_layout_node_by_text(&layout, "mix")
+            .unwrap_or_else(|| panic!("mix label; layout={layout_summaries:#?}"));
+        let size = find_layout_node_by_text(&layout, "size")
+            .unwrap_or_else(|| panic!("size label; layout={layout_summaries:#?}"));
+        assert!(
+            mix.rect.width > 0.5 && size.rect.width > 0.5,
+            "flat fallback labels should remain visible, mix={:?} size={:?}",
+            mix.rect,
+            size.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_groups_metadata_params_into_visible_panels() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "osc_gain",
+                0,
+                0.5,
+                0.0,
+                1.0,
+                Some("osc"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_cutoff",
+                1,
+                1000.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("mix", 2, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 3, 1.0, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("metadata param grid layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        for (debug_name, control_name) in [
+            ("fx-param-group-osc", "fx-param-compact-knob-osc_gain"),
+            (
+                "fx-param-group-filter",
+                "fx-param-compact-knob-filter_cutoff",
+            ),
+            ("fx-param-group-misc", "fx-param-compact-knob-mix"),
+        ] {
+            let panel = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{debug_name}; layout={layout_summaries:#?}"));
+            assert_eq!(
+                panel
+                    .props
+                    .get("background-color")
+                    .cloned(),
+                Some(Value::Keyword("instrument-group-bg".to_string())),
+                "{debug_name} should use the softer group background rather than the dark control background"
+            );
+            let group_label =
+                find_layout_node_by_text(panel, debug_name.trim_start_matches("fx-param-group-"))
+                    .unwrap_or_else(|| {
+                        panic!("group label inside {debug_name}; layout={layout_summaries:#?}")
+                    });
+            assert!(
+                group_label.rect.col > panel.rect.col + 0.25,
+                "{debug_name} label should be inset from the panel edge, panel={:?} label={:?}",
+                panel.rect,
+                group_label.rect
+            );
+            let control =
+                find_layout_node_by_debug_name(panel, control_name).unwrap_or_else(|| {
+                    panic!("{control_name} inside {debug_name}; layout={layout_summaries:#?}")
+                });
+            let knob =
+                find_layout_node_by_widget_type(control, "knob-number").unwrap_or_else(|| {
+                    panic!("knob-number inside {control_name}; layout={layout_summaries:#?}")
+                });
+            assert!(
+                panel.rect.width > 1.0
+                    && panel.rect.width <= 13.0
+                    && panel.rect.height > 1.0
+                    && panel.rect.height <= 3.1
+                    && control.rect.width > 1.0
+                    && control.rect.height > 1.0
+                    && knob.rect.width > 1.0
+                    && knob.rect.height > 1.0,
+                "{debug_name} and {control_name} should have compact visible measured rects, panel={:?} control={:?} knob={:?}",
+                panel.rect,
+                control.rect,
+                knob.rect
+            );
+        }
+        assert_eq!(
+            count_widget_type(&layout, "knob-number"),
+            3,
+            "metadata grouped numeric params should render as compact knob rows"
+        );
+    }
+
+    #[test]
+    fn param_grid_group_rows_fit_control_count_width() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_env",
+                0,
+                1.0,
+                0.0,
+                1.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "hires",
+                1,
+                2.0,
+                0.0,
+                4.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "hicut",
+                2,
+                100.0,
+                0.0,
+                127.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "res",
+                3,
+                2.24,
+                0.0,
+                8.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "cutoff",
+                4,
+                7037.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("gain", 5, 0.5, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("fit-width row layout");
+        assert_finite_layout_tree(&layout);
+        let filter_panel = find_layout_node_by_debug_name(&layout, "fx-param-group-filter")
+            .expect("filter group panel");
+        let misc_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-misc").expect("misc panel");
+        assert!(
+            filter_panel.rect.width > 38.0 && filter_panel.rect.width < 40.0,
+            "five-control group row should fit its controls instead of using a wide default, got {:?}",
+            filter_panel.rect
+        );
+        assert!(
+            misc_panel.rect.width > 12.0 && misc_panel.rect.width <= 13.0,
+            "one-control misc row should use the compact minimum width, got {:?}",
+            misc_panel.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_group_rows_wrap_to_at_most_two_control_rows() {
+        let mut params = Vec::new();
+        for idx in 0..9 {
+            let name = format!("wide_{idx}");
+            params.push(Value::Map(test_param_map_with_ui_metadata(
+                &name,
+                idx,
+                idx as f64,
+                0.0,
+                10.0,
+                Some("wide"),
+                None,
+                None,
+            )));
+        }
+        let editor = param_grid_test_editor(params);
+        let layout = editor.widget_layout().expect("two-row group layout");
+        assert_finite_layout_tree(&layout);
+        let panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-wide").expect("wide group");
+        assert!(
+            panel.rect.height > 5.4 && panel.rect.height < 5.9,
+            "nine controls should wrap into two larger knob rows, not three or more, got {:?}",
+            panel.rect
+        );
+        assert!(
+            panel.rect.width > 38.0 && panel.rect.width < 40.0,
+            "nine controls should use the widest five-control row width, got {:?}",
+            panel.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_packs_group_panels_into_three_row_columns() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_cutoff",
+                0,
+                500.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "fm_amount",
+                1,
+                2.0,
+                0.0,
+                4.0,
+                Some("fm"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "osc_level",
+                2,
+                0.7,
+                0.0,
+                1.0,
+                Some("osc"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("gain", 3, 0.5, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("three-row panel layout");
+        assert_finite_layout_tree(&layout);
+        let filter_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-filter").expect("filter panel");
+        let fm_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-fm").expect("fm panel");
+        let osc_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-osc").expect("osc panel");
+        let misc_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-misc").expect("misc panel");
+        assert!(
+            (filter_panel.rect.col - fm_panel.rect.col).abs() < 0.1
+                && fm_panel.rect.row > filter_panel.rect.row,
+            "first two panels should stack in the first column, filter={:?} fm={:?}",
+            filter_panel.rect,
+            fm_panel.rect
+        );
+        assert!(
+            (filter_panel.rect.col - osc_panel.rect.col).abs() < 0.1
+                && osc_panel.rect.row > fm_panel.rect.row,
+            "third panel should stay in the first column, fm={:?} osc={:?}",
+            fm_panel.rect,
+            osc_panel.rect
+        );
+        assert!(
+            misc_panel.rect.col > filter_panel.rect.col + filter_panel.rect.width
+                && (misc_panel.rect.row - filter_panel.rect.row).abs() < 0.1,
+            "fourth panel should start a new column, filter={:?} misc={:?}",
+            filter_panel.rect,
+            misc_panel.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_complete_adsr_metadata_renders_editor_and_updates_roles() {
+        let mut editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_attack",
+                0,
+                5.0,
+                1.0,
+                1000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_decay",
+                1,
+                120.0,
+                1.0,
+                2000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_sustain",
+                2,
+                0.7,
+                0.0,
+                1.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("sustain"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_release",
+                3,
+                120.0,
+                1.0,
+                3000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("release"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_level",
+                4,
+                0.8,
+                0.0,
+                1.0,
+                Some("amp"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("enabled", 5, 1.0, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("complete ADSR grid layout");
+        assert_finite_layout_tree(&layout);
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            1,
+            "complete envelope should render exactly one adsr-editor"
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "amp_attac").is_none()
+                && find_layout_node_by_text(&layout, "amp_decay").is_none()
+                && find_layout_node_by_text(&layout, "amp_susta").is_none()
+                && find_layout_node_by_text(&layout, "amp_relea").is_none(),
+            "complete envelope role params should be consumed from standalone rows"
+        );
+        let env_editor = find_layout_node_by_widget_type(&layout, "adsr-editor")
+            .expect("complete envelope adsr-editor");
+        let env_panel = find_layout_node_by_debug_name(&layout, "fx-param-env-amp_env")
+            .expect("complete envelope panel");
+        assert!(
+            env_panel.rect.width > 8.0
+                && env_panel.rect.height > 8.0
+                && env_editor.rect.width > 8.0
+                && env_editor.rect.height > 2.0
+                && env_editor.rect.height < 4.0,
+            "ADSR panel should fill the fallback UI height while keeping a compact visible editor, panel={:?} editor={:?}",
+            env_panel.rect,
+            env_editor.rect
+        );
+        let env_label = find_layout_node_by_text(&layout, "amp_env")
+            .expect("selected envelope label should identify the rendered ADSR");
+        assert!(
+            env_label.rect.width > 1.0 && env_label.rect.height > 0.2,
+            "selected envelope label should be visible, got {:?}",
+            env_label.rect
+        );
+        for debug_name in [
+            "fx-param-adsr-number-atk",
+            "fx-param-adsr-number-dec",
+            "fx-param-adsr-number-sus",
+            "fx-param-adsr-number-rel",
+        ] {
+            let number = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{debug_name} should render below ADSR editor"));
+            assert!(
+                number.rect.width > 1.0 && number.rect.height > 0.5,
+                "{debug_name} should have a visible measured rect, got {:?}",
+                number.rect
+            );
+        }
+        let callback = env_editor
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("adsr-editor on-change");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Map(HashMap::from([
+                    (
+                        "attack".to_string(),
+                        Rc::new(RefCell::new(Value::Number(11.0))),
+                    ),
+                    (
+                        "decay".to_string(),
+                        Rc::new(RefCell::new(Value::Number(220.0))),
+                    ),
+                    (
+                        "sustain".to_string(),
+                        Rc::new(RefCell::new(Value::Number(0.42))),
+                    ),
+                    (
+                        "release".to_string(),
+                        Rc::new(RefCell::new(Value::Number(330.0))),
+                    ),
+                ]))],
+            )
+            .expect("invoke ADSR metadata on-change");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 4, "commands={commands:?}");
+        for (command, (expected_idx, expected_value)) in
+            commands
+                .iter()
+                .zip([(0.0, 11.0), (1.0, 220.0), (2.0, 0.42), (3.0, 330.0)])
+        {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-effect-param");
+                    let Value::Map(payload) = payload else {
+                        panic!("set-effect-param payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("slot-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(0.0))
+                    );
+                    assert_eq!(
+                        payload.get("param-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_idx))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                }
+                other => panic!("expected set-effect-param host command, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn param_grid_multiple_complete_envelopes_shows_selected_group_envelope_only() {
+        let mut editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_attack",
+                0,
+                0.0,
+                0.0,
+                1000.0,
+                Some("filter"),
+                Some("filter_env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_decay",
+                1,
+                42.0,
+                0.0,
+                2000.0,
+                Some("filter"),
+                Some("filter_env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_sustain",
+                2,
+                0.0,
+                0.0,
+                1.0,
+                Some("filter"),
+                Some("filter_env"),
+                Some("sustain"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_release",
+                3,
+                550.0,
+                0.0,
+                5000.0,
+                Some("filter"),
+                Some("filter_env"),
+                Some("release"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_cutoff",
+                4,
+                900.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_resonance",
+                5,
+                0.45,
+                0.0,
+                1.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_attack",
+                6,
+                5.0,
+                1.0,
+                1000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_decay",
+                7,
+                120.0,
+                1.0,
+                2000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_sustain",
+                8,
+                0.8,
+                0.0,
+                1.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("sustain"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_release",
+                9,
+                180.0,
+                1.0,
+                5000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("release"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_level",
+                10,
+                0.8,
+                0.0,
+                1.0,
+                Some("amp"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("gain", 11, 0.5, 0.0, 1.0)),
+        ]);
+
+        let layout = editor.widget_layout().expect("multi envelope grid layout");
+        assert_finite_layout_tree(&layout);
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            1,
+            "only one metadata envelope should render at a time"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-filter_env").is_none(),
+            "non-default envelope should not be selected initially"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-amp_env").is_some(),
+            "amp envelope should be selected by default even when amp is not the first group"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-filter_cutoff")
+                .is_some()
+                && find_layout_node_by_debug_name(
+                    &layout,
+                    "fx-param-compact-knob-filter_resonance"
+                )
+                .is_some()
+                && find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-amp_level")
+                    .is_some()
+                && find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-gain").is_some(),
+            "group panels should keep non-envelope controls visible"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-filter_attack")
+                .is_none()
+                && find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-amp_attack")
+                    .is_none(),
+            "envelope role params should be consumed by the shared selected ADSR"
+        );
+
+        let filter_panel = find_layout_node_by_debug_name(&layout, "fx-param-group-filter")
+            .expect("filter group panel");
+        let callback = filter_panel
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("filter group panel click callback");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Bool(false)])
+            .expect("select filter group");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("multi envelope grid layout after selecting filter");
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            1,
+            "selecting another group should still render exactly one envelope"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-filter_env").is_some(),
+            "selected filter group envelope should render"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-amp_env").is_none(),
+            "default amp envelope should be hidden after selecting filter"
+        );
+
+        let misc_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-misc").expect("misc panel");
+        let callback = misc_panel
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("misc panel click callback");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Bool(false)])
+            .expect("select misc group");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("multi envelope grid layout after selecting misc");
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-filter_env").is_none(),
+            "clicking a non-envelope panel should leave the group envelope"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-amp_env").is_some(),
+            "clicking a non-envelope panel should return to the default amp envelope"
+        );
+    }
+
+    #[test]
+    fn param_grid_envelope_only_default_amp_group_hides_empty_panel() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "attack",
+                0,
+                5.0,
+                0.0,
+                1000.0,
+                Some("amp"),
+                Some("amp-env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "decay",
+                1,
+                120.0,
+                1.0,
+                2000.0,
+                Some("amp"),
+                Some("amp-env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "sustain",
+                2,
+                0.8,
+                0.0,
+                1.0,
+                Some("amp"),
+                Some("amp-env"),
+                Some("sustain"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "release",
+                3,
+                180.0,
+                1.0,
+                5000.0,
+                Some("amp"),
+                Some("amp-env"),
+                Some("release"),
+            )),
+            Value::Map(test_param_map("gain", 4, 0.5, 0.0, 1.0)),
+        ]);
+        let layout = editor
+            .widget_layout()
+            .expect("envelope-only amp default layout");
+        assert_finite_layout_tree(&layout);
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            1,
+            "complete amp envelope should render as the default selected ADSR"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-amp-env").is_some(),
+            "default amp envelope should render"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-group-amp").is_none(),
+            "envelope-only amp group should not render an empty control panel"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-group-misc").is_some()
+                && find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-gain").is_some(),
+            "ungrouped controls should still render in the misc row"
+        );
+    }
+
+    #[test]
+    fn param_grid_incomplete_envelope_metadata_falls_back_to_rows() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_attack",
+                0,
+                5.0,
+                1.0,
+                1000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_decay",
+                1,
+                120.0,
+                1.0,
+                2000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_sustain",
+                2,
+                0.7,
+                0.0,
+                1.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("sustain"),
+            )),
+        ]);
+        let layout = editor
+            .widget_layout()
+            .expect("incomplete envelope grid layout");
+        assert_finite_layout_tree(&layout);
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            0,
+            "incomplete envelope should not render an adsr-editor"
+        );
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        for control_name in [
+            "fx-param-compact-knob-amp_attack",
+            "fx-param-compact-knob-amp_decay",
+            "fx-param-compact-knob-amp_sustain",
+        ] {
+            let node = find_layout_node_by_debug_name(&layout, control_name)
+                .unwrap_or_else(|| panic!("{control_name}; layout={layout_summaries:#?}"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 1.0,
+                "incomplete envelope role {control_name} should render as a compact control, got {:?}",
+                node.rect
+            );
+        }
+        assert_eq!(
+            count_widget_type(&layout, "knob-number"),
+            3,
+            "incomplete envelope role params should render as compact knobs"
+        );
+    }
+
+    #[test]
+    fn custom_instrument_ui_still_wins_over_metadata_fallback() {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Map(
+                test_param_map_with_ui_metadata(
+                    "amp_attack",
+                    0,
+                    5.0,
+                    1.0,
+                    1000.0,
+                    Some("amp"),
+                    Some("amp_env"),
+                    Some("attack"),
+                ),
+            )]))),
+        );
+        editor
+            .runtime_mut()
+            .register_reactive("TEST", vec![("inst", Value::Map(inst))], true);
+        load_param_grid_test_lisp(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def custom-instrument-synth-ui (inst)
+                  (label "custom metadata ui" :font-size 10 :bg :transparent))
+                (load "metal-seq-fx/panel-bodies.lisp")
+                (effect-buffer "*custom-metadata-ui-test*" (instrument-synth-panel-body TEST.inst))
+                "#,
+            )
+            .expect("load custom metadata ui test");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom metadata ui test status after refresh: {status}");
+        }
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*custom-metadata-ui-test*")
+            .expect("custom metadata ui test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(80, 12);
+        let layout = editor.widget_layout().expect("custom metadata ui layout");
+        assert!(
+            find_layout_node_by_debug_name(&layout, "custom-synth-wrapper").is_some(),
+            "custom wrapper should render instead of fallback"
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "custom metadata ui").is_some(),
+            "custom UI body should be visible"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fallback-synth-wrapper").is_none()
+                && find_layout_node_by_debug_name(&layout, "fx-param-group-").is_none(),
+            "metadata fallback should not render when custom UI is present"
         );
     }
 

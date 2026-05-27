@@ -5,16 +5,16 @@ use super::super::text_input::{
     cursor_x_from_char_cache, selection_range as text_selection_range, text_width_from_char_cache,
     wrap_text_to_measured_lines,
 };
+use super::super::{CellBuffer, styled_cell};
 #[cfg(target_os = "macos")]
 use super::super::{
-    ndc_bounds, z_layer, MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive,
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
-    WidgetInstance, WidgetViewport,
+    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPatchCablePrimitive, MetalPrimitive,
+    MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive, WidgetInstance,
+    WidgetViewport, ndc_bounds, z_layer,
 };
-use super::super::{styled_cell, CellBuffer};
 #[cfg(target_os = "macos")]
 use crate::layout::LayoutNode;
-use crate::layout::{f64_to_f32, Rect};
+use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
 use crate::vm::Value;
 
@@ -35,16 +35,16 @@ use super::model::{
     OutputPortRef, Patch, PatchConnection, PatchNode, SourceOwner,
     connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
-use super::project::dgenlisp_operator_documentation;
 #[cfg(target_os = "macos")]
 use super::project::OperatorPortDocumentation;
+use super::project::dgenlisp_operator_documentation;
 use super::state::{
-    active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
-    get_patcher_pan_state, max_node_z_index, node_z_index, ordered_patch_nodes,
-    patch_with_interaction_state, patcher_breadcrumb, patcher_state_key, set_patcher_pan_state,
-    source_connection_id, sync_patcher_z_order, AgenticBubbleState, AgenticBubbleTarget,
-    AlignmentGuide, AlignmentGuideKind, PatcherDragState, PatcherInteractionState, PatcherPanState,
-    PatcherTextEdit, PatcherZSlot, PATCHER_Z_SLOTS_PER_NODE,
+    AgenticBubbleState, AgenticBubbleTarget, AlignmentGuide, AlignmentGuideKind,
+    PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState, PatcherPanState,
+    PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
+    get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
+    ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
+    set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
 };
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;

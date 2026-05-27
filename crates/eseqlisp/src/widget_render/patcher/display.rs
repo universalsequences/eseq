@@ -76,8 +76,7 @@ pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
     let Some(last_displayed) = last_displayed else {
         return Vec::new();
     };
-    node
-        .args
+    node.args
         .iter()
         .enumerate()
         .take(last_displayed + 1)

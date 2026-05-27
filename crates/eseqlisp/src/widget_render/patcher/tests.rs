@@ -2909,6 +2909,44 @@ fn operator_metadata_comes_from_generated_dgenlisp_json() {
 }
 
 #[test]
+fn operator_metadata_exposes_param_ui_metadata_attributes() {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../sequencer/tools/dgenlisp-operators.json"
+    ))
+    .expect("bundled dgenlisp-operators.json must be valid JSON");
+    let operators = manifest["operators"]
+        .as_array()
+        .expect("operator manifest should contain operators");
+    let param = operators
+        .iter()
+        .find(|operator| operator["name"].as_str() == Some("param"))
+        .expect("param operator metadata");
+    let attrs = param["attributes"]
+        .as_array()
+        .expect("param attributes")
+        .iter()
+        .map(|attr| attr.as_str().unwrap())
+        .collect::<HashSet<_>>();
+    assert!(attrs.contains("@group"));
+    assert!(attrs.contains("@env"));
+    assert!(attrs.contains("@role"));
+
+    let role = param["attribute_docs"]
+        .as_array()
+        .expect("param attribute docs")
+        .iter()
+        .find(|attr| attr["name"].as_str() == Some("@role"))
+        .expect("@role attribute doc");
+    let role_values = role["values"]
+        .as_array()
+        .expect("@role enum values")
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(role_values, vec!["attack", "decay", "sustain", "release"]);
+}
+
+#[test]
 fn projects_params_and_attributes_as_param_node() {
     let patch = parse("(param cutoff @default 800 @min 20 @max 12000)");
     let node = patch.nodes.iter().find(|node| node.id == "cutoff").unwrap();
@@ -2916,6 +2954,23 @@ fn projects_params_and_attributes_as_param_node() {
     assert_eq!(
         node_display_label(node),
         "param cutoff @default 800 @min 20 @max 12000"
+    );
+}
+
+#[test]
+fn projects_param_ui_metadata_attributes_as_param_node() {
+    let patch = parse(
+        "(param amp_attack @group amp @env amp_env @role attack @default 5 @min 0 @max 1000)",
+    );
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "amp_attack")
+        .unwrap();
+    assert_eq!(node.kind, NodeKind::Param);
+    assert_eq!(
+        node_display_label(node),
+        "param amp_attack @group amp @env amp_env @role attack @default 5 @min 0 @max 1000"
     );
 }
 
@@ -4372,6 +4427,34 @@ fn writeback_root_param_rename_updates_resolved_references_only() {
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
         "(def unresolved (phasor freq))\n(param cutoff @min 1.0 @max 100.0)\n(def a (phasor cutoff))\n(def b (+ cutoff a))"
+    );
+}
+
+#[test]
+fn writeback_root_param_rename_preserves_ui_metadata_attributes() {
+    let source = r#"
+        (param amp_attack @group amp @env amp_env @role attack @default 5 @min 0 @max 1000)
+        (def env_phase (phasor amp_attack))
+    "#;
+    let patch = parse(source);
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Param)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &param.id))
+        .unwrap()
+        .text =
+        "param amp_a @group amp @env amp_env @role attack @default 5 @min 0 @max 1000".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param amp_a @group amp @env amp_env @role attack @default 5.0 @min 0.0 @max 1000.0)\n(def env_phase (phasor amp_a))"
     );
 }
 
@@ -7660,12 +7743,7 @@ fn direct_non_mod_params_inline_on_non_first_inlets() {
         "adsr ? attack decay sustain release"
     );
     assert_eq!(node_display_input_slots(env), vec![1, 2, 3, 4, 5]);
-    for (input_index, name) in [
-        (2, "attack"),
-        (3, "decay"),
-        (4, "sustain"),
-        (5, "release"),
-    ] {
+    for (input_index, name) in [(2, "attack"), (3, "decay"), (4, "sustain"), (5, "release")] {
         let connection = source_connection_for_input(&patch, "env", input_index);
         assert_eq!(connection.presentation, InputPresentation::InlineRawParam);
         assert_eq!(connection.presentation_override, None);
@@ -7689,6 +7767,120 @@ fn direct_non_mod_params_inline_on_non_first_inlets() {
     let input_indices = patch_input_indices(&patch);
     assert_eq!(
         input_indices.get("env").map(Vec::as_slice),
+        Some(&[0, 1][..])
+    );
+}
+
+#[test]
+fn metadata_params_inline_on_non_first_inlets() {
+    let patch = parse(
+        r#"
+            (def gate (in 1 @name gate))
+            (def trigger (in 2 @name trigger))
+            (param attack @group amp @env amp-env @role attack @default 5)
+            (param decay @group amp @env amp-env @role decay @default 120)
+            (param sustain @group amp @env amp-env @role sustain @default 0.8)
+            (param release @group amp @env amp-env @role release @default 180)
+            (def env (adsr gate trigger attack decay sustain release))
+            "#,
+    );
+    let env = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "env")
+        .expect("env node");
+
+    assert_eq!(
+        node_display_label(env),
+        "adsr ? attack decay sustain release"
+    );
+    assert_eq!(node_display_input_slots(env), vec![1, 2, 3, 4, 5]);
+    for (input_index, name) in [(2, "attack"), (3, "decay"), (4, "sustain"), (5, "release")] {
+        let connection = source_connection_for_input(&patch, "env", input_index);
+        assert_eq!(connection.presentation, InputPresentation::InlineRawParam);
+        assert_eq!(connection.presentation_override, None);
+        assert_eq!(
+            env.inline_inputs
+                .get(input_index)
+                .and_then(|input| input.as_ref())
+                .map(|input| input.label()),
+            Some(name.to_string())
+        );
+    }
+    assert_eq!(
+        source_connection_for_input(&patch, "env", 0).presentation,
+        InputPresentation::Cable
+    );
+    assert_eq!(
+        source_connection_for_input(&patch, "env", 1).presentation,
+        InputPresentation::Cable
+    );
+    assert_eq!(
+        patch_input_indices(&patch).get("env").map(Vec::as_slice),
+        Some(&[0, 1][..])
+    );
+}
+
+#[test]
+fn moving_metadata_param_preserves_inline_adsr_param_presentation() {
+    let root_patch = parse(
+        r#"
+            (def gate (in 1 @name gate))
+            (def trigger (in 2 @name trigger))
+            (param attack @group amp @env amp-env @role attack @default 5 @min 0 @max 1000 @unit ms)
+            (param decay @group amp @env amp-env @role decay @default 120 @min 1 @max 2000 @unit ms)
+            (param sustain @group amp @env amp-env @role sustain @default 0.8 @min 0 @max 1)
+            (param release @group amp @env amp-env @role release @default 180 @min 1 @max 5000 @unit ms)
+            (def env (adsr gate trigger attack decay sustain release))
+            "#,
+    );
+    let attack = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "attack")
+        .expect("attack param");
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(
+        &mut state,
+        "root",
+        attack,
+        (attack.position.0 + 8.0, attack.position.1 + 2.0),
+        node_display_label(attack),
+    );
+
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    let attack = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "attack")
+        .expect("moved attack param");
+    assert_eq!(
+        attack.param.as_ref().map(|param| param.name.as_str()),
+        Some("attack")
+    );
+
+    let env = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "env")
+        .expect("env node");
+    assert_eq!(
+        node_display_label(env),
+        "adsr ? attack decay sustain release"
+    );
+    for (input_index, name) in [(2, "attack"), (3, "decay"), (4, "sustain"), (5, "release")] {
+        let connection = source_connection_for_input(&patch, "env", input_index);
+        assert_eq!(connection.presentation, InputPresentation::InlineRawParam);
+        assert_eq!(
+            env.inline_inputs
+                .get(input_index)
+                .and_then(|input| input.as_ref())
+                .map(|input| input.label()),
+            Some(name.to_string())
+        );
+    }
+    assert_eq!(
+        patch_input_indices(&patch).get("env").map(Vec::as_slice),
         Some(&[0, 1][..])
     );
 }
@@ -7774,9 +7966,14 @@ fn modulatable_params_inline_only_when_read_through_nested_mod() {
         .expect("scaled node");
     let gain_connection = source_connection_for_input(&direct, "scaled", 1);
     assert_eq!(gain_connection.presentation, InputPresentation::Cable);
-    assert_eq!(scaled.inline_inputs.get(1).and_then(|input| input.as_ref()), None);
     assert_eq!(
-        patch_input_indices(&direct).get("scaled").map(Vec::as_slice),
+        scaled.inline_inputs.get(1).and_then(|input| input.as_ref()),
+        None
+    );
+    assert_eq!(
+        patch_input_indices(&direct)
+            .get("scaled")
+            .map(Vec::as_slice),
         Some(&[0, 1][..])
     );
 
@@ -7800,13 +7997,83 @@ fn modulatable_params_inline_only_when_read_through_nested_mod() {
         .expect("scaled node");
     assert_eq!(node_display_label(scaled), "* gain~");
     assert_eq!(
-        patch_input_indices(&modulated).get("scaled").map(Vec::as_slice),
+        patch_input_indices(&modulated)
+            .get("scaled")
+            .map(Vec::as_slice),
         Some(&[0][..])
     );
     assert!(
         ordered_patch_nodes(&modulated, &PatcherInteractionState::default(), "root")
             .iter()
             .all(|node| node.op != "mod")
+    );
+}
+
+#[test]
+fn moving_metadata_mod_param_preserves_inline_mod_presentation() {
+    let root_patch = parse(
+        r#"
+            (def signal (in 1))
+            (param cutoff @group filter @env filter_env @role cutoff @default 1000 @min 50 @max 10000 @mod true @mod-mode additive)
+            (param res @group filter @env filter_env @role resonance @default 1 @min 0.5 @max 10 @mod true @mod-mode additive)
+            (def filtered (svf signal (mod cutoff) (mod res) 0))
+            "#,
+    );
+    let cutoff = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "cutoff")
+        .expect("cutoff param");
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(
+        &mut state,
+        "root",
+        cutoff,
+        (cutoff.position.0 + 4.0, cutoff.position.1 + 2.0),
+        node_display_label(cutoff),
+    );
+
+    let patch = patch_with_interaction_state(root_patch, &state, "root");
+    let cutoff = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "cutoff")
+        .expect("moved cutoff param");
+    assert_eq!(
+        cutoff.param.as_ref().map(|param| (param.name.as_str(), param.modulatable)),
+        Some(("cutoff", true))
+    );
+
+    let filtered = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    assert_eq!(node_display_label(filtered), "svf cutoff~ res~ 0");
+    for (input_index, name) in [(1, "cutoff~"), (2, "res~")] {
+        let connection = source_connection_for_input(&patch, "filtered", input_index);
+        assert_eq!(
+            connection.presentation,
+            InputPresentation::InlineModParam
+        );
+        assert_eq!(
+            filtered
+                .inline_inputs
+                .get(input_index)
+                .and_then(|input| input.as_ref())
+                .map(|input| input.label()),
+            Some(name.to_string())
+        );
+    }
+    assert!(
+        ordered_patch_nodes(&patch, &PatcherInteractionState::default(), "root")
+            .iter()
+            .all(|node| node.op != "mod"),
+        "touching a modulatable param must not expose the hidden mod accessor nodes"
+    );
+    assert_eq!(
+        patch_input_indices(&patch).get("filtered").map(Vec::as_slice),
+        Some(&[0][..])
     );
 }
 
@@ -7832,13 +8099,10 @@ fn generated_layout_sidecar_omits_inlined_mod_nodes_and_cables() {
     assert_eq!(node_display_label(scaled), "* gain~");
     assert!(hidden_inline_node_ids(&patch).contains(&mod_node.id));
 
-    let layout_json: serde_json::Value =
-        serde_json::from_str(&sidecar::current_layout_json(
-            &patch,
-            &PatcherInteractionState::default(),
-        )
-        .unwrap())
-        .unwrap();
+    let layout_json: serde_json::Value = serde_json::from_str(
+        &sidecar::current_layout_json(&patch, &PatcherInteractionState::default()).unwrap(),
+    )
+    .unwrap();
     assert!(
         layout_json["root"]["nodes"]
             .as_object()
@@ -7892,14 +8156,14 @@ fn cable_presentation_override_exposes_default_inline_param() {
         attack_connection.presentation_override,
         Some(InputPresentation::Cable)
     );
-    assert_eq!(env.inline_inputs.get(2).and_then(|input| input.as_ref()), None);
+    assert_eq!(
+        env.inline_inputs.get(2).and_then(|input| input.as_ref()),
+        None
+    );
 
     let layout_json: serde_json::Value =
         serde_json::from_str(&sidecar::current_layout_json(&patch, &state).unwrap()).unwrap();
-    assert_eq!(
-        layout_json["root"]["inputPresentation"]["env:2"],
-        "cable"
-    );
+    assert_eq!(layout_json["root"]["inputPresentation"]["env:2"], "cable");
 }
 
 #[test]

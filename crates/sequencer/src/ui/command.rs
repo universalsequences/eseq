@@ -564,8 +564,8 @@ mod tests {
     };
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, SequencerState, StepSlotPlocks, StepSnapshot,
-        TrackSendSnapshot, SwingResolution, Timebase, NUM_PARAMS,
+        default_empty_effect_chain, SequencerState, StepSlotPlocks, StepSnapshot, SwingResolution,
+        Timebase, TrackSendSnapshot, NUM_PARAMS,
     };
     use crate::ui::{App, AudioBuses};
 
@@ -608,6 +608,7 @@ mod tests {
                     node_param_idx: 10,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "__dgen_mod_active__xyz".to_string(),
@@ -619,6 +620,7 @@ mod tests {
                     node_param_idx: 11,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "mod xyz slot 1 amt".to_string(),
@@ -630,6 +632,7 @@ mod tests {
                     node_param_idx: 12,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "mod xyz slot 2 amt".to_string(),
@@ -641,6 +644,7 @@ mod tests {
                     node_param_idx: 13,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         }
@@ -673,21 +677,25 @@ mod tests {
 
     #[test]
     fn live_mixer_commands_do_not_publish_scheduler_snapshots() {
-        assert!(!command_mutates_sequencer_state(&AppCommand::SetTrackVolume {
-            track: 0,
-            value: 0.8,
-        }));
+        assert!(!command_mutates_sequencer_state(
+            &AppCommand::SetTrackVolume {
+                track: 0,
+                value: 0.8,
+            }
+        ));
         assert!(!command_mutates_sequencer_state(&AppCommand::SetTrackPan {
             track: 0,
             value: -0.25,
         }));
-        assert!(!command_mutates_sequencer_state(&AppCommand::SetTrackSends {
-            track: 0,
-            sends: vec![TrackSendSnapshot {
-                destination: crate::sequencer::BusId(1),
-                amount: 0.5,
-            }],
-        }));
+        assert!(!command_mutates_sequencer_state(
+            &AppCommand::SetTrackSends {
+                track: 0,
+                sends: vec![TrackSendSnapshot {
+                    destination: crate::sequencer::BusId(1),
+                    amount: 0.5,
+                }],
+            }
+        ));
         assert!(!command_mutates_sequencer_state(
             &AppCommand::SetMasterVolume { value: 1.1 }
         ));
@@ -699,12 +707,16 @@ mod tests {
             track: 0,
             step: 0,
         }));
-        assert!(command_mutates_sequencer_state(&AppCommand::SetInstrumentParam {
-            track: 0,
-            param_idx: 0,
-            value: 0.5,
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(&AppCommand::SetBpm {
+            bpm: 128
         }));
-        assert!(command_mutates_sequencer_state(&AppCommand::SetBpm { bpm: 128 }));
     }
 
     #[test]

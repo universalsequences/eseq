@@ -240,6 +240,8 @@ pub struct DGenManifest {
     pub dylib_path: PathBuf,
     pub total_memory_slots: usize,
     pub params: Vec<DGenParam>,
+    pub groups: Vec<DGenUiGroup>,
+    pub envelopes: Vec<DGenEnvelope>,
     pub inputs: Vec<DGenInput>,
     pub modulators: Vec<DGenModulator>,
     pub mod_destinations: Vec<DGenModDestination>,
@@ -261,6 +263,29 @@ pub struct DGenParam {
     pub max: f32,
     pub unit: Option<String>,
     pub hidden: bool,
+    pub group: Option<String>,
+    pub env: Option<String>,
+    pub role: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct DGenUiGroup {
+    pub name: String,
+}
+
+#[derive(Clone)]
+pub struct DGenEnvelope {
+    pub name: String,
+    pub group: Option<String>,
+    pub roles: DGenEnvelopeRoles,
+}
+
+#[derive(Clone, Default)]
+pub struct DGenEnvelopeRoles {
+    pub attack: Option<String>,
+    pub decay: Option<String>,
+    pub sustain: Option<String>,
+    pub release: Option<String>,
 }
 
 #[derive(Clone)]
@@ -616,6 +641,43 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
                     max: p["max"].as_f64().unwrap_or(1.0) as f32,
                     unit: p["unit"].as_str().map(|s| s.to_string()),
                     hidden: p["hidden"].as_bool().unwrap_or(false),
+                    group: p["group"].as_str().map(|s| s.to_string()),
+                    env: p["env"].as_str().map(|s| s.to_string()),
+                    role: p["role"].as_str().map(|s| s.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let groups = v["groups"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|group| {
+                    Some(DGenUiGroup {
+                        name: group["name"].as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let envelopes = v["envelopes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|env| {
+                    let roles = &env["roles"];
+                    Some(DGenEnvelope {
+                        name: env["name"].as_str()?.to_string(),
+                        group: env["group"].as_str().map(|s| s.to_string()),
+                        roles: DGenEnvelopeRoles {
+                            attack: roles["attack"].as_str().map(|s| s.to_string()),
+                            decay: roles["decay"].as_str().map(|s| s.to_string()),
+                            sustain: roles["sustain"].as_str().map(|s| s.to_string()),
+                            release: roles["release"].as_str().map(|s| s.to_string()),
+                        },
+                    })
                 })
                 .collect()
         })
@@ -725,6 +787,8 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
         dylib_path,
         total_memory_slots: v["totalMemorySlots"].as_u64().unwrap_or(256) as usize,
         params,
+        groups,
+        envelopes,
         inputs,
         modulators,
         mod_destinations,
@@ -823,6 +887,7 @@ fn append_dgen_modulation_target_params(
             node_param_idx: (HEADER_SLOTS + dest.active_cell_id) as u32,
             node_param_span: active_span,
             host_control: None,
+            ui_metadata: None,
         });
         for lane in &dest.depth_lanes {
             let depth_default = param_by_cell
@@ -859,6 +924,7 @@ fn append_dgen_modulation_target_params(
                 node_param_idx: (HEADER_SLOTS + lane.depth_cell_id) as u32,
                 node_param_span: depth_span,
                 host_control: None,
+                ui_metadata: None,
             });
             if let Some(base_param_idx) = base_param_idx {
                 desc.instrument_modulation_targets.push(
@@ -6453,6 +6519,7 @@ fn parse_midi_fx_param_descriptor(
         node_param_idx: 0,
         node_param_span: 1,
         host_control: None,
+        ui_metadata: None,
     })
 }
 
@@ -7514,6 +7581,83 @@ mod tests {
         assert_eq!(manifest.params[0].cell_span, 1);
         assert_eq!(manifest.params[1].cell_span, 1);
         assert_eq!(manifest.params[2].cell_span, 4);
+        assert!(manifest.params.iter().all(|param| param.group.is_none()));
+        assert!(manifest.params.iter().all(|param| param.env.is_none()));
+        assert!(manifest.params.iter().all(|param| param.role.is_none()));
+        assert!(manifest.groups.is_empty());
+        assert!(manifest.envelopes.is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_reads_ui_metadata() {
+        let manifest = parse_manifest(
+            r#"{
+                "dylib": "test.dylib",
+                "totalMemorySlots": 16,
+                "params": [
+                    {
+                        "name": "amp_attack",
+                        "cellId": 2,
+                        "default": 0.01,
+                        "min": 0,
+                        "max": 2,
+                        "group": "amp",
+                        "env": "amp_env",
+                        "role": "attack"
+                    },
+                    {
+                        "name": "cutoff",
+                        "cellId": 3,
+                        "default": 1000,
+                        "min": 20,
+                        "max": 20000,
+                        "group": "filter"
+                    }
+                ],
+                "groups": [
+                    { "name": "amp" },
+                    { "name": "filter" }
+                ],
+                "envelopes": [
+                    {
+                        "name": "amp_env",
+                        "group": "amp",
+                        "roles": {
+                            "attack": "amp_attack",
+                            "decay": "amp_decay",
+                            "sustain": "amp_sustain",
+                            "release": "amp_release"
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(manifest.params[0].group.as_deref(), Some("amp"));
+        assert_eq!(manifest.params[0].env.as_deref(), Some("amp_env"));
+        assert_eq!(manifest.params[0].role.as_deref(), Some("attack"));
+        assert_eq!(manifest.params[1].group.as_deref(), Some("filter"));
+        assert_eq!(manifest.params[1].env, None);
+        assert_eq!(
+            manifest
+                .groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["amp", "filter"]
+        );
+        assert_eq!(manifest.envelopes.len(), 1);
+        assert_eq!(manifest.envelopes[0].name, "amp_env");
+        assert_eq!(manifest.envelopes[0].group.as_deref(), Some("amp"));
+        assert_eq!(
+            manifest.envelopes[0].roles.attack.as_deref(),
+            Some("amp_attack")
+        );
+        assert_eq!(
+            manifest.envelopes[0].roles.release.as_deref(),
+            Some("amp_release")
+        );
     }
 
     #[test]
@@ -7531,6 +7675,9 @@ mod tests {
                     max: 1.0,
                     unit: None,
                     hidden: false,
+                    group: None,
+                    env: None,
+                    role: None,
                 },
                 DGenParam {
                     name: "vector".to_string(),
@@ -7541,8 +7688,13 @@ mod tests {
                     max: 1.0,
                     unit: None,
                     hidden: false,
+                    group: None,
+                    env: None,
+                    role: None,
                 },
             ],
+            groups: Vec::new(),
+            envelopes: Vec::new(),
             inputs: Vec::new(),
             modulators: Vec::new(),
             mod_destinations: Vec::new(),
@@ -8026,6 +8178,9 @@ mod tests {
                 max: 1.0,
                 unit: None,
                 hidden: false,
+                group: None,
+                env: None,
+                role: None,
             }],
             0,
             0,
@@ -8069,6 +8224,9 @@ mod tests {
                 max: 1.0,
                 unit: None,
                 hidden: false,
+                group: None,
+                env: None,
+                role: None,
             }],
             2,
             2,
@@ -8112,6 +8270,9 @@ mod tests {
                 max: 1.0,
                 unit: None,
                 hidden: false,
+                group: None,
+                env: None,
+                role: None,
             }],
             0,
             0,

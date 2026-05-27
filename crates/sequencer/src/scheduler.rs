@@ -2125,6 +2125,7 @@ mod tests {
                     node_param_idx: 12,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "mod1_source".to_string(),
@@ -2139,6 +2140,7 @@ mod tests {
                         + crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -2194,6 +2196,7 @@ mod tests {
                     node_param_idx: 105,
                     node_param_span: 4,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "__dgen_mod_active__cutoff".to_string(),
@@ -2205,6 +2208,7 @@ mod tests {
                     node_param_idx: 109,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };

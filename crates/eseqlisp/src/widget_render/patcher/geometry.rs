@@ -13,7 +13,7 @@ use super::model::{
     ArgValue, CableEndpoint, InputPortRef, InputPresentation, OutputPortRef, Patch,
     PatchConnection, PatchNode, connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
-use super::state::{source_connection_id, NodeResizeCorner, PatcherPanState};
+use super::state::{NodeResizeCorner, PatcherPanState, source_connection_id};
 
 pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
     let input_indices = patch_input_indices(patch);

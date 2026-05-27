@@ -1,0 +1,471 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 69.909996,
+        "y": 26.982498
+      },
+      "add1": {
+        "x": 94.490974,
+        "y": 36.519657
+      },
+      "add2": {
+        "x": 27.948385,
+        "y": 32.42896
+      },
+      "adsr1": {
+        "x": 85.42,
+        "y": 28.562498
+      },
+      "adsr2": {
+        "x": 17.92259,
+        "y": 52.95281
+      },
+      "attack": {
+        "x": -20.623077,
+        "y": 4.5688763
+      },
+      "audio": {
+        "x": 72.70999,
+        "y": 48.5293
+      },
+      "clip1": {
+        "x": 96.65934,
+        "y": 39.0198
+      },
+      "cos1": {
+        "x": 43.497437,
+        "y": 31.953938
+      },
+      "cos2": {
+        "x": 9.933445,
+        "y": 34.68527
+      },
+      "cutoff": {
+        "x": 126.21597,
+        "y": 23.12812
+      },
+      "decay": {
+        "x": -20.623077,
+        "y": 7.2488766
+      },
+      "env": {
+        "x": 85.42,
+        "y": 20.3
+      },
+      "filter.attack": {
+        "x": 129.52986,
+        "y": 37.025627
+      },
+      "filter.decay": {
+        "x": 129.73103,
+        "y": 39.162872
+      },
+      "filter.env": {
+        "x": 129.73103,
+        "y": 49.016384
+      },
+      "filter.release": {
+        "x": 130.41696,
+        "y": 44.21649
+      },
+      "filter.sustain": {
+        "x": 130.41696,
+        "y": 41.79658
+      },
+      "fm.attack": {
+        "x": -25.446316,
+        "y": 38.487564
+      },
+      "fm.decay": {
+        "x": -25.75784,
+        "y": 41.32403
+      },
+      "fm.release": {
+        "x": -26.692549,
+        "y": 46.9493
+      },
+      "fm.sustain": {
+        "x": -25.75784,
+        "y": 44.03225
+      },
+      "gain": {
+        "x": -20.623077,
+        "y": 15.2888775
+      },
+      "gate": {
+        "x": 124.70999,
+        "y": 8.0
+      },
+      "harmonicity": {
+        "x": -21.460865,
+        "y": 20.80347
+      },
+      "hicut": {
+        "x": 126.21597,
+        "y": 28.89799
+      },
+      "hires": {
+        "x": 126.21597,
+        "y": 32.532883
+      },
+      "index": {
+        "x": -52.801758,
+        "y": 27.781319
+      },
+      "modulated1": {
+        "x": -17.34266,
+        "y": 23.729908
+      },
+      "mul1": {
+        "x": 91.358025,
+        "y": 32.24552
+      },
+      "mul2": {
+        "x": 38.116768,
+        "y": 27.268814
+      },
+      "mul3": {
+        "x": 7.6350346,
+        "y": 25.055767
+      },
+      "mul4": {
+        "x": -9.755272,
+        "y": 33.460262
+      },
+      "mul5": {
+        "x": -8.150675,
+        "y": 35.709095
+      },
+      "mul6": {
+        "x": 9.27845,
+        "y": 31.31792
+      },
+      "mul7": {
+        "x": 96.89232,
+        "y": 34.463356
+      },
+      "phase": {
+        "x": 72.81,
+        "y": 20.3
+      },
+      "phasor1": {
+        "x": 9.115922,
+        "y": 28.117662
+      },
+      "pitch": {
+        "x": 72.81,
+        "y": 8.0
+      },
+      "pitch-glide1": {
+        "x": 82.60999,
+        "y": 2.9888763
+      },
+      "portamento": {
+        "x": 97.38016,
+        "y": -5.490098
+      },
+      "release": {
+        "x": -20.623077,
+        "y": 12.608877
+      },
+      "res": {
+        "x": 126.21597,
+        "y": 25.97956
+      },
+      "sustain": {
+        "x": -20.623077,
+        "y": 9.928877
+      },
+      "svf1": {
+        "x": 72.70999,
+        "y": 37.262726
+      },
+      "svf2": {
+        "x": 72.70999,
+        "y": 39.817554
+      },
+      "triangle1": {
+        "x": 39.37026,
+        "y": 24.727997
+      },
+      "trigger": {
+        "x": 147.76,
+        "y": 8.0
+      },
+      "trishape": {
+        "x": -20.623077,
+        "y": 17.989794
+      },
+      "velocity": {
+        "x": 97.02,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "cutoff:0->add1:1": {
+        "segmented": true,
+        "y": 34.050003
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 24.431248
+      },
+      "filter.attack:0->adsr1:2": {
+        "segmented": true,
+        "y": 15.290001
+      },
+      "filter.decay:0->adsr1:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "filter.env:0->mul1:1": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "filter.release:0->adsr1:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "filter.sustain:0->adsr1:4": {
+        "segmented": true,
+        "y": 20.650002
+      },
+      "fm.attack:0->adsr2:2": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "fm.decay:0->adsr2:3": {
+        "segmented": true,
+        "y": 15.290001
+      },
+      "fm.release:0->adsr2:5": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "fm.sustain:0->adsr2:4": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 15.490001
+      },
+      "portamento:0->pitch-glide1:1": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 19.830002
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 19.01
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.730001
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 18.170002
+      }
+    },
+    "inputPresentation": {
+      "*#0:0": "cable",
+      "add1:0": "cable",
+      "add1:1": "inline-raw-param",
+      "add2:0": "cable",
+      "add2:1": "cable",
+      "adsr1:0": "cable",
+      "adsr1:1": "cable",
+      "adsr2:0": "cable",
+      "adsr2:1": "cable",
+      "audio:0": "cable",
+      "clip1:0": "cable",
+      "cos1:0": "cable",
+      "cos2:0": "cable",
+      "modulated1:0": "cable",
+      "mul1:0": "cable",
+      "mul2:0": "cable",
+      "mul3:0": "cable",
+      "mul3:1": "cable",
+      "mul4:0": "cable",
+      "mul4:1": "inline-mod-param",
+      "mul5:0": "cable",
+      "mul5:1": "cable",
+      "mul6:0": "cable",
+      "mul7:0": "cable",
+      "phase:0": "cable",
+      "phasor1:0": "cable",
+      "pitch-glide1:0": "cable",
+      "pitch-glide1:1": "inline-raw-param",
+      "svf1:0": "cable",
+      "svf1:1": "cable",
+      "svf1:2": "inline-mod-param",
+      "svf2:0": "cable",
+      "svf2:1": "inline-mod-param",
+      "svf2:2": "inline-mod-param",
+      "triangle1:0": "cable",
+      "triangle1:1": "inline-mod-param"
+    }
+  },
+  "macros": {
+    "pitch-glide": {
+      "nodes": {
+        "*#0": {
+          "x": 41.549995,
+          "y": 17.365
+        },
+        "*#1": {
+          "x": 15.9349985,
+          "y": 44.094997
+        },
+        "*#2": {
+          "x": 52.905,
+          "y": 37.4125
+        },
+        "-#0": {
+          "x": 42.804996,
+          "y": 37.4125
+        },
+        "-1": {
+          "x": 54.159996,
+          "y": 17.365
+        },
+        "/#0": {
+          "x": 42.804996,
+          "y": 24.0475
+        },
+        "1": {
+          "x": 42.804996,
+          "y": 30.73
+        },
+        "clip#0": {
+          "x": 10.379999,
+          "y": 10.6825
+        },
+        "coef": {
+          "x": 51.604996,
+          "y": 30.73
+        },
+        "glide_ms": {
+          "x": 38.07,
+          "y": 4.0
+        },
+        "h": {
+          "x": 41.403435,
+          "y": 50.777496
+        },
+        "out": {
+          "x": 53.059196,
+          "y": 64.142494
+        },
+        "pitch_hz": {
+          "x": 10.379999,
+          "y": 4.0
+        },
+        "return": {
+          "x": 53.39,
+          "y": 57.459995
+        },
+        "smoothed": {
+          "x": 52.905,
+          "y": 50.777496
+        },
+        "t_ms": {
+          "x": 36.329994,
+          "y": 10.6825
+        },
+        "target": {
+          "x": 16.419998,
+          "y": 17.365
+        }
+      },
+      "cables": {
+        "*#0:0->/#0:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "*#1:0->smoothed:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "*#2:0->smoothed:1": {
+          "segmented": true,
+          "y": 43.644997
+        },
+        "-#0:0->*#1:1": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "-1:0->/#0:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "/#0:0->coef:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "1:0->-#0:0": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "clip#0:0->target:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "coef:0->*#2:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "coef:0->-#0:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "glide_ms:0->t_ms:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "h:0->*#2:0": {
+          "segmented": true,
+          "y": 44.885
+        },
+        "pitch_hz:0->clip#0:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 61.591248
+        },
+        "smoothed:0->h:0": {
+          "segmented": true,
+          "y": 54.362247
+        },
+        "smoothed:0->return:0": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "t_ms:0->*#0:0": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "target:0->*#1:0": {
+          "segmented": true,
+          "y": 31.519999
+        }
+      }
+    }
+  }
+}

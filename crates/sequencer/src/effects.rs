@@ -28,6 +28,23 @@ pub enum HostControl {
     FxSidechain { input_channel: usize },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamUiMetadata {
+    pub group: Option<String>,
+    pub env: Option<String>,
+    pub role: Option<String>,
+}
+
+impl ParamUiMetadata {
+    pub fn new(group: Option<String>, env: Option<String>, role: Option<String>) -> Option<Self> {
+        if group.is_none() && env.is_none() && role.is_none() {
+            None
+        } else {
+            Some(Self { group, env, role })
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct InstrumentModulatorDescriptor {
     pub slot: usize,
@@ -67,6 +84,7 @@ pub struct ParamDescriptor {
     pub node_param_idx: u32,  // index into audio node's state array
     pub node_param_span: u32, // number of contiguous state cells that share this value
     pub host_control: Option<HostControl>,
+    pub ui_metadata: Option<ParamUiMetadata>,
 }
 
 impl ParamDescriptor {
@@ -247,6 +265,7 @@ mod tests {
             node_param_idx: 0,
             node_param_span: 1,
             host_control: None,
+            ui_metadata: None,
         };
 
         assert_eq!(desc.denormalize(0.49), 0.0);
@@ -267,6 +286,7 @@ mod tests {
             node_param_idx: 0,
             node_param_span: 1,
             host_control: None,
+            ui_metadata: None,
         };
 
         let value = desc.denormalize(0.5);
@@ -286,6 +306,7 @@ mod tests {
                 node_param_idx: 1_000 + idx as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             })
             .collect();
         let desc = EffectDescriptor {
@@ -319,6 +340,7 @@ mod tests {
                 node_param_idx: 2_000 + idx as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             })
             .collect();
         let desc = EffectDescriptor {
@@ -359,6 +381,7 @@ mod tests {
                     node_param_idx: 3,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "b".to_string(),
@@ -370,6 +393,7 @@ mod tests {
                     node_param_idx: 4,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -390,6 +414,7 @@ mod tests {
                     node_param_idx: 10,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "b".to_string(),
@@ -401,6 +426,7 @@ mod tests {
                     node_param_idx: 11,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -443,6 +469,7 @@ mod tests {
                     node_param_idx: 3,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "gain".to_string(),
@@ -454,6 +481,7 @@ mod tests {
                     node_param_idx: 4,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -474,6 +502,7 @@ mod tests {
                     node_param_idx: 10,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -487,6 +516,7 @@ mod tests {
                     node_param_idx: 11,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -529,6 +559,7 @@ mod tests {
                     node_param_idx: 3,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "gain".to_string(),
@@ -540,6 +571,7 @@ mod tests {
                     node_param_idx: 4,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -562,6 +594,7 @@ mod tests {
                     node_param_idx: 10,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "gain".to_string(),
@@ -573,6 +606,7 @@ mod tests {
                     node_param_idx: 11,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -610,6 +644,7 @@ mod tests {
                     node_param_idx: 12,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "enabled".to_string(),
@@ -621,6 +656,7 @@ mod tests {
                     node_param_idx: crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -646,6 +682,9 @@ mod tests {
                 max: 20_000.0,
                 unit: Some("Hz".to_string()),
                 hidden: false,
+                group: None,
+                env: None,
+                role: None,
             }],
             0,
             1,
@@ -655,6 +694,58 @@ mod tests {
             desc.params[0].node_param_idx,
             (crate::lisp_effect::HEADER_SLOTS + 12) as u32
         );
+    }
+
+    #[test]
+    fn lisp_manifest_params_preserve_visible_ui_metadata_only() {
+        let desc = EffectDescriptor::from_lisp_manifest(
+            "custom",
+            &[
+                crate::lisp_effect::DGenParam {
+                    name: "amp_attack".to_string(),
+                    cell_id: 2,
+                    cell_span: 1,
+                    default: 0.01,
+                    min: 0.0,
+                    max: 2.0,
+                    unit: None,
+                    hidden: false,
+                    group: Some("amp".to_string()),
+                    env: Some("amp_env".to_string()),
+                    role: Some("attack".to_string()),
+                },
+                crate::lisp_effect::DGenParam {
+                    name: "hidden_release".to_string(),
+                    cell_id: 3,
+                    cell_span: 1,
+                    default: 0.1,
+                    min: 0.0,
+                    max: 2.0,
+                    unit: None,
+                    hidden: true,
+                    group: Some("amp".to_string()),
+                    env: Some("amp_env".to_string()),
+                    role: Some("release".to_string()),
+                },
+            ],
+            0,
+            1,
+        );
+
+        assert_eq!(
+            desc.params.len(),
+            2,
+            "visible param plus generated enabled param"
+        );
+        let ui = desc.params[0]
+            .ui_metadata
+            .as_ref()
+            .expect("visible DGen param keeps metadata");
+        assert_eq!(ui.group.as_deref(), Some("amp"));
+        assert_eq!(ui.env.as_deref(), Some("amp_env"));
+        assert_eq!(ui.role.as_deref(), Some("attack"));
+        assert_eq!(desc.params[1].name, "enabled");
+        assert!(desc.params[1].ui_metadata.is_none());
     }
 
     #[test]
@@ -1058,6 +1149,7 @@ impl EffectDescriptor {
             node_param_idx,
             node_param_span: 1,
             host_control: None,
+            ui_metadata: None,
         }
     }
 
@@ -1152,6 +1244,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_MODE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -1165,6 +1258,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_CUTOFF as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "resonance".to_string(),
@@ -1176,6 +1270,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_RESONANCE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "drive".to_string(),
@@ -1189,6 +1284,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_DRIVE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "wet".to_string(),
@@ -1202,6 +1298,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_WET as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "lfo amt".to_string(),
@@ -1215,6 +1312,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_AMOUNT as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "lfo rate".to_string(),
@@ -1228,6 +1326,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_RATE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "lfo sync".to_string(),
@@ -1239,6 +1338,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_SYNCED as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "lfo div".to_string(),
@@ -1264,6 +1364,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_DIVISION as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "lfo wave".to_string(),
@@ -1284,6 +1385,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_WAVE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "lfo phase".to_string(),
@@ -1297,6 +1399,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_PHASE_OFFSET as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "env amt".to_string(),
@@ -1310,6 +1413,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_ENV_AMOUNT as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "env attack".to_string(),
@@ -1323,6 +1427,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_ENV_ATTACK_MS as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "env release".to_string(),
@@ -1336,6 +1441,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_ENV_RELEASE_MS as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "slope".to_string(),
@@ -1349,6 +1455,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::filter::FILTER_PARAM_SLOPE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         };
@@ -1379,6 +1486,7 @@ impl EffectDescriptor {
                 node_param_idx: node_param_idx as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             });
             desc.instrument_modulation_targets
                 .push(InstrumentModulationTarget {
@@ -1416,6 +1524,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::sampler::PARAM_ATTACK_SAMPLES as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "synced".to_string(),
@@ -1427,6 +1536,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::sampler::PARAM_RELEASE_SAMPLES as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "time".to_string(),
@@ -1440,6 +1550,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::sampler::PARAM_START_POINT as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "feedback".to_string(),
@@ -1451,6 +1562,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::sampler::PARAM_END_POINT as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "dampening".to_string(),
@@ -1462,6 +1574,7 @@ impl EffectDescriptor {
                     node_param_idx: 4,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "width".to_string(),
@@ -1473,6 +1586,7 @@ impl EffectDescriptor {
                     node_param_idx: 5,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 Self::enabled_param(crate::delay::DELAY_PARAM_ENABLED as u32, 1.0),
             ],
@@ -1515,6 +1629,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_WET as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "feedback".to_string(),
@@ -1526,6 +1641,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FEEDBACK as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "left sync".to_string(),
@@ -1537,6 +1653,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_SYNC as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "left div".to_string(),
@@ -1550,6 +1667,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_DIV as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "left offset".to_string(),
@@ -1563,6 +1681,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_OFFSET as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "left time".to_string(),
@@ -1576,6 +1695,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_TIME_MS as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "right sync".to_string(),
@@ -1587,6 +1707,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_SYNC as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "right div".to_string(),
@@ -1600,6 +1721,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_DIV as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "right offset".to_string(),
@@ -1613,6 +1735,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_OFFSET as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "right time".to_string(),
@@ -1626,6 +1749,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_TIME_MS as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "filter freq".to_string(),
@@ -1639,6 +1763,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FILTER_FREQ as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "filter width".to_string(),
@@ -1650,6 +1775,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FILTER_Q as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "mod rate".to_string(),
@@ -1663,6 +1789,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_RATE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "mod amount".to_string(),
@@ -1676,6 +1803,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_AMOUNT as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "mod phase".to_string(),
@@ -1689,6 +1817,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_PHASE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         }
@@ -1713,6 +1842,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_SPEED as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "length".to_string(),
@@ -1726,6 +1856,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_LENGTH_SEC as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "loop".to_string(),
@@ -1737,6 +1868,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_LOOP as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
             ],
         }
@@ -1764,6 +1896,7 @@ impl EffectDescriptor {
                     node_param_idx: 4,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "size".to_string(),
@@ -1775,6 +1908,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::reverb::REVERB_PARAM_SIZE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "brightness".to_string(),
@@ -1786,6 +1920,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::reverb::REVERB_PARAM_BRIGHT as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "replace".to_string(),
@@ -1797,6 +1932,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::reverb::REVERB_PARAM_REPLACE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 Self::enabled_param(crate::reverb::REVERB_PARAM_ENABLED as u32, 1.0),
             ],
@@ -1833,6 +1969,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_MODE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "amount".to_string(),
@@ -1846,6 +1983,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_AMOUNT as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "attack".to_string(),
@@ -1864,6 +2002,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_ATTACK as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "release".to_string(),
@@ -1882,6 +2021,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_RELEASE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 if mode == 0.0 {
                     ParamDescriptor {
@@ -1901,6 +2041,7 @@ impl EffectDescriptor {
                         node_param_idx: crate::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
                         node_param_span: 1,
                         host_control: None,
+                        ui_metadata: None,
                     }
                 } else {
                     ParamDescriptor {
@@ -1915,6 +2056,7 @@ impl EffectDescriptor {
                         node_param_idx: crate::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
                         node_param_span: 1,
                         host_control: None,
+                        ui_metadata: None,
                     }
                 },
                 ParamDescriptor {
@@ -1929,6 +2071,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_DRIVE as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "output".to_string(),
@@ -1942,6 +2085,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_OUTPUT_DB as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "mix".to_string(),
@@ -1955,6 +2099,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_MIX as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 Self::enabled_param(crate::dynamics::DYNAMICS_PARAM_ENABLED as u32, 1.0),
             ],
@@ -1992,6 +2137,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_THRESHOLD_DB as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "ratio".to_string(),
@@ -2003,6 +2149,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_RATIO as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "attack".to_string(),
@@ -2016,6 +2163,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_ATTACK_MS as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "release".to_string(),
@@ -2029,6 +2177,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_RELEASE_MS as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "makeup".to_string(),
@@ -2042,6 +2191,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_MAKEUP_DB as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "mix".to_string(),
@@ -2055,6 +2205,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_MIX as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 Self::enabled_param(crate::compressor::COMPRESSOR_PARAM_ENABLED as u32, 1.0),
             ],
@@ -2082,6 +2233,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::limiter::LIMITER_PARAM_INPUT_GAIN_DB as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "ceiling".to_string(),
@@ -2095,6 +2247,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::limiter::LIMITER_PARAM_CEILING_DB as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "release".to_string(),
@@ -2108,6 +2261,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::limiter::LIMITER_PARAM_RELEASE_MS as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 ParamDescriptor {
                     name: "lookahead".to_string(),
@@ -2121,6 +2275,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::limiter::LIMITER_PARAM_LOOKAHEAD_MS as u32,
                     node_param_span: 1,
                     host_control: None,
+                    ui_metadata: None,
                 },
                 Self::enabled_param(crate::limiter::LIMITER_PARAM_ENABLED as u32, 1.0),
             ],
@@ -2147,6 +2302,7 @@ impl EffectDescriptor {
                 node_param_idx: 0,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "release".to_string(),
@@ -2160,6 +2316,7 @@ impl EffectDescriptor {
                 node_param_idx: 1,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "start".to_string(),
@@ -2173,6 +2330,7 @@ impl EffectDescriptor {
                 node_param_idx: 2,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "end".to_string(),
@@ -2186,6 +2344,7 @@ impl EffectDescriptor {
                 node_param_idx: 3,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             Self::enabled_param(crate::sampler::SAMPLER_PARAM_ENABLED as u32, 1.0),
             ParamDescriptor {
@@ -2198,6 +2357,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_REVERSE as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "loop".to_string(),
@@ -2216,6 +2376,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_LOOP_MODE as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "xfade".to_string(),
@@ -2229,6 +2390,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_LOOP_XFADE_SAMPLES as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "sr".to_string(),
@@ -2242,6 +2404,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_SR_HZ as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "warp".to_string(),
@@ -2253,6 +2416,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_WARP_ENABLED as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "mode".to_string(),
@@ -2266,6 +2430,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_WARP_MODE as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "bpm".to_string(),
@@ -2277,6 +2442,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_WARP_SAMPLE_BPM as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "speed".to_string(),
@@ -2288,6 +2454,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_SPEED as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "scrub".to_string(),
@@ -2301,6 +2468,7 @@ impl EffectDescriptor {
                 node_param_idx: crate::sampler::PARAM_SCRUB_OFFSET as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
         ];
         params.extend(crate::voice_modulator::ui_param_descriptors());
@@ -2334,6 +2502,7 @@ impl EffectDescriptor {
                 node_param_idx: lane.source_param as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             });
             let depth_param_idx = params.len();
             let (depth_min, depth_max, depth_unit) = sampler_mod_depth_range(name);
@@ -2353,6 +2522,7 @@ impl EffectDescriptor {
                 node_param_idx: lane.depth_param as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             });
             instrument_modulation_targets.push(InstrumentModulationTarget {
                 base_param_idx,
@@ -2377,6 +2547,7 @@ impl EffectDescriptor {
             node_param_idx: crate::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32,
             node_param_span: 1,
             host_control: None,
+            ui_metadata: None,
         });
         Self {
             name: "Sampler".to_string(),
@@ -2440,6 +2611,11 @@ impl EffectDescriptor {
                 node_param_idx: (crate::lisp_effect::HEADER_SLOTS + p.cell_id) as u32,
                 node_param_span: p.cell_span as u32,
                 host_control: None,
+                ui_metadata: crate::effects::ParamUiMetadata::new(
+                    p.group.clone(),
+                    p.env.clone(),
+                    p.role.clone(),
+                ),
             })
             .collect();
         descriptors.push(Self::enabled_param(

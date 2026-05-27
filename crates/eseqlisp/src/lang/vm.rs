@@ -1835,16 +1835,15 @@ impl ReactiveDag {
     fn unindex_source_node(&mut self, source: &ReactiveSource, id: NodeId) {
         match source {
             ReactiveSource::NamespaceField { namespace, field } => {
-                let should_remove_namespace = if let Some(fields) =
-                    self.namespace_field_sources.get_mut(namespace)
-                {
-                    if fields.get(field) == Some(&id) {
-                        fields.remove(field);
-                    }
-                    fields.is_empty()
-                } else {
-                    false
-                };
+                let should_remove_namespace =
+                    if let Some(fields) = self.namespace_field_sources.get_mut(namespace) {
+                        if fields.get(field) == Some(&id) {
+                            fields.remove(field);
+                        }
+                        fields.is_empty()
+                    } else {
+                        false
+                    };
                 if should_remove_namespace {
                     self.namespace_field_sources.remove(namespace);
                 }
@@ -1857,11 +1856,7 @@ impl ReactiveDag {
         }
     }
 
-    pub fn find_namespace_field_source_node(
-        &self,
-        namespace: &str,
-        field: &str,
-    ) -> Option<NodeId> {
+    pub fn find_namespace_field_source_node(&self, namespace: &str, field: &str) -> Option<NodeId> {
         self.namespace_field_sources
             .get(namespace)
             .and_then(|fields| fields.get(field))

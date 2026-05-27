@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use super::super::bump_widget_state_generation;
 use super::super::text_input::TextInputState;
 use crate::layout::LayoutNode;
+use crate::parser::{ASTParser, Expression, Parser};
 use crate::vm::Value;
 
 use super::lisp::{
@@ -1407,6 +1408,7 @@ pub(super) fn node_from_editor_text(
     let known_macros = macro_signatures.keys().cloned().collect::<HashSet<_>>();
     let kind = node_kind_for_op(&op, &known_macros);
     let shape = editor_node_port_shape(&op, kind, macro_signatures);
+    let param = editor_param_node_info(&op, trimmed, &inline_args);
     let args = match kind {
         NodeKind::In => inline_args
             .into_iter()
@@ -1430,8 +1432,6 @@ pub(super) fn node_from_editor_text(
             args
         }
     };
-
-    let param = editor_param_node_info(&op, &args);
 
     PatchNode {
         id: id.to_string(),
@@ -1476,20 +1476,42 @@ pub(super) fn node_from_editor_text(
     }
 }
 
-fn editor_param_node_info(op: &str, args: &[ArgValue]) -> Option<ParamNodeInfo> {
+fn editor_param_node_info(
+    op: &str,
+    text: &str,
+    positional_args: &[String],
+) -> Option<ParamNodeInfo> {
     if op != "param" {
         return None;
     }
-    let name = match args.first() {
-        Some(ArgValue::Literal(name)) => name.clone(),
-        _ => return None,
-    };
-    let modulatable = args.windows(2).any(|pair| {
+    let items = parse_editor_node_items(text).unwrap_or_default();
+    let name = items
+        .get(1)
+        .and_then(|expr| match expr {
+            Expression::Symbol(name) => Some(name.clone()),
+            _ => None,
+        })
+        .or_else(|| positional_args.first().cloned())?;
+    let modulatable = items.windows(2).any(|pair| {
         matches!(
             (&pair[0], &pair[1]),
-            (ArgValue::Literal(key), ArgValue::Literal(value))
+            (Expression::Symbol(key), Expression::Symbol(value))
                 if key == "@mod" && value == "true"
         )
     });
     Some(ParamNodeInfo { name, modulatable })
+}
+
+fn parse_editor_node_items(text: &str) -> Result<Vec<Expression>, String> {
+    let source = format!("({text})");
+    let tokens = Parser::new(source)
+        .parse()
+        .map_err(|error| format!("failed to tokenize node text: {error:?}"))?;
+    let exprs = ASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("failed to parse node text: {error:?}"))?;
+    match exprs.first() {
+        Some(Expression::List(items)) => Ok(items.clone()),
+        _ => Err("node text must parse as a list".to_string()),
+    }
 }

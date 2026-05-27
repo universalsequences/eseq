@@ -4706,9 +4706,10 @@ fn merge_edited_inline_inputs(
     for (token_idx, input_index) in input_slots.into_iter().enumerate() {
         let replacement = &edited_items[token_idx + 1];
         if editor_placeholder_expr(replacement)
-            && node.args.get(input_index).is_some_and(|arg| {
-                matches!(arg, ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr)
-            })
+            && node
+                .args
+                .get(input_index)
+                .is_some_and(|arg| matches!(arg, ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr))
         {
             continue;
         }

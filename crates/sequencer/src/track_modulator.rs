@@ -205,6 +205,7 @@ pub fn descriptor() -> EffectDescriptor {
                 node_param_idx: PARAM_RISE_MS as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
             ParamDescriptor {
                 name: "fall".to_string(),
@@ -218,6 +219,7 @@ pub fn descriptor() -> EffectDescriptor {
                 node_param_idx: PARAM_FALL_MS as u32,
                 node_param_span: 1,
                 host_control: None,
+                ui_metadata: None,
             },
         ],
     }

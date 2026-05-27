@@ -268,7 +268,8 @@ fn is_param_metadata_attribute(expr: &Expression) -> bool {
         Expression::Symbol(symbol)
             if matches!(
                 symbol.as_str(),
-                "@default" | "@min" | "@max" | "@unit" | "@mod" | "@mod-mode"
+                "@default" | "@min" | "@max" | "@unit" | "@group" | "@env" | "@role"
+                    | "@mod" | "@mod-mode"
             )
     )
 }

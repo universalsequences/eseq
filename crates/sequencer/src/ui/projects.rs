@@ -1807,6 +1807,7 @@ mod tests {
             node_param_idx,
             node_param_span: 1,
             host_control: None,
+            ui_metadata: None,
         }
     }
 

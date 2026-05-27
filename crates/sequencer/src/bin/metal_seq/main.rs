@@ -308,10 +308,10 @@ const NEW_INSTRUMENT_STARTER_DSP: &str = r#"(def gate (in 1 @name gate))
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
 
-(param attack @default 5 @min 0 @max 1000 @unit ms)
-(param decay @default 120 @min 1 @max 2000 @unit ms)
-(param sustain @default 0.8 @min 0 @max 1)
-(param release @default 180 @min 1 @max 5000 @unit ms)
+(param attack @group amp @env amp-env @role attack @default 5 @min 0 @max 1000 @unit ms)
+(param decay @group amp @env amp-env @role decay @default 120 @min 1 @max 2000 @unit ms)
+(param sustain @group amp @env amp-env @role sustain @default 0.8 @min 0 @max 1)
+(param release @group amp @env amp-env @role release @default 180 @min 1 @max 5000 @unit ms)
 (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
 
 (def env (adsr gate trigger attack decay sustain release))
@@ -1710,6 +1710,19 @@ mod tests {
                     idx + 4
                 )),
                 "starter source should mark {name} as modulator {idx}"
+            );
+        }
+        for (name, role) in [
+            ("attack", "attack"),
+            ("decay", "decay"),
+            ("sustain", "sustain"),
+            ("release", "release"),
+        ] {
+            assert!(
+                source.contains(&format!(
+                    "(param {name} @group amp @env amp-env @role {role}"
+                )),
+                "starter source should tag {name} as amp-env {role}"
             );
         }
         assert!(source.contains("(def env (adsr gate trigger attack decay sustain release))"));

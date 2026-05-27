@@ -89,7 +89,15 @@ CURATED_OPERATORS = {
     "biquad": {"category": "effect", "summary": "IIR biquad filter.", "signatures": ["(biquad signal cutoff q gain mode)", "(biquad signal @cutoff 1000 @q 0.707 @gain 0 @mode 0)"], "arity": {"minimum": 1, "maximum": 5}},
     "compressor": {"category": "effect", "summary": "Dynamics compressor with optional sidechain forms.", "signatures": ["(compressor signal ratio threshold knee attack release)", "(compressor signal ratio threshold knee attack release sidechain)", "(compressor signal ratio threshold knee attack release isSidechain sidechain)"], "arity": {"minimum": 1, "maximum": 8}},
     "delay": {"category": "effect", "summary": "Delay by a time in samples.", "signatures": ["(delay signal time_in_samples)"], "arity": {"minimum": 2, "maximum": 2}},
-    "param": {"category": "io", "summary": "Host-visible scalar parameter.", "signatures": ["(param name @default value @min value @max value @unit string)"], "arity": {"minimum": 1, "maximum": None}},
+    "param": {
+        "category": "io",
+        "summary": "Host-visible scalar parameter.",
+        "signatures": [
+            "(param name @default value @min value @max value @unit string)",
+            "(param name @group groupName @env envName @role attack|decay|sustain|release)",
+        ],
+        "arity": {"minimum": 1, "maximum": None},
+    },
     "in": {"category": "io", "summary": "Audio input channel.", "signatures": ["(in channel @name string)", "(in channel @name mod1 @modulator 1)"], "arity": {"minimum": 1, "maximum": None}},
     "out": {"category": "io", "summary": "Audio output channel.", "signatures": ["(out expr channel @name string)"], "arity": {"minimum": 2, "maximum": None}},
     "tensor": {"category": "tensor_creation", "summary": "Zero-filled tensor alias, or inline data tensor with @shape/@data.", "signatures": ["(tensor rows cols)", "(tensor [d1,d2,...])", "(tensor @shape [4] @data [1 0.5 0.25 0])"], "arity": {"minimum": 0, "maximum": None}},
@@ -184,10 +192,12 @@ ATTRIBUTE_SPECS = {
     "@default": {"type": "float", "summary": "Default value for scalar params."},
     "@default-file": {"type": "path", "summary": "JSON file used to initialize a mutable tensor or wavetable parameter."},
     "@end": {"type": "float", "summary": "Audio load end time in seconds."},
+    "@env": {"type": "symbol", "summary": "UI fallback envelope name for an envelope-role param."},
     "@file": {"type": "path", "summary": "Audio, tensor, or wavetable asset path."},
     "@gain": {"type": "signal|float", "summary": "Biquad gain or partitioned convolution output gain, depending on operator."},
     "@generated": {"type": "string", "summary": "Tags generated helper parameters."},
     "@generated-for": {"type": "symbol", "summary": "Associates a generated helper parameter with a user parameter."},
+    "@group": {"type": "symbol", "summary": "UI fallback group name for a host-visible param."},
     "@hidden": {"type": "bool", "summary": "Hide a generated or internal parameter from normal host presentation."},
     "@hop": {"type": "int", "summary": "Hop size for STFT and hop-rate operators.", "aliases": ["@hopSize"]},
     "@hopSize": {"type": "int", "summary": "Camel-case alias for @hop.", "aliases": ["@hop"]},
@@ -216,6 +226,7 @@ ATTRIBUTE_SPECS = {
     "@ratio": {"type": "signal|float", "summary": "Compressor ratio."},
     "@release": {"type": "signal|float", "summary": "Compressor release time."},
     "@repeats": {"type": "int[]", "summary": "Per-axis repeat counts."},
+    "@role": {"type": "enum", "values": ["attack", "decay", "sustain", "release"], "summary": "Envelope role for a param that declares @env."},
     "@shape": {"type": "int[]", "summary": "Tensor shape."},
     "@sidechain": {"type": "symbol|expr", "summary": "Compressor sidechain signal."},
     "@size": {"type": "int", "summary": "Tensor size for tensor noise."},
@@ -244,6 +255,9 @@ CURATED_OPERATOR_ATTRIBUTES = {
         "@min",
         "@max",
         "@unit",
+        "@group",
+        "@env",
+        "@role",
         "@hidden",
         "@mod",
         "@mod-mode",
@@ -431,6 +445,8 @@ MANIFEST_SCHEMA = {
     "voiceCellId": {"type": "int|null", "required": False},
     "totalMemorySlots": {"type": "int", "required": True},
     "params": {"type": "ManifestParam[]", "required": True},
+    "groups": {"type": "ManifestGroup[]", "required": False},
+    "envelopes": {"type": "ManifestEnvelope[]", "required": False},
     "inputs": {"type": "ManifestInput[]", "required": True},
     "outputs": {"type": "ManifestOutput[]", "required": True},
     "modulators": {"type": "ManifestModulator[]", "required": True},
@@ -449,6 +465,23 @@ MANIFEST_TYPES = {
         "max": {"type": "float|null"},
         "unit": {"type": "string|null"},
         "hidden": {"type": "bool|null"},
+        "group": {"type": "string|null"},
+        "env": {"type": "string|null"},
+        "role": {"type": "string|null"},
+    },
+    "ManifestGroup": {
+        "name": {"type": "string"},
+    },
+    "ManifestEnvelope": {
+        "name": {"type": "string"},
+        "group": {"type": "string|null"},
+        "roles": {"type": "ManifestEnvelopeRoles"},
+    },
+    "ManifestEnvelopeRoles": {
+        "attack": {"type": "string|null"},
+        "decay": {"type": "string|null"},
+        "sustain": {"type": "string|null"},
+        "release": {"type": "string|null"},
     },
     "ManifestInput": {
         "channel": {"type": "int"},
@@ -755,7 +788,27 @@ def build_attributes_index(operator_map, attrs_by_fn):
     return all_attrs
 
 
-def build_operators(operator_map, attrs_by_fn):
+def load_preserved_preamble_operators(operator_output: Path):
+    if not operator_output.exists():
+        return []
+    try:
+        manifest = json.loads(read(operator_output))
+    except (OSError, json.JSONDecodeError):
+        return []
+    operators = manifest.get("operators")
+    if not isinstance(operators, list):
+        operators = manifest.get("language", {}).get("operators", [])
+    if not isinstance(operators, list):
+        return []
+    return [
+        operator
+        for operator in operators
+        if isinstance(operator, dict) and operator.get("category") == "preamble"
+    ]
+
+
+def build_operators(operator_map, attrs_by_fn, preserved_preamble_operators=None):
+    preserved_preamble_operators = preserved_preamble_operators or []
     operators = []
     for name in sorted(operator_map):
         base = operator_map[name]
@@ -796,8 +849,22 @@ def build_operators(operator_map, attrs_by_fn):
             }
         )
     existing_names = {operator["name"] for operator in operators}
-    for operator in PREAMBLE_OPERATORS:
+    for operator in [*preserved_preamble_operators, *PREAMBLE_OPERATORS]:
         if operator["name"] in existing_names:
+            continue
+        if all(
+            key in operator
+            for key in (
+                "input_count",
+                "output_count",
+                "inputs",
+                "outputs",
+                "documentation",
+                "implementation",
+            )
+        ):
+            operators.append(dict(operator))
+            existing_names.add(operator["name"])
             continue
         signatures = operator.get("signatures", [])
         attrs = operator.get("attributes", [])
@@ -814,6 +881,7 @@ def build_operators(operator_map, attrs_by_fn):
                 "documentation": {"source": "curated-preamble", "port_docs": "curated-from-signature"},
             }
         )
+        existing_names.add(operator["name"])
     operators.sort(key=lambda operator: operator["name"])
     return operators
 
@@ -859,6 +927,7 @@ def main():
     evaluator_source = read(dgen_root / "LispEvaluator.swift")
     operator_map = extract_operator_cases(evaluator_source)
     attrs_by_fn = extract_function_attribute_usage(evaluator_source)
+    preserved_preamble_operators = load_preserved_preamble_operators(operator_output)
     data = {
         "schema_version": 1,
         "generated_from": {
@@ -875,7 +944,7 @@ def main():
             "comments": [{"prefix": ";"}, {"prefix": "#"}],
             "constants": CONSTANTS,
             "special_forms": SPECIAL_FORMS,
-            "operators": build_operators(operator_map, attrs_by_fn),
+            "operators": build_operators(operator_map, attrs_by_fn, preserved_preamble_operators),
             "attributes": build_attributes_index(operator_map, attrs_by_fn),
             "types": [
                 {"name": "float", "summary": "Compile-time scalar constant."},

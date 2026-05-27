@@ -1508,6 +1508,7 @@ impl App {
                     host_control: Some(HostControl::FxSidechain {
                         input_channel: modulator.input_channel,
                     }),
+                    ui_metadata: None,
                 }));
         }
         desc
@@ -1545,6 +1546,7 @@ impl App {
                     host_control: Some(HostControl::FxSidechain {
                         input_channel: modulator.input_channel,
                     }),
+                    ui_metadata: None,
                 }));
         }
         desc

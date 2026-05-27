@@ -2,9 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::layout::LayoutNode;
 use crate::vm::Value;
-use crate::widget_render::{handle_event, map_key_event, WidgetKeyEvent};
+use crate::widget_render::{WidgetKeyEvent, handle_event, map_key_event};
 
-use super::{key_str, Editor};
+use super::{Editor, key_str};
 
 impl Editor {
     pub(super) fn set_focused_widget(&mut self, node: LayoutNode) {

@@ -2305,6 +2305,7 @@ mod tests {
                 node_param_idx: u32::MAX,
                 node_param_span: 1,
                 host_control: Some(HostControl::FxSidechain { input_channel: 0 }),
+                ui_metadata: None,
             }],
             input_channels: 2,
             output_channels: 2,
