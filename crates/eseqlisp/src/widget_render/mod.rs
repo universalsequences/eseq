@@ -1158,6 +1158,58 @@ pub fn flatten_metal_primitive_runs(runs: &[MetalPrimitiveRun]) -> Vec<MetalPrim
 }
 
 #[cfg(target_os = "macos")]
+pub fn build_metal_primitive_run_index(
+    runs: &[MetalPrimitiveRun],
+) -> HashMap<MetalPrimitiveRunKey, usize> {
+    runs.iter()
+        .enumerate()
+        .map(|(index, run)| {
+            (
+                MetalPrimitiveRunKey {
+                    widget_id: run.widget_id,
+                    ordinal: run.ordinal,
+                },
+                index,
+            )
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+pub fn refresh_metal_primitive_runs_retained_in_place(
+    node: &LayoutNode,
+    viewport: WidgetViewport,
+    scroll_top: f32,
+    max_rows: u16,
+    runs: &mut [MetalPrimitiveRun],
+    run_indices: &HashMap<MetalPrimitiveRunKey, usize>,
+    dirty_widget_ids: &[u64],
+) -> (Vec<MetalPrimitive>, RetainedMetalPrimitiveRunStats) {
+    let mut stats = RetainedMetalPrimitiveRunStats::default();
+    let mut run_ordinals = HashMap::new();
+    let mut rebuilt_indices = Vec::new();
+    for run in runs.iter_mut() {
+        run.reused_from_previous = true;
+    }
+    refresh_metal_primitive_runs_retained_in_place_recursive(
+        node,
+        viewport,
+        scroll_top,
+        max_rows,
+        &[],
+        false,
+        runs,
+        run_indices,
+        dirty_widget_ids,
+        &mut run_ordinals,
+        &mut rebuilt_indices,
+        &mut stats,
+    );
+    let overlay = drain_overlay_primitives();
+    (overlay, stats)
+}
+
+#[cfg(target_os = "macos")]
 fn next_primitive_run_key(
     run_ordinals: &mut HashMap<u64, u16>,
     widget_id: u64,
@@ -1237,6 +1289,51 @@ fn push_retained_primitive_run(
         primitives,
         reused_from_previous: false,
     });
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn refresh_retained_primitive_run_in_place(
+    runs: &mut [MetalPrimitiveRun],
+    run_indices: &HashMap<MetalPrimitiveRunKey, usize>,
+    run_ordinals: &mut HashMap<u64, u16>,
+    rebuilt_indices: &mut Vec<usize>,
+    stats: &mut RetainedMetalPrimitiveRunStats,
+    dirty_ancestor: bool,
+    widget_id: u64,
+    widget_type: &str,
+    ancestor_widget_ids: &[u64],
+    build_primitives: impl FnOnce() -> Vec<MetalPrimitive>,
+) {
+    let key = next_primitive_run_key(run_ordinals, widget_id);
+    let Some(index) = run_indices.get(&key).copied() else {
+        if dirty_ancestor {
+            let primitives = build_primitives();
+            if !primitives.is_empty() {
+                stats.missing_previous_runs += 1;
+            }
+        } else {
+            stats.reused_runs += 1;
+        }
+        return;
+    };
+
+    let run = &mut runs[index];
+    if run.widget_type != widget_type || run.ancestor_widget_ids.as_slice() != ancestor_widget_ids {
+        stats.invalid_previous_runs += 1;
+        return;
+    }
+
+    if !dirty_ancestor {
+        stats.reused_runs += 1;
+        run.reused_from_previous = true;
+        return;
+    }
+
+    run.primitives = build_primitives();
+    run.reused_from_previous = false;
+    stats.rebuilt_runs += 1;
+    rebuilt_indices.push(index);
 }
 
 #[cfg(target_os = "macos")]
@@ -1694,6 +1791,220 @@ fn collect_metal_primitive_runs_retained_recursive(
             run_ordinals,
             stats,
             runs,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn refresh_metal_primitive_runs_retained_in_place_recursive(
+    node: &LayoutNode,
+    viewport: WidgetViewport,
+    _scroll_top: f32,
+    _max_rows: u16,
+    ancestor_widget_ids: &[u64],
+    dirty_ancestor: bool,
+    runs: &mut [MetalPrimitiveRun],
+    run_indices: &HashMap<MetalPrimitiveRunKey, usize>,
+    dirty_widget_ids: &[u64],
+    run_ordinals: &mut HashMap<u64, u16>,
+    rebuilt_indices: &mut Vec<usize>,
+    stats: &mut RetainedMetalPrimitiveRunStats,
+) {
+    let node_is_dirty = dirty_widget_ids.contains(&node.widget_id);
+    let subtree_dirty = dirty_ancestor || node_is_dirty;
+    let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
+    let focused_branch = viewport.focused_branch || node_is_focused;
+    let renders_own_focus = widget_definition(&node.widget_type)
+        .map(WidgetDefinition::renders_own_focus)
+        .unwrap_or(false);
+
+    let node_viewport = WidgetViewport {
+        scroll_top: _scroll_top,
+        focused_branch,
+        ..viewport
+    };
+
+    if node.widget_type == "scroll" {
+        let state = scroll::sync_node_state(node);
+        let offset_y = state.offset_y;
+
+        refresh_retained_primitive_run_in_place(
+            runs,
+            run_indices,
+            run_ordinals,
+            rebuilt_indices,
+            stats,
+            subtree_dirty,
+            node.widget_id,
+            &node.widget_type,
+            ancestor_widget_ids,
+            || {
+                let mut own = Vec::new();
+                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                {
+                    own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                        rect: node.rect,
+                        color: crate::theme::WIDGET_FOCUS_BG(),
+                    }));
+                }
+                own.push(MetalPrimitive::PushClipRect(node.rect));
+                own
+            },
+        );
+
+        let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
+        child_ancestor_widget_ids.push(node.widget_id);
+        for child in &node.children {
+            let rebuilt_start = rebuilt_indices.len();
+            refresh_metal_primitive_runs_retained_in_place_recursive(
+                child,
+                node_viewport,
+                _scroll_top,
+                _max_rows,
+                &child_ancestor_widget_ids,
+                subtree_dirty,
+                runs,
+                run_indices,
+                dirty_widget_ids,
+                run_ordinals,
+                rebuilt_indices,
+                stats,
+            );
+            for index in &rebuilt_indices[rebuilt_start..] {
+                if let Some(run) = runs.get_mut(*index) {
+                    for prim in &mut run.primitives {
+                        offset_primitive_y_mut(prim, -offset_y, node_viewport);
+                    }
+                }
+            }
+        }
+
+        refresh_retained_primitive_run_in_place(
+            runs,
+            run_indices,
+            run_ordinals,
+            rebuilt_indices,
+            stats,
+            subtree_dirty,
+            node.widget_id,
+            &node.widget_type,
+            ancestor_widget_ids,
+            || {
+                let mut tail = vec![MetalPrimitive::PopClipRect];
+                tail.extend(widget_primitives_for_node(node, node_viewport));
+                tail
+            },
+        );
+        return;
+    }
+
+    if node.widget_type == "box" && node.props.contains_key("background") {
+        let child_hover =
+            crate::widget_render::sdf_widget::get_sdf_hit_state(node.widget_id).hit_region >= 0;
+        let child_viewport = WidgetViewport {
+            inherited_hover: node_viewport.inherited_hover || child_hover,
+            ..node_viewport
+        };
+
+        refresh_retained_primitive_run_in_place(
+            runs,
+            run_indices,
+            run_ordinals,
+            rebuilt_indices,
+            stats,
+            subtree_dirty,
+            node.widget_id,
+            &node.widget_type,
+            ancestor_widget_ids,
+            || {
+                let mut own = Vec::new();
+                if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus
+                {
+                    own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                        rect: node.rect,
+                        color: crate::theme::WIDGET_FOCUS_BG(),
+                    }));
+                }
+                own.extend(widget_primitives_for_node(node, node_viewport));
+                own.push(MetalPrimitive::PushClipRect(node.rect));
+                own
+            },
+        );
+
+        let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
+        child_ancestor_widget_ids.push(node.widget_id);
+        for child in &node.children {
+            refresh_metal_primitive_runs_retained_in_place_recursive(
+                child,
+                child_viewport,
+                _scroll_top,
+                _max_rows,
+                &child_ancestor_widget_ids,
+                subtree_dirty,
+                runs,
+                run_indices,
+                dirty_widget_ids,
+                run_ordinals,
+                rebuilt_indices,
+                stats,
+            );
+        }
+
+        refresh_retained_primitive_run_in_place(
+            runs,
+            run_indices,
+            run_ordinals,
+            rebuilt_indices,
+            stats,
+            subtree_dirty,
+            node.widget_id,
+            &node.widget_type,
+            ancestor_widget_ids,
+            || vec![MetalPrimitive::PopClipRect],
+        );
+        return;
+    }
+
+    refresh_retained_primitive_run_in_place(
+        runs,
+        run_indices,
+        run_ordinals,
+        rebuilt_indices,
+        stats,
+        subtree_dirty,
+        node.widget_id,
+        &node.widget_type,
+        ancestor_widget_ids,
+        || {
+            let mut own = Vec::new();
+            if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
+                own.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                    rect: node.rect,
+                    color: crate::theme::WIDGET_FOCUS_BG(),
+                }));
+            }
+            own.extend(widget_primitives_for_node(node, node_viewport));
+            own
+        },
+    );
+
+    let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
+    child_ancestor_widget_ids.push(node.widget_id);
+    for child in &node.children {
+        refresh_metal_primitive_runs_retained_in_place_recursive(
+            child,
+            node_viewport,
+            _scroll_top,
+            _max_rows,
+            &child_ancestor_widget_ids,
+            subtree_dirty,
+            runs,
+            run_indices,
+            dirty_widget_ids,
+            run_ordinals,
+            rebuilt_indices,
+            stats,
         );
     }
 }
@@ -2386,6 +2697,134 @@ mod tests {
         assert!(stats.rebuilt_runs > 0);
         assert_eq!(
             primitive_tokens(&flatten_metal_primitive_runs(&retained_runs)),
+            primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_metal_collection_refreshes_cached_runs_in_place() {
+        let make_layout = |label_text: &str| {
+            let label = test_node(
+                2,
+                "label",
+                Rect {
+                    row: 1.0,
+                    col: 1.0,
+                    width: 8.0,
+                    height: 1.0,
+                },
+                HashMap::from([("text".to_string(), Value::String(label_text.to_string()))]),
+                Vec::new(),
+            );
+            let button = test_node(
+                3,
+                "button",
+                Rect {
+                    row: 3.0,
+                    col: 1.0,
+                    width: 6.0,
+                    height: 1.5,
+                },
+                HashMap::from([("text".to_string(), Value::String("Apply".to_string()))]),
+                Vec::new(),
+            );
+            test_node(
+                1,
+                "box",
+                Rect {
+                    row: 0.0,
+                    col: 0.0,
+                    width: 12.0,
+                    height: 8.0,
+                },
+                HashMap::new(),
+                vec![label, button],
+            )
+        };
+        let viewport = test_viewport();
+        let before = make_layout("1");
+        let after = make_layout("17");
+        let (mut cached_runs, _) = collect_metal_primitive_runs(&before, viewport, 0.0, 24);
+        let run_indices = build_metal_primitive_run_index(&cached_runs);
+        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+            &after,
+            viewport,
+            0.0,
+            24,
+            &mut cached_runs,
+            &run_indices,
+            &[2],
+        );
+        let (full_runs, _) = collect_metal_primitive_runs(&after, viewport, 0.0, 24);
+
+        assert!(stats.reused_runs > 0);
+        assert!(stats.rebuilt_runs > 0);
+        assert_eq!(stats.missing_previous_runs, 0);
+        assert_eq!(stats.invalid_previous_runs, 0);
+        assert_eq!(
+            primitive_tokens(&flatten_metal_primitive_runs(&cached_runs)),
+            primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_metal_collection_refreshes_scrolled_cached_runs_without_double_offset() {
+        let label = test_node(
+            2,
+            "label",
+            Rect {
+                row: 2.0,
+                col: 1.0,
+                width: 8.0,
+                height: 1.0,
+            },
+            HashMap::from([("text".to_string(), Value::String("Clean".to_string()))]),
+            Vec::new(),
+        );
+        let button = test_node(
+            3,
+            "button",
+            Rect {
+                row: 4.0,
+                col: 1.0,
+                width: 6.0,
+                height: 1.5,
+            },
+            HashMap::from([("text".to_string(), Value::String("Dirty".to_string()))]),
+            Vec::new(),
+        );
+        let root = test_node(
+            1,
+            "scroll",
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 10.0,
+                height: 4.0,
+            },
+            HashMap::new(),
+            vec![label, button],
+        );
+        let viewport = test_viewport();
+        let (mut cached_runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        let run_indices = build_metal_primitive_run_index(&cached_runs);
+        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+            &root,
+            viewport,
+            0.0,
+            24,
+            &mut cached_runs,
+            &run_indices,
+            &[3],
+        );
+        let (full_runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+
+        assert!(stats.reused_runs > 0);
+        assert!(stats.rebuilt_runs > 0);
+        assert_eq!(
+            primitive_tokens(&flatten_metal_primitive_runs(&cached_runs)),
             primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
         );
     }

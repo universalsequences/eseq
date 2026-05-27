@@ -1417,6 +1417,7 @@ fragment float4 waveform_frag(
     #[derive(Clone)]
     struct CachedWidgetRunScene {
         runs: Vec<widget_render::MetalPrimitiveRun>,
+        run_indices: HashMap<widget_render::MetalPrimitiveRunKey, usize>,
     }
 
     struct ImageTextureResource {
@@ -2076,8 +2077,9 @@ fragment float4 waveform_frag(
                     primitives: primitives.clone(),
                 },
             );
+            let run_indices = widget_render::build_metal_primitive_run_index(&runs);
             self.cached_widget_run_scenes
-                .insert(cache_key, CachedWidgetRunScene { runs });
+                .insert(cache_key, CachedWidgetRunScene { runs, run_indices });
             Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
             self.stats.note_widget_primitives(primitives.len());
             primitives
@@ -2119,10 +2121,12 @@ fragment float4 waveform_frag(
             let primitives = widget_render::flatten_metal_primitive_runs(runs);
             self.cached_widget_scenes
                 .insert(cache_key, CachedWidgetScene { primitives });
+            let run_indices = widget_render::build_metal_primitive_run_index(runs);
             self.cached_widget_run_scenes.insert(
                 cache_key,
                 CachedWidgetRunScene {
                     runs: runs.to_vec(),
+                    run_indices,
                 },
             );
         }
@@ -2154,39 +2158,57 @@ fragment float4 waveform_frag(
                 .note_widget_scene_dirty_bypass(dirty_widget_ids.len());
 
             let cache_key = self.widget_scene_cache_key(cache_parts);
-            let (runs, overlay) = if let Some(previous) =
-                self.cached_widget_run_scenes.get(&cache_key).cloned()
-            {
-                let (runs, overlay, retained_stats) =
-                    widget_render::collect_metal_primitive_runs_retained(
+            let (runs, overlay) =
+                if let Some(scene) = self.cached_widget_run_scenes.get_mut(&cache_key) {
+                    let (overlay, retained_stats) =
+                        widget_render::refresh_metal_primitive_runs_retained_in_place(
+                            layout,
+                            viewport,
+                            scroll_top,
+                            max_rows,
+                            &mut scene.runs,
+                            &scene.run_indices,
+                            dirty_widget_ids,
+                        );
+                    let should_rebuild_full = retained_stats.missing_previous_runs > 0
+                        || retained_stats.invalid_previous_runs > 0;
+                    let stats = retained_stats;
+                    let runs = if should_rebuild_full {
+                        let (runs, _overlay) = widget_render::collect_metal_primitive_runs(
+                            layout, viewport, scroll_top, max_rows,
+                        );
+                        scene.run_indices = widget_render::build_metal_primitive_run_index(&runs);
+                        scene.runs = runs;
+                        scene.runs.clone()
+                    } else {
+                        scene.runs.clone()
+                    };
+                    let primitives = widget_render::flatten_metal_primitive_runs(&scene.runs);
+                    self.cached_widget_scenes
+                        .insert(cache_key, CachedWidgetScene { primitives });
+                    self.stats.note_widget_retained_run_collection(
+                        stats.reused_runs,
+                        stats.rebuilt_runs,
+                        stats.missing_previous_runs,
+                        stats.invalid_previous_runs,
+                    );
+                    (runs, overlay)
+                } else {
+                    self.stats.note_widget_retained_run_collection_miss();
+                    let (runs, overlay) = widget_render::collect_metal_primitive_runs(
+                        layout, viewport, scroll_top, max_rows,
+                    );
+                    self.update_widget_scene_cache_from_primitive_runs(
+                        owner_frame_key,
+                        layout_cache_key,
                         layout,
                         viewport,
                         scroll_top,
                         max_rows,
-                        &previous.runs,
-                        dirty_widget_ids,
+                        &runs,
                     );
-                self.stats.note_widget_retained_run_collection(
-                    retained_stats.reused_runs,
-                    retained_stats.rebuilt_runs,
-                    retained_stats.missing_previous_runs,
-                    retained_stats.invalid_previous_runs,
-                );
-                (runs, overlay)
-            } else {
-                self.stats.note_widget_retained_run_collection_miss();
-                widget_render::collect_metal_primitive_runs(layout, viewport, scroll_top, max_rows)
-            };
-
-            self.update_widget_scene_cache_from_primitive_runs(
-                owner_frame_key,
-                layout_cache_key,
-                layout,
-                viewport,
-                scroll_top,
-                max_rows,
-                &runs,
-            );
+                    (runs, overlay)
+                };
             (runs, overlay)
         }
 
