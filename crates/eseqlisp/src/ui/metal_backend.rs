@@ -2048,6 +2048,28 @@ fragment float4 waveform_frag(
                 self.stats.note_widget_primitives(primitives.len());
                 return primitives;
             }
+            if dirty_widget_ids.is_empty()
+                && let Some(scene) = self.cached_widget_run_scenes.get(&cache_key)
+            {
+                self.stats.note_widget_scene_cache_hit();
+                let mut primitives = widget_render::flatten_metal_primitive_runs(&scene.runs);
+                if self.cached_widget_scenes.len() >= 128 {
+                    self.cached_widget_scenes.clear();
+                    self.cached_widget_run_scenes.clear();
+                    self.widget_scene_last_keys.clear();
+                    self.stats.note_widget_scene_cache_clear();
+                } else {
+                    self.cached_widget_scenes.insert(
+                        cache_key,
+                        CachedWidgetScene {
+                            primitives: primitives.clone(),
+                        },
+                    );
+                }
+                Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
+                self.stats.note_widget_primitives(primitives.len());
+                return primitives;
+            }
 
             if dirty_widget_ids.is_empty() {
                 let previous = self
@@ -2131,7 +2153,7 @@ fragment float4 waveform_frag(
             );
         }
 
-        fn widget_primitive_runs_for_dirty_layout(
+        fn refresh_widget_run_scene_for_dirty_layout(
             &mut self,
             owner_frame_key: u64,
             layout_cache_key: u64,
@@ -2140,10 +2162,7 @@ fragment float4 waveform_frag(
             viewport: WidgetViewport,
             scroll_top: f32,
             max_rows: u16,
-        ) -> (
-            Vec<widget_render::MetalPrimitiveRun>,
-            Vec<widget_render::MetalPrimitive>,
-        ) {
+        ) -> (u64, Vec<widget_render::MetalPrimitive>) {
             let cache_parts = self.widget_scene_cache_parts(
                 owner_frame_key,
                 layout,
@@ -2158,58 +2177,50 @@ fragment float4 waveform_frag(
                 .note_widget_scene_dirty_bypass(dirty_widget_ids.len());
 
             let cache_key = self.widget_scene_cache_key(cache_parts);
-            let (runs, overlay) =
-                if let Some(scene) = self.cached_widget_run_scenes.get_mut(&cache_key) {
-                    let (overlay, retained_stats) =
-                        widget_render::refresh_metal_primitive_runs_retained_in_place(
-                            layout,
-                            viewport,
-                            scroll_top,
-                            max_rows,
-                            &mut scene.runs,
-                            &scene.run_indices,
-                            dirty_widget_ids,
-                        );
-                    let should_rebuild_full = retained_stats.missing_previous_runs > 0
-                        || retained_stats.invalid_previous_runs > 0;
-                    let stats = retained_stats;
-                    let runs = if should_rebuild_full {
-                        let (runs, _overlay) = widget_render::collect_metal_primitive_runs(
-                            layout, viewport, scroll_top, max_rows,
-                        );
-                        scene.run_indices = widget_render::build_metal_primitive_run_index(&runs);
-                        scene.runs = runs;
-                        scene.runs.clone()
-                    } else {
-                        scene.runs.clone()
-                    };
-                    let primitives = widget_render::flatten_metal_primitive_runs(&scene.runs);
-                    self.cached_widget_scenes
-                        .insert(cache_key, CachedWidgetScene { primitives });
-                    self.stats.note_widget_retained_run_collection(
-                        stats.reused_runs,
-                        stats.rebuilt_runs,
-                        stats.missing_previous_runs,
-                        stats.invalid_previous_runs,
-                    );
-                    (runs, overlay)
-                } else {
-                    self.stats.note_widget_retained_run_collection_miss();
-                    let (runs, overlay) = widget_render::collect_metal_primitive_runs(
-                        layout, viewport, scroll_top, max_rows,
-                    );
-                    self.update_widget_scene_cache_from_primitive_runs(
-                        owner_frame_key,
-                        layout_cache_key,
+            self.cached_widget_scenes.remove(&cache_key);
+            if let Some(scene) = self.cached_widget_run_scenes.get_mut(&cache_key) {
+                let (overlay, retained_stats) =
+                    widget_render::refresh_metal_primitive_runs_retained_in_place(
                         layout,
                         viewport,
                         scroll_top,
                         max_rows,
-                        &runs,
+                        &mut scene.runs,
+                        &scene.run_indices,
+                        dirty_widget_ids,
                     );
-                    (runs, overlay)
-                };
-            (runs, overlay)
+                let should_rebuild_full = retained_stats.missing_previous_runs > 0
+                    || retained_stats.invalid_previous_runs > 0;
+                self.stats.note_widget_retained_run_collection(
+                    retained_stats.reused_runs,
+                    retained_stats.rebuilt_runs,
+                    retained_stats.missing_previous_runs,
+                    retained_stats.invalid_previous_runs,
+                );
+                if should_rebuild_full {
+                    let (runs, overlay) = widget_render::collect_metal_primitive_runs(
+                        layout, viewport, scroll_top, max_rows,
+                    );
+                    scene.run_indices = widget_render::build_metal_primitive_run_index(&runs);
+                    scene.runs = runs;
+                    return (cache_key, overlay);
+                }
+                return (cache_key, overlay);
+            }
+
+            self.stats.note_widget_retained_run_collection_miss();
+            let (runs, overlay) =
+                widget_render::collect_metal_primitive_runs(layout, viewport, scroll_top, max_rows);
+            let run_indices = widget_render::build_metal_primitive_run_index(&runs);
+            if self.cached_widget_run_scenes.len() >= 128 {
+                self.cached_widget_scenes.clear();
+                self.cached_widget_run_scenes.clear();
+                self.widget_scene_last_keys.clear();
+                self.stats.note_widget_scene_cache_clear();
+            }
+            self.cached_widget_run_scenes
+                .insert(cache_key, CachedWidgetRunScene { runs, run_indices });
+            (cache_key, overlay)
         }
 
         fn begin_compiled_widget_run_frame(&mut self) {
@@ -3966,8 +3977,8 @@ fragment float4 waveform_frag(
                         overlay_prims,
                         use_widget_run_cache,
                     ) = if use_widget_run_cache {
-                        let (primitive_runs, overlay) = self
-                            .widget_primitive_runs_for_dirty_layout(
+                        let (run_scene_key, overlay) = self
+                            .refresh_widget_run_scene_for_dirty_layout(
                                 tile.frame.widget_content_cache_key,
                                 tile.frame.widget_layout_cache_key,
                                 layout,
@@ -3976,11 +3987,16 @@ fragment float4 waveform_frag(
                                 tile.frame.widget_scroll_top,
                                 inner_rows,
                             );
+                        let primitive_runs = self
+                            .cached_widget_run_scenes
+                            .get(&run_scene_key)
+                            .map(|scene| scene.runs.as_slice())
+                            .unwrap_or(&[]);
                         let mut offset_prims = Vec::new();
                         let mut offset_run_indices = Vec::new();
                         let mut offset_runs = Vec::new();
                         for run in primitive_runs {
-                            let mut run_primitives = run.primitives;
+                            let mut run_primitives = run.primitives.clone();
                             Self::refresh_widget_scene_time(
                                 &mut run_primitives,
                                 viewport.time_seconds,
@@ -4007,8 +4023,8 @@ fragment float4 waveform_frag(
                             }
                             offset_runs.push(OffsetMetalPrimitiveRun {
                                 widget_id: run.widget_id,
-                                widget_type: run.widget_type,
-                                ancestor_widget_ids: run.ancestor_widget_ids,
+                                widget_type: run.widget_type.clone(),
+                                ancestor_widget_ids: run.ancestor_widget_ids.clone(),
                             });
                         }
                         self.stats.note_widget_primitives(offset_prims.len());
