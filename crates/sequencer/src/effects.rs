@@ -755,8 +755,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "mode", "amount", "attack", "release", "low cut", "drive", "output", "mix",
-                "enabled"
+                "mode", "amount", "attack", "release", "low cut", "drive", "input", "output",
+                "mix", "enabled", "knee"
             ]
         );
         assert_eq!(desc.params[0].default, 1.0);
@@ -2074,6 +2074,20 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
                 ParamDescriptor {
+                    name: "input".to_string(),
+                    min: -12.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_INPUT_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
                     name: "output".to_string(),
                     min: -12.0,
                     max: 12.0,
@@ -2102,6 +2116,20 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
                 Self::enabled_param(crate::dynamics::DYNAMICS_PARAM_ENABLED as u32, 1.0),
+                ParamDescriptor {
+                    name: "knee".to_string(),
+                    min: 0.0,
+                    max: 18.0,
+                    default: if mode == 0.0 { 8.0 } else { 6.0 },
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_KNEE_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
             ],
         }
     }

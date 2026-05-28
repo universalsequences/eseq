@@ -18,7 +18,9 @@ const STATE_SC_Y1_R: usize = 13;
 const STATE_ENV_FAST: usize = 14;
 const STATE_ENV_SLOW: usize = 15;
 const STATE_GAIN_DB: usize = 16;
-pub const DYNAMICS_STATE_SIZE: usize = 17;
+const STATE_KNEE_DB: usize = 17;
+const STATE_INPUT_DB: usize = 18;
+pub const DYNAMICS_STATE_SIZE: usize = 19;
 
 pub const DYNAMICS_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 pub const DYNAMICS_PARAM_MODE: u64 = STATE_MODE as u64;
@@ -29,6 +31,8 @@ pub const DYNAMICS_PARAM_LOW_CUT_HZ: u64 = STATE_LOW_CUT_HZ as u64;
 pub const DYNAMICS_PARAM_DRIVE: u64 = STATE_DRIVE as u64;
 pub const DYNAMICS_PARAM_OUTPUT_DB: u64 = STATE_OUTPUT_DB as u64;
 pub const DYNAMICS_PARAM_MIX: u64 = STATE_MIX as u64;
+pub const DYNAMICS_PARAM_KNEE_DB: u64 = STATE_KNEE_DB as u64;
+pub const DYNAMICS_PARAM_INPUT_DB: u64 = STATE_INPUT_DB as u64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DynamicsMode {
@@ -67,18 +71,8 @@ fn time_coef(ms: f32, sample_rate: f32) -> f32 {
 }
 
 #[inline]
-fn time_coef_lsp(ms: f32, sample_rate: f32) -> f32 {
-    if ms <= 0.0 {
-        return 1.0;
-    }
-    let samples = (ms * 0.001 * sample_rate.max(1.0)).max(1.0);
-    let k = (1.0 - std::f32::consts::FRAC_1_SQRT_2).ln();
-    1.0 - (k / samples).exp()
-}
-
-#[inline]
 fn glue_attack_ms(idx: usize) -> f32 {
-    [0.3, 1.0, 3.0, 10.0][idx.min(3)]
+    [0.3, 3.0, 10.0, 30.0][idx.min(3)]
 }
 
 #[inline]
@@ -114,7 +108,7 @@ fn glue_low_cut_hz(idx: usize) -> Option<f32> {
 #[inline]
 fn glue_auto_makeup_db(threshold_db: f32, ratio: f32) -> f32 {
     let slope = 1.0 - 1.0 / ratio.max(1.0);
-    (-threshold_db * slope * 0.45).clamp(0.0, 8.0)
+    (-threshold_db * slope * 0.6).clamp(0.0, 14.0)
 }
 
 #[inline]
@@ -253,69 +247,98 @@ unsafe fn process_glue(
     output: f32,
     mix: f32,
     sr: f32,
+    knee_db: f32,
+    input_gain: f32,
 ) {
     let threshold_db = glue_threshold_db(amount);
     let ratio = glue_ratio(amount);
-    const KNEE_DB: f32 = 6.0;
     let auto_makeup = db_to_amp(glue_auto_makeup_db(threshold_db, ratio));
 
-    let attack_coef = time_coef_lsp(glue_attack_ms(attack_idx), sr);
+    // Standard (1 − e^(−1/(τ·fs))) time coefficients — τ is the time to reach
+    // 1 − 1/e ≈ 63.2 % of target. The old `time_coef_lsp` used a 1/√2
+    // reference which made every labelled attack/release ~1.7× faster than the
+    // user expected.
+    let attack_coef = time_coef(glue_attack_ms(attack_idx), sr);
     let auto = glue_release_ms(release_idx).is_none();
-    let rel_main_coef = time_coef_lsp(glue_release_ms(release_idx).unwrap_or(80.0), sr);
-    let rel_slow_coef = time_coef_lsp(1500.0, sr);
+    // Fast envelope mirrors a small cap: tracks transients quickly and lets go
+    // quickly. In auto mode it defaults to ~100 ms so transient material
+    // breathes; in fixed mode the user release sets it.
+    let rel_fast_coef = time_coef(glue_release_ms(release_idx).unwrap_or(100.0), sr);
+    // Slow envelope mirrors the SSL's larger cap: only charges on *sustained*
+    // material, then drains slowly. A 400 ms attack keeps brief transients
+    // (snare hits, kicks) from elevating it — only chorus-length loud passages
+    // raise it meaningfully. Combined with the fast envelope via `max`, this
+    // reproduces the parallel-RC behaviour where transients release fast and
+    // long blocks release slow.
+    let attack_slow_coef = time_coef(400.0, sr);
+    let rel_slow_coef = time_coef(1500.0, sr);
 
     let low_cut_idx = low_cut.round().clamp(0.0, 3.0) as usize;
     let low_cut_hz = glue_low_cut_hz(low_cut_idx);
 
-    let mut sc_x1 = *s.add(STATE_SC_X1_L);
-    let mut sc_y1 = *s.add(STATE_SC_Y1_L);
+    let mut sc_x1_l = *s.add(STATE_SC_X1_L);
+    let mut sc_y1_l = *s.add(STATE_SC_Y1_L);
+    let mut sc_x1_r = *s.add(STATE_SC_X1_R);
+    let mut sc_y1_r = *s.add(STATE_SC_Y1_R);
     let mut env_fast_db = *s.add(STATE_ENV_FAST);
     let mut env_slow_db = *s.add(STATE_ENV_SLOW);
     let mut gain_db = *s.add(STATE_GAIN_DB);
 
     for i in 0..nf {
-        let inp_l = *in0.add(i);
-        let inp_r = *in1.add(i);
+        let dry_l = *in0.add(i);
+        let dry_r = *in1.add(i);
+        let inp_l = dry_l * input_gain;
+        let inp_r = dry_r * input_gain;
 
-        // Feedback: detect from previously-attenuated signal.
+        // Feedback topology: detector reads the previously-attenuated signal,
+        // stereo-linked via max(|L|,|R|) so out-of-phase material doesn't
+        // cancel in the detector the way a mono sum would.
         let last_g = db_to_amp(gain_db);
-        let mono = (inp_l + inp_r) * 0.5 * last_g;
-        let sc = match low_cut_hz {
-            Some(hz) => sidechain_highpass(mono, hz, sr, &mut sc_x1, &mut sc_y1),
-            None => mono,
+        let det_l = inp_l * last_g;
+        let det_r = inp_r * last_g;
+        let (sc_l, sc_r) = match low_cut_hz {
+            Some(hz) => (
+                sidechain_highpass(det_l, hz, sr, &mut sc_x1_l, &mut sc_y1_l),
+                sidechain_highpass(det_r, hz, sr, &mut sc_x1_r, &mut sc_y1_r),
+            ),
+            None => (det_l, det_r),
         };
-        let detector_db = amp_to_db(sc.abs());
+        let detector_db = amp_to_db(sc_l.abs().max(sc_r.abs()));
 
-        // Log-domain envelope: smooth dB directly.
+        // Fast envelope ("small cap"): user-controlled attack and release.
         if detector_db > env_fast_db {
             env_fast_db += attack_coef * (detector_db - env_fast_db);
         } else {
-            env_fast_db += rel_main_coef * (detector_db - env_fast_db);
+            env_fast_db += rel_fast_coef * (detector_db - env_fast_db);
         }
+        // Slow envelope ("big cap"): only fills on sustained loud passages.
         if detector_db > env_slow_db {
-            env_slow_db += attack_coef * (detector_db - env_slow_db);
+            env_slow_db += attack_slow_coef * (detector_db - env_slow_db);
         } else {
             env_slow_db += rel_slow_coef * (detector_db - env_slow_db);
         }
 
         let env_db = if auto {
-            (env_fast_db + env_slow_db) * 0.5
+            env_fast_db.max(env_slow_db)
         } else {
             env_fast_db
         };
 
-        // Soft-knee gain reduction in dB.
-        gain_db = compression_gain_db(env_db, threshold_db, ratio, KNEE_DB);
+        gain_db = compression_gain_db(env_db, threshold_db, ratio, knee_db);
 
         let g = db_to_amp(gain_db) * auto_makeup * output;
         let wet_l = phat_saturate(inp_l * g, drive);
         let wet_r = phat_saturate(inp_r * g, drive);
-        *out0.add(i) = inp_l + (wet_l - inp_l) * mix;
-        *out1.add(i) = inp_r + (wet_r - inp_r) * mix;
+        // Dry side uses the un-gained input so mix=0 is true bypass; the
+        // `in` knob only drives the comp/saturator path.
+        *out0.add(i) = dry_l + (wet_l - dry_l) * mix;
+        *out1.add(i) = dry_r + (wet_r - dry_r) * mix;
     }
 
-    *s.add(STATE_SC_X1_L) = sc_x1;
-    *s.add(STATE_SC_Y1_L) = sc_y1;
+    *s.add(STATE_SC_X1_L) = sc_x1_l;
+    *s.add(STATE_SC_Y1_L) = sc_y1_l;
+    *s.add(STATE_SC_X1_R) = sc_x1_r;
+    *s.add(STATE_SC_Y1_R) = sc_y1_r;
     *s.add(STATE_ENV_FAST) = env_fast_db;
     *s.add(STATE_ENV_SLOW) = env_slow_db;
     *s.add(STATE_GAIN_DB) = gain_db;
@@ -345,6 +368,8 @@ unsafe extern "C" fn dynamics_init(
     *s.add(STATE_ENV_FAST) = 0.0;
     *s.add(STATE_ENV_SLOW) = 0.0;
     *s.add(STATE_GAIN_DB) = 0.0;
+    *s.add(STATE_KNEE_DB) = 8.0;
+    *s.add(STATE_INPUT_DB) = 0.0;
 }
 
 unsafe extern "C" fn dynamics_process(
@@ -381,8 +406,10 @@ unsafe extern "C" fn dynamics_process(
     let output = db_to_amp((*s.add(STATE_OUTPUT_DB)).clamp(-12.0, 12.0));
     let mix = (*s.add(STATE_MIX)).clamp(0.0, 1.0);
     let sr = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let input_gain = db_to_amp((*s.add(STATE_INPUT_DB)).clamp(-12.0, 24.0));
 
     if matches!(mode, DynamicsMode::Glue) {
+        let knee_db = (*s.add(STATE_KNEE_DB)).clamp(0.0, 18.0);
         process_glue(
             s,
             in0,
@@ -398,6 +425,8 @@ unsafe extern "C" fn dynamics_process(
             output,
             mix,
             sr,
+            knee_db,
+            input_gain,
         );
         return;
     }
@@ -416,8 +445,10 @@ unsafe extern "C" fn dynamics_process(
     let mut gain_db = *s.add(STATE_GAIN_DB);
 
     for i in 0..nf {
-        let input_l = *in0.add(i);
-        let input_r = *in1.add(i);
+        let dry_l = *in0.add(i);
+        let dry_r = *in1.add(i);
+        let input_l = dry_l * input_gain;
+        let input_r = dry_r * input_gain;
         let sc_l = sidechain_highpass(input_l, low_cut, sr, &mut sc_x1_l, &mut sc_y1_l);
         let sc_r = sidechain_highpass(input_r, low_cut, sr, &mut sc_x1_r, &mut sc_y1_r);
         let detector = sc_l.abs().max(sc_r.abs());
@@ -448,8 +479,8 @@ unsafe extern "C" fn dynamics_process(
         let gain = db_to_amp(gain_db);
         let wet_l = soft_clip(input_l * gain, drive, mode) * output;
         let wet_r = soft_clip(input_r * gain, drive, mode) * output;
-        *out0.add(i) = input_l + (wet_l - input_l) * mix;
-        *out1.add(i) = input_r + (wet_r - input_r) * mix;
+        *out0.add(i) = dry_l + (wet_l - dry_l) * mix;
+        *out1.add(i) = dry_r + (wet_r - dry_r) * mix;
     }
 
     *s.add(STATE_SC_X1_L) = sc_x1_l;
@@ -546,11 +577,24 @@ mod tests {
         state[STATE_ATTACK] = 0.0;
         state[STATE_RELEASE] = 1.0;
         state[STATE_DRIVE] = 0.0;
-        let left = vec![0.9; 4096];
-        let right = vec![0.3; 4096];
+        let sr = 48_000.0;
+        // 1 kHz sine well above the 150 Hz sidechain HPF so the detector sees
+        // a steady level; DC would be filtered out and never trigger GR.
+        let left: Vec<f32> = (0..8192)
+            .map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / sr).sin() * 0.9)
+            .collect();
+        let right: Vec<f32> = (0..8192)
+            .map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / sr).sin() * 0.3)
+            .collect();
         let (out_l, out_r) = process_block(&mut state, &left, &right);
-        assert!(rms(&out_l[2048..]) < 0.9);
-        let ratio = rms(&out_l[2048..]) / rms(&out_r[2048..]);
+        let r_l = rms(&out_l[4096..]);
+        let r_r = rms(&out_r[4096..]);
+        let in_rms_l = rms(&left[4096..]);
+        assert!(
+            r_l < in_rms_l,
+            "rms_l {r_l} should be below input rms {in_rms_l}"
+        );
+        let ratio = r_l / r_r;
         assert!((ratio - 3.0).abs() < 0.08, "ratio was {ratio}");
     }
 

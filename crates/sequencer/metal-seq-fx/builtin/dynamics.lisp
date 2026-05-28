@@ -33,15 +33,19 @@
           (low-cut-p (builtin-fx-param params "low cut"))
           (drive-p (builtin-fx-param params "drive"))
           (output-p (builtin-fx-param params "output"))
-          (mix-p (builtin-fx-param params "mix")))
+          (mix-p (builtin-fx-param params "mix"))
+          (knee-p (builtin-fx-param params "knee"))
+          (input-p (builtin-fx-param params "input")))
       (if (and amount-p attack-p release-p low-cut-p drive-p output-p mix-p)
         (v-stack :gap 0.34
           (h-stack :gap 0.45 :align :center
             (builtin-fx-dynamics-option fx "atk" attack-p 5.5)
             (builtin-fx-dynamics-option fx "rel" release-p 5.9))
           (h-stack :gap 0.5 :align :center
+            (if input-p (builtin-fx-dynamics-number-knob fx "in" input-p 1) (box :width 0 :height 0))
             (builtin-fx-dynamics-percent-knob fx "amt" amount-p)
             (builtin-fx-dynamics-number-knob fx "low" low-cut-p 0)
+            (if knee-p (builtin-fx-dynamics-number-knob fx "knee" knee-p 1) (box :width 0 :height 0))
             (builtin-fx-dynamics-percent-knob fx "drive" drive-p)
             (builtin-fx-dynamics-number-knob fx "out" output-p 1)
             (builtin-fx-dynamics-percent-knob fx "mix" mix-p)))
