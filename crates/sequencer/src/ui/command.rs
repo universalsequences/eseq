@@ -2,11 +2,9 @@
 //!
 //! All mutations to `app.state.pattern.*` or `app.state.transport.*` that need
 //! to be visible to the audio thread should go through `apply_command`.  After
-//! executing the command, `apply_command` calls
-//! `app.state.publish_scheduler_snapshot()` so that any future snapshot-based
-//! audio-thread readers can pick up the change.  (Currently `publish` is a
-//! cheap no-op because the audio thread reads atomics directly; the hook is
-//! here for the planned Arc<SequencerSnapshot> architecture.)
+//! executing a command that affects event scheduling, `apply_command` publishes
+//! a scheduler snapshot. Continuous live controls that are pushed directly to
+//! the audio graph intentionally skip that publish path.
 //!
 //! Pure UI-state changes (cursor movement, mode changes, etc.) can also be
 //! routed through `apply_command` for uniformity — they just don't trigger a
@@ -67,6 +65,94 @@ fn sync_instrument_mod_active_plock(
         return;
     };
     let slot = &app.state.pattern.instrument_slots[track];
+    let active = desc
+        .instrument_modulation_targets
+        .iter()
+        .filter(|target| target.active_param_idx == Some(active_param_idx))
+        .any(|target| {
+            slot.plocks
+                .get(step, target.depth_param_idx)
+                .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
+                .abs()
+                > f32::EPSILON
+        });
+    slot.plocks
+        .set(step, active_param_idx, if active { 1.0 } else { 0.0 });
+}
+
+fn effect_mod_active_param_idx(
+    desc: &crate::effects::EffectDescriptor,
+    changed_param_idx: usize,
+) -> Option<usize> {
+    desc.instrument_modulation_targets
+        .iter()
+        .find(|target| target.depth_param_idx == changed_param_idx)
+        .and_then(|target| target.active_param_idx)
+}
+
+fn sync_effect_mod_active_default(
+    app: &mut App,
+    track: usize,
+    slot_idx: usize,
+    changed_param_idx: usize,
+) {
+    let Some(desc) = app
+        .graph
+        .effect_descriptors
+        .get(track)
+        .and_then(|track_descs| track_descs.get(slot_idx))
+    else {
+        return;
+    };
+    let Some(active_param_idx) = effect_mod_active_param_idx(desc, changed_param_idx) else {
+        return;
+    };
+    let Some(slot) = app
+        .state
+        .pattern
+        .effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+    else {
+        return;
+    };
+    let active = desc
+        .instrument_modulation_targets
+        .iter()
+        .filter(|target| target.active_param_idx == Some(active_param_idx))
+        .any(|target| slot.defaults.get(target.depth_param_idx).abs() > f32::EPSILON);
+    let value = if active { 1.0 } else { 0.0 };
+    slot.defaults.set(active_param_idx, value);
+    app.send_slot_param(track, slot_idx, active_param_idx, value);
+}
+
+fn sync_effect_mod_active_plock(
+    app: &mut App,
+    track: usize,
+    step: usize,
+    slot_idx: usize,
+    changed_param_idx: usize,
+) {
+    let Some(desc) = app
+        .graph
+        .effect_descriptors
+        .get(track)
+        .and_then(|track_descs| track_descs.get(slot_idx))
+    else {
+        return;
+    };
+    let Some(active_param_idx) = effect_mod_active_param_idx(desc, changed_param_idx) else {
+        return;
+    };
+    let Some(slot) = app
+        .state
+        .pattern
+        .effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+    else {
+        return;
+    };
     let active = desc
         .instrument_modulation_targets
         .iter()
@@ -467,8 +553,171 @@ pub fn apply_command(app: &mut App, cmd: AppCommand) {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_pasted_step_snapshot;
-    use crate::sequencer::{StepSlotPlocks, StepSnapshot, SwingResolution, Timebase, NUM_PARAMS};
+    use std::sync::{Arc, Mutex};
+
+    use super::{
+        apply_command, command_mutates_sequencer_state, sanitize_pasted_step_snapshot, AppCommand,
+    };
+    use crate::audiograph::LiveGraphPtr;
+    use crate::effects::{
+        EffectDescriptor, InstrumentModulationTarget, ParamDescriptor, ParamKind, ParamScaling,
+    };
+    use crate::recorder::MasterRecorder;
+    use crate::sequencer::{
+        default_empty_effect_chain, SequencerState, StepSlotPlocks, StepSnapshot, SwingResolution,
+        Timebase, TrackSendSnapshot, NUM_PARAMS,
+    };
+    use crate::ui::{App, AudioBuses};
+
+    fn effect_mod_test_descriptor() -> EffectDescriptor {
+        EffectDescriptor {
+            name: "modded effect".to_string(),
+            input_channels: 6,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: vec![
+                InstrumentModulationTarget {
+                    base_param_idx: 0,
+                    source_param_idx: None,
+                    modulator_slot: 1,
+                    depth_param_idx: 2,
+                    active_param_idx: Some(1),
+                    depth_min: -1.0,
+                    depth_max: 1.0,
+                    depth_unit: None,
+                },
+                InstrumentModulationTarget {
+                    base_param_idx: 0,
+                    source_param_idx: None,
+                    modulator_slot: 2,
+                    depth_param_idx: 3,
+                    active_param_idx: Some(1),
+                    depth_min: -1.0,
+                    depth_max: 1.0,
+                    depth_unit: None,
+                },
+            ],
+            params: vec![
+                ParamDescriptor {
+                    name: "xyz".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 10,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "__dgen_mod_active__xyz".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 11,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mod xyz slot 1 amt".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 12,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mod xyz slot 2 amt".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 13,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+            ],
+        }
+    }
+
+    fn test_app_with_effect_descriptor(desc: EffectDescriptor) -> App {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            state,
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.graph.effect_descriptors = vec![vec![desc]];
+        app
+    }
+
+    #[test]
+    fn live_mixer_commands_do_not_publish_scheduler_snapshots() {
+        assert!(!command_mutates_sequencer_state(
+            &AppCommand::SetTrackVolume {
+                track: 0,
+                value: 0.8,
+            }
+        ));
+        assert!(!command_mutates_sequencer_state(&AppCommand::SetTrackPan {
+            track: 0,
+            value: -0.25,
+        }));
+        assert!(!command_mutates_sequencer_state(
+            &AppCommand::SetTrackSends {
+                track: 0,
+                sends: vec![TrackSendSnapshot {
+                    destination: crate::sequencer::BusId(1),
+                    amount: 0.5,
+                }],
+            }
+        ));
+        assert!(!command_mutates_sequencer_state(
+            &AppCommand::SetMasterVolume { value: 1.1 }
+        ));
+    }
+
+    #[test]
+    fn sequenced_pattern_commands_publish_scheduler_snapshots() {
+        assert!(command_mutates_sequencer_state(&AppCommand::ToggleStep {
+            track: 0,
+            step: 0,
+        }));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(&AppCommand::SetBpm {
+            bpm: 128
+        }));
+    }
 
     #[test]
     fn paste_sanitizer_clears_audio_plocks_but_keeps_sequencer_plocks() {
@@ -537,16 +786,106 @@ mod tests {
             vec![Some(0.2), Some(0.8)]
         );
     }
+
+    #[test]
+    fn effect_depth_default_command_updates_dgen_mod_active_param() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc);
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 0.25,
+            },
+        );
+
+        assert_eq!(app.state.pattern.effect_chains[0][0].defaults.get(1), 1.0);
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 0.0,
+            },
+        );
+
+        let slot = &app.state.pattern.effect_chains[0][0];
+        assert_eq!(slot.defaults.get(1), 0.0);
+    }
+
+    #[test]
+    fn effect_depth_plock_command_updates_dgen_mod_active_plock() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_effect_descriptor(desc);
+        let step = 7;
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectParam {
+                track: 0,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 0.25,
+            },
+        );
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectPlock {
+                track: 0,
+                step,
+                slot_idx: 0,
+                param_idx: 2,
+                value: 0.0,
+            },
+        );
+
+        let slot = &app.state.pattern.effect_chains[0][0];
+        assert_eq!(slot.defaults.get(1), 1.0);
+        assert_eq!(slot.plocks.get(step, 1), Some(0.0));
+
+        apply_command(
+            &mut app,
+            AppCommand::SetEffectPlock {
+                track: 0,
+                step,
+                slot_idx: 0,
+                param_idx: 3,
+                value: -0.5,
+            },
+        );
+
+        assert_eq!(
+            app.state.pattern.effect_chains[0][0].plocks.get(step, 1),
+            Some(1.0)
+        );
+    }
 }
 
-/// Returns `true` for commands that write to `app.state.pattern` or
-/// `app.state.transport` and therefore need a snapshot publish.
+/// Returns `true` for commands whose state changes must be visible to the
+/// scheduler's immutable pattern snapshot.
 ///
-/// Currently all `AppCommand` variants mutate sequencer or transport state,
-/// so this always returns `true`.  The function exists as a hook for future
-/// pure-UI command variants that should NOT trigger a publish.
-fn command_mutates_sequencer_state(_cmd: &AppCommand) -> bool {
-    true
+/// Continuous live-mixer controls are pushed directly to the audio graph by
+/// `execute_command`. Publishing a full scheduler snapshot for each drag tick
+/// makes the app loop perform broad pattern/UI sync work even though event
+/// scheduling cannot observe those fields.
+fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
+    !matches!(
+        cmd,
+        AppCommand::SetTrackVolume { .. }
+            | AppCommand::AdjustTrackVolume { .. }
+            | AppCommand::SetTrackPan { .. }
+            | AppCommand::AdjustTrackPan { .. }
+            | AppCommand::SetTrackSend { .. }
+            | AppCommand::AdjustTrackSend { .. }
+            | AppCommand::SetTrackSends { .. }
+            | AppCommand::SetMasterVolume { .. }
+            | AppCommand::AdjustMasterVolume { .. }
+    )
 }
 
 fn execute_command(app: &mut App, cmd: AppCommand) {
@@ -888,6 +1227,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             if let Some(slot) = chain.get(slot_idx) {
                 slot.defaults.set(param_idx, value);
                 app.send_slot_param(track, slot_idx, param_idx, value);
+                sync_effect_mod_active_default(app, track, slot_idx, param_idx);
             }
         }
 
@@ -901,6 +1241,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
                 slot.plocks.set(step, param_idx, value);
+                sync_effect_mod_active_plock(app, track, step, slot_idx, param_idx);
             }
         }
 
@@ -911,10 +1252,21 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
-            let chain = &app.state.pattern.effect_chains[track];
-            if let Some(slot) = chain.get(slot_idx) {
+            let updated = app
+                .state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+                .is_some_and(|slot| {
+                    for step in &steps {
+                        slot.plocks.set(*step, param_idx, value);
+                    }
+                    true
+                });
+            if updated {
                 for step in steps {
-                    slot.plocks.set(step, param_idx, value);
+                    sync_effect_mod_active_plock(app, track, step, slot_idx, param_idx);
                 }
             }
         }

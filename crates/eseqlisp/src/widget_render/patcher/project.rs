@@ -12,9 +12,10 @@ use super::lisp::{
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
-    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch, MacroSignature,
-    NodeKind, NodeSource, OperatorPortShape, Patch, PatchConnection, PatchNode, PatcherIntent,
-    SourceArgValue, SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
+    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, InputPresentation, MacroPatch,
+    MacroSignature, NodeKind, NodeSource, OperatorPortShape, ParamNodeInfo, Patch, PatchConnection,
+    PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId, SourceOwner,
+    SourceScopeId, refresh_patch_inline_inputs,
 };
 
 pub(super) struct Projector {
@@ -62,6 +63,7 @@ impl Projector {
             let form_id = self.form_id(idx);
             self.project_top_level(expr, form_id);
         }
+        refresh_patch_inline_inputs(&mut self.patch);
         assign_layout(&mut self.patch);
         self.patch
     }
@@ -202,6 +204,8 @@ impl Projector {
             outputs: vec!["out".to_string()],
             position: (0.0, 0.0),
             width: None,
+            param: None,
+            inline_inputs: Vec::new(),
             diagnostic: None,
             source: Some(NodeSource {
                 owner: SourceOwner::Compound {
@@ -232,7 +236,7 @@ impl Projector {
 
         match &items[1] {
             Expression::Symbol(name) => {
-                if self.is_hidden_instrument_modulator_def(name, &items[2]) {
+                if self.is_hidden_host_modulator_def(name, &items[2]) {
                     return;
                 }
                 let binding = self.binding_id(name, BindingKind::Def);
@@ -374,6 +378,8 @@ impl Projector {
                 outputs: vec![param.clone()],
                 position: (0.0, 0.0),
                 width: None,
+                param: None,
+                inline_inputs: Vec::new(),
                 diagnostic: None,
                 source: Some(NodeSource {
                     owner: SourceOwner::MacroParameter {
@@ -395,6 +401,7 @@ impl Projector {
             }
         }
         let mut patch = projector.patch;
+        refresh_patch_inline_inputs(&mut patch);
         assign_layout(&mut patch);
         self.patch.macros.push(MacroPatch {
             name: name.to_string(),
@@ -416,12 +423,21 @@ impl Projector {
         );
     }
 
-    fn is_hidden_instrument_modulator_def(&self, name: &str, expr: &Expression) -> bool {
-        self.intent == PatcherIntent::Instrument
-            && self.scope == SourceScopeId::Root
-            && expected_instrument_modulator_slot(name).is_some_and(|slot| {
-                instrument_input_signature(expr) == Some((slot + 4, name, slot))
+    fn is_hidden_host_modulator_def(&self, name: &str, expr: &Expression) -> bool {
+        if self.scope != SourceScopeId::Root {
+            return false;
+        }
+        expected_host_modulator_slot(name).is_some_and(|slot| {
+            host_modulator_input_signature(expr).is_some_and(|(channel, input_name, modulator)| {
+                if input_name != name || modulator != slot {
+                    return false;
+                }
+                match self.intent {
+                    PatcherIntent::Instrument => channel == slot + 4,
+                    PatcherIntent::Effect => channel >= 3,
+                }
             })
+        })
     }
 
     fn project_macro_return(&mut self, expr: &Expression, form_id: SourceFormId) {
@@ -489,6 +505,8 @@ impl Projector {
                 outputs: Vec::new(),
                 position: (0.0, 0.0),
                 width: None,
+                param: None,
+                inline_inputs: Vec::new(),
                 diagnostic: None,
                 source: Some(NodeSource {
                     owner: SourceOwner::TopLevelForm {
@@ -505,6 +523,8 @@ impl Projector {
                 to_input: 0,
                 kind: ConnectionKind::Forward,
                 segment: None,
+                presentation: InputPresentation::Cable,
+                presentation_override: None,
                 source: None,
             });
         }
@@ -659,6 +679,8 @@ impl Projector {
             to_input: 0,
             kind: ConnectionKind::Feedback,
             segment: None,
+            presentation: InputPresentation::Cable,
+            presentation_override: None,
             source: Some(ConnectionSource {
                 from_expr: Some(value_arg.expr.clone()),
                 to_call: source_expr.clone(),
@@ -714,6 +736,8 @@ impl Projector {
             outputs: self.default_outputs_for_node(&op, kind),
             position: (0.0, 0.0),
             width: None,
+            param: param_node_info(&op, items),
+            inline_inputs: Vec::new(),
             diagnostic: self.operator_diagnostic(&op, kind),
             source: Some(NodeSource {
                 owner,
@@ -739,6 +763,8 @@ impl Projector {
                             &mut pending_constants,
                         );
                         let resolved_binding = self.symbol_bindings.get(name).cloned();
+                        let presentation =
+                            self.default_symbol_connection_presentation(idx, &from_node);
                         self.patch.connections.push(PatchConnection {
                             from_node,
                             from_output,
@@ -746,6 +772,8 @@ impl Projector {
                             to_input: idx,
                             kind: connection_kind_for_op(&op),
                             segment: None,
+                            presentation,
+                            presentation_override: None,
                             source: Some(ConnectionSource {
                                 from_expr: None,
                                 to_call: source_expr.clone(),
@@ -779,6 +807,8 @@ impl Projector {
                             &mut arg_slots,
                             &mut pending_constants,
                         );
+                        let presentation =
+                            self.default_nested_connection_presentation(idx, &from_node);
                         self.patch.connections.push(PatchConnection {
                             from_node,
                             from_output,
@@ -786,6 +816,8 @@ impl Projector {
                             to_input: idx,
                             kind: connection_kind_for_op(&op),
                             segment: None,
+                            presentation,
+                            presentation_override: None,
                             source: Some(ConnectionSource {
                                 from_expr: Some(arg_source.expr.clone()),
                                 to_call: source_expr.clone(),
@@ -865,6 +897,8 @@ impl Projector {
                 to_input: arg_source.semantic_index,
                 kind: connection_kind_for_op(&node.op),
                 segment: None,
+                presentation: InputPresentation::Cable,
+                presentation_override: None,
                 source: Some(ConnectionSource {
                     from_expr: Some(arg_source.expr.clone()),
                     to_call,
@@ -892,6 +926,8 @@ impl Projector {
             outputs: vec!["out".to_string()],
             position: (0.0, 0.0),
             width: None,
+            param: None,
+            inline_inputs: Vec::new(),
             diagnostic: None,
             source,
         });
@@ -1042,6 +1078,8 @@ impl Projector {
             outputs: Vec::new(),
             position: (0.0, 0.0),
             width: None,
+            param: None,
+            inline_inputs: Vec::new(),
             diagnostic: Some(reason.to_string()),
             source: Some(NodeSource {
                 owner: SourceOwner::CodeIsland {
@@ -1072,25 +1110,90 @@ impl Projector {
             Some(format!("unknown DGenLisp operator `{op}`"))
         }
     }
+
+    fn default_symbol_connection_presentation(
+        &self,
+        input_index: usize,
+        from_node: &str,
+    ) -> InputPresentation {
+        if input_index == 0 {
+            return InputPresentation::Cable;
+        }
+        self.patch
+            .nodes
+            .iter()
+            .find(|node| node.id == from_node)
+            .and_then(|node| node.param.as_ref())
+            .filter(|param| !param.modulatable)
+            .map(|_| InputPresentation::InlineRawParam)
+            .unwrap_or(InputPresentation::Cable)
+    }
+
+    fn default_nested_connection_presentation(
+        &self,
+        input_index: usize,
+        from_node: &str,
+    ) -> InputPresentation {
+        if input_index == 0 {
+            return InputPresentation::Cable;
+        }
+        let Some(mod_node) = self.patch.nodes.iter().find(|node| node.id == from_node) else {
+            return InputPresentation::Cable;
+        };
+        if mod_node.op != "mod" {
+            return InputPresentation::Cable;
+        }
+        let Some(inbound) = self
+            .patch
+            .connections
+            .iter()
+            .find(|connection| connection.to_node == mod_node.id && connection.to_input == 0)
+        else {
+            return InputPresentation::Cable;
+        };
+        self.patch
+            .nodes
+            .iter()
+            .find(|node| node.id == inbound.from_node)
+            .and_then(|node| node.param.as_ref())
+            .filter(|param| param.modulatable)
+            .map(|_| InputPresentation::InlineModParam)
+            .unwrap_or(InputPresentation::Cable)
+    }
 }
 
-fn expected_instrument_modulator_slot(name: &str) -> Option<usize> {
+fn param_node_info(op: &str, items: &[Expression]) -> Option<ParamNodeInfo> {
+    if op != "param" {
+        return None;
+    }
+    let name = symbol_at(items, 1)?;
+    Some(ParamNodeInfo {
+        name: name.to_string(),
+        modulatable: param_is_modulatable(items),
+    })
+}
+
+fn param_is_modulatable(items: &[Expression]) -> bool {
+    items.windows(2).any(|pair| {
+        matches!(
+            (&pair[0], &pair[1]),
+            (Expression::Symbol(key), Expression::Symbol(value))
+                if key == "@mod" && value == "true"
+        )
+    })
+}
+
+fn expected_host_modulator_slot(name: &str) -> Option<usize> {
     match name {
         "mod1" => Some(1),
         "mod2" => Some(2),
         "mod3" => Some(3),
         "mod4" => Some(4),
-        "mod5" => Some(5),
-        "mod6" => Some(6),
-        "ext1" => Some(7),
-        "ext2" => Some(8),
-        "ext3" => Some(9),
-        "ext4" => Some(10),
         _ => None,
     }
 }
 
-fn instrument_input_signature(expr: &Expression) -> Option<(usize, &str, usize)> {
+fn host_modulator_input_signature(expr: &Expression) -> Option<(usize, &str, usize)> {
     let Expression::List(items) = expr else {
         return None;
     };

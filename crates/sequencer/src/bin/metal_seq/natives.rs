@@ -34,6 +34,10 @@ fn delete_kind_name(value: &Value) -> Option<&str> {
     }
 }
 
+fn trace_ui_enabled() -> bool {
+    std::env::var_os("ESEQLISP_TRACE_UI").is_some()
+}
+
 fn parse_fx_delete_chain(value: &Value) -> Option<FxDeleteChain> {
     match value_string_field(value, "chain")?.as_str() {
         "audio" | "fx" => Some(FxDeleteChain::Audio),
@@ -76,6 +80,26 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
         }
         Some(other) => Err(format!("unknown delete target kind :{other}")),
         None => Err("delete target kind must be a keyword or string".to_string()),
+    }
+}
+
+fn effect_param_target(
+    slot_state: &sequencer::effects::EffectSlotState,
+    param_idx: usize,
+) -> Option<(u64, u64)> {
+    let idx = slot_state.resolve_node_idx(param_idx);
+    if idx == u32::MAX as u64 {
+        return None;
+    }
+    if idx as u32 >= sequencer::voice_modulator::MOD_PARAM_BASE {
+        let modulator_node_id = slot_state.modulator_node_id.load(Ordering::Relaxed);
+        (modulator_node_id != 0).then_some((
+            modulator_node_id as u64,
+            idx - sequencer::voice_modulator::MOD_PARAM_BASE as u64,
+        ))
+    } else {
+        let node_id = slot_state.node_id.load(Ordering::Relaxed);
+        (node_id != 0).then_some((node_id as u64, idx))
     }
 }
 
@@ -302,7 +326,11 @@ pub(crate) fn init_runtime(
                 ),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
-                ("track-pans", build_track_pans(&state)),
+                (
+                    "track-pans",
+                    build_all_track_param_lists_value(&state, &app, StepParam::Pan),
+                ),
+                ("track-mixer-pans", build_track_pans(&state)),
                 ("track-outputs", build_track_outputs(&app, &state)),
                 ("track-bus-sends", build_all_track_bus_sends(&app, &state)),
                 ("mod-routes", build_mod_routes(&state)),
@@ -592,6 +620,33 @@ pub(crate) fn init_runtime(
                     Value::Number(0.0),
                 ));
             }
+            for track in 0..track_count {
+                for (bus_idx, bus) in app.buses.iter().enumerate() {
+                    if bus.id == sequencer::sequencer::BusId::MIX {
+                        continue;
+                    }
+                    fields.push((
+                        Box::leak(track_bus_send_field(track, bus_idx).into_boxed_str()),
+                        Value::Number(
+                            track_bus_send_amount(&app, &state, track, bus_idx).unwrap_or(0.0)
+                                as f64,
+                        ),
+                    ));
+                }
+            }
+            if track_count > 0 {
+                for (bus_idx, bus) in app.buses.iter().enumerate() {
+                    if bus.id == sequencer::sequencer::BusId::MIX {
+                        continue;
+                    }
+                    fields.push((
+                        Box::leak(current_track_bus_send_field(bus_idx).into_boxed_str()),
+                        Value::Number(
+                            track_bus_send_amount(&app, &state, 0, bus_idx).unwrap_or(0.0) as f64,
+                        ),
+                    ));
+                }
+            }
             for idx in 0..MAX_STEPS {
                 fields.push((
                     Box::leak(format!("playhead-active-{idx}").into_boxed_str()),
@@ -599,6 +654,10 @@ pub(crate) fn init_runtime(
                 ));
             }
             for track in 0..track_count {
+                fields.push((
+                    Box::leak(track_playhead_page_field(track).into_boxed_str()),
+                    Value::Number((track_active_playhead_step(&state, track) / PAGE_SIZE) as f64),
+                ));
                 for step in 0..MAX_STEPS {
                     fields.push((
                         Box::leak(track_step_active_field(track, step).into_boxed_str()),
@@ -616,12 +675,17 @@ pub(crate) fn init_runtime(
                         Box::leak(track_step_selected_field(track, step).into_boxed_str()),
                         Value::Bool(false),
                     ));
+                    fields.push((
+                        Box::leak(track_playhead_active_field(track, step).into_boxed_str()),
+                        Value::Bool(step == track_active_playhead_step(&state, track)),
+                    ));
                 }
             }
             fields
         },
         false,
     );
+    runtime.register_reactive("SEQV", vec![], true);
     runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
     if track_count > 0 {
         sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);
@@ -993,8 +1057,20 @@ pub(crate) fn init_runtime(
         if previous != track {
             sel.lock().unwrap().clear();
             piano_sel.lock().unwrap().clear();
-            ui_ep.fetch_add(1, Ordering::Relaxed);
-            fx_ep.fetch_add(1, Ordering::Relaxed);
+            let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+            let next_fx_epoch = fx_ep.fetch_add(1, Ordering::Relaxed) + 1;
+            if trace_ui_enabled() {
+                eprintln!(
+                    "[ui-trace][native] seq-set-track previous={} next={} ui_epoch={} fx_epoch={}",
+                    previous, track, next_ui_epoch, next_fx_epoch
+                );
+            }
+        } else if trace_ui_enabled() {
+            eprintln!(
+                "[ui-trace][native] seq-set-track unchanged track={} ui_epoch={}",
+                track,
+                ui_ep.load(Ordering::Relaxed)
+            );
         }
         Ok(Value::Number(track as f64))
     });
@@ -1077,7 +1153,13 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-toggle-track-mute: track {track} out of range").into());
         }
         let muted = st.pattern.track_params[track].toggle_mute();
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+        if trace_ui_enabled() {
+            eprintln!(
+                "[ui-trace][native] seq-toggle-track-mute track={} muted={} ui_epoch={}",
+                track, muted, next_ui_epoch
+            );
+        }
         let pan_ids_lock = pan_ids.lock().unwrap();
         if let Some(&pan_id) = pan_ids_lock.get(track) {
             push_panner_bool(
@@ -1103,7 +1185,13 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-toggle-track-solo: track {track} out of range").into());
         }
         let solo = st.pattern.track_params[track].toggle_solo();
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+        if trace_ui_enabled() {
+            eprintln!(
+                "[ui-trace][native] seq-toggle-track-solo track={} solo={} ui_epoch={}",
+                track, solo, next_ui_epoch
+            );
+        }
         let pan_ids_lock = pan_ids.lock().unwrap();
         push_solo_mutes(lg_raw, &st, &pan_ids_lock);
         Ok(Value::Bool(solo))
@@ -1234,10 +1322,7 @@ pub(crate) fn init_runtime(
 
         slot_state.defaults.set(param_idx, clamped);
 
-        // Push to audiograph
-        let node_id = slot_state.node_id.load(Ordering::Relaxed);
-        if node_id != 0 {
-            let idx = slot_state.resolve_node_idx(param_idx);
+        if let Some((logical_id, idx)) = effect_param_target(slot_state, param_idx) {
             // Check for host_control — skip if present
             let skip = descs
                 .get(track)
@@ -1251,7 +1336,7 @@ pub(crate) fn init_runtime(
                         lg_raw,
                         sequencer::audiograph::ParamMsg {
                             idx,
-                            logical_id: node_id as u64,
+                            logical_id,
                             fvalue: clamped,
                         },
                     );
@@ -1317,9 +1402,7 @@ pub(crate) fn init_runtime(
 
             slot_state.defaults.set(param_idx, clamped);
 
-            let node_id = slot_state.node_id.load(Ordering::Relaxed);
-            if node_id != 0 {
-                let idx = slot_state.resolve_node_idx(param_idx);
+            if let Some((logical_id, idx)) = effect_param_target(slot_state, param_idx) {
                 let skip = descs
                     .get(track)
                     .and_then(|d| d.get(slot_idx))
@@ -1332,7 +1415,7 @@ pub(crate) fn init_runtime(
                             lg_raw,
                             sequencer::audiograph::ParamMsg {
                                 idx,
-                                logical_id: node_id as u64,
+                                logical_id,
                                 fvalue: clamped,
                             },
                         );
@@ -1417,9 +1500,7 @@ pub(crate) fn init_runtime(
 
             slot_state.defaults.set(param_idx, clamped);
 
-            let node_id = slot_state.node_id.load(Ordering::Relaxed);
-            if node_id != 0 {
-                let idx = slot_state.resolve_node_idx(param_idx);
+            if let Some((logical_id, idx)) = effect_param_target(slot_state, param_idx) {
                 let skip = descs
                     .get(track)
                     .and_then(|d| d.get(slot_idx))
@@ -1432,7 +1513,7 @@ pub(crate) fn init_runtime(
                             lg_raw,
                             sequencer::audiograph::ParamMsg {
                                 idx,
-                                logical_id: node_id as u64,
+                                logical_id,
                                 fvalue: clamped,
                             },
                         );

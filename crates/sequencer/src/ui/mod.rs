@@ -290,6 +290,8 @@ mod engine_registry_tests {
             dylib_path: std::path::PathBuf::new(),
             total_memory_slots: 0,
             params: Vec::new(),
+            groups: Vec::new(),
+            envelopes: Vec::new(),
             inputs: Vec::new(),
             modulators: Vec::new(),
             mod_destinations: Vec::new(),

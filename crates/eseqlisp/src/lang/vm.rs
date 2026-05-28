@@ -1,5 +1,6 @@
 use crate::compiler::{Chunk, Compiler, MacroDef, OpCode};
 use crate::host::BufferId;
+use crate::hot_reload::{SourceManager, extract_defined_symbols_from_source};
 use crate::parser::{ASTParser, Parser};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -44,7 +45,7 @@ fn log_native_callback_error(vm: &VM, native_name: &str, index: usize, error: &V
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReactiveSource {
     NamespaceField { namespace: String, field: String },
     LocalState { name: String },
@@ -114,6 +115,7 @@ pub enum Value {
     NativeFunction(NativeFn),
 }
 
+#[derive(Clone)]
 pub enum ReactiveNode {
     Source {
         id: NodeId,
@@ -133,10 +135,12 @@ pub enum ReactiveNode {
         chunk_idx: usize,
         callable: Option<Value>,
         source_buffer_id: Option<BufferId>,
+        source_module: Option<std::path::PathBuf>,
         target: EffectTarget,
         subtree_root_id: Option<u64>,
         parent_subtree_root_id: Option<u64>,
         stable_key: Option<String>,
+        symbol_dependencies: HashSet<String>,
         dirty: bool,
     },
 }
@@ -242,11 +246,14 @@ struct RegisteredSubtreeOwner {
     callable: Value,
 }
 
+#[derive(Clone)]
 pub struct ReactiveDag {
     pub nodes: HashMap<NodeId, ReactiveNode>,
     pub edges: HashMap<NodeId, HashSet<NodeId>>,
     pub dirty_nodes: HashSet<NodeId>,
     pub next_id: NodeId,
+    namespace_field_sources: HashMap<String, HashMap<String, NodeId>>,
+    local_state_sources: HashMap<String, NodeId>,
 }
 
 pub fn format_lisp_value(value: &Value) -> String {
@@ -860,9 +867,84 @@ pub struct VM {
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
     current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
+    current_effect_symbol_reads: Option<HashSet<String>>,
     current_subtree_capture_stack: Vec<SubtreeCaptureContext>,
     current_subtree_reactive_reads: HashMap<u64, HashSet<ReactiveFieldKey>>,
     pub macros: HashMap<String, MacroDef>,
+    pub source_manager: SourceManager,
+    pub(crate) source_load_errors: Vec<String>,
+    preserve_state_on_redefinition: bool,
+}
+
+pub struct VmStateSnapshot {
+    chunks: Vec<Chunk>,
+    current_chunk: usize,
+    globals: Vec<Option<Rc<RefCell<Value>>>>,
+    global_names: Vec<String>,
+    pending_widget_trees: Vec<PendingUiUpdate>,
+    dag: ReactiveDag,
+    tracking_stack: Vec<NodeId>,
+    reactive_namespaces: HashSet<String>,
+    writable_reactive_namespaces: HashSet<String>,
+    derived_bindings: HashMap<String, NodeId>,
+    state_bindings: HashMap<String, NodeId>,
+    execution_depth: usize,
+    processing_reactive: bool,
+    reactive_exec_timings: Vec<ReactiveExecTiming>,
+    last_reactive_error_context: Option<String>,
+    last_reactive_error_detail: Option<String>,
+    current_effect_source_buffer_id: Option<BufferId>,
+    current_effect_target: EffectTarget,
+    current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
+    current_effect_symbol_reads: Option<HashSet<String>>,
+    current_subtree_capture_stack: Vec<SubtreeCaptureContext>,
+    current_subtree_reactive_reads: HashMap<u64, HashSet<ReactiveFieldKey>>,
+    macros: HashMap<String, MacroDef>,
+    source_manager: SourceManager,
+    source_load_errors: Vec<String>,
+    preserve_state_on_redefinition: bool,
+}
+
+fn clone_globals_for_snapshot(
+    globals: &[Option<Rc<RefCell<Value>>>],
+) -> Vec<Option<Rc<RefCell<Value>>>> {
+    globals
+        .iter()
+        .map(|value| {
+            value
+                .as_ref()
+                .map(|value| Rc::new(RefCell::new(clone_value_for_snapshot(&value.borrow()))))
+        })
+        .collect()
+}
+
+fn clone_value_for_snapshot(value: &Value) -> Value {
+    match value {
+        Value::List(items) => Value::List(
+            items
+                .iter()
+                .map(|item| Rc::new(RefCell::new(clone_value_for_snapshot(&item.borrow()))))
+                .collect(),
+        ),
+        Value::Map(map) => Value::Map(
+            map.iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        Rc::new(RefCell::new(clone_value_for_snapshot(&value.borrow()))),
+                    )
+                })
+                .collect(),
+        ),
+        Value::Closure(chunk_idx, upvalues) => Value::Closure(
+            *chunk_idx,
+            upvalues
+                .iter()
+                .map(|value| Rc::new(RefCell::new(clone_value_for_snapshot(&value.borrow()))))
+                .collect(),
+        ),
+        other => other.deep_clone(),
+    }
 }
 
 /// Register built-in functions available in all contexts.
@@ -929,6 +1011,22 @@ pub fn register_core_natives(vm: &mut VM) {
             vm.dag.add_edge(source_id, ctx_id);
         }
         vm.current_reactive_value(namespace, field)
+    });
+
+    vm.register_native_with_vm("reactive-set", |args, vm| {
+        let (Some(Value::String(namespace)), Some(Value::String(field)), Some(value)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Value::Bool(false);
+        };
+        if !vm.writable_reactive_namespaces.contains(namespace) {
+            return Value::Bool(false);
+        }
+        let value = value.clone();
+        vm.update_reactive_global(namespace, field, value.clone());
+        let source_id = vm.get_or_create_source_node(namespace, field);
+        vm.mark_source_dependents_dirty(source_id, value);
+        Value::Bool(true)
     });
 
     vm.register_native("bind", |args| {
@@ -1573,6 +1671,8 @@ impl ReactiveDag {
             edges: HashMap::new(),
             dirty_nodes: HashSet::new(),
             next_id: 0,
+            namespace_field_sources: HashMap::new(),
+            local_state_sources: HashMap::new(),
         }
     }
 
@@ -1588,11 +1688,22 @@ impl ReactiveDag {
             | ReactiveNode::Derived { id, .. }
             | ReactiveNode::Effect { id, .. } => *id,
         };
+        if let Some(source) = self.nodes.get(&id).and_then(|node| match node {
+            ReactiveNode::Source { source, .. } => Some(source.clone()),
+            _ => None,
+        }) {
+            self.unindex_source_node(&source, id);
+        }
+        if let ReactiveNode::Source { source, .. } = &node {
+            self.index_source_node(source, id);
+        }
         self.nodes.insert(id, node);
     }
 
     pub fn remove_node(&mut self, id: NodeId) {
-        self.nodes.remove(&id);
+        if let Some(ReactiveNode::Source { source, .. }) = self.nodes.remove(&id) {
+            self.unindex_source_node(&source, id);
+        }
         self.edges.remove(&id);
         self.dirty_nodes.remove(&id);
         for dependents in self.edges.values_mut() {
@@ -1723,13 +1834,62 @@ impl ReactiveDag {
         }
     }
 
+    fn index_source_node(&mut self, source: &ReactiveSource, id: NodeId) {
+        match source {
+            ReactiveSource::NamespaceField { namespace, field } => {
+                self.namespace_field_sources
+                    .entry(namespace.clone())
+                    .or_default()
+                    .insert(field.clone(), id);
+            }
+            ReactiveSource::LocalState { name } => {
+                self.local_state_sources.insert(name.clone(), id);
+            }
+        }
+    }
+
+    fn unindex_source_node(&mut self, source: &ReactiveSource, id: NodeId) {
+        match source {
+            ReactiveSource::NamespaceField { namespace, field } => {
+                let should_remove_namespace =
+                    if let Some(fields) = self.namespace_field_sources.get_mut(namespace) {
+                        if fields.get(field) == Some(&id) {
+                            fields.remove(field);
+                        }
+                        fields.is_empty()
+                    } else {
+                        false
+                    };
+                if should_remove_namespace {
+                    self.namespace_field_sources.remove(namespace);
+                }
+            }
+            ReactiveSource::LocalState { name } => {
+                if self.local_state_sources.get(name) == Some(&id) {
+                    self.local_state_sources.remove(name);
+                }
+            }
+        }
+    }
+
+    pub fn find_namespace_field_source_node(&self, namespace: &str, field: &str) -> Option<NodeId> {
+        self.namespace_field_sources
+            .get(namespace)
+            .and_then(|fields| fields.get(field))
+            .copied()
+    }
+
+    pub fn find_local_state_source_node(&self, name: &str) -> Option<NodeId> {
+        self.local_state_sources.get(name).copied()
+    }
+
     pub fn find_source_node(&self, source: &ReactiveSource) -> Option<NodeId> {
-        self.nodes.iter().find_map(|(id, node)| match node {
-            ReactiveNode::Source {
-                source: current, ..
-            } if current == source => Some(*id),
-            _ => None,
-        })
+        match source {
+            ReactiveSource::NamespaceField { namespace, field } => {
+                self.find_namespace_field_source_node(namespace, field)
+            }
+            ReactiveSource::LocalState { name } => self.find_local_state_source_node(name),
+        }
     }
 
     pub fn chunk_idx(&self, id: NodeId) -> Option<usize> {
@@ -1794,6 +1954,58 @@ impl ReactiveDag {
             .collect()
     }
 
+    pub fn descendant_subtree_effect_ids(&self, subtree_root_id: u64) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        let mut stack = vec![subtree_root_id];
+        let mut visited_roots = HashSet::new();
+
+        while let Some(parent_root_id) = stack.pop() {
+            if !visited_roots.insert(parent_root_id) {
+                continue;
+            }
+
+            for (id, node) in &self.nodes {
+                let ReactiveNode::Effect {
+                    subtree_root_id: Some(current_root_id),
+                    parent_subtree_root_id: Some(current_parent_root_id),
+                    ..
+                } = node
+                else {
+                    continue;
+                };
+
+                if *current_parent_root_id == parent_root_id && *current_root_id != subtree_root_id
+                {
+                    ids.push(*id);
+                    stack.push(*current_root_id);
+                }
+            }
+        }
+
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    pub fn remove_descendant_subtree_effects(&mut self, subtree_root_id: u64) -> HashSet<u64> {
+        let descendants = self
+            .descendant_subtree_effect_ids(subtree_root_id)
+            .into_iter()
+            .filter_map(|id| {
+                let root = match self.nodes.get(&id) {
+                    Some(ReactiveNode::Effect {
+                        subtree_root_id: Some(root),
+                        ..
+                    }) => Some(*root),
+                    _ => None,
+                };
+                self.remove_node(id);
+                root
+            })
+            .collect::<HashSet<_>>();
+        descendants
+    }
+
     pub fn effect_id_for_subtree_root(&self, subtree_root_id: u64) -> Option<NodeId> {
         self.nodes.iter().find_map(|(id, node)| match node {
             ReactiveNode::Effect {
@@ -1827,9 +2039,13 @@ impl VM {
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
             current_effect_reactive_reads: None,
+            current_effect_symbol_reads: None,
             current_subtree_capture_stack: Vec::new(),
             current_subtree_reactive_reads: HashMap::new(),
             macros: HashMap::new(),
+            source_manager: SourceManager::new(),
+            source_load_errors: Vec::new(),
+            preserve_state_on_redefinition: false,
         }
     }
 
@@ -1890,6 +2106,103 @@ impl VM {
             }
             Err(_) => Err(VMError::CompileError),
         }
+    }
+
+    pub fn eval_module_source(
+        &mut self,
+        path: std::path::PathBuf,
+        source: &str,
+        revision: u64,
+    ) -> Result<Option<Value>, VMError> {
+        let defined_symbols = extract_defined_symbols_from_source(source).map_err(|error| {
+            self.source_load_errors
+                .push(format!("{}: {error}", path.display()));
+            VMError::ParseError
+        })?;
+        self.clear_effects_for_module(&path);
+        self.source_manager.enter_module(path.clone());
+        let result = self.eval_str(source);
+        self.source_manager.leave_module();
+        if result.is_ok() {
+            self.source_manager.record_module_success(
+                path,
+                source,
+                revision,
+                defined_symbols,
+                Vec::new(),
+            );
+        } else {
+            self.source_manager.discard_module_loads(&path);
+        }
+        result
+    }
+
+    pub fn take_source_load_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.source_load_errors)
+    }
+
+    pub fn set_preserve_state_on_redefinition(&mut self, preserve: bool) {
+        self.preserve_state_on_redefinition = preserve;
+    }
+
+    pub fn snapshot_state(&self) -> VmStateSnapshot {
+        VmStateSnapshot {
+            chunks: self.chunks.clone(),
+            current_chunk: self.current_chunk,
+            globals: clone_globals_for_snapshot(&self.globals),
+            global_names: self.global_names.clone(),
+            pending_widget_trees: self.pending_widget_trees.clone(),
+            dag: self.dag.clone(),
+            tracking_stack: self.tracking_stack.clone(),
+            reactive_namespaces: self.reactive_namespaces.clone(),
+            writable_reactive_namespaces: self.writable_reactive_namespaces.clone(),
+            derived_bindings: self.derived_bindings.clone(),
+            state_bindings: self.state_bindings.clone(),
+            execution_depth: self.execution_depth,
+            processing_reactive: self.processing_reactive,
+            reactive_exec_timings: self.reactive_exec_timings.clone(),
+            last_reactive_error_context: self.last_reactive_error_context.clone(),
+            last_reactive_error_detail: self.last_reactive_error_detail.clone(),
+            current_effect_source_buffer_id: self.current_effect_source_buffer_id,
+            current_effect_target: self.current_effect_target.clone(),
+            current_effect_reactive_reads: self.current_effect_reactive_reads.clone(),
+            current_effect_symbol_reads: self.current_effect_symbol_reads.clone(),
+            current_subtree_capture_stack: self.current_subtree_capture_stack.clone(),
+            current_subtree_reactive_reads: self.current_subtree_reactive_reads.clone(),
+            macros: self.macros.clone(),
+            source_manager: self.source_manager.clone(),
+            source_load_errors: self.source_load_errors.clone(),
+            preserve_state_on_redefinition: self.preserve_state_on_redefinition,
+        }
+    }
+
+    pub fn restore_state(&mut self, snapshot: VmStateSnapshot) {
+        self.chunks = snapshot.chunks;
+        self.current_chunk = snapshot.current_chunk;
+        self.globals = snapshot.globals;
+        self.global_names = snapshot.global_names;
+        self.pending_widget_trees = snapshot.pending_widget_trees;
+        self.dag = snapshot.dag;
+        self.tracking_stack = snapshot.tracking_stack;
+        self.reactive_namespaces = snapshot.reactive_namespaces;
+        self.writable_reactive_namespaces = snapshot.writable_reactive_namespaces;
+        self.derived_bindings = snapshot.derived_bindings;
+        self.state_bindings = snapshot.state_bindings;
+        self.execution_depth = snapshot.execution_depth;
+        self.processing_reactive = snapshot.processing_reactive;
+        self.reactive_exec_timings = snapshot.reactive_exec_timings;
+        self.last_reactive_error_context = snapshot.last_reactive_error_context;
+        self.last_reactive_error_detail = snapshot.last_reactive_error_detail;
+        self.current_effect_source_buffer_id = snapshot.current_effect_source_buffer_id;
+        self.current_effect_target = snapshot.current_effect_target;
+        self.current_effect_reactive_reads = snapshot.current_effect_reactive_reads;
+        self.current_effect_symbol_reads = snapshot.current_effect_symbol_reads;
+        self.current_subtree_capture_stack = snapshot.current_subtree_capture_stack;
+        self.current_subtree_reactive_reads = snapshot.current_subtree_reactive_reads;
+        self.macros = snapshot.macros;
+        self.source_manager = snapshot.source_manager;
+        self.source_load_errors = snapshot.source_load_errors;
+        self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
     }
 
     #[cfg(test)]
@@ -2028,6 +2341,145 @@ impl VM {
         });
     }
 
+    pub fn clear_effects_for_module(&mut self, module: &std::path::Path) {
+        let ids = self
+            .dag
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| match node {
+                ReactiveNode::Effect {
+                    source_module: Some(source_module),
+                    ..
+                } if source_module == module => Some(*id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.dag.remove_node(id);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn effect_count_for_module(&self, module: &std::path::Path) -> usize {
+        self.dag
+            .nodes
+            .values()
+            .filter(|node| {
+                matches!(
+                    node,
+                    ReactiveNode::Effect {
+                        source_module: Some(source_module),
+                        ..
+                    } if source_module == module
+                )
+            })
+            .count()
+    }
+
+    fn upsert_top_level_effect_node(
+        &mut self,
+        node_id: NodeId,
+        chunk_idx: usize,
+        target: EffectTarget,
+    ) {
+        let source_buffer_id = self.current_effect_source_buffer_id;
+        let source_module = self.source_manager.current_module();
+        match self.dag.nodes.get_mut(&node_id) {
+            Some(ReactiveNode::Effect {
+                chunk_idx: current_chunk_idx,
+                callable,
+                source_buffer_id: current_source_buffer_id,
+                source_module: current_source_module,
+                target: current_target,
+                subtree_root_id: None,
+                parent_subtree_root_id,
+                stable_key,
+                dirty,
+                ..
+            }) => {
+                *current_chunk_idx = chunk_idx;
+                *callable = None;
+                *current_source_buffer_id = source_buffer_id;
+                *current_source_module = source_module;
+                *current_target = target;
+                *parent_subtree_root_id = None;
+                *stable_key = None;
+                *dirty = false;
+                self.dag.dirty_nodes.remove(&node_id);
+            }
+            Some(_) => {
+                self.dag.remove_node(node_id);
+                self.dag.add_node(ReactiveNode::Effect {
+                    id: node_id,
+                    chunk_idx,
+                    callable: None,
+                    source_buffer_id,
+                    source_module,
+                    target,
+                    subtree_root_id: None,
+                    parent_subtree_root_id: None,
+                    stable_key: None,
+                    symbol_dependencies: HashSet::new(),
+                    dirty: false,
+                });
+            }
+            None => {
+                self.dag.add_node(ReactiveNode::Effect {
+                    id: node_id,
+                    chunk_idx,
+                    callable: None,
+                    source_buffer_id,
+                    source_module,
+                    target,
+                    subtree_root_id: None,
+                    parent_subtree_root_id: None,
+                    stable_key: None,
+                    symbol_dependencies: HashSet::new(),
+                    dirty: false,
+                });
+            }
+        }
+        self.source_manager.record_render_root(node_id);
+    }
+
+    pub fn mark_effects_depending_on_symbols(&mut self, symbols: &HashSet<String>) -> Vec<String> {
+        if symbols.is_empty() {
+            return Vec::new();
+        }
+        let mut rerendered = Vec::new();
+        let ids = self
+            .dag
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| match node {
+                ReactiveNode::Effect {
+                    subtree_root_id: None,
+                    symbol_dependencies,
+                    ..
+                } if symbol_dependencies
+                    .iter()
+                    .any(|symbol| symbols.contains(symbol)) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for id in ids {
+            if let Some(label) = self.reactive_node_label(id) {
+                rerendered.push(label);
+            }
+            self.dag.mark_dirty(id);
+        }
+        rerendered.sort();
+        rerendered.dedup();
+        rerendered
+    }
+
+    pub fn rerender_dirty_effects(&mut self) -> Result<(), VMError> {
+        self.process_dirty_reactive()
+    }
+
     fn clear_subtree_effects_for_current_context(&mut self) {
         let owner_buffer_id = self.current_effect_source_buffer_id;
         let target = self.current_effect_target.clone();
@@ -2066,6 +2518,12 @@ impl VM {
         }
         if let Some(reads) = self.current_effect_reactive_reads.as_mut() {
             reads.insert(key);
+        }
+    }
+
+    fn record_symbol_read(&mut self, name: &str) {
+        if let Some(reads) = self.current_effect_symbol_reads.as_mut() {
+            reads.insert(name.to_string());
         }
     }
 
@@ -2110,10 +2568,12 @@ impl VM {
             chunk_idx,
             callable: Some(callable.clone()),
             source_buffer_id: self.current_effect_source_buffer_id,
+            source_module: self.source_manager.current_module(),
             target: self.current_effect_target.clone(),
             subtree_root_id: Some(root_id),
             parent_subtree_root_id: parent_root_id,
             stable_key: Some(stable_key.clone()),
+            symbol_dependencies: HashSet::new(),
             dirty: false,
         });
         RegisteredSubtreeOwner {
@@ -2129,6 +2589,15 @@ impl VM {
         &mut self,
         owner: &RegisteredSubtreeOwner,
     ) -> Result<Value, VMError> {
+        let removed_descendants = self.dag.remove_descendant_subtree_effects(owner.root_id);
+        if !removed_descendants.is_empty() {
+            self.pending_widget_trees.retain(|pending| match pending {
+                PendingUiUpdate::ReplaceSubtree {
+                    subtree_root_id, ..
+                } => !removed_descendants.contains(subtree_root_id),
+                PendingUiUpdate::FullTree(_) => true,
+            });
+        }
         self.dag.clear_dependencies_of(owner.node_id);
         self.current_subtree_reactive_reads
             .insert(owner.root_id, HashSet::new());
@@ -2180,6 +2649,44 @@ impl VM {
             .unwrap_or_default();
         reads.sort();
         reads
+    }
+
+    fn current_symbol_reads(&self) -> HashSet<String> {
+        self.current_effect_symbol_reads.clone().unwrap_or_default()
+    }
+
+    fn set_effect_symbol_dependencies(&mut self, node_id: NodeId, dependencies: HashSet<String>) {
+        if let Some(ReactiveNode::Effect {
+            symbol_dependencies,
+            ..
+        }) = self.dag.nodes.get_mut(&node_id)
+        {
+            *symbol_dependencies = dependencies;
+        }
+    }
+
+    fn attach_reactive_dependencies_to_pending_trees(
+        &mut self,
+        pending_trees_start: usize,
+        reactive_dependencies: Vec<ReactiveFieldKey>,
+    ) {
+        for pending in self
+            .pending_widget_trees
+            .iter_mut()
+            .skip(pending_trees_start)
+        {
+            match pending {
+                PendingUiUpdate::FullTree(pending) => {
+                    pending.reactive_dependencies = reactive_dependencies.clone();
+                }
+                PendingUiUpdate::ReplaceSubtree {
+                    reactive_dependencies: pending_dependencies,
+                    ..
+                } => {
+                    *pending_dependencies = reactive_dependencies.clone();
+                }
+            }
+        }
     }
 
     fn reactive_node_label(&self, node_id: NodeId) -> Option<String> {
@@ -2294,16 +2801,16 @@ impl VM {
     }
 
     fn get_or_create_source_node(&mut self, namespace: &str, field: &str) -> NodeId {
-        let source = ReactiveSource::NamespaceField {
-            namespace: namespace.to_string(),
-            field: field.to_string(),
-        };
-        if let Some(id) = self.dag.find_source_node(&source) {
+        if let Some(id) = self.dag.find_namespace_field_source_node(namespace, field) {
             return id;
         }
 
         let id = self.dag.alloc_id();
         let value = self.current_reactive_value(namespace, field);
+        let source = ReactiveSource::NamespaceField {
+            namespace: namespace.to_string(),
+            field: field.to_string(),
+        };
         self.dag.add_node(ReactiveNode::Source {
             id,
             source,
@@ -2314,12 +2821,8 @@ impl VM {
     }
 
     pub fn has_reactive_subscribers(&self, namespace: &str, field: &str) -> bool {
-        let source = ReactiveSource::NamespaceField {
-            namespace: namespace.to_string(),
-            field: field.to_string(),
-        };
         self.dag
-            .find_source_node(&source)
+            .find_namespace_field_source_node(namespace, field)
             .and_then(|id| self.dag.nodes.get(&id))
             .is_some_and(|node| match node {
                 ReactiveNode::Source { dependents, .. } => !dependents.is_empty(),
@@ -2333,14 +2836,16 @@ impl VM {
         name: &str,
         initial: Value,
     ) -> NodeId {
-        let source = ReactiveSource::LocalState {
-            name: name.to_string(),
-        };
-        if let Some(id) = self.dag.find_source_node(&source) {
-            self.mark_source_dependents_dirty(id, initial);
+        if let Some(id) = self.dag.find_local_state_source_node(name) {
+            if !self.preserve_state_on_redefinition {
+                self.mark_source_dependents_dirty(id, initial);
+            }
             return id;
         }
 
+        let source = ReactiveSource::LocalState {
+            name: name.to_string(),
+        };
         self.dag.add_node(ReactiveNode::Source {
             id: node_id,
             source,
@@ -2440,20 +2945,24 @@ impl VM {
                                 continue;
                             };
                             let previous_reactive_reads = self.current_effect_reactive_reads.take();
+                            let previous_symbol_reads = self.current_effect_symbol_reads.take();
                             let previous_subtree_capture_stack =
                                 std::mem::take(&mut self.current_subtree_capture_stack);
                             let previous_subtree_reactive_reads =
                                 std::mem::take(&mut self.current_subtree_reactive_reads);
+                            self.dag.clear_dependencies_of(node_id);
                             self.current_effect_reactive_reads = Some(HashSet::new());
+                            self.current_effect_symbol_reads = Some(HashSet::new());
                             let label = self.reactive_node_label(node_id);
                             let started = Instant::now();
-                            let rendered_tree = self
-                                .render_registered_subtree_owner(&owner)
-                                .map_err(|error| {
-                                    self.last_reactive_error_context =
-                                        label.clone().or_else(|| Some(format!("node:{node_id}")));
-                                    error
-                                })?;
+                            self.tracking_stack.push(node_id);
+                            let render_result = self.render_registered_subtree_owner(&owner);
+                            let _ = self.tracking_stack.pop();
+                            let rendered_tree = render_result.map_err(|error| {
+                                self.last_reactive_error_context =
+                                    label.clone().or_else(|| Some(format!("node:{node_id}")));
+                                error
+                            })?;
                             let mut path = Vec::new();
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
@@ -2478,15 +2987,17 @@ impl VM {
                                 });
                             self.dag.clear_dirty(node_id);
                             if let Some(label) = label {
+                                let elapsed = started.elapsed();
                                 self.reactive_exec_timings.push(ReactiveExecTiming {
                                     label,
-                                    elapsed: started.elapsed(),
+                                    elapsed,
                                     source_buffer_id: self.current_effect_source_buffer_id,
                                     target: self.current_effect_target.clone(),
                                     subtree_root_id: Some(root_id),
                                 });
                             }
                             self.current_effect_reactive_reads = previous_reactive_reads;
+                            self.current_effect_symbol_reads = previous_symbol_reads;
                             self.current_subtree_capture_stack = previous_subtree_capture_stack;
                             self.current_subtree_reactive_reads = previous_subtree_reactive_reads;
                             self.current_effect_source_buffer_id = previous_owner.0;
@@ -2496,6 +3007,7 @@ impl VM {
                     }
                     let pending_trees_start = self.pending_widget_trees.len();
                     let previous_reactive_reads = self.current_effect_reactive_reads.take();
+                    let previous_symbol_reads = self.current_effect_symbol_reads.take();
                     let previous_subtree_capture_stack =
                         std::mem::take(&mut self.current_subtree_capture_stack);
                     let previous_subtree_reactive_reads =
@@ -2512,14 +3024,21 @@ impl VM {
                         })
                     );
                     if capturing_effect_reads {
+                        self.dag.clear_dependencies_of(node_id);
                         self.current_effect_reactive_reads = Some(HashSet::new());
+                        self.current_effect_symbol_reads = Some(HashSet::new());
+                        self.tracking_stack.push(node_id);
                     }
                     if is_top_level_effect {
                         self.clear_subtree_effects_for_current_context();
                     }
                     let label = self.reactive_node_label(node_id);
                     let started = Instant::now();
-                    self.execute_from(chunk_idx).map_err(|error| {
+                    let execute_result = self.execute_from(chunk_idx);
+                    if capturing_effect_reads {
+                        let _ = self.tracking_stack.pop();
+                    }
+                    execute_result.map_err(|error| {
                         self.last_reactive_error_context =
                             label.clone().or_else(|| Some(format!("node:{node_id}")));
                         error
@@ -2529,29 +3048,23 @@ impl VM {
                     } else {
                         Vec::new()
                     };
+                    let captured_symbol_reads = if capturing_effect_reads {
+                        self.current_symbol_reads()
+                    } else {
+                        HashSet::new()
+                    };
                     if capturing_effect_reads {
-                        for pending in self
-                            .pending_widget_trees
-                            .iter_mut()
-                            .skip(pending_trees_start)
-                        {
-                            match pending {
-                                PendingUiUpdate::FullTree(pending) => {
-                                    pending.reactive_dependencies = captured_reactive_reads.clone();
-                                }
-                                PendingUiUpdate::ReplaceSubtree {
-                                    reactive_dependencies,
-                                    ..
-                                } => {
-                                    *reactive_dependencies = captured_reactive_reads.clone();
-                                }
-                            }
-                        }
+                        self.set_effect_symbol_dependencies(node_id, captured_symbol_reads);
+                        self.attach_reactive_dependencies_to_pending_trees(
+                            pending_trees_start,
+                            captured_reactive_reads,
+                        );
                     }
                     if let Some(label) = label {
+                        let elapsed = started.elapsed();
                         self.reactive_exec_timings.push(ReactiveExecTiming {
                             label,
-                            elapsed: started.elapsed(),
+                            elapsed,
                             source_buffer_id: self.current_effect_source_buffer_id,
                             target: self.current_effect_target.clone(),
                             subtree_root_id: self.dag.nodes.get(&node_id).and_then(
@@ -2565,6 +3078,7 @@ impl VM {
                         });
                     }
                     self.current_effect_reactive_reads = previous_reactive_reads;
+                    self.current_effect_symbol_reads = previous_symbol_reads;
                     self.current_subtree_capture_stack = previous_subtree_capture_stack;
                     self.current_subtree_reactive_reads = previous_subtree_reactive_reads;
                     self.current_effect_source_buffer_id = previous_owner.0;
@@ -2960,8 +3474,11 @@ impl VM {
                 }
                 OpCode::LoadGlobal(idx) => {
                     if let Some(frame) = frames.last_mut() {
-                        if let Some(Some(val)) = self.globals.get(idx) {
-                            stack.push(Rc::clone(val));
+                        if let Some(Some(val)) = self.globals.get(idx).cloned() {
+                            if let Some(name) = self.global_names.get(idx).cloned() {
+                                self.record_symbol_read(&name);
+                            }
+                            stack.push(val);
                             frame.pc += 1;
                         } else {
                             let _ = frame;
@@ -3002,50 +3519,68 @@ impl VM {
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::InitEffect(node_id, chunk_idx) => {
-                    if !self.dag.nodes.contains_key(&node_id) {
-                        self.dag.add_node(ReactiveNode::Effect {
-                            id: node_id,
-                            chunk_idx,
-                            callable: None,
-                            source_buffer_id: self.current_effect_source_buffer_id,
-                            target: self.current_effect_target.clone(),
-                            subtree_root_id: None,
-                            parent_subtree_root_id: None,
-                            stable_key: None,
-                            dirty: false,
-                        });
-                    }
+                    self.upsert_top_level_effect_node(
+                        node_id,
+                        chunk_idx,
+                        self.current_effect_target.clone(),
+                    );
 
                     let current_chunk = self.current_chunk;
-                    let result = self.execute_from(chunk_idx)?;
+                    let pending_trees_start = self.pending_widget_trees.len();
+                    let previous_reactive_reads = self.current_effect_reactive_reads.take();
+                    let previous_symbol_reads = self.current_effect_symbol_reads.take();
+                    self.dag.clear_dependencies_of(node_id);
+                    self.current_effect_reactive_reads = Some(HashSet::new());
+                    self.current_effect_symbol_reads = Some(HashSet::new());
+                    self.tracking_stack.push(node_id);
+                    let result = self.execute_from(chunk_idx);
+                    let _ = self.tracking_stack.pop();
+                    let captured_reactive_reads = self.sorted_current_reactive_reads();
+                    let captured_symbol_reads = self.current_symbol_reads();
+                    self.set_effect_symbol_dependencies(node_id, captured_symbol_reads);
+                    self.attach_reactive_dependencies_to_pending_trees(
+                        pending_trees_start,
+                        captured_reactive_reads,
+                    );
+                    self.current_effect_reactive_reads = previous_reactive_reads;
+                    self.current_effect_symbol_reads = previous_symbol_reads;
                     self.current_chunk = current_chunk;
-                    let _ = result;
+                    let _ = result?;
                     stack.push(Rc::new(RefCell::new(Value::Nil)));
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::InitNamedEffect(node_id, chunk_idx, name_idx) => {
                     let target_name = self.chunks[self.current_chunk].strings[name_idx].clone();
-                    if !self.dag.nodes.contains_key(&node_id) {
-                        self.dag.add_node(ReactiveNode::Effect {
-                            id: node_id,
-                            chunk_idx,
-                            callable: None,
-                            source_buffer_id: self.current_effect_source_buffer_id,
-                            target: EffectTarget::BufferName(target_name.clone()),
-                            subtree_root_id: None,
-                            parent_subtree_root_id: None,
-                            stable_key: None,
-                            dirty: false,
-                        });
-                    }
+                    self.upsert_top_level_effect_node(
+                        node_id,
+                        chunk_idx,
+                        EffectTarget::BufferName(target_name.clone()),
+                    );
 
                     let current_chunk = self.current_chunk;
                     let previous_target = self.current_effect_target.clone();
+                    let pending_trees_start = self.pending_widget_trees.len();
+                    let previous_reactive_reads = self.current_effect_reactive_reads.take();
+                    let previous_symbol_reads = self.current_effect_symbol_reads.take();
                     self.current_effect_target = EffectTarget::BufferName(target_name);
-                    let result = self.execute_from(chunk_idx)?;
+                    self.dag.clear_dependencies_of(node_id);
+                    self.current_effect_reactive_reads = Some(HashSet::new());
+                    self.current_effect_symbol_reads = Some(HashSet::new());
+                    self.tracking_stack.push(node_id);
+                    let result = self.execute_from(chunk_idx);
+                    let _ = self.tracking_stack.pop();
+                    let captured_reactive_reads = self.sorted_current_reactive_reads();
+                    let captured_symbol_reads = self.current_symbol_reads();
+                    self.set_effect_symbol_dependencies(node_id, captured_symbol_reads);
+                    self.attach_reactive_dependencies_to_pending_trees(
+                        pending_trees_start,
+                        captured_reactive_reads,
+                    );
+                    self.current_effect_reactive_reads = previous_reactive_reads;
+                    self.current_effect_symbol_reads = previous_symbol_reads;
                     self.current_chunk = current_chunk;
                     self.current_effect_target = previous_target;
-                    let _ = result;
+                    let _ = result?;
                     stack.push(Rc::new(RefCell::new(Value::Nil)));
                     frames.last_mut().unwrap().pc += 1;
                 }
@@ -3376,7 +3911,9 @@ impl VM {
 
 #[cfg(test)]
 mod tests {
-    use super::{VM, Value};
+    use std::collections::HashSet;
+
+    use super::{EffectTarget, ReactiveDag, ReactiveNode, ReactiveSource, VM, Value};
 
     #[test]
     fn eval_str_grows_global_storage_for_large_programs() {
@@ -3411,5 +3948,47 @@ mod tests {
             .expect("macro definition");
 
         assert!(vm.eval_str("(again 1)").is_err());
+    }
+
+    #[test]
+    fn reactive_dag_indexes_source_nodes() {
+        let mut dag = ReactiveDag::new();
+        let source = ReactiveSource::NamespaceField {
+            namespace: "SEQ".to_string(),
+            field: "send-a".to_string(),
+        };
+        dag.add_node(ReactiveNode::Source {
+            id: 7,
+            source: source.clone(),
+            value: Value::Number(0.0),
+            dependents: HashSet::new(),
+        });
+
+        assert_eq!(dag.find_source_node(&source), Some(7));
+
+        dag.add_node(ReactiveNode::Effect {
+            id: 7,
+            chunk_idx: 0,
+            callable: None,
+            source_buffer_id: None,
+            source_module: None,
+            target: EffectTarget::BufferId(None),
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            symbol_dependencies: HashSet::new(),
+            dirty: false,
+        });
+        assert_eq!(dag.find_source_node(&source), None);
+
+        dag.add_node(ReactiveNode::Source {
+            id: 8,
+            source: source.clone(),
+            value: Value::Number(1.0),
+            dependents: HashSet::new(),
+        });
+        assert_eq!(dag.find_source_node(&source), Some(8));
+        dag.remove_node(8);
+        assert_eq!(dag.find_source_node(&source), None);
     }
 }

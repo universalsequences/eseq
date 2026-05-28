@@ -108,6 +108,14 @@
       ]
     },
     {
+      "name": "@env",
+      "summary": "UI fallback envelope name for an envelope-role param.",
+      "type": "symbol",
+      "used_by": [
+        "param"
+      ]
+    },
+    {
       "name": "@file",
       "summary": "Audio, tensor, or wavetable asset path.",
       "type": "path",
@@ -140,6 +148,14 @@
     {
       "name": "@generated-for",
       "summary": "Associates a generated helper parameter with a user parameter.",
+      "type": "symbol",
+      "used_by": [
+        "param"
+      ]
+    },
+    {
+      "name": "@group",
+      "summary": "UI fallback group name for a host-visible param.",
       "type": "symbol",
       "used_by": [
         "param"
@@ -406,6 +422,14 @@
       "type": "int[]",
       "used_by": [
         "repeat"
+      ]
+    },
+    {
+      "name": "@role",
+      "summary": "Envelope role for a param that declares @env.",
+      "type": "enum",
+      "used_by": [
+        "param"
       ]
     },
     {
@@ -3764,53 +3788,6 @@
       },
       "attribute_docs": [],
       "attributes": [],
-      "category": "special-form",
-      "documentation": {
-        "port_docs": "curated-from-signature",
-        "source": "dgenlisp-special-forms"
-      },
-      "implementation": {
-        "function": null,
-        "source_file": "DGenLisp special form"
-      },
-      "input_count": {
-        "maximum": 1,
-        "minimum": 1
-      },
-      "inputs": [
-        {
-          "kind": "symbol",
-          "name": "paramName",
-          "required": true,
-          "summary": "Name of a parameter declared with @mod true."
-        }
-      ],
-      "name": "mod",
-      "output_count": {
-        "maximum": 1,
-        "minimum": 1
-      },
-      "outputs": [
-        {
-          "index": 0,
-          "kind": "value",
-          "name": "out",
-          "summary": "Resolved modulated parameter value."
-        }
-      ],
-      "signatures": [
-        "(mod paramName)"
-      ],
-      "summary": "Resolve the lowered modulated value for a parameter declared with `@mod true`."
-    },
-    {
-      "aliases": [],
-      "arity": {
-        "maximum": 1,
-        "minimum": 1
-      },
-      "attribute_docs": [],
-      "attributes": [],
       "category": "preamble",
       "documentation": {
         "port_docs": "curated-from-signature",
@@ -4197,6 +4174,11 @@
           "type": "float"
         },
         {
+          "name": "@env",
+          "summary": "UI fallback envelope name for an envelope-role param.",
+          "type": "symbol"
+        },
+        {
           "name": "@generated",
           "summary": "Tags generated helper parameters.",
           "type": "string"
@@ -4204,6 +4186,11 @@
         {
           "name": "@generated-for",
           "summary": "Associates a generated helper parameter with a user parameter.",
+          "type": "symbol"
+        },
+        {
+          "name": "@group",
+          "summary": "UI fallback group name for a host-visible param.",
           "type": "symbol"
         },
         {
@@ -4262,6 +4249,17 @@
           "type": "int"
         },
         {
+          "name": "@role",
+          "summary": "Envelope role for a param that declares @env.",
+          "type": "enum",
+          "values": [
+            "attack",
+            "decay",
+            "sustain",
+            "release"
+          ]
+        },
+        {
           "name": "@unit",
           "summary": "Host-visible unit label.",
           "type": "string"
@@ -4269,8 +4267,10 @@
       ],
       "attributes": [
         "@default",
+        "@env",
         "@generated",
         "@generated-for",
+        "@group",
         "@hidden",
         "@max",
         "@min",
@@ -4281,6 +4281,7 @@
         "@mod-mode",
         "@mod-resolved-symbol",
         "@modulator-slot",
+        "@role",
         "@unit"
       ],
       "category": "io",
@@ -4318,7 +4319,8 @@
         }
       ],
       "signatures": [
-        "(param name @default value @min value @max value @unit string)"
+        "(param name @default value @min value @max value @unit string)",
+        "(param name @group groupName @env envName @role attack|decay|sustain|release)"
       ],
       "summary": "Host-visible scalar parameter."
     },
@@ -6905,6 +6907,44 @@
         "(triangle phase duty)"
       ],
       "summary": "Convert a 0..1 phase to a triangle wave with optional duty."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": null,
+        "minimum": null
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "uncategorized",
+      "documentation": {
+        "port_docs": "not-yet-curated",
+        "source": "source-discovered"
+      },
+      "implementation": {
+        "function": "evalTuple",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": null,
+        "minimum": null
+      },
+      "inputs": [],
+      "name": "tuple",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [],
+      "summary": "Operator implemented in DGenLisp evaluator."
     },
     {
       "aliases": [],

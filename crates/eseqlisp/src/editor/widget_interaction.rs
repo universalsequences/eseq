@@ -172,10 +172,16 @@ fn nearest_widget_gesture_node(
     if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
         return None;
     }
+    let hit_node_handles_pointer = widget_render::node_handles_pointer_events(hit_node);
     path.into_iter().rev().find_map(|node| {
+        if node.widget_id != hit_node.widget_id && hit_node_handles_pointer {
+            return None;
+        }
         let gesture_data = begin_widget_gesture_data(&node, local_col, local_row);
-        if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
+        if gesture_data.is_some() {
             Some((node, gesture_data))
+        } else if widget_render::widget_captures_drag(&node.widget_type) {
+            Some((node, None))
         } else {
             None
         }
@@ -726,7 +732,10 @@ impl Editor {
         {
             if let Some(overlay_id) = widget_render::overlay_widget_id() {
                 let Some(layout) = self.runtime.current_layout.clone() else {
-                    return true;
+                    widget_render::dropdown::close_dropdown(overlay_id);
+                    widget_render::clear_overlay();
+                    self.mark_needs_redraw();
+                    return false;
                 };
                 if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id) {
                     let (cell_w, cell_h) = self.runtime.layout_cell_dims();
@@ -748,9 +757,12 @@ impl Editor {
                         }
                     };
                     let _ = self.apply_widget_output(output);
+                    return true;
                 }
+                widget_render::dropdown::close_dropdown(overlay_id);
+                widget_render::clear_overlay();
+                self.mark_needs_redraw();
             }
-            return true;
         }
 
         let gen_before = widget_render::widget_state_generation();

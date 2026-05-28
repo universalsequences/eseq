@@ -12,11 +12,12 @@ pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
     app: &ui::App,
 ) -> Result<(Editor, MetalBackend), Box<dyn std::error::Error>> {
-    let init_src = read_eseqlisp_init_source();
+    let (init_src, init_path) = read_eseqlisp_init_source();
     let mut editor = Editor::new(
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            init_source_path: init_path,
             vim_mode: true,
         },
     );
@@ -24,10 +25,20 @@ pub(crate) fn create_editor_and_backend(
     reload_custom_instrument_ui(&mut editor);
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
     let grid_source = editor.active_buffer().text();
-    editor
-        .runtime_mut()
-        .eval_str(&grid_source)
-        .map_err(|error| format!("failed to load metal-seq-grid.lisp: {error:?}"))?;
+    let overlays = editor.snapshot_file_backed_sources();
+    let report = editor.runtime_mut().eval_source_transactional(
+        Some(std::path::PathBuf::from("metal-seq-grid.lisp")),
+        &grid_source,
+        overlays,
+    );
+    if !report.success {
+        return Err(format!(
+            "failed to load metal-seq-grid.lisp: {}",
+            report.failure_message()
+        )
+        .into());
+    }
+    editor.process_lisp_reload_report(report);
     editor.refresh_runtime_side_effects();
     log_lisp_ui_load_diagnostics(&mut editor);
     reload_custom_instrument_ui(&mut editor);
@@ -50,10 +61,14 @@ pub(crate) fn create_editor_and_backend(
     Ok((editor, backend))
 }
 
-fn read_eseqlisp_init_source() -> String {
+fn read_eseqlisp_init_source() -> (String, Option<std::path::PathBuf>) {
     eseqlisp_init_candidates()
         .into_iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
+        .find_map(|path| {
+            std::fs::read_to_string(&path)
+                .ok()
+                .map(|source| (source, Some(path)))
+        })
         .unwrap_or_default()
 }
 
@@ -68,6 +83,7 @@ fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
 
     for name in [
         "*metal*",
+        "*sequencer*",
         "*samples*",
         "*track*",
         "*fx*",

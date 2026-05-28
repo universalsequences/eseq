@@ -576,13 +576,19 @@ pub fn subtree_root_paths(existing: &LayoutNode) -> HashMap<u64, Vec<usize>> {
     paths
 }
 
+fn is_subtree_boundary(root_id: Option<u64>, parent_root_id: Option<u64>) -> bool {
+    root_id.is_some() && root_id != parent_root_id
+}
+
 fn collect_subtree_root_paths(
     node: &LayoutNode,
     path: &mut Vec<usize>,
     paths: &mut HashMap<u64, Vec<usize>>,
 ) {
-    if let Some(root_id) = node.subtree_root_id {
-        paths.insert(root_id, path.clone());
+    if is_subtree_boundary(node.subtree_root_id, node.parent_subtree_root_id)
+        && let Some(root_id) = node.subtree_root_id
+    {
+        paths.entry(root_id).or_insert_with(|| path.clone());
     }
     for (idx, child) in node.children.iter().enumerate() {
         path.push(idx);
@@ -1157,6 +1163,53 @@ mod tests {
         );
     }
 
+    fn layout_node(
+        widget_type: &str,
+        subtree_root_id: Option<u64>,
+        parent_subtree_root_id: Option<u64>,
+        children: Vec<LayoutNode>,
+    ) -> LayoutNode {
+        LayoutNode {
+            widget_id: 0,
+            stable_widget_id: None,
+            subtree_root_id,
+            parent_subtree_root_id,
+            stable_key: None,
+            widget_type: widget_type.to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            props: std::collections::HashMap::new(),
+            children,
+            focusable: false,
+        }
+    }
+
+    #[test]
+    fn subtree_root_paths_record_boundary_nodes_not_inherited_descendants() {
+        let layout = layout_node(
+            "v-stack",
+            None,
+            None,
+            vec![layout_node(
+                "box",
+                Some(11),
+                None,
+                vec![layout_node(
+                    "v-stack",
+                    Some(11),
+                    Some(11),
+                    vec![layout_node("label", Some(11), Some(11), Vec::new())],
+                )],
+            )],
+        );
+
+        assert_eq!(subtree_root_paths(&layout).get(&11), Some(&vec![0]));
+    }
+
     /// Build a label widget: (label "text" :width w)
     fn label(text: &str, width: Option<f64>) -> Value {
         let mut args = vec![s(text)];
@@ -1189,6 +1242,55 @@ mod tests {
                 num(0.5),
             ],
         )
+    }
+
+    fn mixer_send_knob() -> Value {
+        build_widget(
+            "knob-number",
+            vec![
+                kw("label"),
+                s("A"),
+                kw("value"),
+                num(0.5),
+                kw("min"),
+                num(0.0),
+                kw("max"),
+                num(1.0),
+                kw("decimals"),
+                num(2.0),
+                kw("show-value"),
+                Value::Bool(false),
+                kw("font-size"),
+                num(9.0),
+                kw("label-font-size"),
+                num(5.0),
+                kw("width"),
+                num(4.7),
+                kw("height"),
+                num(1.8),
+                kw("knob-size"),
+                num(1.84),
+            ],
+        )
+    }
+
+    #[test]
+    fn knob_number_hit_test_covers_visible_mixer_send_knob_lower_half() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&mixer_send_knob()).expect("knob layout");
+
+        let declared_height = 1.8_f32;
+        let knob_size = 1.84_f32;
+        let top_label_band = (declared_height * 0.45).max(0.72);
+        let visible_knob_bottom = layout.rect.row + top_label_band + knob_size;
+        let hit_row = layout.rect.row + 2.2;
+        let hit_col = layout.rect.col + layout.rect.width * 0.5;
+        assert!(hit_row > layout.rect.row + declared_height);
+        assert!(hit_row < visible_knob_bottom);
+
+        let hit = hit_test_layout(&layout, hit_row, hit_col)
+            .expect("visible lower half of mixer send knob should be hittable");
+        assert_eq!(hit.widget_type, "knob-number");
     }
 
     /// Build a vslider: (vslider :height h)

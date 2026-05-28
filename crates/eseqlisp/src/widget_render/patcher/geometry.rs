@@ -10,7 +10,8 @@ use super::metrics::{
     PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{
-    ArgValue, CableEndpoint, InputPortRef, OutputPortRef, Patch, PatchConnection, PatchNode,
+    ArgValue, CableEndpoint, InputPortRef, InputPresentation, OutputPortRef, Patch,
+    PatchConnection, PatchNode, connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
 use super::state::{NodeResizeCorner, PatcherPanState, source_connection_id};
 
@@ -18,9 +19,13 @@ pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
     let input_indices = patch_input_indices(patch);
     let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
     let output_counts = patch_output_counts(patch);
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     let mut max_col: f32 = VIEW_PADDING_X * 2.0;
     let mut max_row: f32 = VIEW_PADDING_Y * 2.0;
     for node in &patch.nodes {
+        if hidden_node_ids.contains(&node.id) {
+            continue;
+        }
         let (width, height) = node_size_for_ports(
             node,
             input_slot_counts.get(&node.id).copied().unwrap_or(0),
@@ -63,9 +68,11 @@ pub(super) fn patch_node_rects(
     let input_indices = patch_input_indices(patch);
     let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
     let output_counts = patch_output_counts(patch);
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     patch
         .nodes
         .iter()
+        .filter(|node| !hidden_node_ids.contains(&node.id))
         .map(|node| {
             let size = node_size_for_ports(
                 node,
@@ -87,14 +94,31 @@ pub(super) fn patch_node_rects(
 
 pub(super) fn patch_input_indices(patch: &Patch) -> HashMap<String, Vec<usize>> {
     let mut indices: HashMap<String, Vec<usize>> = HashMap::new();
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     for node in &patch.nodes {
+        if hidden_node_ids.contains(&node.id) {
+            continue;
+        }
         for (idx, arg) in node.args.iter().enumerate() {
+            if node
+                .inline_inputs
+                .get(idx)
+                .is_some_and(|input| input.is_some())
+            {
+                continue;
+            }
             if matches!(arg, ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr) {
                 indices.entry(node.id.clone()).or_default().push(idx);
             }
         }
     }
     for connection in &patch.connections {
+        if connection.presentation != InputPresentation::Cable {
+            continue;
+        }
+        if connection_touches_hidden_inline_node(connection, &hidden_node_ids) {
+            continue;
+        }
         let node_indices = indices.entry(connection.to_node.clone()).or_default();
         if !node_indices.contains(&connection.to_input) {
             node_indices.push(connection.to_input);
@@ -112,7 +136,11 @@ pub(super) fn patch_input_slot_counts(
     input_indices: &HashMap<String, Vec<usize>>,
 ) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     for node in &patch.nodes {
+        if hidden_node_ids.contains(&node.id) {
+            continue;
+        }
         let count = input_indices
             .get(&node.id)
             .map(|indices| {
@@ -134,12 +162,19 @@ pub(super) fn patch_input_slot_counts(
 
 pub(super) fn patch_output_counts(patch: &Patch) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     for node in &patch.nodes {
+        if hidden_node_ids.contains(&node.id) {
+            continue;
+        }
         if !node.outputs.is_empty() {
             counts.insert(node.id.clone(), node.outputs.len());
         }
     }
     for connection in &patch.connections {
+        if connection_touches_hidden_inline_node(connection, &hidden_node_ids) {
+            continue;
+        }
         let needed = connection.from_output + 1;
         counts
             .entry(connection.from_node.clone())
@@ -469,9 +504,12 @@ pub(super) fn hit_patcher_cable(
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let origin = patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     patch
         .connections
         .iter()
+        .filter(|connection| connection.presentation == InputPresentation::Cable)
+        .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
         .filter_map(|connection| {
             let (start, end) = connection_endpoints(
                 connection,
@@ -544,31 +582,37 @@ pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
     let node_rects = patch_node_rects(patch, rect, pan_state);
     let origin = patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
-    patch.connections.iter().find_map(|connection| {
-        let segment = connection.segment?;
-        if !segment.is_segmented {
-            return None;
-        }
-        let (start, end) = connection_endpoints(
-            connection,
-            &node_rects,
-            input_indices,
-            input_slot_counts,
-            output_counts,
-        )?;
-        if !super::super::cable::should_render_segmented_cable(start, end) {
-            return None;
-        }
-        super::super::cable::segmented_horizontal_segment_hit(
-            start,
-            end,
-            origin.1 + segment.segment_row * zoom,
-            SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
-            CABLE_HIT_RADIUS_CELLS * zoom,
-            (local_col, local_row),
-        )
-        .then(|| source_connection_id(connection))
-    })
+    let hidden_node_ids = hidden_inline_node_ids(patch);
+    patch
+        .connections
+        .iter()
+        .filter(|connection| connection.presentation == InputPresentation::Cable)
+        .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
+        .find_map(|connection| {
+            let segment = connection.segment?;
+            if !segment.is_segmented {
+                return None;
+            }
+            let (start, end) = connection_endpoints(
+                connection,
+                &node_rects,
+                input_indices,
+                input_slot_counts,
+                output_counts,
+            )?;
+            if !super::super::cable::should_render_segmented_cable(start, end) {
+                return None;
+            }
+            super::super::cable::segmented_horizontal_segment_hit(
+                start,
+                end,
+                origin.1 + segment.segment_row * zoom,
+                SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
+                CABLE_HIT_RADIUS_CELLS * zoom,
+                (local_col, local_row),
+            )
+            .then(|| source_connection_id(connection))
+        })
 }
 
 pub(super) fn hit_patcher_cable_handle(
@@ -587,27 +631,34 @@ pub(super) fn hit_patcher_cable_handle(
     let zoom = patcher_zoom(pan_state);
     let threshold_radius = CABLE_HANDLE_HIT_RADIUS_CELLS * zoom;
     let threshold = threshold_radius * threshold_radius;
-    patch.connections.iter().find_map(|connection| {
-        let cable_id = source_connection_id(connection);
-        if cable_id != selected_cable {
-            return None;
-        }
-        let (start, end) = connection_endpoints(
-            connection,
-            &node_rects,
-            input_indices,
-            input_slot_counts,
-            output_counts,
-        )?;
-        let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end, zoom);
-        if distance_squared(from_handle, (local_col, local_row)) <= threshold {
-            Some((cable_id, CableEndpoint::From))
-        } else if distance_squared(to_handle, (local_col, local_row)) <= threshold {
-            Some((cable_id, CableEndpoint::To))
-        } else {
-            None
-        }
-    })
+    let hidden_node_ids = hidden_inline_node_ids(patch);
+    patch
+        .connections
+        .iter()
+        .filter(|connection| connection.presentation == InputPresentation::Cable)
+        .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
+        .find_map(|connection| {
+            let cable_id = source_connection_id(connection);
+            if cable_id != selected_cable {
+                return None;
+            }
+            let (start, end) = connection_endpoints(
+                connection,
+                &node_rects,
+                input_indices,
+                input_slot_counts,
+                output_counts,
+            )?;
+            let (from_handle, to_handle) =
+                connection_cable_edit_points(connection, start, end, zoom);
+            if distance_squared(from_handle, (local_col, local_row)) <= threshold {
+                Some((cable_id, CableEndpoint::From))
+            } else if distance_squared(to_handle, (local_col, local_row)) <= threshold {
+                Some((cable_id, CableEndpoint::To))
+            } else {
+                None
+            }
+        })
 }
 
 pub(super) fn patcher_breadcrumb_rect(rect: Rect) -> Rect {

@@ -39,8 +39,7 @@ Critical effect DSP rules:
   `(out left_signal 1 @name left)`
   `(out right_signal 2 @name right)`.
 - Effect parameters are not host-modulatable in this build. Never write
-  `@mod true`, `@mod-mode`, `@modulator`, `mod1`, `mod2`, `mod3`, `mod4`,
-  `mod5`, `mod6`, or `(mod param)` in effect DSP.
+  `@mod true`, `@mod-mode`, `@modulator`, `mod1`, `mod2`, `mod3`, `mod4`, or `(mod param)` in effect DSP.
 - Read every effect parameter directly by name. For example, use `depth`, not
   `(mod depth)`.
 - `%` is the numeric remainder/modulo-style operator. Do not use `(mod x y)`.

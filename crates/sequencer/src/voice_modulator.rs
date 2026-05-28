@@ -1,76 +1,303 @@
 use std::os::raw::{c_int, c_void};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::audiograph::NodeVTable;
 use crate::effects::{ParamDescriptor, ParamKind, ParamScaling, SyncDivision};
+use crate::sequencer::MAX_TRACKS;
 
-pub const NUM_OUTPUTS: usize = 6;
-pub const MOD_PARAM_BASE: u32 = 1_000_000;
+pub const SLOT_COUNT: usize = 4;
+pub const NUM_OUTPUTS: usize = SLOT_COUNT;
+pub const INPUT_COUNT: usize = 8;
+pub const EXT_INPUT_COUNT: usize = 4;
 
-const IDX_LFO1_PHASE: usize = 0;
-const IDX_LFO2_PHASE: usize = 1;
-const IDX_LFO3_PHASE: usize = 2;
-const IDX_ENV2: usize = 3;
-const IDX_RAND_PHASE: usize = 4;
-const IDX_DRIFT: usize = 5;
-const IDX_PREV_GATE: usize = 6;
-const IDX_RNG: usize = 7;
-const IDX_RAND_HOLD: usize = 8;
-const IDX_RAND_SMOOTH: usize = 9;
-const IDX_LAST_RESET_COUNTER: usize = 10;
-const IDX_ENV_STAGE: usize = 11;
-const IDX_SAMPLE_RATE: usize = 48;
+/// Deliberately versioned away from the old fixed-source layout at 1_000_000.
+/// Old project/preset cells must not collide with the new configurable slot
+/// params and be silently interpreted as different modulation controls.
+pub const MOD_PARAM_BASE: u32 = 1_100_000;
+pub const LEGACY_FIXED_MOD_PARAM_BASE: u32 = 1_000_000;
 
-pub const PARAM_BPM: usize = 49;
-pub const PARAM_RESET_COUNTER: usize = 50;
+const SLOT_STATE_STRIDE: usize = 8;
+const IDX_SLOT_STATE_BASE: usize = 0;
+const IDX_LFO_PHASE: usize = 0;
+const IDX_ENV: usize = 1;
+const IDX_RAND_PHASE: usize = 2;
+const IDX_DRIFT: usize = 3;
+const IDX_RNG: usize = 4;
+const IDX_RAND_HOLD: usize = 5;
+const IDX_RAND_SMOOTH: usize = 6;
+const IDX_ENV_STAGE: usize = 7;
 
-pub const PARAM_LFO1_RATE_HZ: usize = 13;
-pub const PARAM_LFO1_SYNC: usize = 14;
-pub const PARAM_LFO1_DIV: usize = 15;
-pub const PARAM_LFO1_SHAPE: usize = 16;
-pub const PARAM_LFO1_PW: usize = 17;
-pub const PARAM_LFO1_RETRIGGER: usize = 18;
-pub const PARAM_LFO2_RATE_HZ: usize = 19;
-pub const PARAM_LFO2_SYNC: usize = 20;
-pub const PARAM_LFO2_DIV: usize = 21;
-pub const PARAM_LFO2_SHAPE: usize = 22;
-pub const PARAM_LFO2_PW: usize = 23;
-pub const PARAM_LFO2_RETRIGGER: usize = 24;
-pub const PARAM_LFO3_RATE_HZ: usize = 25;
-pub const PARAM_LFO3_SYNC: usize = 26;
-pub const PARAM_LFO3_DIV: usize = 27;
-pub const PARAM_LFO3_SHAPE: usize = 28;
-pub const PARAM_LFO3_PW: usize = 29;
-pub const PARAM_LFO3_RETRIGGER: usize = 30;
-pub const PARAM_ENV_ATTACK_MS: usize = 31;
-pub const PARAM_ENV_DECAY_MS: usize = 32;
-pub const PARAM_ENV_SUSTAIN: usize = 33;
-pub const PARAM_ENV_RELEASE_MS: usize = 34;
-pub const PARAM_RAND_RATE_HZ: usize = 35;
-pub const PARAM_RAND_SYNC: usize = 36;
-pub const PARAM_RAND_DIV: usize = 37;
-pub const PARAM_RAND_SLEW: usize = 38;
-pub const PARAM_DRIFT_RATE: usize = 39;
-pub const PARAM_DRIFT_SYNC: usize = 40;
-pub const PARAM_DRIFT_DIV: usize = 41;
-pub const PARAM_MOD1_DEPTH: usize = 42;
-pub const PARAM_MOD2_DEPTH: usize = 43;
-pub const PARAM_MOD3_DEPTH: usize = 44;
-pub const PARAM_MOD4_DEPTH: usize = 45;
-pub const PARAM_MOD5_DEPTH: usize = 46;
-pub const PARAM_MOD6_DEPTH: usize = 47;
+const IDX_PREV_GATE: usize = IDX_SLOT_STATE_BASE + SLOT_STATE_STRIDE * SLOT_COUNT;
+const IDX_LAST_RESET_COUNTER: usize = IDX_PREV_GATE + 1;
+const IDX_SAMPLE_RATE: usize = IDX_LAST_RESET_COUNTER + 1;
+const IDX_CUSTOM_ENGINE_ID: usize = IDX_SAMPLE_RATE + 1;
+const IDX_CUSTOM_VOICE_IDX: usize = IDX_CUSTOM_ENGINE_ID + 1;
+const IDX_SAMPLER_TRACK_IDX: usize = IDX_CUSTOM_VOICE_IDX + 1;
+const IDX_SAMPLER_VOICE_IDX: usize = IDX_SAMPLER_TRACK_IDX + 1;
 
-pub const PARAM_COUNT: usize = 37;
-pub const STATE_SIZE: usize = 51;
+pub const PARAM_SLOT_BASE: usize = 64;
+pub const PARAM_SLOT_STRIDE: usize = 18;
+pub const PARAM_SLOT_SOURCE: usize = 0;
+pub const PARAM_LFO_RATE_HZ: usize = 1;
+pub const PARAM_LFO_SYNC: usize = 2;
+pub const PARAM_LFO_DIV: usize = 3;
+pub const PARAM_LFO_SHAPE: usize = 4;
+pub const PARAM_LFO_PW: usize = 5;
+pub const PARAM_LFO_RETRIGGER: usize = 6;
+pub const PARAM_ENV_ATTACK_MS: usize = 7;
+pub const PARAM_ENV_DECAY_MS: usize = 8;
+pub const PARAM_ENV_SUSTAIN: usize = 9;
+pub const PARAM_ENV_RELEASE_MS: usize = 10;
+pub const PARAM_RAND_RATE_HZ: usize = 11;
+pub const PARAM_RAND_SYNC: usize = 12;
+pub const PARAM_RAND_DIV: usize = 13;
+pub const PARAM_RAND_SLEW: usize = 14;
+pub const PARAM_DRIFT_RATE: usize = 15;
+pub const PARAM_DRIFT_SYNC: usize = 16;
+pub const PARAM_DRIFT_DIV: usize = 17;
+
+pub const PARAM_BPM: usize = PARAM_SLOT_BASE + PARAM_SLOT_STRIDE * SLOT_COUNT;
+pub const PARAM_RESET_COUNTER: usize = PARAM_BPM + 1;
+
+pub const STATE_SIZE: usize = PARAM_RESET_COUNTER + 1;
+const UNBOUND_CUSTOM_ENGINE: f32 = -1.0;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoiceModulatorInitialState {
+    pub custom_engine_id: u32,
+    pub custom_voice_idx: u32,
+    pub sampler_track_idx: u32,
+    pub sampler_voice_idx: u32,
+}
+
+pub fn custom_engine_initial_state(
+    custom_engine_id: usize,
+    custom_voice_idx: usize,
+) -> VoiceModulatorInitialState {
+    VoiceModulatorInitialState {
+        custom_engine_id: custom_engine_id as u32,
+        custom_voice_idx: custom_voice_idx as u32,
+        sampler_track_idx: u32::MAX,
+        sampler_voice_idx: u32::MAX,
+    }
+}
+
+pub fn sampler_voice_initial_state(
+    sampler_track_idx: usize,
+    sampler_voice_idx: usize,
+) -> VoiceModulatorInitialState {
+    VoiceModulatorInitialState {
+        custom_engine_id: u32::MAX,
+        custom_voice_idx: u32::MAX,
+        sampler_track_idx: sampler_track_idx as u32,
+        sampler_voice_idx: sampler_voice_idx as u32,
+    }
+}
+
+static PROCESS_STATS_ENABLED: AtomicBool = AtomicBool::new(false);
+static SAMPLER_ACTIVE_MASKS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static PROCESS_CALLS: AtomicU64 = AtomicU64::new(0);
+static RENDERED_CALLS: AtomicU64 = AtomicU64::new(0);
+static DISABLED_CUSTOM_SKIPS: AtomicU64 = AtomicU64::new(0);
+static DISABLED_SAMPLER_SKIPS: AtomicU64 = AtomicU64::new(0);
+static ALL_SLOTS_OFF_CALLS: AtomicU64 = AtomicU64::new(0);
+static UNBOUND_RENDERED_CALLS: AtomicU64 = AtomicU64::new(0);
+static RENDERED_FRAMES: AtomicU64 = AtomicU64::new(0);
+static DISABLED_FRAMES: AtomicU64 = AtomicU64::new(0);
+static ALL_SLOTS_OFF_FRAMES: AtomicU64 = AtomicU64::new(0);
+static CUSTOM_ENGINE_CALLS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static CUSTOM_ENGINE_RENDERED_CALLS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static CUSTOM_ENGINE_DISABLED_SKIPS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static CUSTOM_ENGINE_RENDERED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static CUSTOM_ENGINE_DISABLED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static SAMPLER_TRACK_CALLS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static SAMPLER_TRACK_RENDERED_CALLS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static SAMPLER_TRACK_DISABLED_SKIPS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static SAMPLER_TRACK_RENDERED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static SAMPLER_TRACK_DISABLED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+
+#[derive(Clone, Debug, Default)]
+pub struct VoiceModulatorEngineProcessStats {
+    pub engine_id: usize,
+    pub enabled_voices: usize,
+    pub calls: u64,
+    pub rendered_calls: u64,
+    pub disabled_skips: u64,
+    pub rendered_frames: u64,
+    pub disabled_frames: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VoiceModulatorSamplerTrackProcessStats {
+    pub track_idx: usize,
+    pub active_mask: u64,
+    pub calls: u64,
+    pub rendered_calls: u64,
+    pub disabled_skips: u64,
+    pub rendered_frames: u64,
+    pub disabled_frames: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VoiceModulatorProcessStats {
+    pub calls: u64,
+    pub rendered_calls: u64,
+    pub disabled_custom_skips: u64,
+    pub disabled_sampler_skips: u64,
+    pub all_slots_off_calls: u64,
+    pub unbound_rendered_calls: u64,
+    pub rendered_frames: u64,
+    pub disabled_frames: u64,
+    pub all_slots_off_frames: u64,
+    pub engines: Vec<VoiceModulatorEngineProcessStats>,
+    pub sampler_tracks: Vec<VoiceModulatorSamplerTrackProcessStats>,
+}
+
+pub fn set_process_stats_enabled(enabled: bool) {
+    PROCESS_STATS_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn set_sampler_active_mask(track_idx: usize, active_mask: u64) {
+    if track_idx < MAX_TRACKS {
+        SAMPLER_ACTIVE_MASKS[track_idx].store(active_mask, Ordering::Release);
+    }
+}
+
+pub fn take_process_stats() -> VoiceModulatorProcessStats {
+    let engines = (0..MAX_TRACKS)
+        .filter_map(|engine_id| {
+            let calls = CUSTOM_ENGINE_CALLS[engine_id].swap(0, Ordering::AcqRel);
+            let rendered_calls = CUSTOM_ENGINE_RENDERED_CALLS[engine_id].swap(0, Ordering::AcqRel);
+            let disabled_skips = CUSTOM_ENGINE_DISABLED_SKIPS[engine_id].swap(0, Ordering::AcqRel);
+            let rendered_frames =
+                CUSTOM_ENGINE_RENDERED_FRAMES[engine_id].swap(0, Ordering::AcqRel);
+            let disabled_frames =
+                CUSTOM_ENGINE_DISABLED_FRAMES[engine_id].swap(0, Ordering::AcqRel);
+            (calls > 0 || rendered_calls > 0 || disabled_skips > 0).then(|| {
+                VoiceModulatorEngineProcessStats {
+                    engine_id,
+                    enabled_voices: crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id),
+                    calls,
+                    rendered_calls,
+                    disabled_skips,
+                    rendered_frames,
+                    disabled_frames,
+                }
+            })
+        })
+        .collect();
+    let sampler_tracks = (0..MAX_TRACKS)
+        .filter_map(|track_idx| {
+            let calls = SAMPLER_TRACK_CALLS[track_idx].swap(0, Ordering::AcqRel);
+            let rendered_calls = SAMPLER_TRACK_RENDERED_CALLS[track_idx].swap(0, Ordering::AcqRel);
+            let disabled_skips = SAMPLER_TRACK_DISABLED_SKIPS[track_idx].swap(0, Ordering::AcqRel);
+            let rendered_frames =
+                SAMPLER_TRACK_RENDERED_FRAMES[track_idx].swap(0, Ordering::AcqRel);
+            let disabled_frames =
+                SAMPLER_TRACK_DISABLED_FRAMES[track_idx].swap(0, Ordering::AcqRel);
+            (calls > 0 || rendered_calls > 0 || disabled_skips > 0).then(|| {
+                VoiceModulatorSamplerTrackProcessStats {
+                    track_idx,
+                    active_mask: SAMPLER_ACTIVE_MASKS[track_idx].load(Ordering::Acquire),
+                    calls,
+                    rendered_calls,
+                    disabled_skips,
+                    rendered_frames,
+                    disabled_frames,
+                }
+            })
+        })
+        .collect();
+
+    VoiceModulatorProcessStats {
+        calls: PROCESS_CALLS.swap(0, Ordering::AcqRel),
+        rendered_calls: RENDERED_CALLS.swap(0, Ordering::AcqRel),
+        disabled_custom_skips: DISABLED_CUSTOM_SKIPS.swap(0, Ordering::AcqRel),
+        disabled_sampler_skips: DISABLED_SAMPLER_SKIPS.swap(0, Ordering::AcqRel),
+        all_slots_off_calls: ALL_SLOTS_OFF_CALLS.swap(0, Ordering::AcqRel),
+        unbound_rendered_calls: UNBOUND_RENDERED_CALLS.swap(0, Ordering::AcqRel),
+        rendered_frames: RENDERED_FRAMES.swap(0, Ordering::AcqRel),
+        disabled_frames: DISABLED_FRAMES.swap(0, Ordering::AcqRel),
+        all_slots_off_frames: ALL_SLOTS_OFF_FRAMES.swap(0, Ordering::AcqRel),
+        engines,
+        sampler_tracks,
+    }
+}
 
 const SHAPE_TRIANGLE: usize = 0;
 const SHAPE_SINE: usize = 1;
 const SHAPE_PULSE: usize = 2;
 const SHAPE_SAW: usize = 3;
+
+const SOURCE_OFF: usize = 0;
+const SOURCE_LFO: usize = 1;
+const SOURCE_ENV: usize = 2;
+const SOURCE_RAND: usize = 3;
+const SOURCE_DRIFT: usize = 4;
+const SOURCE_EXT1: usize = 5;
+const SOURCE_EXT2: usize = 6;
+const SOURCE_EXT3: usize = 7;
+const SOURCE_EXT4: usize = 8;
+
 const ENV_STAGE_IDLE: f32 = 0.0;
 const ENV_STAGE_ATTACK: f32 = 1.0;
 const ENV_STAGE_DECAY: f32 = 2.0;
 const ENV_STAGE_SUSTAIN: f32 = 3.0;
 const ENV_STAGE_RELEASE: f32 = 4.0;
+
+fn slot_state_idx(slot: usize, offset: usize) -> usize {
+    IDX_SLOT_STATE_BASE + slot * SLOT_STATE_STRIDE + offset
+}
+
+pub fn slot_param_idx(slot: usize, offset: usize) -> usize {
+    PARAM_SLOT_BASE + slot * PARAM_SLOT_STRIDE + offset
+}
+
+pub fn slot_source_param_idx(slot: usize) -> usize {
+    slot_param_idx(slot, PARAM_SLOT_SOURCE)
+}
+
+pub fn slot_source_node_param_idx(slot: usize) -> u32 {
+    MOD_PARAM_BASE + slot_source_param_idx(slot) as u32
+}
+
+pub fn is_source_param(node_param_idx: u32) -> bool {
+    node_param_idx >= MOD_PARAM_BASE
+}
 
 fn sync_labels() -> Vec<String> {
     SyncDivision::ALL
@@ -79,13 +306,163 @@ fn sync_labels() -> Vec<String> {
         .collect()
 }
 
-fn shape_labels() -> Vec<String> {
-    vec![
-        "triangle".to_string(),
-        "sine".to_string(),
-        "pulse".to_string(),
-        "sawtooth".to_string(),
+fn source_labels() -> Vec<String> {
+    [
+        "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4",
     ]
+    .iter()
+    .map(|label| label.to_string())
+    .collect()
+}
+
+fn shape_labels() -> Vec<String> {
+    ["triangle", "sine", "pulse", "sawtooth"]
+        .iter()
+        .map(|label| label.to_string())
+        .collect()
+}
+
+pub fn source_type_label(source: usize) -> &'static str {
+    match source {
+        SOURCE_LFO => "lfo",
+        SOURCE_ENV => "env",
+        SOURCE_RAND => "rand",
+        SOURCE_DRIFT => "drift",
+        SOURCE_EXT1 => "ext1",
+        SOURCE_EXT2 => "ext2",
+        SOURCE_EXT3 => "ext3",
+        SOURCE_EXT4 => "ext4",
+        _ => "off",
+    }
+}
+
+pub fn source_type_name_from_param_name(name: &str) -> Option<&'static str> {
+    let parts = parse_slot_param_name(name)?;
+    match parts.1 {
+        "source" => Some("source"),
+        "lfo_rate" | "lfo_sync" | "lfo_div" | "lfo_shape" | "lfo_pw" | "lfo_retrigger" => {
+            Some("lfo")
+        }
+        "env_attack" | "env_decay" | "env_sustain" | "env_release" => Some("env"),
+        "rand_rate" | "rand_sync" | "rand_div" | "rand_slew" => Some("rand"),
+        "drift_rate" | "drift_sync" | "drift_div" => Some("drift"),
+        _ => None,
+    }
+}
+
+pub fn source_param_display_name(name: &str) -> String {
+    let Some((_, suffix)) = parse_slot_param_name(name) else {
+        return name.to_string();
+    };
+    match suffix {
+        "source" => "type",
+        "lfo_rate" | "rand_rate" | "drift_rate" => "rate",
+        "lfo_div" | "rand_div" | "drift_div" => "division",
+        "lfo_sync" | "rand_sync" | "drift_sync" => "sync",
+        "lfo_shape" => "shape",
+        "lfo_pw" => "pulse width",
+        "lfo_retrigger" => "retrigger",
+        "env_attack" => "attack",
+        "env_decay" => "decay",
+        "env_sustain" => "sustain",
+        "env_release" => "release",
+        "rand_slew" => "slew",
+        other => other,
+    }
+    .to_string()
+}
+
+pub fn slot_from_param_name(name: &str) -> Option<usize> {
+    parse_slot_param_name(name).map(|(slot, _)| slot)
+}
+
+pub fn selected_source_param_indices<F>(
+    params: &[ParamDescriptor],
+    mut value_for_param: F,
+) -> Vec<usize>
+where
+    F: FnMut(usize, &ParamDescriptor) -> f32,
+{
+    let source_indices = params
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, param)| is_source_param(param.node_param_idx).then_some(idx))
+        .collect::<Vec<_>>();
+
+    let find_idx_by_node = |node_param_idx: u32| {
+        source_indices
+            .iter()
+            .copied()
+            .find(|&idx| params[idx].node_param_idx == node_param_idx)
+    };
+
+    let mut out = Vec::new();
+    for slot in 0..SLOT_COUNT {
+        let Some(source_idx) = find_idx_by_node(slot_source_node_param_idx(slot)) else {
+            continue;
+        };
+        out.push(source_idx);
+
+        let source_value = value_for_param(source_idx, &params[source_idx]).round() as usize;
+        let source_name = source_type_label(source_value);
+        if source_name == "off" || source_name.starts_with("ext") {
+            continue;
+        }
+
+        let sync = source_indices
+            .iter()
+            .copied()
+            .find(|&idx| {
+                slot_from_param_name(&params[idx].name) == Some(slot + 1)
+                    && params[idx].name.ends_with("_sync")
+                    && source_type_name_from_param_name(&params[idx].name) == Some(source_name)
+            })
+            .map(|idx| value_for_param(idx, &params[idx]) > 0.5)
+            .unwrap_or(false);
+
+        let pulse = source_indices
+            .iter()
+            .copied()
+            .find(|&idx| {
+                slot_from_param_name(&params[idx].name) == Some(slot + 1)
+                    && params[idx].name.ends_with("_shape")
+            })
+            .map(|idx| value_for_param(idx, &params[idx]).round() as i32 == SHAPE_PULSE as i32)
+            .unwrap_or(false);
+
+        for &idx in &source_indices {
+            let param = &params[idx];
+            if slot_from_param_name(&param.name) != Some(slot + 1)
+                || source_type_name_from_param_name(&param.name) != Some(source_name)
+            {
+                continue;
+            }
+            if (param.name.ends_with("_rate") && sync)
+                || (param.name.ends_with("_div") && !sync)
+                || (param.name.ends_with("_pw") && !pulse)
+            {
+                continue;
+            }
+            out.push(idx);
+        }
+    }
+
+    out
+}
+
+fn parse_slot_param_name(name: &str) -> Option<(usize, &str)> {
+    let rest = name.strip_prefix("mod")?;
+    let digit_end = rest
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()?;
+    let slot = rest[..digit_end].parse::<usize>().ok()?;
+    if !(1..=SLOT_COUNT).contains(&slot) {
+        return None;
+    }
+    let suffix = rest[digit_end..].strip_prefix('_')?;
+    Some((slot, suffix))
 }
 
 fn next_rand(state: &mut u32) -> f32 {
@@ -129,51 +506,63 @@ fn sync_division_index(division: SyncDivision) -> f32 {
         .unwrap_or(0) as f32
 }
 
-unsafe fn init_param_defaults(s: *mut f32) {
+fn default_source(slot: usize) -> f32 {
+    match slot {
+        0 => SOURCE_LFO as f32,
+        1 => SOURCE_ENV as f32,
+        2 => SOURCE_RAND as f32,
+        3 => SOURCE_DRIFT as f32,
+        _ => SOURCE_OFF as f32,
+    }
+}
+
+unsafe fn init_param_defaults_with_source<F>(s: *mut f32, mut source_for_slot: F)
+where
+    F: FnMut(usize) -> f32,
+{
     *s.add(PARAM_BPM) = 120.0;
     *s.add(PARAM_RESET_COUNTER) = 0.0;
 
-    *s.add(PARAM_LFO1_RATE_HZ) = 5.0;
-    *s.add(PARAM_LFO1_SYNC) = 0.0;
-    *s.add(PARAM_LFO1_DIV) = sync_division_index(SyncDivision::Quarter);
-    *s.add(PARAM_LFO1_SHAPE) = SHAPE_TRIANGLE as f32;
-    *s.add(PARAM_LFO1_PW) = 0.5;
-    *s.add(PARAM_LFO1_RETRIGGER) = 0.0;
+    for slot in 0..SLOT_COUNT {
+        *s.add(slot_source_param_idx(slot)) = source_for_slot(slot);
 
-    *s.add(PARAM_LFO2_RATE_HZ) = 1.7;
-    *s.add(PARAM_LFO2_SYNC) = 0.0;
-    *s.add(PARAM_LFO2_DIV) = sync_division_index(SyncDivision::Half);
-    *s.add(PARAM_LFO2_SHAPE) = SHAPE_TRIANGLE as f32;
-    *s.add(PARAM_LFO2_PW) = 0.5;
-    *s.add(PARAM_LFO2_RETRIGGER) = 0.0;
+        *s.add(slot_param_idx(slot, PARAM_LFO_RATE_HZ)) = match slot {
+            1 => 1.7,
+            2 => 0.37,
+            _ => 5.0,
+        };
+        *s.add(slot_param_idx(slot, PARAM_LFO_SYNC)) = 0.0;
+        *s.add(slot_param_idx(slot, PARAM_LFO_DIV)) = match slot {
+            1 => sync_division_index(SyncDivision::Half),
+            2 => sync_division_index(SyncDivision::Whole),
+            _ => sync_division_index(SyncDivision::Quarter),
+        };
+        *s.add(slot_param_idx(slot, PARAM_LFO_SHAPE)) = SHAPE_TRIANGLE as f32;
+        *s.add(slot_param_idx(slot, PARAM_LFO_PW)) = 0.5;
+        *s.add(slot_param_idx(slot, PARAM_LFO_RETRIGGER)) = 0.0;
 
-    *s.add(PARAM_LFO3_RATE_HZ) = 0.37;
-    *s.add(PARAM_LFO3_SYNC) = 0.0;
-    *s.add(PARAM_LFO3_DIV) = sync_division_index(SyncDivision::Whole);
-    *s.add(PARAM_LFO3_SHAPE) = SHAPE_TRIANGLE as f32;
-    *s.add(PARAM_LFO3_PW) = 0.5;
-    *s.add(PARAM_LFO3_RETRIGGER) = 0.0;
+        *s.add(slot_param_idx(slot, PARAM_ENV_ATTACK_MS)) = 6.0;
+        *s.add(slot_param_idx(slot, PARAM_ENV_DECAY_MS)) = 180.0;
+        *s.add(slot_param_idx(slot, PARAM_ENV_SUSTAIN)) = 0.55;
+        *s.add(slot_param_idx(slot, PARAM_ENV_RELEASE_MS)) = 240.0;
 
-    *s.add(PARAM_ENV_ATTACK_MS) = 6.0;
-    *s.add(PARAM_ENV_DECAY_MS) = 180.0;
-    *s.add(PARAM_ENV_SUSTAIN) = 0.55;
-    *s.add(PARAM_ENV_RELEASE_MS) = 240.0;
+        *s.add(slot_param_idx(slot, PARAM_RAND_RATE_HZ)) = 3.0;
+        *s.add(slot_param_idx(slot, PARAM_RAND_SYNC)) = 0.0;
+        *s.add(slot_param_idx(slot, PARAM_RAND_DIV)) = sync_division_index(SyncDivision::Whole);
+        *s.add(slot_param_idx(slot, PARAM_RAND_SLEW)) = 0.0;
 
-    *s.add(PARAM_RAND_RATE_HZ) = 3.0;
-    *s.add(PARAM_RAND_SYNC) = 0.0;
-    *s.add(PARAM_RAND_DIV) = sync_division_index(SyncDivision::Whole);
-    *s.add(PARAM_RAND_SLEW) = 0.0;
+        *s.add(slot_param_idx(slot, PARAM_DRIFT_RATE)) = 0.00035;
+        *s.add(slot_param_idx(slot, PARAM_DRIFT_SYNC)) = 0.0;
+        *s.add(slot_param_idx(slot, PARAM_DRIFT_DIV)) = sync_division_index(SyncDivision::Whole);
+    }
+}
 
-    *s.add(PARAM_DRIFT_RATE) = 0.00035;
-    *s.add(PARAM_DRIFT_SYNC) = 0.0;
-    *s.add(PARAM_DRIFT_DIV) = sync_division_index(SyncDivision::Whole);
+unsafe fn init_param_defaults(s: *mut f32) {
+    init_param_defaults_with_source(s, default_source);
+}
 
-    *s.add(PARAM_MOD1_DEPTH) = 1.0;
-    *s.add(PARAM_MOD2_DEPTH) = 1.0;
-    *s.add(PARAM_MOD3_DEPTH) = 1.0;
-    *s.add(PARAM_MOD4_DEPTH) = 1.0;
-    *s.add(PARAM_MOD5_DEPTH) = 1.0;
-    *s.add(PARAM_MOD6_DEPTH) = 1.0;
+unsafe fn init_effect_param_defaults(s: *mut f32) {
+    init_param_defaults_with_source(s, |_| SOURCE_OFF as f32);
 }
 
 fn push_param(
@@ -196,100 +585,86 @@ fn push_param(
         node_param_idx: MOD_PARAM_BASE + idx as u32,
         node_param_span: 1,
         host_control: None,
+        ui_metadata: None,
     });
 }
 
 pub fn param_descriptors() -> Vec<ParamDescriptor> {
+    param_descriptors_with_default_source(default_source)
+}
+
+pub fn effect_param_descriptors() -> Vec<ParamDescriptor> {
+    param_descriptors_with_default_source(|_| SOURCE_OFF as f32)
+}
+
+fn param_descriptors_with_default_source<F>(mut source_for_slot: F) -> Vec<ParamDescriptor>
+where
+    F: FnMut(usize) -> f32,
+{
     let mut out = Vec::new();
+    let source_labels = source_labels();
     let sync_div_labels = sync_labels();
     let shape_labels = shape_labels();
 
-    for &(
-        rate_idx,
-        sync_idx,
-        div_idx,
-        shape_idx,
-        pw_idx,
-        retrig_idx,
-        prefix,
-        rate_default,
-        div_default,
-        retrig_default,
-    ) in &[
-        (
-            PARAM_LFO1_RATE_HZ,
-            PARAM_LFO1_SYNC,
-            PARAM_LFO1_DIV,
-            PARAM_LFO1_SHAPE,
-            PARAM_LFO1_PW,
-            PARAM_LFO1_RETRIGGER,
-            "mod_lfo1",
-            5.0,
-            sync_division_index(SyncDivision::Quarter),
-            0.0,
-        ),
-        (
-            PARAM_LFO2_RATE_HZ,
-            PARAM_LFO2_SYNC,
-            PARAM_LFO2_DIV,
-            PARAM_LFO2_SHAPE,
-            PARAM_LFO2_PW,
-            PARAM_LFO2_RETRIGGER,
-            "mod_lfo2",
-            1.7,
-            sync_division_index(SyncDivision::Half),
-            0.0,
-        ),
-        (
-            PARAM_LFO3_RATE_HZ,
-            PARAM_LFO3_SYNC,
-            PARAM_LFO3_DIV,
-            PARAM_LFO3_SHAPE,
-            PARAM_LFO3_PW,
-            PARAM_LFO3_RETRIGGER,
-            "mod_lfo3",
-            0.37,
-            sync_division_index(SyncDivision::Whole),
-            0.0,
-        ),
-    ] {
+    for slot in 0..SLOT_COUNT {
+        let prefix = format!("mod{}", slot + 1);
         push_param(
             &mut out,
-            &format!("{prefix}_rate"),
+            &format!("{prefix}_source"),
+            SOURCE_OFF as f32,
+            SOURCE_EXT4 as f32,
+            source_for_slot(slot),
+            ParamKind::Enum {
+                labels: source_labels.clone(),
+            },
+            ParamScaling::Linear,
+            slot_source_param_idx(slot),
+        );
+        push_param(
+            &mut out,
+            &format!("{prefix}_lfo_rate"),
             0.01,
             20.0,
-            rate_default,
+            match slot {
+                1 => 1.7,
+                2 => 0.37,
+                _ => 5.0,
+            },
             ParamKind::Continuous {
                 unit: Some("Hz".to_string()),
             },
             ParamScaling::Exponential,
-            rate_idx,
+            slot_param_idx(slot, PARAM_LFO_RATE_HZ),
         );
         push_param(
             &mut out,
-            &format!("{prefix}_sync"),
+            &format!("{prefix}_lfo_sync"),
             0.0,
             1.0,
             0.0,
             ParamKind::Boolean,
             ParamScaling::Linear,
-            sync_idx,
+            slot_param_idx(slot, PARAM_LFO_SYNC),
         );
         push_param(
             &mut out,
-            &format!("{prefix}_div"),
+            &format!("{prefix}_lfo_div"),
             0.0,
             (sync_div_labels.len() - 1) as f32,
-            div_default,
+            match slot {
+                1 => sync_division_index(SyncDivision::Half),
+                2 => sync_division_index(SyncDivision::Whole),
+                _ => sync_division_index(SyncDivision::Quarter),
+            },
             ParamKind::Enum {
                 labels: sync_div_labels.clone(),
             },
             ParamScaling::Linear,
-            div_idx,
+            slot_param_idx(slot, PARAM_LFO_DIV),
         );
         push_param(
             &mut out,
-            &format!("{prefix}_shape"),
+            &format!("{prefix}_lfo_shape"),
             0.0,
             (shape_labels.len() - 1) as f32,
             0.0,
@@ -297,176 +672,159 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
                 labels: shape_labels.clone(),
             },
             ParamScaling::Linear,
-            shape_idx,
+            slot_param_idx(slot, PARAM_LFO_SHAPE),
         );
         push_param(
             &mut out,
-            &format!("{prefix}_pw"),
+            &format!("{prefix}_lfo_pw"),
             0.05,
             0.95,
             0.5,
             ParamKind::Continuous { unit: None },
             ParamScaling::Linear,
-            pw_idx,
+            slot_param_idx(slot, PARAM_LFO_PW),
         );
         push_param(
             &mut out,
-            &format!("{prefix}_retrigger"),
+            &format!("{prefix}_lfo_retrigger"),
             0.0,
             1.0,
-            retrig_default,
+            0.0,
             ParamKind::Boolean,
             ParamScaling::Linear,
-            retrig_idx,
+            slot_param_idx(slot, PARAM_LFO_RETRIGGER),
         );
-    }
 
-    push_param(
-        &mut out,
-        "mod_env_attack",
-        1.0,
-        2000.0,
-        6.0,
-        ParamKind::Continuous {
-            unit: Some("ms".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_ENV_ATTACK_MS,
-    );
-    push_param(
-        &mut out,
-        "mod_env_decay",
-        5.0,
-        4000.0,
-        180.0,
-        ParamKind::Continuous {
-            unit: Some("ms".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_ENV_DECAY_MS,
-    );
-    push_param(
-        &mut out,
-        "mod_env_sustain",
-        0.0,
-        1.0,
-        0.55,
-        ParamKind::Continuous {
-            unit: Some("%".to_string()),
-        },
-        ParamScaling::Linear,
-        PARAM_ENV_SUSTAIN,
-    );
-    push_param(
-        &mut out,
-        "mod_env_release",
-        5.0,
-        4000.0,
-        240.0,
-        ParamKind::Continuous {
-            unit: Some("ms".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_ENV_RELEASE_MS,
-    );
+        for (suffix, offset, min, max, default, unit, scaling) in [
+            (
+                "env_attack",
+                PARAM_ENV_ATTACK_MS,
+                1.0,
+                2000.0,
+                6.0,
+                Some("ms"),
+                ParamScaling::Exponential,
+            ),
+            (
+                "env_decay",
+                PARAM_ENV_DECAY_MS,
+                5.0,
+                4000.0,
+                180.0,
+                Some("ms"),
+                ParamScaling::Exponential,
+            ),
+            (
+                "env_sustain",
+                PARAM_ENV_SUSTAIN,
+                0.0,
+                1.0,
+                0.55,
+                Some("%"),
+                ParamScaling::Linear,
+            ),
+            (
+                "env_release",
+                PARAM_ENV_RELEASE_MS,
+                5.0,
+                4000.0,
+                240.0,
+                Some("ms"),
+                ParamScaling::Exponential,
+            ),
+        ] {
+            push_param(
+                &mut out,
+                &format!("{prefix}_{suffix}"),
+                min,
+                max,
+                default,
+                ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling,
+                slot_param_idx(slot, offset),
+            );
+        }
 
-    push_param(
-        &mut out,
-        "mod_rand_rate",
-        0.05,
-        20.0,
-        3.0,
-        ParamKind::Continuous {
-            unit: Some("Hz".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_RAND_RATE_HZ,
-    );
-    push_param(
-        &mut out,
-        "mod_rand_sync",
-        0.0,
-        1.0,
-        0.0,
-        ParamKind::Boolean,
-        ParamScaling::Linear,
-        PARAM_RAND_SYNC,
-    );
-    push_param(
-        &mut out,
-        "mod_rand_div",
-        0.0,
-        (sync_div_labels.len() - 1) as f32,
-        sync_division_index(SyncDivision::Whole),
-        ParamKind::Enum {
-            labels: sync_div_labels.clone(),
-        },
-        ParamScaling::Linear,
-        PARAM_RAND_DIV,
-    );
-    push_param(
-        &mut out,
-        "mod_rand_slew",
-        0.0,
-        0.999,
-        0.0,
-        ParamKind::Continuous { unit: None },
-        ParamScaling::Linear,
-        PARAM_RAND_SLEW,
-    );
-
-    push_param(
-        &mut out,
-        "mod_drift_rate",
-        0.00001,
-        0.01,
-        0.00035,
-        ParamKind::Continuous {
-            unit: Some("Hz".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_DRIFT_RATE,
-    );
-    push_param(
-        &mut out,
-        "mod_drift_sync",
-        0.0,
-        1.0,
-        0.0,
-        ParamKind::Boolean,
-        ParamScaling::Linear,
-        PARAM_DRIFT_SYNC,
-    );
-    push_param(
-        &mut out,
-        "mod_drift_div",
-        0.0,
-        (sync_div_labels.len() - 1) as f32,
-        sync_division_index(SyncDivision::Whole),
-        ParamKind::Enum {
-            labels: sync_div_labels,
-        },
-        ParamScaling::Linear,
-        PARAM_DRIFT_DIV,
-    );
-
-    for (name, idx) in [
-        ("mod1_depth", PARAM_MOD1_DEPTH),
-        ("mod2_depth", PARAM_MOD2_DEPTH),
-        ("mod3_depth", PARAM_MOD3_DEPTH),
-        ("mod4_depth", PARAM_MOD4_DEPTH),
-        ("mod5_depth", PARAM_MOD5_DEPTH),
-        ("mod6_depth", PARAM_MOD6_DEPTH),
-    ] {
         push_param(
             &mut out,
-            name,
+            &format!("{prefix}_rand_rate"),
+            0.05,
+            20.0,
+            3.0,
+            ParamKind::Continuous {
+                unit: Some("Hz".to_string()),
+            },
+            ParamScaling::Exponential,
+            slot_param_idx(slot, PARAM_RAND_RATE_HZ),
+        );
+        push_param(
+            &mut out,
+            &format!("{prefix}_rand_sync"),
             0.0,
             1.0,
-            1.0,
+            0.0,
+            ParamKind::Boolean,
+            ParamScaling::Linear,
+            slot_param_idx(slot, PARAM_RAND_SYNC),
+        );
+        push_param(
+            &mut out,
+            &format!("{prefix}_rand_div"),
+            0.0,
+            (sync_div_labels.len() - 1) as f32,
+            sync_division_index(SyncDivision::Whole),
+            ParamKind::Enum {
+                labels: sync_div_labels.clone(),
+            },
+            ParamScaling::Linear,
+            slot_param_idx(slot, PARAM_RAND_DIV),
+        );
+        push_param(
+            &mut out,
+            &format!("{prefix}_rand_slew"),
+            0.0,
+            0.999,
+            0.0,
             ParamKind::Continuous { unit: None },
             ParamScaling::Linear,
-            idx,
+            slot_param_idx(slot, PARAM_RAND_SLEW),
+        );
+
+        push_param(
+            &mut out,
+            &format!("{prefix}_drift_rate"),
+            0.00001,
+            0.01,
+            0.00035,
+            ParamKind::Continuous {
+                unit: Some("Hz".to_string()),
+            },
+            ParamScaling::Exponential,
+            slot_param_idx(slot, PARAM_DRIFT_RATE),
+        );
+        push_param(
+            &mut out,
+            &format!("{prefix}_drift_sync"),
+            0.0,
+            1.0,
+            0.0,
+            ParamKind::Boolean,
+            ParamScaling::Linear,
+            slot_param_idx(slot, PARAM_DRIFT_SYNC),
+        );
+        push_param(
+            &mut out,
+            &format!("{prefix}_drift_div"),
+            0.0,
+            (sync_div_labels.len() - 1) as f32,
+            sync_division_index(SyncDivision::Whole),
+            ParamKind::Enum {
+                labels: sync_div_labels.clone(),
+            },
+            ParamScaling::Linear,
+            slot_param_idx(slot, PARAM_DRIFT_DIV),
         );
     }
 
@@ -474,346 +832,358 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
 }
 
 pub fn ui_param_descriptors() -> Vec<ParamDescriptor> {
-    let mut out = Vec::new();
-    let sync_div_labels = sync_labels();
-    let shape_labels = shape_labels();
+    param_descriptors()
+}
 
-    for &(
-        rate_idx,
-        sync_idx,
-        div_idx,
-        shape_idx,
-        pw_idx,
-        retrig_idx,
-        rate_default,
-        div_default,
-        retrig_default,
-    ) in &[(
-        PARAM_LFO1_RATE_HZ,
-        PARAM_LFO1_SYNC,
-        PARAM_LFO1_DIV,
-        PARAM_LFO1_SHAPE,
-        PARAM_LFO1_PW,
-        PARAM_LFO1_RETRIGGER,
-        5.0,
-        sync_division_index(SyncDivision::Quarter),
-        0.0,
-    )] {
-        push_param(
-            &mut out,
-            "rate",
-            0.01,
-            20.0,
-            rate_default,
-            ParamKind::Continuous {
-                unit: Some("Hz".to_string()),
-            },
-            ParamScaling::Exponential,
-            rate_idx,
-        );
-        push_param(
-            &mut out,
-            "sync",
-            0.0,
-            1.0,
-            0.0,
-            ParamKind::Boolean,
-            ParamScaling::Linear,
-            sync_idx,
-        );
-        push_param(
-            &mut out,
-            "division",
-            0.0,
-            (sync_div_labels.len() - 1) as f32,
-            div_default,
-            ParamKind::Enum {
-                labels: sync_div_labels.clone(),
-            },
-            ParamScaling::Linear,
-            div_idx,
-        );
-        push_param(
-            &mut out,
-            "shape",
-            0.0,
-            (shape_labels.len() - 1) as f32,
-            0.0,
-            ParamKind::Enum {
-                labels: shape_labels.clone(),
-            },
-            ParamScaling::Linear,
-            shape_idx,
-        );
-        push_param(
-            &mut out,
-            "pulse width",
-            0.05,
-            0.95,
-            0.5,
-            ParamKind::Continuous { unit: None },
-            ParamScaling::Linear,
-            pw_idx,
-        );
-        push_param(
-            &mut out,
-            "retrigger",
-            0.0,
-            1.0,
-            retrig_default,
-            ParamKind::Boolean,
-            ParamScaling::Linear,
-            retrig_idx,
-        );
+unsafe fn init_identity(s: *mut f32, initial_state: *const c_void) {
+    *s.add(IDX_CUSTOM_ENGINE_ID) = UNBOUND_CUSTOM_ENGINE;
+    *s.add(IDX_CUSTOM_VOICE_IDX) = UNBOUND_CUSTOM_ENGINE;
+    *s.add(IDX_SAMPLER_TRACK_IDX) = UNBOUND_CUSTOM_ENGINE;
+    *s.add(IDX_SAMPLER_VOICE_IDX) = UNBOUND_CUSTOM_ENGINE;
+
+    if initial_state.is_null() {
+        return;
     }
 
-    push_param(
-        &mut out,
-        "attack",
-        1.0,
-        2000.0,
-        6.0,
-        ParamKind::Continuous {
-            unit: Some("ms".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_ENV_ATTACK_MS,
-    );
-    push_param(
-        &mut out,
-        "decay",
-        5.0,
-        4000.0,
-        180.0,
-        ParamKind::Continuous {
-            unit: Some("ms".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_ENV_DECAY_MS,
-    );
-    push_param(
-        &mut out,
-        "sustain",
-        0.0,
-        1.0,
-        0.55,
-        ParamKind::Continuous {
-            unit: Some("%".to_string()),
-        },
-        ParamScaling::Linear,
-        PARAM_ENV_SUSTAIN,
-    );
-    push_param(
-        &mut out,
-        "release",
-        5.0,
-        4000.0,
-        240.0,
-        ParamKind::Continuous {
-            unit: Some("ms".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_ENV_RELEASE_MS,
-    );
-
-    push_param(
-        &mut out,
-        "rate",
-        0.05,
-        20.0,
-        3.0,
-        ParamKind::Continuous {
-            unit: Some("Hz".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_RAND_RATE_HZ,
-    );
-    push_param(
-        &mut out,
-        "sync",
-        0.0,
-        1.0,
-        0.0,
-        ParamKind::Boolean,
-        ParamScaling::Linear,
-        PARAM_RAND_SYNC,
-    );
-    push_param(
-        &mut out,
-        "division",
-        0.0,
-        (sync_div_labels.len() - 1) as f32,
-        sync_division_index(SyncDivision::Whole),
-        ParamKind::Enum {
-            labels: sync_div_labels.clone(),
-        },
-        ParamScaling::Linear,
-        PARAM_RAND_DIV,
-    );
-    push_param(
-        &mut out,
-        "slew",
-        0.0,
-        0.999,
-        0.0,
-        ParamKind::Continuous { unit: None },
-        ParamScaling::Linear,
-        PARAM_RAND_SLEW,
-    );
-
-    push_param(
-        &mut out,
-        "rate",
-        0.00001,
-        0.01,
-        0.00035,
-        ParamKind::Continuous {
-            unit: Some("Hz".to_string()),
-        },
-        ParamScaling::Exponential,
-        PARAM_DRIFT_RATE,
-    );
-    push_param(
-        &mut out,
-        "sync",
-        0.0,
-        1.0,
-        0.0,
-        ParamKind::Boolean,
-        ParamScaling::Linear,
-        PARAM_DRIFT_SYNC,
-    );
-    push_param(
-        &mut out,
-        "division",
-        0.0,
-        (sync_div_labels.len() - 1) as f32,
-        sync_division_index(SyncDivision::Whole),
-        ParamKind::Enum {
-            labels: sync_div_labels.clone(),
-        },
-        ParamScaling::Linear,
-        PARAM_DRIFT_DIV,
-    );
-
-    for &(
-        rate_idx,
-        sync_idx,
-        div_idx,
-        shape_idx,
-        pw_idx,
-        retrig_idx,
-        rate_default,
-        div_default,
-        retrig_default,
-    ) in &[
-        (
-            PARAM_LFO2_RATE_HZ,
-            PARAM_LFO2_SYNC,
-            PARAM_LFO2_DIV,
-            PARAM_LFO2_SHAPE,
-            PARAM_LFO2_PW,
-            PARAM_LFO2_RETRIGGER,
-            1.7,
-            sync_division_index(SyncDivision::Half),
-            0.0,
-        ),
-        (
-            PARAM_LFO3_RATE_HZ,
-            PARAM_LFO3_SYNC,
-            PARAM_LFO3_DIV,
-            PARAM_LFO3_SHAPE,
-            PARAM_LFO3_PW,
-            PARAM_LFO3_RETRIGGER,
-            0.37,
-            sync_division_index(SyncDivision::Whole),
-            0.0,
-        ),
-    ] {
-        push_param(
-            &mut out,
-            "rate",
-            0.01,
-            20.0,
-            rate_default,
-            ParamKind::Continuous {
-                unit: Some("Hz".to_string()),
-            },
-            ParamScaling::Exponential,
-            rate_idx,
-        );
-        push_param(
-            &mut out,
-            "sync",
-            0.0,
-            1.0,
-            0.0,
-            ParamKind::Boolean,
-            ParamScaling::Linear,
-            sync_idx,
-        );
-        push_param(
-            &mut out,
-            "division",
-            0.0,
-            (sync_div_labels.len() - 1) as f32,
-            div_default,
-            ParamKind::Enum {
-                labels: sync_div_labels.clone(),
-            },
-            ParamScaling::Linear,
-            div_idx,
-        );
-        push_param(
-            &mut out,
-            "shape",
-            0.0,
-            (shape_labels.len() - 1) as f32,
-            0.0,
-            ParamKind::Enum {
-                labels: shape_labels.clone(),
-            },
-            ParamScaling::Linear,
-            shape_idx,
-        );
-        push_param(
-            &mut out,
-            "pulse width",
-            0.05,
-            0.95,
-            0.5,
-            ParamKind::Continuous { unit: None },
-            ParamScaling::Linear,
-            pw_idx,
-        );
-        push_param(
-            &mut out,
-            "retrigger",
-            0.0,
-            1.0,
-            retrig_default,
-            ParamKind::Boolean,
-            ParamScaling::Linear,
-            retrig_idx,
-        );
+    let initial = &*(initial_state as *const VoiceModulatorInitialState);
+    if initial.custom_engine_id != u32::MAX && initial.custom_voice_idx != u32::MAX {
+        *s.add(IDX_CUSTOM_ENGINE_ID) = initial.custom_engine_id as f32;
+        *s.add(IDX_CUSTOM_VOICE_IDX) = initial.custom_voice_idx as f32;
     }
-
-    out
+    if initial.sampler_track_idx != u32::MAX && initial.sampler_voice_idx != u32::MAX {
+        *s.add(IDX_SAMPLER_TRACK_IDX) = initial.sampler_track_idx as f32;
+        *s.add(IDX_SAMPLER_VOICE_IDX) = initial.sampler_voice_idx as f32;
+    }
 }
 
 unsafe extern "C" fn voice_modulator_init(
     state: *mut c_void,
     sample_rate: c_int,
     _max_block: c_int,
-    _initial_state: *const c_void,
+    initial_state: *const c_void,
 ) {
     let s = state as *mut f32;
     for i in 0..STATE_SIZE {
         *s.add(i) = 0.0;
     }
-    *s.add(IDX_RNG) = 0x1234_5678u32 as f32;
+    for slot in 0..SLOT_COUNT {
+        *s.add(slot_state_idx(slot, IDX_RNG)) = 0x1234_5678u32.wrapping_add(slot as u32) as f32;
+    }
     *s.add(IDX_SAMPLE_RATE) = sample_rate as f32;
+    init_identity(s, initial_state);
     init_param_defaults(s);
+}
+
+unsafe extern "C" fn effect_modulator_init(
+    state: *mut c_void,
+    sample_rate: c_int,
+    _max_block: c_int,
+    initial_state: *const c_void,
+) {
+    let s = state as *mut f32;
+    for i in 0..STATE_SIZE {
+        *s.add(i) = 0.0;
+    }
+    for slot in 0..SLOT_COUNT {
+        *s.add(slot_state_idx(slot, IDX_RNG)) = 0x1234_5678u32.wrapping_add(slot as u32) as f32;
+    }
+    *s.add(IDX_SAMPLE_RATE) = sample_rate as f32;
+    init_identity(s, initial_state);
+    init_effect_param_defaults(s);
+}
+
+unsafe fn clear_outputs(out: *const *mut f32, nf: usize) {
+    if out.is_null() {
+        return;
+    }
+    for slot in 0..NUM_OUTPUTS {
+        let out_slot = *out.add(slot);
+        if out_slot.is_null() {
+            continue;
+        }
+        for i in 0..nf {
+            *out_slot.add(i) = 0.0;
+        }
+    }
+}
+
+unsafe fn clear_output_slot(out: *const *mut f32, slot: usize, nf: usize) {
+    if out.is_null() || slot >= NUM_OUTPUTS {
+        return;
+    }
+    let out_slot = *out.add(slot);
+    if out_slot.is_null() {
+        return;
+    }
+    for i in 0..nf {
+        *out_slot.add(i) = 0.0;
+    }
+}
+
+unsafe fn slot_source(s: *const f32, slot: usize) -> usize {
+    let source = (*s.add(slot_source_param_idx(slot))).round() as usize;
+    if source <= SOURCE_EXT4 {
+        source
+    } else {
+        SOURCE_OFF
+    }
+}
+
+unsafe fn custom_engine_identity(s: *const f32) -> Option<(usize, usize)> {
+    let engine_id = *s.add(IDX_CUSTOM_ENGINE_ID);
+    if engine_id < 0.0 {
+        return None;
+    }
+    let voice_idx = *s.add(IDX_CUSTOM_VOICE_IDX);
+    if voice_idx < 0.0 {
+        return None;
+    }
+
+    Some((engine_id as usize, voice_idx as usize))
+}
+
+unsafe fn sampler_identity(s: *const f32) -> Option<(usize, usize)> {
+    let track_idx = *s.add(IDX_SAMPLER_TRACK_IDX);
+    if track_idx < 0.0 {
+        return None;
+    }
+    let voice_idx = *s.add(IDX_SAMPLER_VOICE_IDX);
+    if voice_idx < 0.0 {
+        return None;
+    }
+
+    Some((track_idx as usize, voice_idx as usize))
+}
+
+fn sampler_voice_is_active(track_idx: usize, voice_idx: usize) -> bool {
+    if track_idx >= MAX_TRACKS || voice_idx >= 64 {
+        return false;
+    }
+    let mask = SAMPLER_ACTIVE_MASKS[track_idx].load(Ordering::Acquire);
+    (mask & (1u64 << voice_idx)) != 0
+}
+
+fn record_disabled_custom_skip(engine_id: usize, nf: usize) {
+    if !PROCESS_STATS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
+    DISABLED_CUSTOM_SKIPS.fetch_add(1, Ordering::Relaxed);
+    DISABLED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
+    if engine_id < MAX_TRACKS {
+        CUSTOM_ENGINE_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
+        CUSTOM_ENGINE_DISABLED_SKIPS[engine_id].fetch_add(1, Ordering::Relaxed);
+        CUSTOM_ENGINE_DISABLED_FRAMES[engine_id].fetch_add(nf as u64, Ordering::Relaxed);
+    }
+}
+
+fn record_disabled_sampler_skip(track_idx: usize, nf: usize) {
+    if !PROCESS_STATS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
+    DISABLED_SAMPLER_SKIPS.fetch_add(1, Ordering::Relaxed);
+    DISABLED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
+    if track_idx < MAX_TRACKS {
+        SAMPLER_TRACK_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
+        SAMPLER_TRACK_DISABLED_SKIPS[track_idx].fetch_add(1, Ordering::Relaxed);
+        SAMPLER_TRACK_DISABLED_FRAMES[track_idx].fetch_add(nf as u64, Ordering::Relaxed);
+    }
+}
+
+fn record_all_slots_off(nf: usize) {
+    if !PROCESS_STATS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
+    ALL_SLOTS_OFF_CALLS.fetch_add(1, Ordering::Relaxed);
+    ALL_SLOTS_OFF_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
+}
+
+fn record_rendered_call(
+    custom_identity: Option<(usize, usize)>,
+    sampler_identity: Option<(usize, usize)>,
+    nf: usize,
+) {
+    if !PROCESS_STATS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
+    RENDERED_CALLS.fetch_add(1, Ordering::Relaxed);
+    RENDERED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
+
+    if let Some((engine_id, _)) = custom_identity {
+        if engine_id < MAX_TRACKS {
+            CUSTOM_ENGINE_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
+            CUSTOM_ENGINE_RENDERED_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
+            CUSTOM_ENGINE_RENDERED_FRAMES[engine_id].fetch_add(nf as u64, Ordering::Relaxed);
+        }
+    } else if let Some((track_idx, _)) = sampler_identity {
+        if track_idx < MAX_TRACKS {
+            SAMPLER_TRACK_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
+            SAMPLER_TRACK_RENDERED_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
+            SAMPLER_TRACK_RENDERED_FRAMES[track_idx].fetch_add(nf as u64, Ordering::Relaxed);
+        }
+    } else {
+        UNBOUND_RENDERED_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+unsafe fn render_slot(
+    s: *mut f32,
+    ext_inputs: &[*mut f32; EXT_INPUT_COUNT],
+    slot: usize,
+    source: usize,
+    frame: usize,
+    gate: f32,
+    velocity: f32,
+    note_on: bool,
+    sample_rate: f32,
+    bpm: f32,
+) -> f32 {
+    if source == SOURCE_OFF {
+        return 0.0;
+    }
+    if (SOURCE_EXT1..=SOURCE_EXT4).contains(&source) {
+        let ext_idx = source - SOURCE_EXT1;
+        let ptr = ext_inputs[ext_idx];
+        return if ptr.is_null() {
+            0.0
+        } else {
+            (*ptr.add(frame)).clamp(0.0, 1.0)
+        };
+    }
+
+    let mut rng_state = *s.add(slot_state_idx(slot, IDX_RNG)) as u32;
+    if rng_state == 0 {
+        rng_state = 0x1234_5678u32.wrapping_add(slot as u32);
+    }
+
+    let out = match source {
+        SOURCE_LFO => {
+            let mut phase = *s.add(slot_state_idx(slot, IDX_LFO_PHASE));
+            if note_on && *s.add(slot_param_idx(slot, PARAM_LFO_RETRIGGER)) > 0.5 {
+                phase = 0.0;
+            }
+            let rate = if *s.add(slot_param_idx(slot, PARAM_LFO_SYNC)) > 0.5 {
+                synced_rate_hz(
+                    (*s.add(slot_param_idx(slot, PARAM_LFO_DIV))).round() as usize,
+                    bpm,
+                )
+            } else {
+                (*s.add(slot_param_idx(slot, PARAM_LFO_RATE_HZ))).clamp(0.01, 20.0)
+            };
+            phase = (phase + rate / sample_rate).fract();
+            *s.add(slot_state_idx(slot, IDX_LFO_PHASE)) = phase;
+            let shape = (*s.add(slot_param_idx(slot, PARAM_LFO_SHAPE))).round() as usize;
+            let pw = (*s.add(slot_param_idx(slot, PARAM_LFO_PW))).clamp(0.05, 0.95);
+            bipolar_to_unipolar(shape_value(shape, phase, pw))
+        }
+        SOURCE_ENV => {
+            let mut env = *s.add(slot_state_idx(slot, IDX_ENV));
+            let mut stage = *s.add(slot_state_idx(slot, IDX_ENV_STAGE));
+            if note_on {
+                env = 0.0;
+                stage = ENV_STAGE_ATTACK;
+            }
+            if gate <= 0.5 && stage != ENV_STAGE_IDLE && stage != ENV_STAGE_RELEASE {
+                stage = ENV_STAGE_RELEASE;
+            }
+            let attack = 1.0
+                / ((*s.add(slot_param_idx(slot, PARAM_ENV_ATTACK_MS))).clamp(1.0, 2000.0)
+                    * 0.001
+                    * sample_rate);
+            let decay = 1.0
+                / ((*s.add(slot_param_idx(slot, PARAM_ENV_DECAY_MS))).clamp(5.0, 4000.0)
+                    * 0.001
+                    * sample_rate);
+            let sustain = (*s.add(slot_param_idx(slot, PARAM_ENV_SUSTAIN))).clamp(0.0, 1.0);
+            let release = 1.0
+                / ((*s.add(slot_param_idx(slot, PARAM_ENV_RELEASE_MS))).clamp(5.0, 4000.0)
+                    * 0.001
+                    * sample_rate);
+
+            if stage == ENV_STAGE_ATTACK {
+                env = (env + attack).min(1.0);
+                if env >= 0.999 {
+                    env = 1.0;
+                    stage = ENV_STAGE_DECAY;
+                }
+            } else if stage == ENV_STAGE_DECAY {
+                env += (sustain - env) * decay;
+                if (env - sustain).abs() <= 0.001 {
+                    env = sustain;
+                    stage = if gate > 0.5 {
+                        ENV_STAGE_SUSTAIN
+                    } else {
+                        ENV_STAGE_RELEASE
+                    };
+                }
+            } else if stage == ENV_STAGE_SUSTAIN {
+                env = sustain;
+                if gate <= 0.5 {
+                    stage = ENV_STAGE_RELEASE;
+                }
+            } else if stage == ENV_STAGE_RELEASE {
+                env += (0.0 - env) * release;
+                if env <= 0.0005 {
+                    env = 0.0;
+                    stage = ENV_STAGE_IDLE;
+                }
+            }
+            env = env.clamp(0.0, 1.0);
+            *s.add(slot_state_idx(slot, IDX_ENV)) = env;
+            *s.add(slot_state_idx(slot, IDX_ENV_STAGE)) = stage;
+            env
+        }
+        SOURCE_RAND => {
+            let mut phase = *s.add(slot_state_idx(slot, IDX_RAND_PHASE));
+            let mut hold = *s.add(slot_state_idx(slot, IDX_RAND_HOLD));
+            let mut smooth = *s.add(slot_state_idx(slot, IDX_RAND_SMOOTH));
+            if note_on {
+                hold = next_rand(&mut rng_state);
+            }
+            let rate = if *s.add(slot_param_idx(slot, PARAM_RAND_SYNC)) > 0.5 {
+                synced_rate_hz(
+                    (*s.add(slot_param_idx(slot, PARAM_RAND_DIV))).round() as usize,
+                    bpm,
+                )
+            } else {
+                (*s.add(slot_param_idx(slot, PARAM_RAND_RATE_HZ))).clamp(0.01, 20.0)
+            };
+            let prev_phase = phase;
+            phase = (phase + rate / sample_rate).fract();
+            if phase < prev_phase {
+                hold = next_rand(&mut rng_state);
+            }
+            let slew = (*s.add(slot_param_idx(slot, PARAM_RAND_SLEW))).clamp(0.0, 0.999);
+            smooth += (hold - smooth) * (1.0 - slew);
+            *s.add(slot_state_idx(slot, IDX_RAND_PHASE)) = phase;
+            *s.add(slot_state_idx(slot, IDX_RAND_HOLD)) = hold;
+            *s.add(slot_state_idx(slot, IDX_RAND_SMOOTH)) = smooth;
+            bipolar_to_unipolar(smooth)
+        }
+        SOURCE_DRIFT => {
+            let mut drift = *s.add(slot_state_idx(slot, IDX_DRIFT));
+            let rate = if *s.add(slot_param_idx(slot, PARAM_DRIFT_SYNC)) > 0.5 {
+                synced_rate_hz(
+                    (*s.add(slot_param_idx(slot, PARAM_DRIFT_DIV))).round() as usize,
+                    bpm,
+                ) * 0.2
+            } else {
+                (*s.add(slot_param_idx(slot, PARAM_DRIFT_RATE))).clamp(0.00001, 0.01) * sample_rate
+            };
+            drift +=
+                (next_rand(&mut rng_state) * 0.08 - drift) * (rate / sample_rate).clamp(0.0, 1.0);
+            drift = drift.clamp(-1.0, 1.0);
+            *s.add(slot_state_idx(slot, IDX_DRIFT)) = drift;
+            bipolar_to_unipolar((drift * (0.4 + velocity * 0.6)).clamp(-1.0, 1.0))
+        }
+        _ => 0.0,
+    };
+
+    *s.add(slot_state_idx(slot, IDX_RNG)) = rng_state as f32;
+    out.clamp(0.0, 1.0)
 }
 
 unsafe extern "C" fn voice_modulator_process(
@@ -826,203 +1196,101 @@ unsafe extern "C" fn voice_modulator_process(
     let nf = nframes as usize;
     let s = state as *mut f32;
 
+    let custom_identity = custom_engine_identity(s);
+    if let Some((engine_id, voice_idx)) = custom_identity {
+        let enabled = crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id);
+        if voice_idx >= enabled {
+            record_disabled_custom_skip(engine_id, nf);
+            clear_outputs(out, nf);
+            return;
+        }
+    }
+    let sampler_identity = sampler_identity(s);
+    if let Some((track_idx, voice_idx)) = sampler_identity {
+        if !sampler_voice_is_active(track_idx, voice_idx) {
+            record_disabled_sampler_skip(track_idx, nf);
+            clear_outputs(out, nf);
+            return;
+        }
+    }
+
     let gate_in = *inp.add(0);
     let velocity_in = *inp.add(2);
     let trigger_in = *inp.add(3);
+    let ext_inputs = [*inp.add(4), *inp.add(5), *inp.add(6), *inp.add(7)];
 
-    let out_mod1 = *out.add(0);
-    let out_mod2 = *out.add(1);
-    let out_mod3 = *out.add(2);
-    let out_mod4 = *out.add(3);
-    let out_mod5 = *out.add(4);
-    let out_mod6 = *out.add(5);
-
-    let mut lfo1_phase = *s.add(IDX_LFO1_PHASE);
-    let mut lfo2_phase = *s.add(IDX_LFO2_PHASE);
-    let mut lfo3_phase = *s.add(IDX_LFO3_PHASE);
-    let mut env2 = *s.add(IDX_ENV2);
-    let mut rand_phase = *s.add(IDX_RAND_PHASE);
-    let mut drift = *s.add(IDX_DRIFT);
     let mut prev_gate = *s.add(IDX_PREV_GATE);
-    let mut rng_state = *s.add(IDX_RNG) as u32;
-    let mut rand_hold = *s.add(IDX_RAND_HOLD);
-    let mut rand_smooth = *s.add(IDX_RAND_SMOOTH);
     let mut last_reset_counter = *s.add(IDX_LAST_RESET_COUNTER);
-    let mut env_stage = *s.add(IDX_ENV_STAGE);
-
     let sample_rate = (*s.add(IDX_SAMPLE_RATE)).max(1.0);
     let bpm = (*s.add(PARAM_BPM)).clamp(20.0, 400.0);
     let reset_counter = *s.add(PARAM_RESET_COUNTER);
 
     if reset_counter != last_reset_counter {
-        lfo1_phase = 0.0;
-        lfo2_phase = 0.0;
-        lfo3_phase = 0.0;
-        rand_phase = 0.0;
-        rand_hold = 0.0;
-        rand_smooth = 0.0;
-        drift = 0.0;
-        env2 = 0.0;
-        env_stage = ENV_STAGE_IDLE;
+        for slot in 0..SLOT_COUNT {
+            *s.add(slot_state_idx(slot, IDX_LFO_PHASE)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_ENV)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_RAND_PHASE)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_DRIFT)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_RAND_HOLD)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_RAND_SMOOTH)) = 0.0;
+            *s.add(slot_state_idx(slot, IDX_ENV_STAGE)) = ENV_STAGE_IDLE;
+        }
         last_reset_counter = reset_counter;
     }
 
-    let lfo1_rate = if *s.add(PARAM_LFO1_SYNC) > 0.5 {
-        synced_rate_hz((*s.add(PARAM_LFO1_DIV)).round() as usize, bpm)
-    } else {
-        (*s.add(PARAM_LFO1_RATE_HZ)).clamp(0.01, 20.0)
-    };
-    let lfo2_rate = if *s.add(PARAM_LFO2_SYNC) > 0.5 {
-        synced_rate_hz((*s.add(PARAM_LFO2_DIV)).round() as usize, bpm)
-    } else {
-        (*s.add(PARAM_LFO2_RATE_HZ)).clamp(0.01, 20.0)
-    };
-    let lfo3_rate = if *s.add(PARAM_LFO3_SYNC) > 0.5 {
-        synced_rate_hz((*s.add(PARAM_LFO3_DIV)).round() as usize, bpm)
-    } else {
-        (*s.add(PARAM_LFO3_RATE_HZ)).clamp(0.01, 20.0)
-    };
-    let rand_rate = if *s.add(PARAM_RAND_SYNC) > 0.5 {
-        synced_rate_hz((*s.add(PARAM_RAND_DIV)).round() as usize, bpm)
-    } else {
-        (*s.add(PARAM_RAND_RATE_HZ)).clamp(0.01, 20.0)
-    };
-    let drift_rate = if *s.add(PARAM_DRIFT_SYNC) > 0.5 {
-        synced_rate_hz((*s.add(PARAM_DRIFT_DIV)).round() as usize, bpm) * 0.2
-    } else {
-        (*s.add(PARAM_DRIFT_RATE)).clamp(0.00001, 0.01) * sample_rate
-    };
+    let slot_sources = [
+        slot_source(s, 0),
+        slot_source(s, 1),
+        slot_source(s, 2),
+        slot_source(s, 3),
+    ];
+    if slot_sources.iter().all(|source| *source == SOURCE_OFF) {
+        record_all_slots_off(nf);
+        clear_outputs(out, nf);
+        if nf > 0 && !gate_in.is_null() {
+            *s.add(IDX_PREV_GATE) = (*gate_in.add(nf - 1)).clamp(0.0, 1.0);
+        }
+        *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
+        return;
+    }
+    record_rendered_call(custom_identity, sampler_identity, nf);
 
-    let lfo1_inc = lfo1_rate / sample_rate;
-    let lfo2_inc = lfo2_rate / sample_rate;
-    let lfo3_inc = lfo3_rate / sample_rate;
-    let rand_inc = rand_rate / sample_rate;
-
-    let env_attack = 1.0 / ((*s.add(PARAM_ENV_ATTACK_MS)).clamp(1.0, 2000.0) * 0.001 * sample_rate);
-    let env_decay = 1.0 / ((*s.add(PARAM_ENV_DECAY_MS)).clamp(5.0, 4000.0) * 0.001 * sample_rate);
-    let env_sustain = (*s.add(PARAM_ENV_SUSTAIN)).clamp(0.0, 1.0);
-    let env_release =
-        1.0 / ((*s.add(PARAM_ENV_RELEASE_MS)).clamp(5.0, 4000.0) * 0.001 * sample_rate);
-    let rand_slew = (*s.add(PARAM_RAND_SLEW)).clamp(0.0, 0.999);
-
-    let lfo1_shape = (*s.add(PARAM_LFO1_SHAPE)).round() as usize;
-    let lfo2_shape = (*s.add(PARAM_LFO2_SHAPE)).round() as usize;
-    let lfo3_shape = (*s.add(PARAM_LFO3_SHAPE)).round() as usize;
-    let lfo1_pw = (*s.add(PARAM_LFO1_PW)).clamp(0.05, 0.95);
-    let lfo2_pw = (*s.add(PARAM_LFO2_PW)).clamp(0.05, 0.95);
-    let lfo3_pw = (*s.add(PARAM_LFO3_PW)).clamp(0.05, 0.95);
-    let lfo1_retrigger = *s.add(PARAM_LFO1_RETRIGGER) > 0.5;
-    let lfo2_retrigger = *s.add(PARAM_LFO2_RETRIGGER) > 0.5;
-    let lfo3_retrigger = *s.add(PARAM_LFO3_RETRIGGER) > 0.5;
-
-    let mod1_depth = (*s.add(PARAM_MOD1_DEPTH)).clamp(0.0, 1.0);
-    let mod2_depth = (*s.add(PARAM_MOD2_DEPTH)).clamp(0.0, 1.0);
-    let mod3_depth = (*s.add(PARAM_MOD3_DEPTH)).clamp(0.0, 1.0);
-    let mod4_depth = (*s.add(PARAM_MOD4_DEPTH)).clamp(0.0, 1.0);
-    let mod5_depth = (*s.add(PARAM_MOD5_DEPTH)).clamp(0.0, 1.0);
-    let mod6_depth = (*s.add(PARAM_MOD6_DEPTH)).clamp(0.0, 1.0);
+    for (slot, source) in slot_sources.iter().copied().enumerate() {
+        if source == SOURCE_OFF {
+            clear_output_slot(out, slot, nf);
+        }
+    }
 
     for i in 0..nf {
         let gate = (*gate_in.add(i)).clamp(0.0, 1.0);
         let velocity = (*velocity_in.add(i)).clamp(0.0, 1.0);
         let trigger = (*trigger_in.add(i)).max(0.0);
+        let note_on = (gate > 0.5 && prev_gate <= 0.5) || trigger > 0.5;
 
-        let gate_rising = gate > 0.5 && prev_gate <= 0.5;
-        let note_on = gate_rising || trigger > 0.5;
-        if note_on {
-            env2 = 0.0;
-            env_stage = ENV_STAGE_ATTACK;
-            rand_hold = next_rand(&mut rng_state);
-            if lfo1_retrigger {
-                lfo1_phase = 0.0;
+        for (slot, source) in slot_sources.iter().copied().enumerate() {
+            if source == SOURCE_OFF {
+                continue;
             }
-            if lfo2_retrigger {
-                lfo2_phase = 0.0;
-            }
-            if lfo3_retrigger {
-                lfo3_phase = 0.0;
-            }
+            let out_slot = *out.add(slot);
+            *out_slot.add(i) = render_slot(
+                s,
+                &ext_inputs,
+                slot,
+                source,
+                i,
+                gate,
+                velocity,
+                note_on,
+                sample_rate,
+                bpm,
+            );
         }
-
-        lfo1_phase = (lfo1_phase + lfo1_inc).fract();
-        lfo2_phase = (lfo2_phase + lfo2_inc).fract();
-        lfo3_phase = (lfo3_phase + lfo3_inc).fract();
-
-        let prev_rand_phase = rand_phase;
-        rand_phase = (rand_phase + rand_inc).fract();
-        if rand_phase < prev_rand_phase {
-            rand_hold = next_rand(&mut rng_state);
-        }
-        rand_smooth += (rand_hold - rand_smooth) * (1.0 - rand_slew);
-
-        if gate <= 0.5 && env_stage != ENV_STAGE_IDLE && env_stage != ENV_STAGE_RELEASE {
-            env_stage = ENV_STAGE_RELEASE;
-        }
-
-        if env_stage == ENV_STAGE_ATTACK {
-            env2 = (env2 + env_attack).min(1.0);
-            if env2 >= 0.999 {
-                env2 = 1.0;
-                env_stage = ENV_STAGE_DECAY;
-            }
-        } else if env_stage == ENV_STAGE_DECAY {
-            env2 += (env_sustain - env2) * env_decay;
-            if (env2 - env_sustain).abs() <= 0.001 {
-                env2 = env_sustain;
-                env_stage = if gate > 0.5 {
-                    ENV_STAGE_SUSTAIN
-                } else {
-                    ENV_STAGE_RELEASE
-                };
-            }
-        } else if env_stage == ENV_STAGE_SUSTAIN {
-            env2 = env_sustain;
-            if gate <= 0.5 {
-                env_stage = ENV_STAGE_RELEASE;
-            }
-        } else if env_stage == ENV_STAGE_RELEASE {
-            env2 += (0.0 - env2) * env_release;
-            if env2 <= 0.0005 {
-                env2 = 0.0;
-                env_stage = ENV_STAGE_IDLE;
-            }
-        }
-        env2 = env2.clamp(0.0, 1.0);
-
-        drift +=
-            (next_rand(&mut rng_state) * 0.08 - drift) * (drift_rate / sample_rate).clamp(0.0, 1.0);
-        drift = drift.clamp(-1.0, 1.0);
-
-        let drift_source = (drift * (0.4 + velocity * 0.6)).clamp(-1.0, 1.0);
-
-        *out_mod1.add(i) = (bipolar_to_unipolar(shape_value(lfo1_shape, lfo1_phase, lfo1_pw))
-            * mod1_depth)
-            .clamp(0.0, 1.0);
-        *out_mod2.add(i) = (env2 * mod2_depth).clamp(0.0, 1.0);
-        *out_mod3.add(i) = (bipolar_to_unipolar(rand_smooth) * mod3_depth).clamp(0.0, 1.0);
-        *out_mod4.add(i) = (bipolar_to_unipolar(drift_source) * mod4_depth).clamp(0.0, 1.0);
-        *out_mod5.add(i) = (bipolar_to_unipolar(shape_value(lfo2_shape, lfo2_phase, lfo2_pw))
-            * mod5_depth)
-            .clamp(0.0, 1.0);
-        *out_mod6.add(i) = (bipolar_to_unipolar(shape_value(lfo3_shape, lfo3_phase, lfo3_pw))
-            * mod6_depth)
-            .clamp(0.0, 1.0);
 
         prev_gate = gate;
     }
 
-    *s.add(IDX_LFO1_PHASE) = lfo1_phase;
-    *s.add(IDX_LFO2_PHASE) = lfo2_phase;
-    *s.add(IDX_LFO3_PHASE) = lfo3_phase;
-    *s.add(IDX_ENV2) = env2;
-    *s.add(IDX_RAND_PHASE) = rand_phase;
-    *s.add(IDX_DRIFT) = drift;
     *s.add(IDX_PREV_GATE) = prev_gate;
-    *s.add(IDX_RNG) = rng_state as f32;
-    *s.add(IDX_RAND_HOLD) = rand_hold;
-    *s.add(IDX_RAND_SMOOTH) = rand_smooth;
     *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
-    *s.add(IDX_ENV_STAGE) = env_stage;
 }
 
 pub fn voice_modulator_vtable() -> NodeVTable {
@@ -1034,40 +1302,54 @@ pub fn voice_modulator_vtable() -> NodeVTable {
     }
 }
 
+pub fn effect_modulator_vtable() -> NodeVTable {
+    NodeVTable {
+        process: Some(voice_modulator_process),
+        init: Some(effect_modulator_init),
+        reset: None,
+        migrate: None,
+    }
+}
+
 pub fn is_bar_resync_param(node_param_idx: u32) -> bool {
-    let timed_params = [
-        MOD_PARAM_BASE + PARAM_LFO1_SYNC as u32,
-        MOD_PARAM_BASE + PARAM_LFO1_DIV as u32,
-        MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32,
-        MOD_PARAM_BASE + PARAM_LFO2_SYNC as u32,
-        MOD_PARAM_BASE + PARAM_LFO2_DIV as u32,
-        MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32,
-        MOD_PARAM_BASE + PARAM_LFO3_SYNC as u32,
-        MOD_PARAM_BASE + PARAM_LFO3_DIV as u32,
-        MOD_PARAM_BASE + PARAM_LFO3_RETRIGGER as u32,
-        MOD_PARAM_BASE + PARAM_RAND_SYNC as u32,
-        MOD_PARAM_BASE + PARAM_RAND_DIV as u32,
-        MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32,
-        MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32,
-    ];
-    timed_params.contains(&node_param_idx)
+    if node_param_idx < MOD_PARAM_BASE {
+        return false;
+    }
+    let idx = (node_param_idx - MOD_PARAM_BASE) as usize;
+    for slot in 0..SLOT_COUNT {
+        let base = slot_param_idx(slot, 0);
+        if matches!(
+            idx,
+            x if x == base + PARAM_LFO_SYNC
+                || x == base + PARAM_LFO_DIV
+                || x == base + PARAM_LFO_RETRIGGER
+                || x == base + PARAM_RAND_SYNC
+                || x == base + PARAM_RAND_DIV
+                || x == base + PARAM_DRIFT_SYNC
+                || x == base + PARAM_DRIFT_DIV
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn modulator_slot_label(slot: usize, fallback_name: &str) -> String {
-    match slot {
-        1 => "LFO 1",
-        2 => "ENV 1",
-        3 => "RAND",
-        4 => "DRIFT",
-        5 => "LFO 2",
-        6 => "LFO 3",
-        7 => "Ext 1",
-        8 => "Ext 2",
-        9 => "Ext 3",
-        10 => "Ext 4",
-        _ => fallback_name,
+    if (1..=SLOT_COUNT).contains(&slot) {
+        format!("Mod {slot}")
+    } else {
+        fallback_name.to_string()
     }
-    .to_string()
+}
+
+pub fn modulator_slot_label_static(slot: usize) -> Option<&'static str> {
+    match slot {
+        1 => Some("Mod 1"),
+        2 => Some("Mod 2"),
+        3 => Some("Mod 3"),
+        4 => Some("Mod 4"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1077,6 +1359,7 @@ mod tests {
     fn render_voice_modulator(
         state: &mut [f32; STATE_SIZE],
         frames: usize,
+        ext: [[f32; 64]; EXT_INPUT_COUNT],
     ) -> [[f32; 64]; NUM_OUTPUTS] {
         assert!(frames <= 64);
 
@@ -1089,6 +1372,10 @@ mod tests {
             pitch.as_ptr() as *mut f32,
             velocity.as_ptr() as *mut f32,
             trigger.as_ptr() as *mut f32,
+            ext[0].as_ptr() as *mut f32,
+            ext[1].as_ptr() as *mut f32,
+            ext[2].as_ptr() as *mut f32,
+            ext[3].as_ptr() as *mut f32,
         ];
 
         let mut outputs = [[0.0f32; 64]; NUM_OUTPUTS];
@@ -1097,8 +1384,6 @@ mod tests {
             outputs[1].as_mut_ptr(),
             outputs[2].as_mut_ptr(),
             outputs[3].as_mut_ptr(),
-            outputs[4].as_mut_ptr(),
-            outputs[5].as_mut_ptr(),
         ];
 
         unsafe {
@@ -1114,6 +1399,42 @@ mod tests {
         outputs
     }
 
+    fn init_state() -> [f32; STATE_SIZE] {
+        let mut state = [0.0f32; STATE_SIZE];
+        unsafe {
+            voice_modulator_init(state.as_mut_ptr().cast(), 48_000, 64, std::ptr::null());
+        }
+        state
+    }
+
+    fn init_custom_engine_state(engine_id: usize, voice_idx: usize) -> [f32; STATE_SIZE] {
+        let mut state = [0.0f32; STATE_SIZE];
+        let initial = custom_engine_initial_state(engine_id, voice_idx);
+        unsafe {
+            voice_modulator_init(
+                state.as_mut_ptr().cast(),
+                48_000,
+                64,
+                (&initial as *const VoiceModulatorInitialState).cast(),
+            );
+        }
+        state
+    }
+
+    fn init_sampler_voice_state(track_idx: usize, voice_idx: usize) -> [f32; STATE_SIZE] {
+        let mut state = [0.0f32; STATE_SIZE];
+        let initial = sampler_voice_initial_state(track_idx, voice_idx);
+        unsafe {
+            voice_modulator_init(
+                state.as_mut_ptr().cast(),
+                48_000,
+                64,
+                (&initial as *const VoiceModulatorInitialState).cast(),
+            );
+        }
+        state
+    }
+
     #[test]
     fn synced_lfo_divisions_are_calibrated_to_quarter_note_beats() {
         let bpm = 120.0;
@@ -1126,90 +1447,204 @@ mod tests {
     }
 
     #[test]
-    fn sync_labels_match_builtin_effect_division_indices() {
-        let labels = sync_labels();
+    fn source_type_is_enum_and_defaults_to_legacy_first_four_classes() {
+        let desc = param_descriptors();
+        let sources = desc
+            .iter()
+            .filter(|param| param.name.ends_with("_source"))
+            .map(|param| (param.name.as_str(), param.default, &param.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(sources.len(), SLOT_COUNT);
+        assert_eq!(sources[0].0, "mod1_source");
+        assert_eq!(sources[0].1, SOURCE_LFO as f32);
+        assert_eq!(sources[1].1, SOURCE_ENV as f32);
+        assert_eq!(sources[2].1, SOURCE_RAND as f32);
+        assert_eq!(sources[3].1, SOURCE_DRIFT as f32);
+        match sources[0].2 {
+            ParamKind::Enum { labels } => assert_eq!(
+                labels,
+                &vec![
+                    "off".to_string(),
+                    "lfo".to_string(),
+                    "env".to_string(),
+                    "rand".to_string(),
+                    "drift".to_string(),
+                    "ext1".to_string(),
+                    "ext2".to_string(),
+                    "ext3".to_string(),
+                    "ext4".to_string(),
+                ]
+            ),
+            other => panic!("source type should be enum, got {other:?}"),
+        }
+    }
 
-        assert_eq!(labels[SyncDivision::Quarter as usize], "1/4");
-        assert_eq!(
-            sync_division_index(SyncDivision::Quarter),
-            SyncDivision::Quarter as usize as f32
+    #[test]
+    fn selected_source_param_indices_follow_slot_source_state() {
+        let params = param_descriptors();
+        let mut values = params.iter().map(|param| param.default).collect::<Vec<_>>();
+        let idx = |name: &str| {
+            params
+                .iter()
+                .position(|param| param.name == name)
+                .unwrap_or_else(|| panic!("missing param {name}"))
+        };
+        let selected_names = |values: &[f32]| {
+            selected_source_param_indices(&params, |idx, _| values[idx])
+                .into_iter()
+                .map(|idx| params[idx].name.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        let names = selected_names(&values);
+        assert!(names.contains(&"mod1_source"));
+        assert!(names.contains(&"mod1_lfo_rate"));
+        assert!(!names.contains(&"mod1_lfo_div"));
+        assert!(!names.contains(&"mod1_lfo_pw"));
+        assert!(names.contains(&"mod2_env_attack"));
+        assert!(names.contains(&"mod3_rand_rate"));
+        assert!(names.contains(&"mod4_drift_rate"));
+
+        values[idx("mod1_lfo_sync")] = 1.0;
+        values[idx("mod1_lfo_shape")] = SHAPE_PULSE as f32;
+        let names = selected_names(&values);
+        assert!(!names.contains(&"mod1_lfo_rate"));
+        assert!(names.contains(&"mod1_lfo_div"));
+        assert!(names.contains(&"mod1_lfo_pw"));
+
+        values[idx("mod1_source")] = SOURCE_EXT2 as f32;
+        let names = selected_names(&values);
+        assert!(names.contains(&"mod1_source"));
+        assert!(!names.contains(&"mod1_lfo_div"));
+        assert!(!names.contains(&"mod1_lfo_pw"));
+    }
+
+    #[test]
+    fn default_slots_render_lfo_env_rand_and_drift() {
+        let mut state = init_state();
+        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!(outputs[0].iter().any(|value| *value > 0.0));
+        assert!(outputs[1].iter().any(|value| *value > 0.0));
+        assert!(outputs[2].iter().any(|value| *value > 0.0));
+        assert!(outputs[3].iter().any(|value| *value > 0.0));
+    }
+
+    #[test]
+    fn duplicate_envelope_slots_are_independent() {
+        let mut state = init_state();
+        state[slot_source_param_idx(0)] = SOURCE_ENV as f32;
+        state[slot_source_param_idx(1)] = SOURCE_ENV as f32;
+        state[slot_param_idx(0, PARAM_ENV_ATTACK_MS)] = 10.0;
+        state[slot_param_idx(1, PARAM_ENV_ATTACK_MS)] = 1000.0;
+
+        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!(outputs[0][63] > outputs[1][63] * 10.0);
+        assert_ne!(
+            state[slot_state_idx(0, IDX_ENV)],
+            state[slot_state_idx(1, IDX_ENV)]
         );
     }
 
     #[test]
-    fn lfo1_does_not_retrigger_by_default() {
-        let desc = param_descriptors();
-        let retrigger = desc
+    fn ext_source_copies_selected_external_input() {
+        let mut state = init_state();
+        state[slot_source_param_idx(0)] = SOURCE_EXT3 as f32;
+        let mut ext = [[0.0f32; 64]; EXT_INPUT_COUNT];
+        ext[2][0] = 0.25;
+        ext[2][1] = 0.75;
+        ext[2][2] = 1.25;
+
+        let outputs = render_voice_modulator(&mut state, 3, ext);
+
+        assert_eq!(&outputs[0][..3], &[0.25, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn off_slot_outputs_zero_and_does_not_advance_slot_state() {
+        let mut state = init_state();
+        state[slot_source_param_idx(0)] = SOURCE_OFF as f32;
+        let before_phase = state[slot_state_idx(0, IDX_LFO_PHASE)];
+        let before_env = state[slot_state_idx(0, IDX_ENV)];
+
+        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!(outputs[0].iter().all(|value| *value == 0.0));
+        assert_eq!(state[slot_state_idx(0, IDX_LFO_PHASE)], before_phase);
+        assert_eq!(state[slot_state_idx(0, IDX_ENV)], before_env);
+    }
+
+    #[test]
+    fn all_off_slots_clear_outputs_without_advancing_any_slot_state() {
+        let mut state = init_state();
+        for slot in 0..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+        }
+        state[slot_state_idx(0, IDX_LFO_PHASE)] = 0.5;
+        state[PARAM_RESET_COUNTER] = 1.0;
+        let before_lfo_phase = state[slot_state_idx(0, IDX_LFO_PHASE)];
+        let before_env = state[slot_state_idx(1, IDX_ENV)];
+        let before_rand_phase = state[slot_state_idx(2, IDX_RAND_PHASE)];
+        let before_drift = state[slot_state_idx(3, IDX_DRIFT)];
+
+        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!(outputs
             .iter()
-            .find(|param| param.node_param_idx == MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
-            .expect("LFO 1 retrigger descriptor");
-
-        assert_eq!(retrigger.default, 0.0);
+            .all(|slot| slot.iter().all(|value| *value == 0.0)));
+        assert_ne!(before_lfo_phase, 0.0);
+        assert_eq!(state[slot_state_idx(0, IDX_LFO_PHASE)], 0.0);
+        assert_eq!(state[slot_state_idx(1, IDX_ENV)], before_env);
+        assert_eq!(state[slot_state_idx(2, IDX_RAND_PHASE)], before_rand_phase);
+        assert_eq!(state[slot_state_idx(3, IDX_DRIFT)], before_drift);
+        assert_eq!(state[IDX_PREV_GATE], 1.0);
+        assert_eq!(state[IDX_LAST_RESET_COUNTER], 1.0);
     }
 
     #[test]
-    fn transport_params_do_not_overlap_runtime_state() {
-        let runtime_indices = [
-            IDX_LFO1_PHASE,
-            IDX_LFO2_PHASE,
-            IDX_LFO3_PHASE,
-            IDX_ENV2,
-            IDX_RAND_PHASE,
-            IDX_DRIFT,
-            IDX_PREV_GATE,
-            IDX_RNG,
-            IDX_RAND_HOLD,
-            IDX_RAND_SMOOTH,
-            IDX_LAST_RESET_COUNTER,
-            IDX_ENV_STAGE,
-            IDX_SAMPLE_RATE,
-        ];
+    fn custom_engine_disabled_voice_outputs_zero_without_advancing_modulators() {
+        let engine_id = 63;
+        crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, 1);
+        let mut state = init_custom_engine_state(engine_id, 3);
+        let before_lfo_phase = state[slot_state_idx(0, IDX_LFO_PHASE)];
+        let before_rand_phase = state[slot_state_idx(2, IDX_RAND_PHASE)];
 
-        assert!(!runtime_indices.contains(&PARAM_BPM));
-        assert!(!runtime_indices.contains(&PARAM_RESET_COUNTER));
-        assert!(PARAM_BPM < STATE_SIZE);
-        assert!(PARAM_RESET_COUNTER < STATE_SIZE);
+        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!(outputs
+            .iter()
+            .all(|slot| slot.iter().all(|value| *value == 0.0)));
+        assert_eq!(state[slot_state_idx(0, IDX_LFO_PHASE)], before_lfo_phase);
+        assert_eq!(state[slot_state_idx(2, IDX_RAND_PHASE)], before_rand_phase);
+
+        crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, 4);
+        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+
+        assert!(outputs[0].iter().any(|value| *value > 0.0));
+        crate::lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
     }
 
     #[test]
-    fn built_in_modulator_outputs_are_unipolar() {
-        let mut state = [0.0f32; STATE_SIZE];
-        unsafe {
-            voice_modulator_init(state.as_mut_ptr().cast(), 48_000, 64, std::ptr::null());
-        }
+    fn inactive_sampler_voice_outputs_zero_without_advancing_modulators() {
+        let track_idx = 62;
+        set_sampler_active_mask(track_idx, 0);
+        let mut state = init_sampler_voice_state(track_idx, 2);
+        let before_lfo_phase = state[slot_state_idx(0, IDX_LFO_PHASE)];
+        let before_rand_phase = state[slot_state_idx(2, IDX_RAND_PHASE)];
 
-        let outputs = render_voice_modulator(&mut state, 64);
+        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
 
-        for (output_idx, output) in outputs.iter().enumerate() {
-            for (frame_idx, value) in output.iter().take(64).enumerate() {
-                assert!(
-                    (0.0..=1.0).contains(value),
-                    "mod output {} frame {} should be unipolar, got {}",
-                    output_idx + 1,
-                    frame_idx,
-                    value
-                );
-            }
-        }
-    }
+        assert!(outputs
+            .iter()
+            .all(|slot| slot.iter().all(|value| *value == 0.0)));
+        assert_eq!(state[slot_state_idx(0, IDX_LFO_PHASE)], before_lfo_phase);
+        assert_eq!(state[slot_state_idx(2, IDX_RAND_PHASE)], before_rand_phase);
 
-    #[test]
-    fn modulator_depth_zero_outputs_zero_not_center_bias() {
-        let mut state = [0.0f32; STATE_SIZE];
-        unsafe {
-            voice_modulator_init(state.as_mut_ptr().cast(), 48_000, 64, std::ptr::null());
-        }
-        state[PARAM_MOD1_DEPTH] = 0.0;
-        state[PARAM_MOD2_DEPTH] = 0.0;
-        state[PARAM_MOD3_DEPTH] = 0.0;
-        state[PARAM_MOD4_DEPTH] = 0.0;
-        state[PARAM_MOD5_DEPTH] = 0.0;
-        state[PARAM_MOD6_DEPTH] = 0.0;
+        set_sampler_active_mask(track_idx, 1u64 << 2);
+        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
 
-        let outputs = render_voice_modulator(&mut state, 64);
-
-        for output in &outputs {
-            assert_eq!(&output[..64], &[0.0; 64]);
-        }
+        assert!(outputs[0].iter().any(|value| *value > 0.0));
+        set_sampler_active_mask(track_idx, 0);
     }
 }

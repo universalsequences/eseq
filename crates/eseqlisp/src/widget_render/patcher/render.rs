@@ -31,8 +31,9 @@ use super::metrics::{
     PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
 use super::model::{
-    ArgValue, BindingTarget, ConnectionKind, InputPortRef, NodeKind, OutputPortRef, Patch,
-    PatchConnection, PatchNode, SourceOwner,
+    ArgValue, BindingTarget, ConnectionKind, InputPortRef, InputPresentation, NodeKind,
+    OutputPortRef, Patch, PatchConnection, PatchNode, SourceOwner,
+    connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
 #[cfg(target_os = "macos")]
 use super::project::OperatorPortDocumentation;
@@ -654,8 +655,15 @@ fn draw_patch_with_view_key(
         Some(PatcherDragState::CableEndpoint { cable_id, .. }) => Some(cable_id.as_str()),
         _ => None,
     };
+    let hidden_node_ids = hidden_inline_node_ids(patch);
 
     for connection in &patch.connections {
+        if connection.presentation != InputPresentation::Cable {
+            continue;
+        }
+        if connection_touches_hidden_inline_node(connection, &hidden_node_ids) {
+            continue;
+        }
         let connection_id = source_connection_id(connection);
         if dragged_cable == Some(connection_id.as_str()) {
             continue;
@@ -741,6 +749,8 @@ fn draw_patch_with_view_key(
             to_input: 0,
             kind: ConnectionKind::Forward,
             segment: None,
+            presentation: InputPresentation::Cable,
+            presentation_override: None,
             source: None,
         };
         push_cable_handles(&mut cable_prims, &preview_connection, start, end, zoom);
@@ -1337,6 +1347,8 @@ fn push_preview_cable(
         to_input: 0,
         kind,
         segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
         source: None,
     };
     push_cable(prims, start, end, &connection, 0.0, zoom, selected);
@@ -1670,16 +1682,16 @@ fn push_node_label(
     } else {
         NODE_FONT_SIZE
     };
-    let baseline_row = if node.kind == NodeKind::CodeIsland {
+    let text_row = if node.kind == NodeKind::CodeIsland {
         rect.row + 0.55 * zoom
     } else {
-        rect.row + 0.36 * zoom
+        rect.row + (rect.height - zoom) * 0.5
     };
     let text_col = rect.col + NODE_TEXT_COL_OFFSET * zoom;
     if let Some(edit) = edit {
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
-                row: baseline_row,
+                row: text_row,
                 col: text_col,
                 align_width: rect.width - 1.84 * zoom,
                 h_align: 0.0,
@@ -1697,7 +1709,7 @@ fn push_node_label(
     let bg = crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0);
     prims.push(MetalPrimitive::ProportionalText(
         MetalProportionalTextPrimitive {
-            row: baseline_row,
+            row: text_row,
             col: text_col,
             align_width: rect.width - 1.84 * zoom,
             h_align: 0.0,
@@ -1713,7 +1725,7 @@ fn push_node_label(
             + cursor_x_from_char_cache(&label, font_size, tail_start, viewport.cell_w) * zoom;
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
-                row: baseline_row,
+                row: text_row,
                 col: tail_col,
                 align_width: (rect.col + rect.width - tail_col - 0.92 * zoom).max(0.0),
                 h_align: 0.0,

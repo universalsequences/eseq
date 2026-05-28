@@ -696,13 +696,28 @@ impl PatternSnapshot {
         desc: &EffectDescriptor,
         node_id: u32,
     ) {
+        self.sync_effect_slot_with_modulator(track, slot_idx, desc, node_id, 0);
+    }
+
+    pub fn sync_effect_slot_with_modulator(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
         while self.effect_slots.len() <= track {
             self.push_default_track(track, &[]);
         }
         while self.effect_slots[track].len() <= slot_idx {
             self.effect_slots[track].push(EffectSlotSnapshot::new_empty());
         }
-        self.effect_slots[track][slot_idx].sync_to_descriptor(desc, node_id);
+        self.effect_slots[track][slot_idx].sync_to_descriptor_with_modulator(
+            desc,
+            node_id,
+            modulator_node_id,
+        );
     }
 
     pub fn sync_midi_fx_slot(&mut self, track: usize, slot_idx: usize, desc: &EffectDescriptor) {
@@ -2170,6 +2185,7 @@ mod tests {
     fn sample_effect_slot_snapshot(id: usize) -> EffectSlotSnapshot {
         EffectSlotSnapshot {
             node_id: 100 + id as u32,
+            modulator_node_id: 0,
             num_params: 2,
             defaults: vec![id as f32, id as f32 + 0.5],
             plocks: (0..MAX_STEPS)
@@ -2289,6 +2305,7 @@ mod tests {
                 node_param_idx: u32::MAX,
                 node_param_span: 1,
                 host_control: Some(HostControl::FxSidechain { input_channel: 0 }),
+                ui_metadata: None,
             }],
             input_channels: 2,
             output_channels: 2,
@@ -2549,6 +2566,7 @@ mod tests {
                 vec![EffectSlotSnapshot::new_empty()],
                 vec![EffectSlotSnapshot {
                     node_id: 1,
+                    modulator_node_id: 0,
                     num_params: 1,
                     defaults: vec![3.0],
                     plocks: {

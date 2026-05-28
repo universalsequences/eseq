@@ -17,6 +17,7 @@ backtrace = "0.3"
 libc = "0.2"
 eseqlisp = { path = "../eseqlisp" }
 arrayvec = "0.7"
+notify = "6"
 
 [lib]
 name = "sequencer"

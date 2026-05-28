@@ -30,11 +30,11 @@
 (bind-key "ESC" "seq-clear-ui-selection")
 
 (defstate piano-roll-placement :bottom)
-(defstate step-panel-buffer "*metal*")
-(defstate remembered-step-panel-buffer "*metal*")
+(defstate step-panel-buffer "*sequencer*")
+(defstate remembered-step-panel-buffer "*sequencer*")
 (defstate lower-panel-buffer "*fx*")
 
-(def lower-fx-layout-height 10)
+(def lower-fx-layout-height 11)
 
 (def seq-step-buffer? (buffer)
   (or (= buffer "*metal*") (= buffer "*sequencer*")))
@@ -159,20 +159,21 @@
     (seq-open-piano-roll-main)
     (seq-open-piano-roll-bottom)))
 
-(def seq-toggle-metal-sequencer-main ()
-  (let ((next-buffer
-          (if (= (seq-current-step-buffer) "*sequencer*")
-            "*metal*"
-            "*sequencer*")))
-    (do
-      (set! remembered-step-panel-buffer next-buffer)
-      (if (= step-panel-buffer "*piano-roll*")
-        nil
-        (set! step-panel-buffer next-buffer))
-      (set-window-buffer next-buffer)
-      (if (= lower-panel-buffer "*piano-roll*")
-        (seq-apply-piano-roll-layout)
-        (seq-apply-fx-layout)))))
+(def seq-show-sequencer-main ()
+  (do
+    (set! remembered-step-panel-buffer "*sequencer*")
+    (if (= step-panel-buffer "*piano-roll*")
+      nil
+      (set! step-panel-buffer "*sequencer*"))
+    (set-window-buffer "*sequencer*")
+    (if (= lower-panel-buffer "*piano-roll*")
+      (seq-apply-piano-roll-layout)
+      (seq-apply-fx-layout))))
+
+(def seq-toggle-current-track-expanded-main ()
+  (do
+    (seq-show-sequencer-main)
+    (seqv-toggle-current-track-expanded)))
 
 (def seq-toggle-piano-roll-main ()
   (if (= step-panel-buffer "*piano-roll*")
@@ -214,7 +215,10 @@
           (seq-apply-fx-layout))))))
 
 (def seq-toggle-main-or-piano-roll ()
-  (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))
+  (if (or (= SEQ.editor-mode "new-instrument")
+          (= SEQ.editor-mode "edit-instrument")
+          (= SEQ.editor-mode "new-effect")
+          (= SEQ.editor-mode "edit-effect"))
     (host-command "toggle-instrument-patcher-source" (dict))
     (if (seq-piano-roll-open?)
       (seq-close-piano-roll)
@@ -235,7 +239,8 @@
     (instrument-toggle-mods-view)
     (seq-show-fx-lower-panel)))
 
-(bind-key "Tab" "seq-toggle-main-or-piano-roll")
+(bind-key "Tab" "seq-toggle-current-track-expanded-main")
+(bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync
 (defstate param-mode 0)
@@ -350,7 +355,7 @@
     (set! step-drag-anchor step)
     (seq-select-step-range step step)))
 
-(def step-select-drag-over (step evt)
+(def step-select-drag-over-for-track (track step evt)
   (if (selection-click? evt)
     (do
       (set! step-click-pending nil)
@@ -365,7 +370,7 @@
         (set! step-click-pending nil)
         (cool-off-follow)
         (set! cursor-step step)
-        (if (= (seq-track-step-active? SEQ.current-track step) step-toggle-drag-value)
+        (if (= (seq-track-step-active? track step) step-toggle-drag-value)
           nil
           (seq-toggle-step step)))
       (if (= step-move-last nil)
@@ -379,14 +384,17 @@
             (set! step-move-last step)
             (set! cursor-step step)))))))
 
-(def step-pointer-down (step evt)
+(def step-select-drag-over (step evt)
+  (step-select-drag-over-for-track SEQ.current-track step evt))
+
+(def step-pointer-down-for-track (track step evt use-selection)
   (if (selection-click? evt)
     (step-select-drag-start step evt)
     (do
       (cool-off-follow)
       (set! cursor-step step)
       (set! step-drag-anchor nil)
-      (if (or (seq-track-step-active? SEQ.current-track step) (step-selected? step))
+      (if (or (seq-track-step-active? track step) (and use-selection (step-selected? step)))
         (do
           (set! step-move-last step)
           (set! step-click-pending step)
@@ -395,7 +403,10 @@
           (set! step-move-last nil)
           (set! step-click-pending nil)
           (set! step-toggle-drag-value true)
-          (step-select-drag-over step evt))))))
+          (step-select-drag-over-for-track track step evt))))))
+
+(def step-pointer-down (step evt)
+  (step-pointer-down-for-track SEQ.current-track step evt true))
 
 (def step-pointer-up (step evt)
   (do
@@ -470,17 +481,19 @@
   (if (= param-mode 3) 0 2))
 
 (def seq-grid-handle-key (key text)
-  (if (= key "LEFT")
-    (do (cursor-left) true)
-    (if (= key "RIGHT")
-      (do (cursor-right) true)
-      (if (= key "C-a")
-        (do (select-all-steps) true)
-        (if (or (= key "BS") (= key "Delete"))
-          (do (delete-selected-steps) true)
-          (if (= key "RET")
-            (do (cursor-toggle) true)
-            false))))))
+  (if (= (current-buffer-name) "*sequencer*")
+    (seqv-handle-key key text)
+    (if (= key "LEFT")
+      (do (cursor-left) true)
+      (if (= key "RIGHT")
+        (do (cursor-right) true)
+        (if (= key "C-a")
+          (do (select-all-steps) true)
+          (if (or (= key "BS") (= key "Delete"))
+            (do (delete-selected-steps) true)
+            (if (= key "RET")
+              (do (cursor-toggle) true)
+              false)))))))
 
 (def goto-page (page)
   (do
@@ -507,6 +520,7 @@
 (mode-bind-key "seq-grid-mode" "BS" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "Delete" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "RET" "cursor-toggle")
+(mode-bind-key "seq-grid-mode" "C-h" "seqv-collapse-all-tracks")
 
 (def set-vel-mode () (set! param-mode 0))
 (mode-bind-key "seq-grid-mode" "v" "set-vel-mode")

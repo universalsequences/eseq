@@ -10,12 +10,6 @@
 (def mod2     (in 6  @name mod2 @modulator 2))
 (def mod3     (in 7  @name mod3 @modulator 3))
 (def mod4     (in 8  @name mod4 @modulator 4))
-(def mod5     (in 9  @name mod5 @modulator 5))
-(def mod6     (in 10 @name mod6 @modulator 6))
-(def ext1 (in 11 @name ext1 @modulator 7))
-(def ext2 (in 12 @name ext2 @modulator 8))
-(def ext3 (in 13 @name ext3 @modulator 9))
-(def ext4 (in 14 @name ext4 @modulator 10))
 
 (param bow_pressure    @default 0.34 @min 0    @max 1    @mod true @mod-mode additive)
 (param bow_attack_ms   @default 160  @min 5    @max 2000 @unit ms @mod true @mod-mode additive)

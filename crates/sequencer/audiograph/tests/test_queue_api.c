@@ -20,8 +20,7 @@ int main() {
   // Memory is now allocated by the library
   int osc_id = add_node(lg, OSC_VTABLE, OSC_MEMORY_SIZE * sizeof(float),
                         "test_osc", 0, 1, NULL, 0); // Osc: 0 inputs, 1 output
-  int gain_id = add_node(lg, GAIN_VTABLE, GAIN_MEMORY_SIZE * sizeof(float),
-                         "test_gain", 1, 1, NULL, 0); // Gain: 1 input, 1 output
+  int gain_id = add_gain_node(lg, 0.75f, "test_gain");
 
   assert(osc_id > 0);        // Should get immediate logical ID
   assert(gain_id > 0);       // Should get immediate logical ID
@@ -59,6 +58,10 @@ int main() {
   }
 
   assert(apply_result == true);
+  assert(lg->nodes[gain_id].nInputs == 2);
+  assert(lg->nodes[gain_id].nOutputs == 1);
+  assert(lg->nodes[gain_id].state != NULL);
+  assert(((float *)lg->nodes[gain_id].state)[0] == 0.75f);
 
   printf("✓ Applied all queued edits successfully\n");
   printf("  Node count: %d -> %d\n", initial_count, lg->node_count);

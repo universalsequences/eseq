@@ -44,12 +44,6 @@ Example:
 (def mod2 (in 6 @name mod2 @modulator 2))
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
-(def mod5 (in 9 @name mod5 @modulator 5))
-(def mod6 (in 10 @name mod6 @modulator 6))
-(def ext1 (in 11 @name ext1 @modulator 7))
-(def ext2 (in 12 @name ext2 @modulator 8))
-(def ext3 (in 13 @name ext3 @modulator 9))
-(def ext4 (in 14 @name ext4 @modulator 10))
 ```
 
 Rules:
@@ -60,9 +54,9 @@ Rules:
 - these inputs are exported in the manifest as modulation sources and should be
   consumed through generated `(mod param)` resolution, not read directly as
   audio/control signals in instrument DSP
-- the current synth convention is slots `1..6` for built-in host modulators
-  (`mod1`..`mod6`) and slots `7..10` for external modulation inputs
-  (`ext1`..`ext4`)
+- the current synth convention is exactly four slots, `mod1`..`mod4`
+- each host slot can be configured to an internal source class or one of the
+  external modulation buses; DGenLisp instruments still see only `mod1..mod4`
 
 ### 2. Modulation Destination Declaration
 
@@ -184,13 +178,7 @@ for that destination:
 (+ (* mod1 cutoff__mod_depth_slot1)
    (* mod2 cutoff__mod_depth_slot2)
    (* mod3 cutoff__mod_depth_slot3)
-   (* mod4 cutoff__mod_depth_slot4)
-   (* mod5 cutoff__mod_depth_slot5)
-   (* mod6 cutoff__mod_depth_slot6)
-   (* ext1 cutoff__mod_depth_slot7)
-   (* ext2 cutoff__mod_depth_slot8)
-   (* ext3 cutoff__mod_depth_slot9)
-   (* ext4 cutoff__mod_depth_slot10))
+   (* mod4 cutoff__mod_depth_slot4))
 ```
 
 If the generated active flag is `0`, generated DSP returns the base parameter
@@ -298,13 +286,7 @@ Example:
   { "slot": 1, "inputChannel": 4, "name": "mod1" },
   { "slot": 2, "inputChannel": 5, "name": "mod2" },
   { "slot": 3, "inputChannel": 6, "name": "mod3" },
-  { "slot": 4, "inputChannel": 7, "name": "mod4" },
-  { "slot": 5, "inputChannel": 8, "name": "mod5" },
-  { "slot": 6, "inputChannel": 9, "name": "mod6" },
-  { "slot": 7, "inputChannel": 10, "name": "ext1" },
-  { "slot": 8, "inputChannel": 11, "name": "ext2" },
-  { "slot": 9, "inputChannel": 12, "name": "ext3" },
-  { "slot": 10, "inputChannel": 13, "name": "ext4" }
+  { "slot": 4, "inputChannel": 7, "name": "mod4" }
 ]
 ```
 
@@ -416,12 +398,6 @@ Source:
 (def mod2 (in 6 @name mod2 @modulator 2))
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
-(def mod5 (in 9 @name mod5 @modulator 5))
-(def mod6 (in 10 @name mod6 @modulator 6))
-(def ext1 (in 11 @name ext1 @modulator 7))
-(def ext2 (in 12 @name ext2 @modulator 8))
-(def ext3 (in 13 @name ext3 @modulator 9))
-(def ext4 (in 14 @name ext4 @modulator 10))
 
 (param cutoff
   @default 2400

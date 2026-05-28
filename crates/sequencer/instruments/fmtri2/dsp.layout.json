@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 90.465004,
+        "y": 49.712494
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 4.0
+      },
+      "audio": {
+        "x": 92.590004,
+        "y": 56.394993
+      },
+      "cos1": {
+        "x": 93.75,
+        "y": 36.347496
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 6.6800003
+      },
+      "env": {
+        "x": 129.705,
+        "y": 16.3
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 14.720001
+      },
+      "gate": {
+        "x": 162.32,
+        "y": 4.0
+      },
+      "mod#0": {
+        "x": 151.005,
+        "y": 16.3
+      },
+      "mul1": {
+        "x": 91.43,
+        "y": 29.664997
+      },
+      "phase": {
+        "x": 92.01,
+        "y": 16.3
+      },
+      "phasor1": {
+        "x": 143.705,
+        "y": 4.0
+      },
+      "pitch": {
+        "x": 92.01,
+        "y": 4.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 12.040001
+      },
+      "scale1": {
+        "x": 106.94,
+        "y": 22.982498
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 9.360001
+      },
+      "svf1": {
+        "x": 89.11,
+        "y": 43.029995
+      },
+      "triangle1": {
+        "x": 90.850006,
+        "y": 22.982498
+      },
+      "triangle2": {
+        "x": 112.16,
+        "y": 16.3
+      },
+      "trigger": {
+        "x": 185.37001,
+        "y": 4.0
+      },
+      "value1": {
+        "x": 142.83133,
+        "y": 0.8220659
+      },
+      "velocity": {
+        "x": 116.22,
+        "y": 4.0
+      }
+    },
+    "cables": {
+      "*#0:0->audio:0": {
+        "segmented": true,
+        "y": 53.843742
+      },
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "cos1:0->svf1:0": {
+        "segmented": true,
+        "y": 40.478745
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.950001
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 32.556244
+      },
+      "gain:0->mod#0:0": {
+        "segmented": true,
+        "y": 16.3
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 9.7
+      },
+      "mod#0:0->*#0:3": {
+        "segmented": true,
+        "y": 37.137497
+      },
+      "mul1:0->cos1:0": {
+        "segmented": true,
+        "y": 35.036247
+      },
+      "phase:0->triangle1:0": {
+        "segmented": true,
+        "y": 19.811247
+      },
+      "phasor1:0->triangle2:0": {
+        "segmented": true,
+        "y": 10.94
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 12.179999
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 14.590001
+      },
+      "scale1:0->svf1:1": {
+        "segmented": true,
+        "y": 33.796246
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 13.77
+      },
+      "svf1:0->*#0:0": {
+        "segmented": true,
+        "y": 47.161247
+      },
+      "triangle1:0->mul1:0": {
+        "segmented": true,
+        "y": 26.493746
+      },
+      "triangle2:0->scale1:0": {
+        "segmented": true,
+        "y": 20.431248
+      },
+      "triangle2:0->triangle1:1": {
+        "segmented": true,
+        "y": 20.201534
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 8.459999
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 27.113747
+      }
+    }
+  },
+  "macros": {}
+}

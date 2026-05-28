@@ -173,6 +173,10 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     }
 
     let new_np = desc.params.len();
+    let has_legacy_fixed_voice_mod_params = slot.param_node_indices.iter().any(|&node_idx| {
+        node_idx >= crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE
+            && node_idx < crate::voice_modulator::MOD_PARAM_BASE
+    });
     let has_generated_mod_params = desc
         .params
         .iter()
@@ -204,6 +208,12 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     };
 
     let old_idx_for = |new_idx: usize, param: &crate::effects::ParamDescriptor| -> Option<usize> {
+        if has_legacy_fixed_voice_mod_params
+            && param.node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE
+        {
+            return None;
+        }
+
         if is_generated_mod_runtime_param_name(&param.name) {
             return None;
         }
@@ -277,6 +287,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
 
     let mut snapshot = crate::effects::EffectSlotSnapshot {
         node_id,
+        modulator_node_id: 0,
         num_params: new_np as u32,
         defaults,
         plocks,
@@ -1607,6 +1618,7 @@ impl App {
                             // start=0.0, end=1.0 already set from defaults
                             crate::effects::EffectSlotSnapshot {
                                 node_id: 0,
+                                modulator_node_id: 0,
                                 num_params: defaults.len() as u32,
                                 defaults,
                                 plocks: vec![Vec::new(); MAX_STEPS],
@@ -1795,6 +1807,7 @@ mod tests {
             node_param_idx,
             node_param_span: 1,
             host_control: None,
+            ui_metadata: None,
         }
     }
 
@@ -1976,6 +1989,58 @@ mod tests {
                 crate::lisp_effect::HEADER_SLOTS as u32,
                 crate::lisp_effect::HEADER_SLOTS as u32 + 1,
                 crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                crate::voice_modulator::MOD_PARAM_BASE,
+                crate::voice_modulator::MOD_PARAM_BASE + 1,
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_resets_legacy_fixed_voice_mod_params() {
+        let mut plocks = vec![vec![None; 4]; MAX_STEPS];
+        plocks[7][2] = Some(0.33);
+
+        let old_slot = project::ProjectEffectSlot {
+            num_params: 4,
+            defaults: vec![0.12, 0.34, 8.0, 9.0],
+            plocks,
+            param_node_indices: vec![
+                crate::lisp_effect::HEADER_SLOTS as u32,
+                crate::lisp_effect::HEADER_SLOTS as u32 + 1,
+                crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE,
+                crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE + 1,
+            ],
+            param_node_spans: vec![1, 1, 1, 1],
+        };
+
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                test_param("attack", 0.01, crate::lisp_effect::HEADER_SLOTS as u32),
+                test_param("tone", 0.02, crate::lisp_effect::HEADER_SLOTS as u32 + 1),
+                test_param("mod 1 source", 1.0, crate::voice_modulator::MOD_PARAM_BASE),
+                test_param(
+                    "mod 1 lfo rate",
+                    5.0,
+                    crate::voice_modulator::MOD_PARAM_BASE + 1,
+                ),
+            ],
+        };
+
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+
+        assert_eq!(restored.defaults, vec![0.12, 0.34, 1.0, 5.0]);
+        assert_eq!(restored.plocks[7][2], None);
+        assert_eq!(restored.plocks[7][3], None);
+        assert_eq!(
+            restored.param_node_indices,
+            vec![
+                crate::lisp_effect::HEADER_SLOTS as u32,
+                crate::lisp_effect::HEADER_SLOTS as u32 + 1,
                 crate::voice_modulator::MOD_PARAM_BASE,
                 crate::voice_modulator::MOD_PARAM_BASE + 1,
             ]

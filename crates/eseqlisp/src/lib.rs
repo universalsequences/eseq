@@ -67,6 +67,7 @@ pub mod audio;
 pub mod buffer;
 pub mod editor;
 pub mod host;
+pub mod hot_reload;
 pub mod mode;
 pub mod reactive;
 pub mod runtime;
@@ -90,6 +91,7 @@ use vm::{VMError, Value};
 
 pub use editor::{Editor, EditorConfig, EditorError, EditorExit};
 pub use host::{BufferId, CompileKind, HostCommand, HostEvent};
+pub use hot_reload::{ReloadReport, SourceOverlay, SourceSnapshot};
 pub use mode::BufferMode;
 pub use runtime::{NativeContext, NativeResult, Runtime, RuntimeError, SymbolMetadata};
 
@@ -1405,6 +1407,49 @@ mod tests {
     }
 
     #[test]
+    fn reactive_set_reruns_only_matching_field_subtree() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![], true);
+
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*rows*"
+                  (v-stack
+                    (subtree :key "row-a"
+                      (label (if (reactive-get "APP" "a") "a on" "a off")))
+                    (subtree :key "row-b"
+                      (label (if (reactive-get "APP" "b") "b on" "b off")))))
+                "#,
+            )
+            .expect("install row subtrees");
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        runtime
+            .eval_str(r#"(reactive-set "APP" "a" true)"#)
+            .expect("set reactive field from Lisp");
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(
+            pending.len(),
+            1,
+            "reactive-set should rerun only subtrees that read the changed field"
+        );
+        let rendered_tree = match &pending[0] {
+            crate::vm::PendingUiUpdate::FullTree(update) => format!("{:?}", update.tree),
+            crate::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => format!("{tree:?}"),
+        };
+        assert!(
+            rendered_tree.contains("a on"),
+            "updated subtree should be the row-a subtree: {rendered_tree}"
+        );
+        assert!(
+            !rendered_tree.contains("b off"),
+            "row-b must not be rerendered when APP.a changes: {rendered_tree}"
+        );
+    }
+
+    #[test]
     fn set_reactive_updates_unsubscribed_fields_before_dependent_rerun() {
         let mut runtime = Runtime::new();
         runtime.register_reactive(
@@ -2243,6 +2288,97 @@ mod tests {
             panic!("expected text");
         };
         assert_eq!(text, Value::String("count: 2".to_string()));
+    }
+
+    #[test]
+    fn active_subtree_reactive_update_reuses_targeted_layout() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive("APP", vec![("active", Value::Bool(true))], false);
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (v-stack
+                    (subtree :key "row"
+                      (box :width 4 :height 1 :active APP.active))
+                    (label "static" :width 6)))
+                "#,
+            )
+            .expect("install active subtree effect");
+        let initial_revision = runtime.layout_revision();
+        let initial_box_id = runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| layout.children.first())
+            .map(|node| node.widget_id)
+            .expect("subtree box id");
+        let _ = runtime.take_dirty_widget_ids();
+        let _ = runtime.drain_rendered_layouts();
+
+        runtime.set_reactive("APP", "active", Value::Bool(false));
+        runtime.run_reactive_cycle();
+
+        let trace = runtime
+            .last_ui_invalidation_trace()
+            .expect("invalidation trace");
+        assert_eq!(trace.relayout_mode.as_deref(), Some("subtree-reuse"));
+        assert_eq!(trace.relayout_failure_reason, None);
+        assert_eq!(trace.subtree_failure_reason, None);
+        assert_eq!(
+            runtime.layout_revision(),
+            initial_revision,
+            "non-size subtree prop changes should not bump the layout revision"
+        );
+        assert_eq!(runtime.take_dirty_widget_ids(), vec![initial_box_id]);
+        assert!(
+            runtime
+                .current_layout
+                .as_ref()
+                .and_then(|layout| layout.children.first())
+                .is_some_and(|node| node.props.get("active") == Some(&Value::Bool(false))),
+            "targeted subtree reuse should update layout props"
+        );
+    }
+
+    #[test]
+    fn active_subtree_size_change_falls_back_to_full_relayout() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive("APP", vec![("width", Value::Number(4.0))], false);
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (v-stack
+                    (subtree :key "row"
+                      (box :width APP.width :height 1))
+                    (label "static" :width 6)))
+                "#,
+            )
+            .expect("install active subtree effect");
+        let initial_revision = runtime.layout_revision();
+        let _ = runtime.take_dirty_widget_ids();
+        let _ = runtime.drain_rendered_layouts();
+
+        runtime.set_reactive("APP", "width", Value::Number(5.0));
+        runtime.run_reactive_cycle();
+
+        let trace = runtime
+            .last_ui_invalidation_trace()
+            .expect("invalidation trace");
+        assert_eq!(trace.relayout_mode.as_deref(), Some("full"));
+        assert!(
+            trace
+                .subtree_failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("size-props:box")),
+            "targeted subtree reuse should report the size-prop miss: {trace:?}"
+        );
+        assert!(
+            runtime.layout_revision() > initial_revision,
+            "size-changing subtree updates should fall back to a layout revision bump"
+        );
     }
 
     #[test]

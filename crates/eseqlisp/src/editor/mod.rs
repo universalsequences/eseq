@@ -18,6 +18,7 @@ use crossterm::event::{
 
 use crate::buffer::{Buffer, debug_widget_tree_summary};
 use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
+use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::Rect;
 use crate::mode::{
     BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match,
@@ -26,12 +27,20 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
-use crate::vm::{EffectTarget, PendingUiUpdate, Value, format_lisp_value};
+use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
 use commands::key_str;
 use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
+
+struct EditorSubtreeReplacement {
+    buffer_idx: usize,
+    source_buffer_id: Option<BufferId>,
+    subtree_root_id: u64,
+    tree: Value,
+    reactive_dependencies: Vec<ReactiveFieldKey>,
+}
 
 fn metal_tile_content_viewport(
     rect: &Rect,
@@ -77,6 +86,39 @@ fn metal_tile_content_viewport_height_exact(
     };
     (rect.height - border_inset_px * 2.0 / cell_h.max(1.0) - if show_status { 1.0 } else { 0.0 })
         .max(0.0)
+}
+
+fn format_lisp_reload_report(report: &ReloadReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(if report.success {
+        "Lisp reload: success".to_string()
+    } else {
+        "Lisp reload: failure".to_string()
+    });
+    if let Some(path) = &report.requested_path {
+        lines.push(format!("requested: {}", path.display()));
+    }
+    if let Some(path) = &report.evaluated_path {
+        lines.push(format!("evaluated: {}", path.display()));
+    }
+    if !report.changed_symbols.is_empty() {
+        lines.push(format!(
+            "changed symbols: {}",
+            report.changed_symbols.join(", ")
+        ));
+    }
+    if !report.rerendered_roots.is_empty() {
+        lines.push(format!(
+            "rerendered roots: {}",
+            report.rerendered_roots.join(", ")
+        ));
+    }
+    if !report.diagnostics.is_empty() {
+        lines.push(String::new());
+        lines.push("diagnostics:".to_string());
+        lines.extend(report.diagnostics.iter().cloned());
+    }
+    lines.join("\n")
 }
 
 fn widget_only_scratch_buffer_should_show_ui(buffer: &Buffer) -> bool {
@@ -133,6 +175,7 @@ impl ViewMode {
 #[derive(Default, Clone)]
 pub struct EditorConfig {
     pub init_source: Option<String>,
+    pub init_source_path: Option<PathBuf>,
     pub vim_mode: bool,
 }
 
@@ -422,7 +465,10 @@ impl Editor {
             test_clipboard: None,
         };
         editor.bind_defaults();
-        editor.load_init(config.init_source.as_deref());
+        editor.load_init(
+            config.init_source.as_deref(),
+            config.init_source_path.as_deref(),
+        );
         editor.refresh_runtime_side_effects();
         editor.sync_runtime_context();
         editor
@@ -935,6 +981,25 @@ impl Editor {
             .unwrap_or(0);
         let next_idx = (current_idx + 1) % ids.len();
         self.switch_active_tile(ids[next_idx]);
+    }
+
+    pub fn switch_active_tile_to_buffer_named(&mut self, buffer_name: &str) -> bool {
+        let Some(buffer_idx) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == buffer_name)
+        else {
+            return false;
+        };
+        let Some(tile_id) = self
+            .tile_root
+            .find_leaf_by_buffer_idx(buffer_idx)
+            .map(|leaf| leaf.id)
+        else {
+            return false;
+        };
+        self.switch_active_tile(tile_id);
+        true
     }
 
     /// Handle tiled mouse event: hit-test tiles, switch active, then dispatch.
@@ -2108,6 +2173,48 @@ impl Editor {
         if changed {
             self.mark_needs_redraw();
         }
+    }
+
+    pub fn ensure_widget_stable_key_visible(&mut self, stable_key: &str, margin_rows: f32) -> bool {
+        let Some((target_row, target_height)) = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| find_layout_node_by_stable_key(layout, stable_key))
+            .map(|node| (node.rect.row, node.rect.height))
+        else {
+            return false;
+        };
+        let viewport_height = self.active_leaf().widget_viewport_height.max(0.0);
+        let viewport_height = if viewport_height > 0.0 {
+            viewport_height
+        } else {
+            self.runtime.layout_rows_exact()
+        };
+        if viewport_height <= 0.0 {
+            return false;
+        }
+
+        let margin = margin_rows.max(0.0).min(viewport_height * 0.5);
+        let target_top = target_row.floor();
+        let target_bottom = (target_row + target_height).ceil();
+        let current_scroll = self.active_leaf().widget_scroll_top;
+        let desired_scroll = if target_top < current_scroll + margin {
+            target_top - margin
+        } else if target_bottom > current_scroll + viewport_height - margin {
+            target_bottom - viewport_height + margin
+        } else {
+            current_scroll
+        }
+        .clamp(0.0, self.max_widget_vertical_scroll());
+
+        if (desired_scroll - current_scroll).abs() <= f32::EPSILON {
+            return false;
+        }
+
+        self.active_leaf_mut().widget_scroll_top = desired_scroll;
+        self.mark_needs_redraw();
+        true
     }
 
     /// Combined vertical scroll: widget scroll + text scroll.
@@ -4012,16 +4119,65 @@ impl Editor {
         )
     }
 
+    pub fn snapshot_file_backed_sources(&self) -> Vec<SourceOverlay> {
+        self.buffers
+            .iter()
+            .filter_map(|buffer| {
+                let path = buffer.path.clone()?;
+                Some(SourceOverlay {
+                    path,
+                    text: buffer.text(),
+                    dirty: buffer.dirty,
+                    revision: buffer.revision,
+                })
+            })
+            .collect()
+    }
+
+    pub fn process_lisp_reload_report(&mut self, report: ReloadReport) {
+        let diagnostics_text = format_lisp_reload_report(&report);
+        if !report.success || !report.diagnostics.is_empty() {
+            let idx = self.ensure_scratch_buffer_named("*lisp-reload*");
+            let buffer = &mut self.buffers[idx];
+            buffer.set_text(&diagnostics_text);
+            buffer.read_only = true;
+            buffer.dirty = false;
+            buffer.view_mode = ViewMode::TextOnly;
+        }
+        if report.success {
+            self.show_transient_message(report.success_message());
+        } else {
+            self.show_transient_message(report.failure_message());
+        }
+        self.refresh_runtime_side_effects();
+        if report.success {
+            self.sync_layout_to_active_leaf();
+        }
+        self.sync_runtime_context();
+        self.mark_needs_redraw();
+    }
+
     // ── Internal methods ─────────────────────────────────────────────────────
 
-    fn load_init(&mut self, override_source: Option<&str>) {
+    fn load_init(&mut self, override_source: Option<&str>, source_path: Option<&std::path::Path>) {
         let init_src = override_source
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| std::fs::read_to_string("init.lisp").unwrap_or_default());
         if init_src.trim().is_empty() {
             return;
         }
-        let _ = self.runtime.eval_str(&init_src);
+        if let Some(path) = source_path {
+            let report = self.runtime.eval_source_transactional(
+                Some(path.to_path_buf()),
+                &init_src,
+                Vec::new(),
+            );
+            if !report.success {
+                self.show_transient_message(report.failure_message());
+            }
+        } else {
+            let _ = self.runtime.eval_str(&init_src);
+        }
         self.refresh_runtime_side_effects();
         if let Some(status) = self.runtime.take_status_message() {
             self.show_transient_message(status);
@@ -4144,6 +4300,17 @@ impl Editor {
             return;
         }
 
+        if fn_name == "eval-buffer-command" {
+            let path = self.active_buffer().path.clone();
+            let overlays = self.snapshot_file_backed_sources();
+            let report = self
+                .runtime
+                .eval_source_transactional(path, &source, overlays);
+            self.process_lisp_reload_report(report);
+            self.completion = None;
+            return;
+        }
+
         match self.runtime.eval_str(&source) {
             Ok(Some(result)) => self.show_transient_message(format_value_for_minibuffer(&result)),
             Ok(None) => self.show_transient_message("No result"),
@@ -4236,12 +4403,56 @@ impl Editor {
             match tree {
                 Some(tree) => {
                     self.runtime.set_widget_tree(tree);
-                    self.auto_focus_first_widget();
+                    self.remap_focused_widget_after_layout_change();
                 }
                 None => self.clear_widget_focus(),
             }
         }
         self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+    }
+
+    fn sync_active_buffer_widget_snapshot_from_runtime(&mut self) {
+        let Some(runtime_generation) = self.runtime.current_committed_ui_snapshot_generation()
+        else {
+            return;
+        };
+        if self.active_buffer().committed_ui_runtime_generation == Some(runtime_generation) {
+            return;
+        }
+        let Some(snapshot) = self.runtime.current_committed_ui_snapshot() else {
+            return;
+        };
+        let buffer = self.active_buffer_mut();
+        buffer.adopt_runtime_committed_ui_snapshot(snapshot, runtime_generation);
+        buffer.view_mode = ViewMode::UiOnly;
+    }
+
+    fn restore_runtime_widget_tree_from_buffer(&mut self, buffer_idx: usize) {
+        if self.active_buffer_idx() != buffer_idx {
+            return;
+        }
+        let tree = self.buffers[buffer_idx].widget_tree.clone();
+        let snapshot = self.buffers[buffer_idx].committed_ui_snapshot.clone();
+        let buffer_id = self.buffers[buffer_idx].id as u64;
+        match tree {
+            Some(tree) => {
+                if trace_ui_invalidation_enabled() {
+                    eprintln!(
+                        "[ui-trace][editor] restoring active runtime tree from buffer snapshot target={}",
+                        self.buffers[buffer_idx].name
+                    );
+                }
+                self.runtime.restore_widget_tree_with_cached_layout(
+                    tree,
+                    snapshot,
+                    None,
+                    None,
+                    buffer_id * 100_000,
+                    self.runtime.layout_revision(),
+                );
+            }
+            None => self.clear_widget_focus(),
+        }
     }
 
     fn refresh_inactive_tile_layouts_for_buffer(&mut self, buffer_idx: usize) {
@@ -4738,6 +4949,95 @@ impl Editor {
         true
     }
 
+    fn flush_active_subtree_replacements(
+        &mut self,
+        replacements: &mut Vec<EditorSubtreeReplacement>,
+    ) {
+        if replacements.is_empty() {
+            return;
+        }
+        while let Some(buffer_idx) = replacements
+            .first()
+            .map(|replacement| replacement.buffer_idx)
+        {
+            let mut group = Vec::new();
+            let mut remaining = Vec::new();
+            for replacement in replacements.drain(..) {
+                if replacement.buffer_idx == buffer_idx {
+                    group.push(replacement);
+                } else {
+                    remaining.push(replacement);
+                }
+            }
+            *replacements = remaining;
+
+            let common_source = group
+                .first()
+                .and_then(|first| {
+                    group
+                        .iter()
+                        .all(|replacement| replacement.source_buffer_id == first.source_buffer_id)
+                        .then_some(first.source_buffer_id)
+                })
+                .flatten();
+            let batch = group
+                .iter()
+                .map(|replacement| {
+                    (
+                        replacement.subtree_root_id,
+                        replacement.tree.deep_clone(),
+                        replacement.reactive_dependencies.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let batch_replaced = {
+                let buffer = &mut self.buffers[buffer_idx];
+                let replaced = buffer.replace_widget_subtrees(&batch, common_source);
+                if replaced {
+                    buffer.view_mode = ViewMode::UiOnly;
+                }
+                replaced
+            };
+            let mut any_replaced = batch_replaced;
+            if !batch_replaced {
+                for replacement in &group {
+                    let replaced = {
+                        let buffer = &mut self.buffers[buffer_idx];
+                        let replaced = buffer.replace_widget_subtree(
+                            replacement.subtree_root_id,
+                            replacement.tree.deep_clone(),
+                            replacement.source_buffer_id,
+                            replacement.reactive_dependencies.clone(),
+                        );
+                        if replaced {
+                            buffer.view_mode = ViewMode::UiOnly;
+                        }
+                        replaced
+                    };
+                    if replaced {
+                        any_replaced = true;
+                    }
+                }
+            }
+            if !any_replaced {
+                continue;
+            }
+            if self.active_buffer_idx() == buffer_idx {
+                crate::widget_render::clear_overlay();
+                if let Some(tree) = self.buffers[buffer_idx].widget_tree.clone() {
+                    let snapshot = self.buffers[buffer_idx].committed_ui_snapshot.clone();
+                    let buffer_id = self.buffers[buffer_idx].id as u64;
+                    self.runtime.adopt_current_widget_tree_snapshot(
+                        tree,
+                        snapshot,
+                        buffer_id * 100_000,
+                    );
+                }
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+    }
+
     pub fn refresh_runtime_side_effects(&mut self) {
         self.lisp_bindings = self.default_lisp_bindings.clone();
         self.lisp_bindings.extend(self.runtime.lisp_bindings());
@@ -4795,13 +5095,18 @@ impl Editor {
             }
         }
 
-        for source_buffer_id in self.runtime.take_pending_cleared_effect_sources() {
+        for cleared_source in self.runtime.take_pending_cleared_effect_sources() {
             let target_indices = self
                 .buffers
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, buffer)| {
-                    (buffer.widget_tree_source == source_buffer_id).then_some(idx)
+                    let clear_is_current = buffer
+                        .committed_ui_runtime_generation
+                        .is_none_or(|generation| generation <= cleared_source.runtime_generation);
+                    (clear_is_current
+                        && buffer.widget_tree_source == cleared_source.source_buffer_id)
+                        .then_some(idx)
                 })
                 .collect::<Vec<_>>();
             for idx in target_indices {
@@ -4831,8 +5136,7 @@ impl Editor {
                     self.minibuffer = Some(status);
                 }
             }
-            // Auto-focus first focusable widget if mode has them
-            self.auto_focus_first_widget();
+            self.remap_focused_widget_after_layout_change();
         }
 
         if let Some(text) = self.runtime.take_pending_set_text() {
@@ -4883,15 +5187,18 @@ impl Editor {
                     buffer.set_widget_tree(Some(tree.deep_clone()), Some(source_id));
                     buffer.view_mode = ViewMode::UiOnly;
                     self.runtime.set_widget_tree(tree);
-                    self.auto_focus_first_widget();
+                    self.remap_focused_widget_after_layout_change();
                 }
             }
         }
 
         let mut inactive_buffers_to_refresh: HashMap<usize, Option<Vec<u64>>> = HashMap::new();
+        let mut active_subtree_replacements = Vec::<EditorSubtreeReplacement>::new();
+        self.sync_active_buffer_widget_snapshot_from_runtime();
         for pending in self.runtime.take_pending_buffer_widget_trees() {
             match pending {
                 PendingUiUpdate::FullTree(pending) => {
+                    self.flush_active_subtree_replacements(&mut active_subtree_replacements);
                     let buffer_idx = match pending.target {
                         EffectTarget::BufferId(Some(id)) => {
                             let Some(idx) = self.buffers.iter().position(|buffer| buffer.id == id)
@@ -4930,34 +5237,39 @@ impl Editor {
                         .and_then(|snapshot| {
                             snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
                         });
-                    let upgraded_subtree = upgraded_subtree_root.is_some_and(|subtree_root_id| {
-                        self.buffers[buffer_idx].replace_widget_subtree(
-                            subtree_root_id,
-                            pending.tree.deep_clone(),
-                            pending.source_buffer_id,
-                            pending.reactive_dependencies.clone(),
-                        )
+                    let upgraded_subtree_root = upgraded_subtree_root.and_then(|subtree_root_id| {
+                        self.buffers[buffer_idx]
+                            .replace_widget_subtree(
+                                subtree_root_id,
+                                pending.tree.deep_clone(),
+                                pending.source_buffer_id,
+                                pending.reactive_dependencies.clone(),
+                            )
+                            .then_some(subtree_root_id)
                     });
-                    if upgraded_subtree {
+                    if let Some(subtree_root_id) = upgraded_subtree_root {
                         if debug_ui_updates_enabled() {
                             eprintln!(
-                                "[ui-update full->subtree] target={} root={:?}",
-                                buffer_name, upgraded_subtree_root
+                                "[ui-update full->subtree] target={} root={}",
+                                buffer_name, subtree_root_id
                             );
                         }
                         self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
                         if is_active {
                             crate::widget_render::clear_overlay();
-                            let _ = self
+                            let runtime_upgraded = self
                                 .runtime
                                 .try_upgrade_full_tree_to_current_subtree(&pending);
-                            self.auto_focus_first_widget();
+                            if !runtime_upgraded {
+                                self.restore_runtime_widget_tree_from_buffer(buffer_idx);
+                            }
+                            self.remap_focused_widget_after_layout_change();
                         } else {
                             inactive_buffers_to_refresh
                                 .entry(buffer_idx)
                                 .or_insert_with(|| Some(Vec::new()))
                                 .as_mut()
-                                .map(|roots| roots.push(upgraded_subtree_root.unwrap()));
+                                .map(|roots| roots.push(subtree_root_id));
                         }
                     } else if is_active {
                         if debug_ui_updates_enabled() {
@@ -5027,6 +5339,16 @@ impl Editor {
                         )
                     });
                     let is_active = self.active_buffer_idx() == buffer_idx;
+                    if is_active {
+                        active_subtree_replacements.push(EditorSubtreeReplacement {
+                            buffer_idx,
+                            source_buffer_id,
+                            subtree_root_id,
+                            tree,
+                            reactive_dependencies,
+                        });
+                        continue;
+                    }
                     let replaced = {
                         let buffer = &mut self.buffers[buffer_idx];
                         let replaced = buffer.replace_widget_subtree(
@@ -5041,21 +5363,11 @@ impl Editor {
                         replaced
                     };
                     if replaced {
-                        if is_active {
-                            crate::widget_render::clear_overlay();
-                            let _ = self.runtime.replace_current_subtree(
-                                subtree_root_id,
-                                tree,
-                                reactive_dependencies,
-                            );
-                            self.auto_focus_first_widget();
-                        } else {
-                            inactive_buffers_to_refresh
-                                .entry(buffer_idx)
-                                .or_insert_with(|| Some(Vec::new()))
-                                .as_mut()
-                                .map(|roots| roots.push(subtree_root_id));
-                        }
+                        inactive_buffers_to_refresh
+                            .entry(buffer_idx)
+                            .or_insert_with(|| Some(Vec::new()))
+                            .as_mut()
+                            .map(|roots| roots.push(subtree_root_id));
                     }
                     self.trace_ui_tree_event_with(
                         &buffer_name,
@@ -5076,6 +5388,7 @@ impl Editor {
                 }
             }
         }
+        self.flush_active_subtree_replacements(&mut active_subtree_replacements);
         for (buffer_idx, subtree_roots) in inactive_buffers_to_refresh {
             match subtree_roots {
                 Some(subtree_roots) => {
@@ -5275,6 +5588,24 @@ impl Editor {
         let Some(output) = output else {
             return false;
         };
+        if trace_ui_invalidation_enabled() {
+            let args = output
+                .args
+                .iter()
+                .take(3)
+                .map(format_lisp_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suffix = if output.args.len() > 3 { ", ..." } else { "" };
+            eprintln!(
+                "[ui-trace][callback] active_buffer={} callback={} args=[{}{}] arg_count={}",
+                self.active_buffer().name,
+                format_lisp_value(&output.callback),
+                args,
+                suffix,
+                output.args.len()
+            );
+        }
         self.sync_patcher_emitted_source_buffer(&output.args);
         self.sync_runtime_source_context();
         let result = self.runtime.invoke(output.callback, output.args);
@@ -5779,6 +6110,18 @@ fn max_layout_bottom(node: &crate::layout::LayoutNode) -> f32 {
         .fold(node.rect.row + node.rect.height, |bottom, child| {
             bottom.max(max_layout_bottom(child))
         })
+}
+
+fn find_layout_node_by_stable_key<'a>(
+    node: &'a crate::layout::LayoutNode,
+    stable_key: &str,
+) -> Option<&'a crate::layout::LayoutNode> {
+    if node.stable_key.as_deref() == Some(stable_key) {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_layout_node_by_stable_key(child, stable_key))
 }
 
 fn widget_tree_contains_patcher_path(value: &Value, path: &str) -> bool {

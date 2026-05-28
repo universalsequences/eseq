@@ -14,7 +14,8 @@ Per allocated voice:
 ```text
 gatepitch -> synth inputs 1..4
 gatepitch -> modulator inputs 1..4
-modulator -> synth inputs 5..10
+external modulation -> modulator inputs 5..8
+modulator -> synth inputs 5..8
 ```
 
 Each voice instance gets:
@@ -38,8 +39,6 @@ All instruments should assume these inputs:
 - `in 6`: `mod2`
 - `in 7`: `mod3`
 - `in 8`: `mod4`
-- `in 9`: `mod5`
-- `in 10`: `mod6`
 
 Signal conventions:
 
@@ -47,37 +46,31 @@ Signal conventions:
 - `pitch_hz`: Hz
 - `velocity`: `0..1`
 - `trigger`: pulse on note-on
-- `mod1..mod6`: unipolar `0..1`
+- `mod1..mod4`: unipolar `0..1`
+
+The four mod inputs are configurable host modulation slots. Each slot chooses
+one source type from `off`, `lfo`, `env`, `rand`, `drift`, or one of the four
+external modulation buses `ext1..ext4`.
 
 ## Native Modulator Node
 
-The reusable modulator node should eventually provide:
+The reusable modulator node provides four independent slots. Each slot owns its
+own state and parameters for source classes that need state, so two slots can
+both be independent LFOs or envelopes.
 
-- `lfo1`
-- `lfo2`
-- `env2`
-- `rand`
-- `drift`
-- `clock_phase`
-- `clock_pulse`
-
-MVP output contract:
+Output contract:
 
 - `out 1`: `mod1`
 - `out 2`: `mod2`
 - `out 3`: `mod3`
 - `out 4`: `mod4`
-- `out 5`: `mod5`
-- `out 6`: `mod6`
 
-MVP internal source mapping:
+Default source mapping:
 
-- `mod1`: cyclic modulation
-- `mod2`: secondary envelope
+- `mod1`: LFO
+- `mod2`: envelope
 - `mod3`: stepped random
 - `mod4`: slow drift
-- `mod5`: second cyclic modulation source
-- `mod6`: third cyclic modulation source
 
 ## Preset Model
 
@@ -89,25 +82,25 @@ Conceptual structure:
 {
   "params": {},
   "mod": {
-    "lfo1_shape": "triangle",
-    "lfo1_rate_sync": "1/8",
-    "env2_mode": "AD",
-    "rand_mode": "s&h",
-    "mod1_source": "lfo1",
-    "mod2_source": "env2",
+    "mod1_source": "lfo",
+    "mod1_lfo_shape": "triangle",
+    "mod1_lfo_rate_sync": "1/8",
+    "mod2_source": "env",
+    "mod2_env_mode": "AD",
     "mod3_source": "rand",
     "mod4_source": "drift"
   }
 }
 ```
 
-MVP can hardcode source assignment in the node and add preset-level routing later.
+The slot source selection and source parameters live in the instrument parameter
+layout so they can be saved in presets and parameter locked.
 
 ## Shared Lisp Helpers
 
 The injected instrument preamble should define:
 
-- input symbols for `mod1..mod4`, `clock_phase`, `clock_pulse`
+- input symbols for `mod1..mod4`
 - safe modulation helpers
 
 Suggested helpers:
@@ -120,24 +113,11 @@ Suggested helpers:
 
 ## Implementation Plan
 
-### Phase 1
+## Project Compatibility
 
-- extend the instrument input contract to 10 inputs
-- add a native `voice_modulator` node
-- wire one modulator per voice in the graph
-- expose modulation inputs in the instrument preamble
-
-### Phase 2
-
-- add modulator config structs and preset serialization
-- store per-track modulation settings alongside instrument presets
-- add runtime parameter updates for modulator nodes
-
-### Phase 3
-
-- add transport-derived clock wiring to the modulator node
-- expose per-preset clock divisions and retrigger behavior
-- add UI for LFO/env/random source configuration
+The four-slot layout intentionally breaks the older fixed ten-lane modulation
+layout. Host modulation parameters use a new `MOD_PARAM_BASE`, so old saved
+values are not silently interpreted as the new slot source and depth state.
 
 ### Phase 4
 

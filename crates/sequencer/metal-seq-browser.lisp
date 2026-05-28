@@ -256,9 +256,13 @@
 
 (def sbrowser-select-audio-effect (item)
   (let ((kind (get item :kind)) (label (get item :label)))
-    (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect") (= kind "new-audio-effect"))
+    (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect"))
       (status (str label))
       (status "Open a section or choose an effect"))))
+
+(def sbrowser-enter-new-effect-editor ()
+  (set! sbrowser-editor-name "")
+  (host-command "enter-new-effect-editor" (dict)))
 
 (def sbrowser-activate-audio-effect (item)
   (let ((kind (get item :kind)) (name (get item :name)))
@@ -274,11 +278,7 @@
             (host-command "add-bus-effect" (dict :bus selected-bus :name name))
             (host-command "add-effect" (dict :name name)))
           (status (str "Add effect: " name)))
-        (if (= kind "new-audio-effect")
-          (do
-            (set! sbrowser-editor-name "")
-            (host-command "enter-new-effect-editor" (dict)))
-          (status "Open a section or choose an effect"))))))
+        (status "Open a section or choose an effect")))))
 
 (def sbrowser-select-midi-effect (item)
   (let ((kind (get item :kind)) (label (get item :label)))
@@ -508,23 +508,37 @@
           :on-select (lambda (item) (sbrowser-select-create-item item))
           :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
 
+(def sbrowser-audio-fx-toolbar ()
+  (box :width :fill :padding 0.25
+    (h-stack :width :fill :gap 0.5 :align :center
+      (button "+ New Effect"
+        :variant :secondary
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-enter-new-effect-editor)
+        :color :white))))
+
 (def sbrowser-audio-fx-panel ()
   (let ((items (seq-audio-effect-tree sbrowser-filter)))
-    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-      (if (= (len items) 0)
-        (sbrowser-empty-message "No audio effects found.")
-        (scroll :key "audio-fx-tab-scroll" :width :fill :flex 1
-          (tree
-            :key "audio-fx-tab-tree"
-            :width :fill
-            :background-color :buffer-bg
-            :items items
-            :expand-all (not (= sbrowser-filter ""))
-            :focusable true
-            :drag-type "audio-effect"
-            :on-select (lambda (item) (sbrowser-select-audio-effect item))
-            :on-cursor-change (lambda (item) (sbrowser-select-audio-effect item))
-            :on-activate (lambda (item) (sbrowser-activate-audio-effect item))))))))
+    (v-stack :key "audio-fx-tab-panel" :width :fill :gap 0.5 :flex 1
+      (sbrowser-audio-fx-toolbar)
+      (sbrowser-library-label)
+      (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+        (if (= (len items) 0)
+          (sbrowser-empty-message "No audio effects found.")
+          (scroll :key "audio-fx-tab-scroll" :width :fill :flex 1
+            (tree
+              :key "audio-fx-tab-tree"
+              :width :fill
+              :background-color :buffer-bg
+              :items items
+              :expand-all (not (= sbrowser-filter ""))
+              :focusable true
+              :drag-type "audio-effect"
+              :on-select (lambda (item) (sbrowser-select-audio-effect item))
+              :on-cursor-change (lambda (item) (sbrowser-select-audio-effect item))
+              :on-activate (lambda (item) (sbrowser-activate-audio-effect item)))))))))
 
 (def sbrowser-midi-fx-panel ()
   (let ((items (seq-midi-effect-tree sbrowser-filter)))
@@ -772,15 +786,27 @@
             :on-change (lambda (v) (set! sbrowser-editor-name v))
             :height 1.5
             :font-size 12))
-        ;; Name input (only for new effects)
         (if (= SEQ.editor-mode "new-effect")
-          (text-input
-            :width :fill
-            :value sbrowser-editor-name
-            :placeholder "effect-name"
-            :on-change (lambda (v) (set! sbrowser-editor-name v))
-            :height 1.5
-            :font-size 12)
+          (v-stack :width :fill :gap 0.35
+            (label "Draft patch"
+              :font-size 9
+              :color :gray
+              :bg :transparent)
+            (label (str "track " (+ SEQ.current-track 1))
+              :font-size 11
+              :color :white
+              :bg :transparent)
+            (label "Save as"
+              :font-size 9
+              :color :gray
+              :bg :transparent)
+            (text-input
+              :width :fill
+              :value sbrowser-editor-name
+              :placeholder "effect-name"
+              :on-change (lambda (v) (set! sbrowser-editor-name v))
+              :height 1.5
+              :font-size 12))
           ;; For edit modes, show the file name
           (label SEQ.editor-buffer-name
             :font-size 10
@@ -847,8 +873,14 @@
 
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──
 
-(effect-buffer "*samples*"
+(def sbrowser-root-widget ()
   (v-stack :width :fill :gap 0.4 :padding 0.15 (sbrowser-build-widgets)))
+
+(def sbrowser-refresh-buffer ()
+  (render-widget-to-buffer "*samples*" (sbrowser-root-widget)))
+
+(effect-buffer "*samples*"
+  (sbrowser-root-widget))
 
 ;; ── Entry point: just switch to the buffer ──
 

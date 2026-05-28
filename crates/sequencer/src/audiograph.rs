@@ -88,6 +88,7 @@ extern "C" {
         initial_state: *const c_void,
         initial_state_size: usize,
     ) -> c_int;
+    pub fn add_gain_node(lg: *mut LiveGraph, gain_value: f32, name: *const c_char) -> c_int;
 
     // Connections
     pub fn graph_connect(

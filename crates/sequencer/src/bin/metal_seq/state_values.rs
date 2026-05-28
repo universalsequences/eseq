@@ -59,6 +59,54 @@ pub(crate) fn build_all_track_num_steps_value(state: &Arc<SequencerState>, app: 
     Value::List(items)
 }
 
+fn resolved_track_timebase_label(
+    state: &Arc<SequencerState>,
+    track: usize,
+    current_track_idx: usize,
+    selected_step: Option<usize>,
+) -> String {
+    let timebase = if track == current_track_idx {
+        selected_step
+            .and_then(|step| state.pattern.timebase_plocks[track].get(step))
+            .unwrap_or_else(|| state.pattern.track_params[track].get_timebase())
+    } else {
+        state.pattern.track_params[track].get_timebase()
+    };
+    timebase.label().to_string()
+}
+
+fn build_track_timebase_labels_value(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+    current_track_idx: usize,
+    selected_step: Option<usize>,
+) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = (0..track_count)
+        .map(|track| {
+            Rc::new(RefCell::new(Value::String(resolved_track_timebase_label(
+                state,
+                track,
+                current_track_idx,
+                selected_step,
+            ))))
+        })
+        .collect();
+    Value::List(items)
+}
+
+pub(crate) fn build_all_track_timebase_labels_value(
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    let selected_step = {
+        let selected = selected_steps.lock().unwrap();
+        selected.iter().copied().min()
+    };
+    build_track_timebase_labels_value(state, app.tracks.len(), current_track_idx, selected_step)
+}
+
 fn build_track_duration_spans_value(state: &Arc<SequencerState>, track: usize) -> Value {
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
@@ -192,6 +240,27 @@ pub(crate) fn build_all_track_step_has_plocks(state: &Arc<SequencerState>, app: 
     Value::List(tracks)
 }
 
+pub(crate) fn build_all_track_param_lists_value(
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    param: StepParam,
+) -> Value {
+    let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
+        .map(|track| Rc::new(RefCell::new(build_param_list(state, track, param))))
+        .collect();
+    Value::List(tracks)
+}
+
+pub(crate) fn build_all_active_track_param_lists_value(
+    state: &Arc<SequencerState>,
+    param: StepParam,
+) -> Value {
+    let tracks: Vec<Rc<RefCell<Value>>> = (0..state.active_track_count())
+        .map(|track| Rc::new(RefCell::new(build_param_list(state, track, param))))
+        .collect();
+    Value::List(tracks)
+}
+
 pub(crate) fn track_playheads_snapshot(state: &Arc<SequencerState>, app: &ui::App) -> Vec<u32> {
     (0..app.tracks.len())
         .map(|t| state.transport.track_playheads[t].load(Ordering::Relaxed))
@@ -202,7 +271,15 @@ fn track_playhead_row_field(track: usize, row: usize) -> String {
     format!("track-playhead-row-{track}-{row}")
 }
 
-fn track_active_playhead_step(state: &Arc<SequencerState>, track: usize) -> usize {
+pub(crate) fn track_playhead_active_field(track: usize, step: usize) -> String {
+    format!("track-playhead-active-{track}-{step}")
+}
+
+pub(crate) fn track_playhead_page_field(track: usize) -> String {
+    format!("track-playhead-page-{track}")
+}
+
+pub(crate) fn track_active_playhead_step(state: &Arc<SequencerState>, track: usize) -> usize {
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .max(1)
@@ -329,6 +406,65 @@ fn insert_string_prop(
         key.to_string(),
         Rc::new(RefCell::new(Value::String(value.into()))),
     );
+}
+
+fn insert_param_ui_metadata(
+    map: &mut HashMap<String, Rc<RefCell<Value>>>,
+    metadata: Option<&sequencer::effects::ParamUiMetadata>,
+) {
+    let Some(metadata) = metadata else { return };
+    if let Some(group) = &metadata.group {
+        insert_string_prop(map, "group", group);
+    }
+    if let Some(env) = &metadata.env {
+        insert_string_prop(map, "env", env);
+    }
+    if let Some(role) = &metadata.role {
+        insert_string_prop(map, "role", role);
+    }
+}
+
+fn instrument_slot_param_value(
+    slot: &sequencer::effects::EffectSlotState,
+    desc: &sequencer::effects::EffectDescriptor,
+    param_idx: usize,
+    plock_step: Option<usize>,
+) -> f32 {
+    plock_step
+        .and_then(|step| slot.plocks.get(step, param_idx))
+        .unwrap_or_else(|| {
+            if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                slot.defaults.get(param_idx)
+            } else {
+                desc.params
+                    .get(param_idx)
+                    .map(|param| param.default)
+                    .unwrap_or_default()
+            }
+        })
+}
+
+fn selected_voice_mod_source_indices(
+    desc: &sequencer::effects::EffectDescriptor,
+    slot: &sequencer::effects::EffectSlotState,
+    plock_step: Option<usize>,
+) -> Vec<usize> {
+    sequencer::voice_modulator::selected_source_param_indices(&desc.params, |idx, _| {
+        instrument_slot_param_value(slot, desc, idx, plock_step)
+    })
+}
+
+fn selected_voice_mod_source_indices_for_optional_slot(
+    desc: &sequencer::effects::EffectDescriptor,
+    slot: Option<&sequencer::effects::EffectSlotState>,
+    plock_step: Option<usize>,
+) -> Vec<usize> {
+    if let Some(slot) = slot {
+        return selected_voice_mod_source_indices(desc, slot, plock_step);
+    }
+    sequencer::voice_modulator::selected_source_param_indices(&desc.params, |_, param| {
+        param.default
+    })
 }
 
 fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDescriptor) -> bool {
@@ -610,12 +746,33 @@ pub(crate) fn sync_track_playhead_field_delta(
                     effects_dirty |= rt
                         .set_reactive(
                             "SEQ",
+                            &track_playhead_page_field(t),
+                            Value::Number(active_row as f64),
+                        )
+                        .effects_dirty;
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
                             &track_playhead_row_field(t, prev_active_row),
                             Value::Number(-1.0),
                         )
                         .effects_dirty;
                 }
                 if prev_active_step != active_step {
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_playhead_active_field(t, prev_active_step),
+                            Value::Bool(false),
+                        )
+                        .effects_dirty;
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_playhead_active_field(t, active_step),
+                            Value::Bool(true),
+                        )
+                        .effects_dirty;
                     effects_dirty |= rt
                         .set_reactive(
                             "SEQ",
@@ -626,6 +783,20 @@ pub(crate) fn sync_track_playhead_field_delta(
                 }
             }
         } else {
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_playhead_page_field(t),
+                    Value::Number(active_row as f64),
+                )
+                .effects_dirty;
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_playhead_active_field(t, active_step),
+                    Value::Bool(true),
+                )
+                .effects_dirty;
             effects_dirty |= rt
                 .set_reactive(
                     "SEQ",
@@ -653,8 +824,63 @@ pub(crate) fn sync_all_track_sequencer_state(
 ) {
     rt.set_reactive(
         "SEQ",
+        "track-steps",
+        build_all_track_steps_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
         "track-num-steps",
         build_all_track_num_steps_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-timebases",
+        build_all_track_timebase_labels_value(state, app, current_track_idx, selected_steps),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-duration-spans",
+        build_all_track_duration_spans_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-step-has-plocks",
+        build_all_track_step_has_plocks(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-playheads",
+        build_all_track_playheads_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-velocities",
+        build_all_track_param_lists_value(state, app, StepParam::Velocity),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-durations",
+        build_all_track_param_lists_value(state, app, StepParam::Duration),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-auxas",
+        build_all_track_param_lists_value(state, app, StepParam::AuxA),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-transposes",
+        build_all_track_param_lists_value(state, app, StepParam::Transpose),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-pans",
+        build_all_track_param_lists_value(state, app, StepParam::Pan),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-syncs",
+        build_all_track_param_lists_value(state, app, StepParam::Sync),
     );
     sync_all_track_step_binding_fields(rt, state, app, current_track_idx, selected_steps);
     sync_all_track_playhead_fields(rt, state, app);
@@ -705,6 +931,36 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
         "SEQ",
         "syncs",
         build_param_list(state, track, StepParam::Sync),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-velocities",
+        build_all_active_track_param_lists_value(state, StepParam::Velocity),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-durations",
+        build_all_active_track_param_lists_value(state, StepParam::Duration),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-transposes",
+        build_all_active_track_param_lists_value(state, StepParam::Transpose),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-auxas",
+        build_all_active_track_param_lists_value(state, StepParam::AuxA),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-pans",
+        build_all_active_track_param_lists_value(state, StepParam::Pan),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-syncs",
+        build_all_active_track_param_lists_value(state, StepParam::Sync),
     );
 }
 
@@ -877,6 +1133,49 @@ pub(crate) fn build_track_pans(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn track_volume_field(track: usize) -> String {
+    format!("track-{track}-volume")
+}
+
+pub(crate) fn track_pan_field(track: usize) -> String {
+    format!("track-{track}-pan")
+}
+
+pub(crate) fn sync_track_volume_binding_field(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+) {
+    if let Some(tp) = state.pattern.track_params.get(track) {
+        rt.set_reactive(
+            "SEQ",
+            &track_volume_field(track),
+            Value::Number(tp.get_volume() as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_track_pan_binding_field(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+) {
+    if let Some(tp) = state.pattern.track_params.get(track) {
+        rt.set_reactive(
+            "SEQ",
+            &track_pan_field(track),
+            Value::Number(tp.get_pan() as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_track_volume_pan_binding_fields(rt: &mut Runtime, state: &Arc<SequencerState>) {
+    for track in 0..state.active_track_count() {
+        sync_track_volume_binding_field(rt, state, track);
+        sync_track_pan_binding_field(rt, state, track);
+    }
+}
+
 pub(crate) fn build_track_outputs(app: &ui::App, state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
@@ -901,6 +1200,93 @@ pub(crate) fn build_all_track_bus_sends(app: &ui::App, state: &Arc<SequencerStat
         })
         .collect();
     Value::List(items)
+}
+
+pub(crate) fn track_bus_send_field(track: usize, bus_idx: usize) -> String {
+    format!("track-{track}-bus-{bus_idx}-send")
+}
+
+pub(crate) fn current_track_bus_send_field(bus_idx: usize) -> String {
+    format!("tp-bus-{bus_idx}-send")
+}
+
+pub(crate) fn track_bus_send_amount(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    bus_idx: usize,
+) -> Option<f32> {
+    let bus = app.buses.get(bus_idx)?;
+    if bus.id == sequencer::sequencer::BusId::MIX {
+        return None;
+    }
+    let tp = state.pattern.track_params.get(track)?;
+    Some(
+        tp.sends()
+            .iter()
+            .find(|send| send.destination == bus.id)
+            .map(|send| send.amount)
+            .unwrap_or(0.0),
+    )
+}
+
+pub(crate) fn sync_track_bus_send_binding_field(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    bus_idx: usize,
+) {
+    if let Some(amount) = track_bus_send_amount(app, state, track, bus_idx) {
+        rt.set_reactive(
+            "SEQ",
+            &track_bus_send_field(track, bus_idx),
+            Value::Number(amount as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_track_bus_send_binding_fields(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+) {
+    for track in 0..state.active_track_count() {
+        for (bus_idx, bus) in app.buses.iter().enumerate() {
+            if bus.id != sequencer::sequencer::BusId::MIX {
+                sync_track_bus_send_binding_field(rt, app, state, track, bus_idx);
+            }
+        }
+    }
+}
+
+pub(crate) fn sync_current_track_bus_send_binding_field(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    bus_idx: usize,
+) {
+    if let Some(amount) = track_bus_send_amount(app, state, track, bus_idx) {
+        rt.set_reactive(
+            "SEQ",
+            &current_track_bus_send_field(bus_idx),
+            Value::Number(amount as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_current_track_bus_send_binding_fields(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+) {
+    for (bus_idx, bus) in app.buses.iter().enumerate() {
+        if bus.id != sequencer::sequencer::BusId::MIX {
+            sync_current_track_bus_send_binding_field(rt, app, state, track, bus_idx);
+        }
+    }
 }
 
 pub(crate) fn build_mod_routes(state: &Arc<SequencerState>) -> Value {
@@ -981,13 +1367,15 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
         build_track_instrument_types(app),
     );
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
-    rt.set_reactive("SEQ", "track-pans", build_track_pans(state));
+    rt.set_reactive("SEQ", "track-mixer-pans", build_track_pans(state));
+    sync_track_volume_pan_binding_fields(rt, state);
     rt.set_reactive("SEQ", "track-outputs", build_track_outputs(app, state));
     rt.set_reactive(
         "SEQ",
         "track-bus-sends",
         build_all_track_bus_sends(app, state),
     );
+    sync_track_bus_send_binding_fields(rt, app, state);
     rt.set_reactive("SEQ", "mod-routes", build_mod_routes(state));
     rt.set_reactive("SEQ", "track-mutes", build_track_mutes(state));
     rt.set_reactive("SEQ", "track-solos", build_track_solos(state));
@@ -1046,7 +1434,7 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-mixer-pans", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
@@ -1625,9 +2013,16 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-timebases", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-velocities", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-durations", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-auxas", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-transposes", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         return;
     }
@@ -1719,6 +2114,103 @@ pub(crate) fn build_effects_value(
     // If steps are selected, show p-lock value from first selected step
     let plock_step = sel.iter().copied().min();
 
+    struct UiModMetadata {
+        source_param_idx: Option<usize>,
+        depth_param_idx: usize,
+        source_slot: f32,
+        source_value_field: Option<String>,
+        depth_value: f32,
+        depth_value_field: Option<String>,
+        depth_min: f32,
+        depth_max: f32,
+        depth_unit: Option<String>,
+    }
+
+    fn is_mod_param(name: &str) -> bool {
+        name.starts_with("mod ")
+    }
+
+    fn is_generated_host_mod_param(name: &str) -> bool {
+        name.starts_with("__host_mod__")
+    }
+
+    fn is_hidden_dgen_mod_param(name: &str) -> bool {
+        name.starts_with("__dgen_mod_active__")
+    }
+
+    fn is_source_param(node_param_idx: u32) -> bool {
+        sequencer::voice_modulator::is_source_param(node_param_idx)
+    }
+
+    fn rename_source_param(name: &str) -> String {
+        sequencer::voice_modulator::source_param_display_name(name)
+    }
+
+    fn insert_mod_metadata(
+        pmap: &mut HashMap<String, Rc<RefCell<Value>>>,
+        targets: &[UiModMetadata],
+    ) {
+        pmap.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let target_values = targets
+            .iter()
+            .map(|meta| {
+                let mut target = HashMap::new();
+                if let Some(source_param_idx) = meta.source_param_idx {
+                    target.insert(
+                        "source-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(source_param_idx as f64))),
+                    );
+                }
+                target.insert(
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
+                );
+                target.insert(
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
+                );
+                if let Some(field) = &meta.source_value_field {
+                    target.insert(
+                        "source-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(field.clone()))),
+                    );
+                }
+                target.insert(
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
+                );
+                if let Some(field) = &meta.depth_value_field {
+                    target.insert(
+                        "depth-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(field.clone()))),
+                    );
+                }
+                target.insert(
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_min as f64))),
+                );
+                target.insert(
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_max as f64))),
+                );
+                if let Some(unit) = &meta.depth_unit {
+                    target.insert(
+                        "depth-unit".to_string(),
+                        Rc::new(RefCell::new(Value::String(unit.clone()))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(target)))
+            })
+            .collect();
+        pmap.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(Value::List(target_values))),
+        );
+    }
+
     let slots: Vec<Rc<RefCell<Value>>> = track_descs
         .iter()
         .enumerate()
@@ -1741,11 +2233,109 @@ pub(crate) fn build_effects_value(
                 ))),
             );
 
+            let slot = chain.get(slot_idx);
+            let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
+            for target in desc
+                .instrument_modulation_targets
+                .iter()
+                .filter_map(|target| {
+                    let depth_desc = desc.params.get(target.depth_param_idx)?;
+                    let source_default = if let Some(source_param_idx) = target.source_param_idx {
+                        if let Some(slot) = slot {
+                            if source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                                slot.defaults.get(source_param_idx)
+                            } else {
+                                desc.params.get(source_param_idx)?.default
+                            }
+                        } else {
+                            desc.params.get(source_param_idx)?.default
+                        }
+                    } else {
+                        target.modulator_slot as f32
+                    };
+                    let depth_default = if let Some(slot) = slot {
+                        if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize
+                        {
+                            slot.defaults.get(target.depth_param_idx)
+                        } else {
+                            depth_desc.default
+                        }
+                    } else {
+                        depth_desc.default
+                    };
+                    let source_current = target
+                        .source_param_idx
+                        .and_then(|source_param_idx| {
+                            plock_step.and_then(|step| {
+                                slot.and_then(|slot| slot.plocks.get(step, source_param_idx))
+                            })
+                        })
+                        .unwrap_or(source_default);
+                    let depth_current = plock_step
+                        .and_then(|step| {
+                            slot.and_then(|slot| slot.plocks.get(step, target.depth_param_idx))
+                        })
+                        .unwrap_or(depth_default);
+                    Some((
+                        target.base_param_idx,
+                        UiModMetadata {
+                            source_param_idx: target.source_param_idx,
+                            depth_param_idx: target.depth_param_idx,
+                            source_slot: target
+                                .source_param_idx
+                                .and_then(|source_param_idx| {
+                                    desc.params.get(source_param_idx).map(|source_desc| {
+                                        source_desc.stored_to_user(source_current)
+                                    })
+                                })
+                                .unwrap_or(source_current),
+                            source_value_field: target.source_param_idx.and_then(
+                                |source_param_idx| {
+                                    plock_step.is_none().then(|| {
+                                        let source_desc = &desc.params[source_param_idx];
+                                        track_effect_param_value_field(
+                                            track,
+                                            slot_idx,
+                                            source_param_idx,
+                                            &source_desc.name,
+                                        )
+                                    })
+                                },
+                            ),
+                            depth_value: depth_desc.stored_to_user(depth_current),
+                            depth_value_field: plock_step.is_none().then(|| {
+                                track_effect_param_value_field(
+                                    track,
+                                    slot_idx,
+                                    target.depth_param_idx,
+                                    &depth_desc.name,
+                                )
+                            }),
+                            depth_min: target.depth_min,
+                            depth_max: target.depth_max,
+                            depth_unit: target.depth_unit.clone(),
+                        },
+                    ))
+                })
+            {
+                modulation_targets
+                    .entry(target.0)
+                    .or_default()
+                    .push(target.1);
+            }
+
             let params: Vec<Rc<RefCell<Value>>> = desc
                 .params
                 .iter()
                 .enumerate()
-                .map(|(param_idx, pdesc)| {
+                .filter_map(|(param_idx, pdesc)| {
+                    if is_source_param(pdesc.node_param_idx)
+                        || is_mod_param(&pdesc.name)
+                        || is_generated_host_mod_param(&pdesc.name)
+                        || is_hidden_dgen_mod_param(&pdesc.name)
+                    {
+                        return None;
+                    }
                     let delay_synced = if desc.name == "Delay" {
                         chain
                             .get(slot_idx)
@@ -1874,13 +2464,168 @@ pub(crate) fn build_effects_value(
                             }
                         }
                     }
-                    Rc::new(RefCell::new(Value::Map(pmap)))
+                    if let Some(targets) = modulation_targets.get(&param_idx) {
+                        insert_mod_metadata(&mut pmap, targets);
+                    }
+                    insert_param_ui_metadata(&mut pmap, pdesc.ui_metadata.as_ref());
+                    Some(Rc::new(RefCell::new(Value::Map(pmap))))
                 })
                 .collect();
+
+            let source_actual =
+                selected_voice_mod_source_indices_for_optional_slot(desc, slot, plock_step);
+            let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
+            let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
+            for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+                let section_name =
+                    sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+                let mut section_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+                let mut source_param: Option<Rc<RefCell<Value>>> = None;
+                for &param_idx in &source_actual {
+                    let Some(pdesc) = desc.params.get(param_idx) else {
+                        continue;
+                    };
+                    if sequencer::voice_modulator::slot_from_param_name(&pdesc.name)
+                        != Some(slot_number)
+                    {
+                        continue;
+                    }
+                    let default_val = slot
+                        .map(|slot| {
+                            if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                                slot.defaults.get(param_idx)
+                            } else {
+                                pdesc.default
+                            }
+                        })
+                        .unwrap_or(pdesc.default);
+                    let current_val = plock_step
+                        .and_then(|step| slot.and_then(|slot| slot.plocks.get(step, param_idx)))
+                        .unwrap_or(default_val);
+                    let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                    pmap.insert(
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String(rename_source_param(
+                            &pdesc.name,
+                        )))),
+                    );
+                    pmap.insert(
+                        "idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(param_idx as f64))),
+                    );
+                    pmap.insert(
+                        "value".to_string(),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(current_val) as f64,
+                        ))),
+                    );
+                    pmap.insert(
+                        "min".to_string(),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(pdesc.min) as f64
+                        ))),
+                    );
+                    pmap.insert(
+                        "max".to_string(),
+                        Rc::new(RefCell::new(Value::Number(
+                            pdesc.stored_to_user(pdesc.max) as f64
+                        ))),
+                    );
+                    match &pdesc.kind {
+                        ParamKind::Boolean => {
+                            pmap.insert(
+                                "boolean".to_string(),
+                                Rc::new(RefCell::new(Value::Bool(true))),
+                            );
+                        }
+                        ParamKind::Enum { labels } => {
+                            let selected = labels
+                                .get(current_val.round() as usize)
+                                .cloned()
+                                .unwrap_or_default();
+                            let option_values = labels
+                                .iter()
+                                .cloned()
+                                .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                                .collect();
+                            pmap.insert(
+                                "text-value".to_string(),
+                                Rc::new(RefCell::new(Value::String(selected))),
+                            );
+                            pmap.insert(
+                                "options".to_string(),
+                                Rc::new(RefCell::new(Value::List(option_values))),
+                            );
+                        }
+                        ParamKind::Continuous { .. } => {}
+                    }
+                    if plock_step.is_none() {
+                        insert_string_prop(
+                            &mut pmap,
+                            "value-field",
+                            track_effect_param_value_field(track, slot_idx, param_idx, &pdesc.name),
+                        );
+                    }
+                    let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
+                    if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+                        == Some("source")
+                    {
+                        source_param = Some(param_value);
+                    } else {
+                        section_params.push(param_value);
+                    }
+                }
+                source_names.push(Rc::new(RefCell::new(Value::String(section_name.clone()))));
+                let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                section_map.insert(
+                    "name".to_string(),
+                    Rc::new(RefCell::new(Value::String(section_name))),
+                );
+                section_map.insert(
+                    "slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(slot_number as f64))),
+                );
+                if let Some(source_param) = source_param {
+                    section_map.insert("source-param".to_string(), source_param);
+                }
+                section_map.insert(
+                    "params".to_string(),
+                    Rc::new(RefCell::new(Value::List(section_params))),
+                );
+                source_sections.push(Rc::new(RefCell::new(Value::Map(section_map))));
+            }
 
             slot_map.insert(
                 "params".to_string(),
                 Rc::new(RefCell::new(Value::List(params))),
+            );
+            slot_map.insert(
+                "modulators".to_string(),
+                Rc::new(RefCell::new(Value::List(
+                    desc.instrument_modulators
+                        .iter()
+                        .map(|modulator| {
+                            let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                            map.insert(
+                                "slot".to_string(),
+                                Rc::new(RefCell::new(Value::Number(modulator.slot as f64))),
+                            );
+                            map.insert(
+                                "label".to_string(),
+                                Rc::new(RefCell::new(Value::String(modulator.label.clone()))),
+                            );
+                            Rc::new(RefCell::new(Value::Map(map)))
+                        })
+                        .collect(),
+                ))),
+            );
+            slot_map.insert(
+                "source-names".to_string(),
+                Rc::new(RefCell::new(Value::List(source_names))),
+            );
+            slot_map.insert(
+                "sources".to_string(),
+                Rc::new(RefCell::new(Value::List(source_sections))),
             );
 
             Rc::new(RefCell::new(Value::Map(slot_map)))
@@ -2207,20 +2952,6 @@ pub(crate) fn build_sampler_panel_value(
 ) -> Value {
     use std::collections::HashMap;
 
-    const MOD_PARAM_BASE: u32 = 1_000_000;
-    const PARAM_LFO1_RATE_HZ: usize = 13;
-    const PARAM_LFO1_RETRIGGER: usize = 18;
-    const PARAM_LFO2_RATE_HZ: usize = 19;
-    const PARAM_LFO2_RETRIGGER: usize = 24;
-    const PARAM_LFO3_RATE_HZ: usize = 25;
-    const PARAM_LFO3_RETRIGGER: usize = 30;
-    const PARAM_ENV_ATTACK_MS: usize = 31;
-    const PARAM_ENV_RELEASE_MS: usize = 34;
-    const PARAM_RAND_RATE_HZ: usize = 35;
-    const PARAM_RAND_SLEW: usize = 38;
-    const PARAM_DRIFT_RATE: usize = 39;
-    const PARAM_DRIFT_DIV: usize = 41;
-
     fn is_mod_param(name: &str) -> bool {
         name.starts_with("mod ")
     }
@@ -2234,64 +2965,11 @@ pub(crate) fn build_sampler_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        node_param_idx >= MOD_PARAM_BASE
-    }
-
-    fn source_section_name(node_param_idx: u32) -> &'static str {
-        if (MOD_PARAM_BASE + PARAM_LFO1_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
-            .contains(&node_param_idx)
-        {
-            "LFO 1"
-        } else if (MOD_PARAM_BASE + PARAM_ENV_ATTACK_MS as u32
-            ..=MOD_PARAM_BASE + PARAM_ENV_RELEASE_MS as u32)
-            .contains(&node_param_idx)
-        {
-            "ENV 1"
-        } else if (MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_RAND_SLEW as u32)
-            .contains(&node_param_idx)
-        {
-            "RAND"
-        } else if (MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32
-            ..=MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
-            .contains(&node_param_idx)
-        {
-            "DRIFT"
-        } else if (MOD_PARAM_BASE + PARAM_LFO2_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32)
-            .contains(&node_param_idx)
-        {
-            "LFO 2"
-        } else {
-            "LFO 3"
-        }
+        sequencer::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
-        if name.ends_with("_div") || name.ends_with("_rate") {
-            "rate".to_string()
-        } else if name.ends_with("_sync") {
-            "sync".to_string()
-        } else if name.ends_with("_shape") {
-            "shape".to_string()
-        } else if name.ends_with("_pw") {
-            "pulse width".to_string()
-        } else if name.ends_with("_retrigger") {
-            "retrigger".to_string()
-        } else if name == "mod_rand_slew" {
-            "slew".to_string()
-        } else if name == "mod_env_attack" {
-            "attack".to_string()
-        } else if name == "mod_env_decay" {
-            "decay".to_string()
-        } else if name == "mod_env_sustain" {
-            "sustain".to_string()
-        } else if name == "mod_env_release" {
-            "release".to_string()
-        } else {
-            name.to_string()
-        }
+        sequencer::voice_modulator::source_param_display_name(name)
     }
 
     app.publish_sampler_analysis_runtime(track);
@@ -2480,8 +3158,12 @@ pub(crate) fn build_sampler_panel_value(
 
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
-    let mut source_params_by_section: HashMap<&'static str, Vec<Rc<RefCell<Value>>>> =
-        HashMap::new();
+    let mut source_params_by_slot: HashMap<usize, Vec<Rc<RefCell<Value>>>> = HashMap::new();
+    let mut source_type_param_by_slot: HashMap<usize, Rc<RefCell<Value>>> = HashMap::new();
+    let visible_source_indices: std::collections::HashSet<usize> =
+        selected_voice_mod_source_indices(&desc, slot, plock_step)
+            .into_iter()
+            .collect();
     let base_note = f32::from_bits(
         app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
     );
@@ -2607,10 +3289,20 @@ pub(crate) fn build_sampler_panel_value(
                     Rc::new(RefCell::new(Value::String(rename_source_param(&name)))),
                 );
             }
-            source_params_by_section
-                .entry(source_section_name(pdesc.node_param_idx))
-                .or_default()
-                .push(Rc::new(RefCell::new(Value::Map(pmap))));
+            if let Some(slot_number) = sequencer::voice_modulator::slot_from_param_name(&pdesc.name)
+            {
+                let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
+                if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+                    == Some("source")
+                {
+                    source_type_param_by_slot.insert(slot_number, param_value);
+                } else if visible_source_indices.contains(&param_idx) {
+                    source_params_by_slot
+                        .entry(slot_number)
+                        .or_default()
+                        .push(param_value);
+                }
+            }
         } else if is_mod_param(&pdesc.name) {
             if let Some(Value::String(name)) = pmap.get("name").map(|v| v.borrow().clone()) {
                 pmap.insert(
@@ -2631,21 +3323,25 @@ pub(crate) fn build_sampler_panel_value(
 
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for section_name in ["LFO 1", "ENV 1", "RAND", "DRIFT", "LFO 2", "LFO 3"] {
-        let Some(params) = source_params_by_section.remove(section_name) else {
-            continue;
-        };
-        if params.is_empty() {
-            continue;
-        }
-        source_names.push(Rc::new(RefCell::new(Value::String(
-            section_name.to_string(),
-        ))));
+    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+        let params = source_params_by_slot
+            .remove(&slot_number)
+            .unwrap_or_default();
+        let source_param = source_type_param_by_slot.remove(&slot_number);
+        source_names.push(Rc::new(RefCell::new(Value::String(section_name.clone()))));
         let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
         section_map.insert(
             "name".to_string(),
-            Rc::new(RefCell::new(Value::String(section_name.to_string()))),
+            Rc::new(RefCell::new(Value::String(section_name))),
         );
+        section_map.insert(
+            "slot".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_number as f64))),
+        );
+        if let Some(source_param) = source_param {
+            section_map.insert("source-param".to_string(), source_param);
+        }
         section_map.insert(
             "params".to_string(),
             Rc::new(RefCell::new(Value::List(params))),
@@ -2807,37 +3503,6 @@ pub(crate) fn build_instrument_panel_value(
 ) -> Value {
     use std::collections::HashMap;
 
-    const MOD_PARAM_BASE: u32 = 1_000_000;
-    const PARAM_LFO1_RATE_HZ: usize = 13;
-    const PARAM_LFO1_SYNC: usize = 14;
-    const PARAM_LFO1_DIV: usize = 15;
-    const PARAM_LFO1_SHAPE: usize = 16;
-    const PARAM_LFO1_PW: usize = 17;
-    const PARAM_LFO1_RETRIGGER: usize = 18;
-    const PARAM_LFO2_RATE_HZ: usize = 19;
-    const PARAM_LFO2_SYNC: usize = 20;
-    const PARAM_LFO2_DIV: usize = 21;
-    const PARAM_LFO2_SHAPE: usize = 22;
-    const PARAM_LFO2_PW: usize = 23;
-    const PARAM_LFO2_RETRIGGER: usize = 24;
-    const PARAM_LFO3_RATE_HZ: usize = 25;
-    const PARAM_LFO3_SYNC: usize = 26;
-    const PARAM_LFO3_DIV: usize = 27;
-    const PARAM_LFO3_SHAPE: usize = 28;
-    const PARAM_LFO3_PW: usize = 29;
-    const PARAM_LFO3_RETRIGGER: usize = 30;
-    const PARAM_ENV_ATTACK_MS: usize = 31;
-    const PARAM_ENV_DECAY_MS: usize = 32;
-    const PARAM_ENV_SUSTAIN: usize = 33;
-    const PARAM_ENV_RELEASE_MS: usize = 34;
-    const PARAM_RAND_RATE_HZ: usize = 35;
-    const PARAM_RAND_SYNC: usize = 36;
-    const PARAM_RAND_DIV: usize = 37;
-    const PARAM_RAND_SLEW: usize = 38;
-    const PARAM_DRIFT_RATE: usize = 39;
-    const PARAM_DRIFT_SYNC: usize = 40;
-    const PARAM_DRIFT_DIV: usize = 41;
-
     if app.is_sampler_track(track) {
         return build_sampler_panel_value(app, track, selected);
     }
@@ -2879,6 +3544,7 @@ pub(crate) fn build_instrument_panel_value(
         options: Option<&Vec<String>>,
         value_field: Option<String>,
         mod_targets: Option<&Vec<UiModMetadata>>,
+        ui_metadata: Option<&sequencer::effects::ParamUiMetadata>,
     ) {
         let is_boolean_name = name == "enabled" || name == "sync";
         let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -2997,6 +3663,7 @@ pub(crate) fn build_instrument_panel_value(
                 Rc::new(RefCell::new(Value::List(target_values))),
             );
         }
+        insert_param_ui_metadata(&mut pmap, ui_metadata);
         out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
 
@@ -3013,189 +3680,14 @@ pub(crate) fn build_instrument_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        node_param_idx >= MOD_PARAM_BASE
-    }
-
-    fn source_section_name(node_param_idx: u32) -> &'static str {
-        if (MOD_PARAM_BASE + PARAM_LFO1_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
-            .contains(&node_param_idx)
-        {
-            "LFO 1"
-        } else if (MOD_PARAM_BASE + PARAM_ENV_ATTACK_MS as u32
-            ..=MOD_PARAM_BASE + PARAM_ENV_RELEASE_MS as u32)
-            .contains(&node_param_idx)
-        {
-            "ENV 1"
-        } else if (MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_RAND_SLEW as u32)
-            .contains(&node_param_idx)
-        {
-            "RAND"
-        } else if (MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32
-            ..=MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
-            .contains(&node_param_idx)
-        {
-            "DRIFT"
-        } else if (MOD_PARAM_BASE + PARAM_LFO2_RATE_HZ as u32
-            ..=MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32)
-            .contains(&node_param_idx)
-        {
-            "LFO 2"
-        } else {
-            "LFO 3"
-        }
+        sequencer::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
-        if name.ends_with("_div") || name.ends_with("_rate") {
-            "rate".to_string()
-        } else if name.ends_with("_sync") {
-            "sync".to_string()
-        } else if name.ends_with("_shape") {
-            "shape".to_string()
-        } else if name.ends_with("_pw") {
-            "pulse width".to_string()
-        } else if name.ends_with("_retrigger") {
-            "retrigger".to_string()
-        } else if name == "mod_rand_slew" {
-            "slew".to_string()
-        } else if name == "mod_env_attack" {
-            "attack".to_string()
-        } else if name == "mod_env_decay" {
-            "decay".to_string()
-        } else if name == "mod_env_sustain" {
-            "sustain".to_string()
-        } else if name == "mod_env_release" {
-            "release".to_string()
-        } else {
-            name.to_string()
-        }
+        sequencer::voice_modulator::source_param_display_name(name)
     }
 
-    let source_indices: Vec<usize> = desc
-        .params
-        .iter()
-        .enumerate()
-        .filter_map(|(i, p)| is_source_param(p.node_param_idx).then_some(i))
-        .collect();
-
-    let find_idx_by_node = |node_param_idx: u32| {
-        source_indices
-            .iter()
-            .copied()
-            .find(|&idx| desc.params.get(idx).map(|p| p.node_param_idx) == Some(node_param_idx))
-    };
-
-    let lfo_sync = |sync_idx: u32| -> bool {
-        find_idx_by_node(sync_idx)
-            .map(|idx| slot.defaults.get(idx) > 0.5)
-            .unwrap_or(false)
-    };
-    let lfo_shape_is_pulse = |shape_idx: u32| -> bool {
-        find_idx_by_node(shape_idx)
-            .map(|idx| slot.defaults.get(idx).round() as i32 == 2)
-            .unwrap_or(false)
-    };
-
-    let mut source_actual: Vec<usize> = Vec::new();
-    let push_lfo = |out: &mut Vec<usize>,
-                    rate_idx: usize,
-                    sync_idx: usize,
-                    div_idx: usize,
-                    shape_idx: usize,
-                    pw_idx: usize,
-                    retrig_idx: usize| {
-        let rate_node = MOD_PARAM_BASE + rate_idx as u32;
-        let sync_node = MOD_PARAM_BASE + sync_idx as u32;
-        let div_node = MOD_PARAM_BASE + div_idx as u32;
-        let shape_node = MOD_PARAM_BASE + shape_idx as u32;
-        let pw_node = MOD_PARAM_BASE + pw_idx as u32;
-        let retrig_node = MOD_PARAM_BASE + retrig_idx as u32;
-
-        if let Some(idx) = if lfo_sync(sync_node) {
-            find_idx_by_node(div_node)
-        } else {
-            find_idx_by_node(rate_node)
-        } {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(sync_node) {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(shape_node) {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(retrig_node) {
-            out.push(idx);
-        }
-        if lfo_shape_is_pulse(shape_node) {
-            if let Some(idx) = find_idx_by_node(pw_node) {
-                out.push(idx);
-            }
-        }
-    };
-
-    push_lfo(
-        &mut source_actual,
-        PARAM_LFO1_RATE_HZ,
-        PARAM_LFO1_SYNC,
-        PARAM_LFO1_DIV,
-        PARAM_LFO1_SHAPE,
-        PARAM_LFO1_PW,
-        PARAM_LFO1_RETRIGGER,
-    );
-    for idx_const in [
-        PARAM_ENV_ATTACK_MS,
-        PARAM_ENV_DECAY_MS,
-        PARAM_ENV_SUSTAIN,
-        PARAM_ENV_RELEASE_MS,
-    ] {
-        if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + idx_const as u32) {
-            source_actual.push(idx);
-        }
-    }
-    if let Some(idx) = if lfo_sync(MOD_PARAM_BASE + PARAM_RAND_SYNC as u32) {
-        find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_DIV as u32)
-    } else {
-        find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32)
-    } {
-        source_actual.push(idx);
-    }
-    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_SYNC as u32) {
-        source_actual.push(idx);
-    }
-    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_SLEW as u32) {
-        source_actual.push(idx);
-    }
-    if let Some(idx) = if lfo_sync(MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32) {
-        find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
-    } else {
-        find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32)
-    } {
-        source_actual.push(idx);
-    }
-    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32) {
-        source_actual.push(idx);
-    }
-    push_lfo(
-        &mut source_actual,
-        PARAM_LFO2_RATE_HZ,
-        PARAM_LFO2_SYNC,
-        PARAM_LFO2_DIV,
-        PARAM_LFO2_SHAPE,
-        PARAM_LFO2_PW,
-        PARAM_LFO2_RETRIGGER,
-    );
-    push_lfo(
-        &mut source_actual,
-        PARAM_LFO3_RATE_HZ,
-        PARAM_LFO3_SYNC,
-        PARAM_LFO3_DIV,
-        PARAM_LFO3_SHAPE,
-        PARAM_LFO3_PW,
-        PARAM_LFO3_RETRIGGER,
-    );
+    let source_actual = selected_voice_mod_source_indices(desc, slot, plock_step);
 
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
@@ -3280,6 +3772,7 @@ pub(crate) fn build_instrument_panel_value(
         None,
         Some(instrument_base_note_value_field(track)),
         None,
+        None,
     );
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
@@ -3320,6 +3813,7 @@ pub(crate) fn build_instrument_panel_value(
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
+                None,
             );
         } else {
             push_param(
@@ -3335,19 +3829,22 @@ pub(crate) fn build_instrument_panel_value(
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
                 modulation_targets.get(&param_idx),
+                pdesc.ui_metadata.as_ref(),
             );
         }
     }
 
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for section_name in ["LFO 1", "ENV 1", "RAND", "DRIFT", "LFO 2", "LFO 3"] {
+    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
         let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
+        let mut source_param: Option<Rc<RefCell<Value>>> = None;
         for &param_idx in &source_actual {
             let Some(pdesc) = desc.params.get(param_idx) else {
                 continue;
             };
-            if source_section_name(pdesc.node_param_idx) != section_name {
+            if sequencer::voice_modulator::slot_from_param_name(&pdesc.name) != Some(slot_number) {
                 continue;
             }
             let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
@@ -3375,19 +3872,27 @@ pub(crate) fn build_instrument_panel_value(
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
+                None,
             );
+            if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+                == Some("source")
+            {
+                source_param = params.pop();
+            }
         }
-        if params.is_empty() {
-            continue;
-        }
-        source_names.push(Rc::new(RefCell::new(Value::String(
-            section_name.to_string(),
-        ))));
+        source_names.push(Rc::new(RefCell::new(Value::String(section_name.clone()))));
         let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
         section_map.insert(
             "name".to_string(),
-            Rc::new(RefCell::new(Value::String(section_name.to_string()))),
+            Rc::new(RefCell::new(Value::String(section_name))),
         );
+        section_map.insert(
+            "slot".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_number as f64))),
+        );
+        if let Some(source_param) = source_param {
+            section_map.insert("source-param".to_string(), source_param);
+        }
         section_map.insert(
             "params".to_string(),
             Rc::new(RefCell::new(Value::List(params))),
@@ -3488,17 +3993,12 @@ pub(crate) fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Va
 }
 
 /// Build list of available effect names from the effects/ directory.
-/// Prepends "+ New Effect" as a special entry for inline creation.
 pub(crate) fn build_available_effects() -> Value {
     let names = sequencer::lisp_effect::list_saved_effects();
-    let mut items: Vec<Rc<RefCell<Value>>> = vec![Rc::new(RefCell::new(Value::String(
-        "+ New Effect".to_string(),
-    )))];
-    items.extend(
-        names
-            .into_iter()
-            .map(|n| Rc::new(RefCell::new(Value::String(n)))),
-    );
+    let items: Vec<Rc<RefCell<Value>>> = names
+        .into_iter()
+        .map(|n| Rc::new(RefCell::new(Value::String(n))))
+        .collect();
     Value::List(items)
 }
 
@@ -3791,6 +4291,7 @@ pub(crate) fn sync_track_params(
         build_track_output_options(app),
     );
     rt.set_reactive("SEQ", "tp-bus-sends", build_track_bus_sends(app, tp));
+    sync_current_track_bus_send_binding_fields(rt, app, state, track);
     rt.set_reactive(
         "SEQ",
         "tp-num-steps",
@@ -4113,21 +4614,15 @@ fn build_track_output_options(app: &ui::App) -> Value {
     Value::List(labels)
 }
 
-fn build_track_bus_sends(app: &ui::App, tp: &sequencer::sequencer::TrackParams) -> Value {
+fn build_track_bus_sends(app: &ui::App, _tp: &sequencer::sequencer::TrackParams) -> Value {
     use std::collections::HashMap;
 
-    let sends = tp.sends();
     let items = app
         .buses
         .iter()
         .enumerate()
         .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
         .map(|(bus_idx, bus)| {
-            let amount = sends
-                .iter()
-                .find(|send| send.destination == bus.id)
-                .map(|send| send.amount)
-                .unwrap_or(0.0);
             let mut map = HashMap::new();
             map.insert(
                 "bus-idx".to_string(),
@@ -4136,10 +4631,6 @@ fn build_track_bus_sends(app: &ui::App, tp: &sequencer::sequencer::TrackParams) 
             map.insert(
                 "name".to_string(),
                 Rc::new(RefCell::new(Value::String(bus.name.clone()))),
-            );
-            map.insert(
-                "amount".to_string(),
-                Rc::new(RefCell::new(Value::Number(amount as f64))),
             );
             Rc::new(RefCell::new(Value::Map(map)))
         })
@@ -4350,6 +4841,7 @@ mod tests {
             node_param_idx: 0,
             node_param_span: 1,
             host_control: None,
+            ui_metadata: None,
         };
         let target = sequencer::effects::InstrumentModulationTarget {
             base_param_idx: 0,
@@ -4496,7 +4988,34 @@ mod tests {
             "metal-seq-materials.lisp",
             "metal-seq-browser.lisp",
             "metal-seq-builtin-fx-ui.lisp",
+            "metal-seq-fx/builtin/filter-core.lisp",
+            "metal-seq-fx/builtin/str8-delay.lisp",
+            "metal-seq-fx/builtin/filter-panel.lisp",
+            "metal-seq-fx/builtin/dynamics.lisp",
+            "metal-seq-fx/builtin/dj-mixer.lisp",
+            "metal-seq-fx/builtin/audio-fx.lisp",
             "metal-seq-fx.lisp",
+            "metal-seq-fx/state.lisp",
+            "metal-seq-fx/panel-frame.lisp",
+            "metal-seq-fx/drag-drop.lisp",
+            "metal-seq-fx/track-panels.lisp",
+            "metal-seq-fx/panel-widgets.lisp",
+            "metal-seq-fx/param-controls.lisp",
+            "metal-seq-fx/param-grid.lisp",
+            "metal-seq-fx/instrument-modulation.lisp",
+            "metal-seq-fx/effect-modulation.lisp",
+            "metal-seq-fx/instrument-sources.lisp",
+            "metal-seq-fx/effect-panels.lisp",
+            "metal-seq-fx/custom-ui-runtime.lisp",
+            "metal-seq-fx/custom-ui-sections.lisp",
+            "metal-seq-fx/custom-ui-controls.lisp",
+            "metal-seq-fx/custom-ui-lego.lisp",
+            "metal-seq-fx/custom-effect-ui.lisp",
+            "metal-seq-fx/panel-bodies.lisp",
+            "metal-seq-fx/sampler-panel.lisp",
+            "metal-seq-fx/modulator-panel.lisp",
+            "metal-seq-fx/instrument-panel.lisp",
+            "metal-seq-fx/buffers.lisp",
             "metal-seq-piano-roll.lisp",
             "metal-seq-mixer-v2.lisp",
             "metal-seq-transport.lisp",
@@ -4622,6 +5141,73 @@ mod tests {
         (runtime, steps, toggles, moves)
     }
 
+    fn track_qualified_step_gesture_runtime() -> (
+        Runtime,
+        Arc<Mutex<Vec<Vec<bool>>>>,
+        Arc<Mutex<Vec<(usize, usize)>>>,
+    ) {
+        let steps = Arc::new(Mutex::new(vec![
+            vec![false, true, false, false],
+            vec![false, false, false, false],
+        ]));
+        let current_track = Arc::new(Mutex::new(0usize));
+        let toggles = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str("(defstate cursor-step 0)")
+            .expect("define cursor step");
+        runtime
+            .eval_str(
+                "(def SEQ (dict :current-track 1 :selected-steps '(false false false false)))",
+            )
+            .expect("define stale SEQ test map");
+        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
+        runtime.register_native("seq-select-step-range", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("seq-move-step-drag", |_args, _ctx| Ok(Value::Bool(true)));
+        {
+            let current_track = current_track.clone();
+            runtime.register_native("seq-set-track", move |args, _ctx| {
+                let Some(Value::Number(track)) = args.first() else {
+                    return Err("seq-set-track: expected track".into());
+                };
+                *current_track.lock().unwrap() = *track as usize;
+                Ok(Value::Number(*track))
+            });
+        }
+        {
+            let steps = steps.clone();
+            runtime.register_native("seq-track-step-active?", move |args, _ctx| {
+                let (Some(Value::Number(track)), Some(Value::Number(step))) =
+                    (args.first(), args.get(1))
+                else {
+                    return Err("seq-track-step-active?: expected track and step".into());
+                };
+                Ok(Value::Bool(
+                    steps.lock().unwrap()[*track as usize][*step as usize],
+                ))
+            });
+        }
+        {
+            let steps = steps.clone();
+            let current_track = current_track.clone();
+            let toggles = toggles.clone();
+            runtime.register_native("seq-toggle-step", move |args, _ctx| {
+                let Some(Value::Number(step)) = args.first() else {
+                    return Err("seq-toggle-step: expected step".into());
+                };
+                let track = *current_track.lock().unwrap();
+                let step = *step as usize;
+                let mut steps = steps.lock().unwrap();
+                steps[track][step] = !steps[track][step];
+                toggles.lock().unwrap().push((track, step));
+                Ok(Value::Bool(steps[track][step]))
+            });
+        }
+        load_step_gesture_source(&mut runtime);
+        (runtime, steps, toggles)
+    }
+
     fn bool_list_source(values: &[bool]) -> String {
         let items = values
             .iter()
@@ -4700,6 +5286,40 @@ mod tests {
         );
         assert!(toggles.lock().unwrap().is_empty());
         assert_eq!(*moves.lock().unwrap(), vec![(2, 4)]);
+    }
+
+    #[test]
+    fn track_qualified_step_click_ignores_stale_reactive_current_track() {
+        let (mut runtime, steps, toggles) = track_qualified_step_gesture_runtime();
+
+        runtime
+            .eval_str("(seq-set-track 0)")
+            .expect("host switches to clicked track before gesture handling");
+        runtime
+            .eval_str("(step-pointer-down-for-track 0 1 (dict) false)")
+            .expect("pointer down on active step in clicked track");
+        runtime
+            .eval_str("(step-select-drag-over-for-track 0 1 (dict))")
+            .expect("same-step drag jitter should not enter paint-on mode");
+
+        assert!(
+            toggles.lock().unwrap().is_empty(),
+            "pointer-down and same-step jitter must not toggle an already-active step off through stale SEQ.current-track"
+        );
+
+        runtime
+            .eval_str("(step-pointer-up 1 (dict))")
+            .expect("pointer up on clicked step");
+
+        assert_eq!(
+            *toggles.lock().unwrap(),
+            vec![(0, 1)],
+            "a plain click on an active step in another track should toggle exactly once"
+        );
+        assert!(
+            !steps.lock().unwrap()[0][1],
+            "the clicked active step should end off"
+        );
     }
 
     #[test]
@@ -5264,6 +5884,18 @@ mod tests {
         }
     }
 
+    fn layout_tree_has_bool_prop(
+        node: &eseqlisp::layout::LayoutNode,
+        prop: &str,
+        expected: bool,
+    ) -> bool {
+        layout_prop_bool(node, prop) == Some(expected)
+            || node
+                .children
+                .iter()
+                .any(|child| layout_tree_has_bool_prop(child, prop, expected))
+    }
+
     fn render_layout_cells(layout: &eseqlisp::layout::LayoutNode, cols: u16, rows: u16) -> String {
         let mut cell_buf = eseqlisp::widget_render::CellBuffer::new(cols, rows);
         eseqlisp::widget_render::render_widget_tree(layout, &mut cell_buf);
@@ -5279,6 +5911,21 @@ mod tests {
             .join("\n")
     }
 
+    fn find_layout_text_containing<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        needle: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if matches!(node.props.get("text"), Some(Value::String(text)) if text.contains(needle)) {
+            return Some(node);
+        }
+        if matches!(node.props.get("label"), Some(Value::String(text)) if text.contains(needle)) {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_text_containing(child, needle))
+    }
+
     #[test]
     fn metal_seq_browser_instrument_tab_builds_instrument_tree() {
         let editor = browser_editor_on_instrument_tab();
@@ -5292,6 +5939,56 @@ mod tests {
             value_contains_string(tree, "digitone") || value_contains_string(tree, "minimoog"),
             "instrument tab should render saved instruments"
         );
+    }
+
+    #[test]
+    fn metal_seq_audio_effect_tree_excludes_new_effect_action() {
+        let tree = build_audio_effect_tree("+ New Effect");
+        assert!(
+            !value_contains_string(&tree, "new-audio-effect"),
+            "effect creation should be a sidebar button, not a tree item"
+        );
+        assert!(
+            !value_contains_string(&tree, "+ New Effect"),
+            "effect creation should be a sidebar button, not a tree label"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_audio_fx_tab_renders_new_effect_button_outside_tree() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"audio-fx\")")
+            .expect("select audio fx tab");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
+        assert!(value_contains_string(tree, "+ New Effect"));
+        assert!(
+            value_contains_string(tree, "No audio effects found."),
+            "test native returns an empty effect tree; the button must not come from tree items"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-enter-new-effect-editor)")
+            .expect("enter new effect editor");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "enter-new-effect-editor");
+                assert_eq!(payload, &Value::Map(Default::default()));
+            }
+            other => panic!("expected enter-new-effect-editor host command, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5320,6 +6017,107 @@ mod tests {
         assert!(
             !value_contains_string(tree, "Save & Add"),
             "new instrument editor should use finalization copy"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_new_effect_editor_uses_finalize_controls() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-active", Value::Bool(true));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-effect".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser
+            .widget_tree
+            .as_ref()
+            .expect("browser widget tree")
+            .clone();
+        assert!(value_contains_string(&tree, "New Effect"));
+        assert!(value_contains_string(&tree, "Draft patch"));
+        assert!(value_contains_string(&tree, "track "));
+        assert!(value_contains_string(&tree, "Save as"));
+        assert!(value_contains_string(&tree, "effect-name"));
+        assert!(value_contains_string(&tree, "Save & Add"));
+        assert!(
+            !value_contains_string(&tree, "Search samples"),
+            "new effect editor should replace the sample browser chrome"
+        );
+
+        let layout = editor
+            .runtime_mut()
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((28.0, 13.0)))
+            .expect("new effect editor sidebar should lay out");
+        for label in ["New Effect", "Draft patch", "Save as", "Save & Add"] {
+            let node = find_layout_text_containing(&layout, label)
+                .unwrap_or_else(|| panic!("expected visible editor text: {label}"));
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.width > 0.0
+                    && node.rect.height > 0.0,
+                "editor text should have a finite nonzero rect for {label}: {:?}",
+                node.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_explicit_refresh_updates_inactive_samples_editor_panel() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let browser_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        assert_ne!(
+            editor.active_buffer_idx(),
+            browser_idx,
+            "test setup should exercise the inactive-buffer refresh path"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-active", Value::Bool(true));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-effect".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(2.0));
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-refresh-buffer)")
+            .expect("explicit sidebar refresh should render the samples buffer");
+        editor.refresh_runtime_side_effects();
+
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
+        assert!(value_contains_string(tree, "New Effect"));
+        assert!(value_contains_string(tree, "effect-name"));
+        assert!(value_contains_string(tree, "Save & Add"));
+        assert!(
+            !value_contains_string(tree, "Search samples"),
+            "explicit refresh should replace stale sample browser content"
         );
     }
 
@@ -6133,6 +6931,23 @@ mod tests {
         )
     }
 
+    fn test_track_bus_send(bus_idx: usize, name: &str, amount: f64) -> Value {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "bus-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
+        );
+        map.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name.to_string()))),
+        );
+        map.insert(
+            "amount".to_string(),
+            Rc::new(RefCell::new(Value::Number(amount))),
+        );
+        Value::Map(map)
+    }
+
     fn test_delete_target_number(payload: &Value, field: &str) -> Option<usize> {
         let Value::Map(map) = payload else {
             return None;
@@ -6494,10 +7309,6 @@ mod tests {
             Rc::new(RefCell::new(Value::String(name.to_string()))),
         );
         param.insert(
-            "group".to_string(),
-            Rc::new(RefCell::new(Value::String("main".to_string()))),
-        );
-        param.insert(
             "idx".to_string(),
             Rc::new(RefCell::new(Value::Number(idx as f64))),
         );
@@ -6508,6 +7319,127 @@ mod tests {
         param.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(min))));
         param.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(max))));
         param
+    }
+
+    fn test_param_map_with_ui_metadata(
+        name: &str,
+        idx: usize,
+        value: f64,
+        min: f64,
+        max: f64,
+        group: Option<&str>,
+        env: Option<&str>,
+        role: Option<&str>,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut param = test_param_map(name, idx, value, min, max);
+        if let Some(group) = group {
+            param.insert(
+                "group".to_string(),
+                Rc::new(RefCell::new(Value::String(group.to_string()))),
+            );
+        }
+        if let Some(env) = env {
+            param.insert(
+                "env".to_string(),
+                Rc::new(RefCell::new(Value::String(env.to_string()))),
+            );
+        }
+        if let Some(role) = role {
+            param.insert(
+                "role".to_string(),
+                Rc::new(RefCell::new(Value::String(role.to_string()))),
+            );
+        }
+        param
+    }
+
+    fn load_param_grid_test_lisp(editor: &mut eseqlisp::Editor) {
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selection? () false)
+                (def fx-clear-selected-effect () false)
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (load "metal-seq-fx/state.lisp")
+                (def visible-params (params)
+                  (filter |p| (not (= (get p :name) "enabled")) params))
+                (load "metal-seq-fx/param-controls.lisp")
+                (load "metal-seq-fx/param-grid.lisp")
+                "#,
+            )
+            .expect("load param grid test lisp");
+    }
+
+    fn param_grid_test_editor(params: Vec<Value>) -> eseqlisp::Editor {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let fx = Value::Map(test_fx_map("metadata-effect", 0, params.clone()));
+        editor.runtime_mut().register_reactive(
+            "TEST",
+            vec![("params", test_list(params)), ("fx", fx)],
+            true,
+        );
+        load_param_grid_test_lisp(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect-buffer "*param-grid-test*" (fx-param-grid TEST.params TEST.fx))"#)
+            .expect("create param grid test buffer");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("param grid test lisp status after refresh: {status}");
+        }
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*param-grid-test*")
+            .expect("param grid test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(140, 18);
+        editor
+    }
+
+    fn custom_audio_fx_body_test_editor(params: Vec<Value>) -> eseqlisp::Editor {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let fx = Value::Map(test_fx_map("metadata-custom-fx", 0, params));
+        editor
+            .runtime_mut()
+            .register_reactive("TEST", vec![("fx", fx)], true);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-has-selection? () false)
+                (def fx-clear-selected-effect () false)
+                (def custom-audio-fx-ui (fx) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-instrument-synth-ui (inst) false)
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (load "metal-seq-fx/state.lisp")
+                (def visible-params (params)
+                  (filter |p| (not (= (get p :name) "enabled")) params))
+                (load "metal-seq-fx/param-controls.lisp")
+                (load "metal-seq-fx/param-grid.lisp")
+                (load "metal-seq-fx/builtin/audio-fx.lisp")
+                (load "metal-seq-fx/panel-bodies.lisp")
+                (effect-buffer "*custom-audio-fx-body-test*"
+                  (audio-fx-panel-body TEST.fx (get TEST.fx :params)))
+                "#,
+            )
+            .expect("load custom audio effect body test lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom audio effect body test status after refresh: {status}");
+        }
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*custom-audio-fx-body-test*")
+            .expect("custom audio effect body test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(140, 18);
+        editor
     }
 
     fn test_enum_param_map(
@@ -7067,16 +7999,10 @@ mod tests {
             "modulators".to_string(),
             Rc::new(RefCell::new(test_list(
                 [
-                    (1.0, "LFO 1"),
-                    (2.0, "ENV 1"),
-                    (3.0, "RAND"),
-                    (4.0, "DRIFT"),
-                    (5.0, "LFO 2"),
-                    (6.0, "LFO 3"),
-                    (7.0, "Ext 1"),
-                    (8.0, "Ext 2"),
-                    (9.0, "Ext 3"),
-                    (10.0, "Ext 4"),
+                    (1.0, "Mod 1"),
+                    (2.0, "Mod 2"),
+                    (3.0, "Mod 3"),
+                    (4.0, "Mod 4"),
                 ]
                 .into_iter()
                 .map(|(slot, label)| {
@@ -7373,6 +8299,19 @@ mod tests {
         }
     }
 
+    fn string_list_values(value: &Value) -> Vec<String> {
+        match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::String(value) => value.clone(),
+                    other => panic!("expected string list item, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected string list, got {other:?}"),
+        }
+    }
+
     #[test]
     fn duration_spans_cover_steps_held_by_active_sources() {
         let state = Arc::new(SequencerState::new(1, vec![]));
@@ -7389,6 +8328,32 @@ mod tests {
         assert!(!spans[2]);
         assert!(spans[3]);
         assert!(!spans[4]);
+    }
+
+    #[test]
+    fn sequencer_track_timebase_labels_show_current_selected_step_plock() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        state.pattern.track_params[0].set_timebase(Timebase::Sixteenth);
+        state.pattern.track_params[1].set_timebase(Timebase::Quarter);
+        state.pattern.timebase_plocks[0].set(3, Timebase::EighthTriplet);
+        state.pattern.timebase_plocks[1].set(3, Timebase::HalfTriplet);
+
+        let selected = Some(3);
+        assert_eq!(
+            string_list_values(&build_track_timebase_labels_value(&state, 2, 0, selected)),
+            ["8T", "4"],
+            "only the current track row should reflect the selected step's timebase plock"
+        );
+        assert_eq!(
+            string_list_values(&build_track_timebase_labels_value(&state, 2, 1, selected)),
+            ["16", "2T"],
+            "switching current track should resolve that track's selected-step timebase plock"
+        );
+        assert_eq!(
+            string_list_values(&build_track_timebase_labels_value(&state, 2, 0, None)),
+            ["16", "4"],
+            "without selected steps every row should show its track default timebase"
+        );
     }
 
     fn test_string_list(values: &[&str]) -> Value {
@@ -7489,6 +8454,41 @@ mod tests {
         editor
             .runtime_mut()
             .register_native("seq-piano-roll-action", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-pause-auto-follow", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-clear-selection", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(false)));
+        editor
+            .runtime_mut()
+            .register_native("seq-track-step-active?", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-set-step-param", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-set-step-param-plock", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-double-track-pattern", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-halve-track-pattern", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
@@ -7522,30 +8522,8 @@ mod tests {
         ]);
         let empty_plocks = test_bool_list(&[false; 16]);
         let one_track_bus_sends = test_list(vec![
-            Value::Map({
-                let mut map = std::collections::HashMap::new();
-                map.insert(
-                    "name".to_string(),
-                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                );
-                map.insert(
-                    "value".to_string(),
-                    Rc::new(RefCell::new(Value::Number(0.0))),
-                );
-                map
-            }),
-            Value::Map({
-                let mut map = std::collections::HashMap::new();
-                map.insert(
-                    "name".to_string(),
-                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                );
-                map.insert(
-                    "value".to_string(),
-                    Rc::new(RefCell::new(Value::Number(0.0))),
-                );
-                map
-            }),
+            test_track_bus_send(0, "Bus A", 0.0),
+            test_track_bus_send(1, "Bus B", 0.0),
         ]);
 
         editor.runtime_mut().register_reactive(
@@ -7562,15 +8540,20 @@ mod tests {
                 ("track-solos", test_bool_list(&[false])),
                 ("track-muted-by-solo", test_bool_list(&[false])),
                 ("track-volumes", test_number_list(&[1.0])),
-                ("track-pans", test_number_list(&[0.0])),
+                ("track-mixer-pans", test_number_list(&[0.0])),
                 ("track-outputs", test_string_list(&["main"])),
                 (
                     "track-output-options",
                     test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
                 ),
                 ("track-bus-sends", test_list(vec![one_track_bus_sends])),
+                ("track-0-bus-0-send", Value::Number(0.0)),
+                ("track-0-bus-1-send", Value::Number(0.0)),
+                ("tp-bus-0-send", Value::Number(0.0)),
+                ("tp-bus-1-send", Value::Number(0.0)),
                 ("track-steps", test_list(vec![steps.clone()])),
                 ("track-num-steps", test_number_list(&[16.0])),
+                ("track-timebases", test_string_list(&["16"])),
                 (
                     "track-duration-spans",
                     test_list(vec![test_bool_list(&[false; 16])]),
@@ -7579,6 +8562,18 @@ mod tests {
                     "track-step-has-plocks",
                     test_list(vec![empty_plocks.clone()]),
                 ),
+                ("track-velocities", test_list(vec![step_numbers.clone()])),
+                (
+                    "track-durations",
+                    test_list(vec![test_number_list(&[1.0; 16])]),
+                ),
+                ("track-auxas", test_list(vec![test_number_list(&[0.0; 16])])),
+                (
+                    "track-transposes",
+                    test_list(vec![test_number_list(&[0.0; 16])]),
+                ),
+                ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
+                ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
                 ("steps", steps.clone()),
                 ("velocities", step_numbers.clone()),
@@ -7707,6 +8702,17 @@ mod tests {
             ],
             true,
         );
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        for step in 0..16 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(0, step),
+                Value::Bool(step == 0),
+            );
+        }
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &track_playhead_page_field(0), Value::Number(0.0));
         register_test_delete_target_natives(&mut editor, 1);
 
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
@@ -7718,6 +8724,194 @@ mod tests {
             }
         }
         editor
+    }
+
+    fn set_full_grid_track_count(
+        editor: &mut eseqlisp::Editor,
+        track_count: usize,
+        step_count: usize,
+    ) {
+        let names = (0..track_count)
+            .map(|track| format!("track-{track}"))
+            .collect::<Vec<_>>();
+        let ids = (0..track_count)
+            .map(|track| Value::Number(track as f64))
+            .collect::<Vec<_>>();
+        let steps = (0..track_count)
+            .map(|track| {
+                test_list(
+                    (0..step_count)
+                        .map(|step| Value::Bool((step + track) % 2 == 0))
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let repeated_param_lists = |value: f64| {
+            (0..track_count)
+                .map(|_| test_repeated_number_list(value, step_count))
+                .collect::<Vec<_>>()
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
+        rt.set_reactive("SEQ", "track-ids", test_list(ids));
+        rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
+        rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
+        rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
+        rt.set_reactive(
+            "SEQ",
+            "record-armed",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-mutes",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-solos",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-muted-by-solo",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive("SEQ", "track-steps", test_list(steps));
+        rt.set_reactive(
+            "SEQ",
+            "track-num-steps",
+            test_repeated_number_list(step_count as f64, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-timebases",
+            test_list(
+                (0..track_count)
+                    .map(|_| Value::String("16".to_string()))
+                    .collect(),
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-duration-spans",
+            test_list(
+                (0..track_count)
+                    .map(|_| test_repeated_bool_list(false, step_count))
+                    .collect(),
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-has-plocks",
+            test_list(
+                (0..track_count)
+                    .map(|_| test_repeated_bool_list(false, step_count))
+                    .collect(),
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-playheads",
+            test_repeated_number_list(0.0, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-velocities",
+            test_list(repeated_param_lists(1.0)),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-durations",
+            test_list(repeated_param_lists(1.0)),
+        );
+        rt.set_reactive("SEQ", "track-auxas", test_list(repeated_param_lists(0.0)));
+        rt.set_reactive(
+            "SEQ",
+            "track-transposes",
+            test_list(repeated_param_lists(0.0)),
+        );
+        rt.set_reactive("SEQ", "track-pans", test_list(repeated_param_lists(0.0)));
+        rt.set_reactive("SEQ", "track-syncs", test_list(repeated_param_lists(0.0)));
+        rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
+        rt.set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_repeated_bool_list(false, step_count),
+        );
+        rt.set_reactive("SEQ", "steps", test_repeated_bool_list(true, step_count));
+        rt.set_reactive(
+            "SEQ",
+            "velocities",
+            test_repeated_number_list(1.0, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "durations",
+            test_repeated_number_list(1.0, step_count),
+        );
+        rt.set_reactive("SEQ", "auxas", test_repeated_number_list(0.0, step_count));
+        rt.set_reactive(
+            "SEQ",
+            "transposes",
+            test_repeated_number_list(0.0, step_count),
+        );
+        rt.set_reactive("SEQ", "pans", test_repeated_number_list(0.0, step_count));
+        rt.set_reactive("SEQ", "syncs", test_repeated_number_list(0.0, step_count));
+        rt.set_reactive(
+            "SEQ",
+            "step-has-plocks",
+            test_repeated_bool_list(false, step_count),
+        );
+        for track in 0..track_count {
+            for step in 0..step_count {
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_active_field(track, step),
+                    Value::Bool((step + track) % 2 == 0),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_duration_field(track, step),
+                    Value::Bool(false),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_plocked_field(track, step),
+                    Value::Bool(false),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_selected_field(track, step),
+                    Value::Bool(false),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_active_field(track, step),
+                    Value::Bool(step == 0),
+                );
+            }
+            let rows = (step_count + PAGE_SIZE - 1) / PAGE_SIZE;
+            for row in 0..rows {
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_row_field(track, row),
+                    Value::Number(if row == 0 { 0.0 } else { -1.0 }),
+                );
+            }
+            rt.set_reactive("SEQ", &track_playhead_page_field(track), Value::Number(0.0));
+        }
+    }
+
+    fn assert_finite_nonzero_rect(node: &eseqlisp::layout::LayoutNode, label: &str) {
+        assert!(
+            node.rect.width.is_finite()
+                && node.rect.width > 0.0
+                && node.rect.height.is_finite()
+                && node.rect.height > 0.0,
+            "{label} should have a finite nonzero rect: {:?}",
+            node.rect
+        );
     }
 
     fn apply_sequencer_perf_pattern(
@@ -7740,6 +8934,24 @@ mod tests {
             .collect::<Vec<_>>();
         let track_step_has_plocks = (0..track_count)
             .map(|track| sequencer_perf_plocks(track, generation, step_count))
+            .collect::<Vec<_>>();
+        let track_velocities = (0..track_count)
+            .map(|_| test_repeated_number_list(1.0, step_count))
+            .collect::<Vec<_>>();
+        let track_durations = (0..track_count)
+            .map(|_| test_repeated_number_list(1.0, step_count))
+            .collect::<Vec<_>>();
+        let track_auxas = (0..track_count)
+            .map(|_| test_repeated_number_list(0.0, step_count))
+            .collect::<Vec<_>>();
+        let track_transposes = (0..track_count)
+            .map(|_| test_repeated_number_list(0.0, step_count))
+            .collect::<Vec<_>>();
+        let track_pans = (0..track_count)
+            .map(|_| test_repeated_number_list(0.0, step_count))
+            .collect::<Vec<_>>();
+        let track_syncs = (0..track_count)
+            .map(|_| test_repeated_number_list(0.0, step_count))
             .collect::<Vec<_>>();
 
         let rt = editor.runtime_mut();
@@ -7775,7 +8987,7 @@ mod tests {
         );
         rt.set_reactive(
             "SEQ",
-            "track-pans",
+            "track-mixer-pans",
             test_repeated_number_list(0.0, track_count),
         );
         rt.set_reactive(
@@ -7792,6 +9004,15 @@ mod tests {
             "track-num-steps",
             test_repeated_number_list(step_count as f64, track_count),
         );
+        rt.set_reactive(
+            "SEQ",
+            "track-timebases",
+            test_list(
+                (0..track_count)
+                    .map(|_| Value::String("16".to_string()))
+                    .collect(),
+            ),
+        );
         rt.set_reactive("SEQ", "track-steps", test_list(track_steps));
         rt.set_reactive(
             "SEQ",
@@ -7803,6 +9024,12 @@ mod tests {
             "track-step-has-plocks",
             test_list(track_step_has_plocks),
         );
+        rt.set_reactive("SEQ", "track-velocities", test_list(track_velocities));
+        rt.set_reactive("SEQ", "track-durations", test_list(track_durations));
+        rt.set_reactive("SEQ", "track-auxas", test_list(track_auxas));
+        rt.set_reactive("SEQ", "track-transposes", test_list(track_transposes));
+        rt.set_reactive("SEQ", "track-pans", test_list(track_pans));
+        rt.set_reactive("SEQ", "track-syncs", test_list(track_syncs));
         rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
         rt.set_reactive(
             "SEQ",
@@ -7864,6 +9091,11 @@ mod tests {
                     &track_step_selected_field(track, step),
                     Value::Bool(false),
                 );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_active_field(track, step),
+                    Value::Bool(step == (generation % PAGE_SIZE)),
+                );
             }
             for row in 0..max_rows {
                 rt.set_reactive(
@@ -7876,6 +9108,7 @@ mod tests {
                     }),
                 );
             }
+            rt.set_reactive("SEQ", &track_playhead_page_field(track), Value::Number(0.0));
         }
     }
 
@@ -7957,7 +9190,10 @@ mod tests {
             .eval_str(r#"(set-window-buffer "*fx*")"#)
             .expect("switch to fx buffer");
         editor.refresh_runtime_side_effects();
-        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seqv-handle-key "C-a" nil)"#)
+            .expect("route select-all through sequencer key handler");
 
         assert_eq!(
             editor.runtime_mut().eval_str("selected-count").unwrap(),
@@ -8012,7 +9248,7 @@ mod tests {
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
-            Some(Value::String("*metal*".to_string()))
+            Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
@@ -8032,7 +9268,7 @@ mod tests {
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
-            Some(Value::String("*metal*".to_string())),
+            Some(Value::String("*sequencer*".to_string())),
             "changing placement while closed must not open or move piano roll"
         );
 
@@ -8062,7 +9298,7 @@ mod tests {
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
-            Some(Value::String("*metal*".to_string()))
+            Some(Value::String("*sequencer*".to_string()))
         );
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
@@ -8334,6 +9570,7 @@ mod tests {
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let step_clipboard = Arc::new(Mutex::new(None));
+        let ui_epoch = AtomicUsize::new(0);
 
         state.pattern.patterns[0].set_step_active(0, true);
         editor
@@ -8347,29 +9584,41 @@ mod tests {
             .expect("switch to fx buffer and set cursor");
         editor.refresh_runtime_side_effects();
 
-        assert!(handle_metal_command_shortcut(
+        assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
             &state,
             &current_track,
             &selected_steps,
             &step_clipboard,
+            &ui_epoch,
         ));
         assert!(step_clipboard.lock().unwrap().is_some());
+        assert_eq!(
+            ui_epoch.load(Ordering::Relaxed),
+            0,
+            "copy should not invalidate sequencer UI state"
+        );
 
         editor
             .runtime_mut()
             .eval_str("(set! cursor-step 1)")
             .expect("move cursor");
-        assert!(handle_metal_command_shortcut(
+        assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
             &state,
             &current_track,
             &selected_steps,
             &step_clipboard,
+            &ui_epoch,
         ));
         assert!(state.pattern.patterns[0].is_active(1));
+        assert_eq!(
+            ui_epoch.load(Ordering::Relaxed),
+            1,
+            "paste must invalidate sequencer UI state so expanded tracks repaint"
+        );
 
         editor
             .runtime_mut()
@@ -8462,7 +9711,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_full_grid_empty_metal_buffer_is_centered_and_does_not_y_scroll_on_load() {
+    fn metal_seq_full_grid_empty_sequencer_buffer_does_not_y_scroll_on_load() {
         use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
 
         fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -8485,44 +9734,37 @@ mod tests {
         }
 
         let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
-        let metal_tile = frame
+        let sequencer_tile = frame
             .tiles
             .iter()
-            .find(|tile| tile.frame.buffer_name == "*metal*")
-            .expect("full grid layout should contain *metal* tile");
-        let metal_tile_id = metal_tile.tile_id;
-        let layout = metal_tile
+            .find(|tile| tile.frame.buffer_name == "*sequencer*")
+            .expect("full grid layout should default to a *sequencer* tile");
+        let sequencer_tile_id = sequencer_tile.tile_id;
+        let layout = sequencer_tile
             .frame
             .widget_layout
             .as_ref()
-            .expect("metal tile should have widget layout");
-        let prompt = find_layout_node_by_text(layout, "Select a sound to create a track")
-            .expect("empty metal prompt should be present in tiled startup layout");
-        let prompt_center = prompt.rect.row + prompt.rect.height * 0.5;
+            .expect("sequencer tile should have widget layout");
         let viewport_height = editor
             .tile_root
-            .find_leaf(metal_tile_id)
-            .expect("metal tile leaf should exist")
+            .find_leaf(sequencer_tile_id)
+            .expect("sequencer tile leaf should exist")
             .widget_viewport_height;
         let content_bottom = layout_bottom(layout);
 
         assert!(
-            (prompt_center - viewport_height * 0.5).abs() <= 2.0,
-            "empty *metal* prompt should be centered in its tiled viewport; prompt={:?}, viewport={viewport_height:.3}, content_bottom={content_bottom:.3}",
-            prompt.rect
-        );
-        assert!(
             content_bottom <= viewport_height + 0.01,
-            "empty *metal* content should fit tiled viewport without scroll overflow; content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
+            "empty *sequencer* content should fit tiled viewport without scroll overflow; content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
         );
 
         let before = editor
             .tile_root
-            .find_leaf(metal_tile_id)
-            .expect("metal tile leaf should exist")
+            .find_leaf(sequencer_tile_id)
+            .expect("sequencer tile leaf should exist")
             .widget_scroll_top;
-        let scroll_col = (metal_tile.rect.col + metal_tile.rect.width * 0.5).floor() as u16;
-        let scroll_row = (metal_tile.rect.row + metal_tile.rect.height * 0.5).floor() as u16;
+        let scroll_col = (sequencer_tile.rect.col + sequencer_tile.rect.width * 0.5).floor() as u16;
+        let scroll_row =
+            (sequencer_tile.rect.row + sequencer_tile.rect.height * 0.5).floor() as u16;
         editor.handle_tiled_mouse_precise(
             mouse_event(MouseEventKind::ScrollDown, scroll_col, scroll_row),
             scroll_col as f32 + 0.5,
@@ -8531,13 +9773,13 @@ mod tests {
         );
         let after = editor
             .tile_root
-            .find_leaf(metal_tile_id)
-            .expect("metal tile leaf should still exist")
+            .find_leaf(sequencer_tile_id)
+            .expect("sequencer tile leaf should still exist")
             .widget_scroll_top;
 
         assert_eq!(
             after, before,
-            "empty *metal* tiled startup layout fits but wheel scroll changed; tile_id={metal_tile_id}, content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
+            "empty *sequencer* tiled startup layout fits but wheel scroll changed; tile_id={sequencer_tile_id}, content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
         );
     }
 
@@ -8687,6 +9929,1095 @@ mod tests {
             count_stable_key_prefix(&layout, "seqv-step-cell-"),
             16,
             "sequencer buffer should render one cell per visible step"
+        );
+
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-timebase-0").is_none(),
+            "collapsed sequencer rows should not render the removed right-side timebase dropdown: {layout_summaries:#?}"
+        );
+
+        let expand =
+            find_layout_node_by_stable_key(&layout, "seqv-expand-0").unwrap_or_else(|| {
+                panic!("sequencer row expand button missing: {layout_summaries:#?}")
+            });
+        assert_eq!(expand.widget_type, "box");
+        assert!(
+            expand.rect.width.is_finite()
+                && expand.rect.width > 0.0
+                && expand.rect.height.is_finite()
+                && expand.rect.height > 0.0,
+            "sequencer row expand button should have a finite nonzero rect: {:?}",
+            expand.rect
+        );
+        assert_eq!(
+            expand.props.get("background"),
+            Some(&Value::String("seqv-ellipsis-button".to_string())),
+            "sequencer row expand control should use the SDF ellipsis widget instead of text"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_ellipsis_toggles_expanded_track_editor() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+
+        let initial_layout = editor
+            .widget_layout()
+            .expect("sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&initial_layout, "seqv-expanded-step-slider-"),
+            0,
+            "collapsed sequencer rows should not render expanded metal sliders"
+        );
+
+        let expand = find_layout_node_by_stable_key(&initial_layout, "seqv-expand-0")
+            .expect("sequencer row expand button should render");
+        let callback = expand
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("sequencer row expand button on-click");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke sequencer row expand button");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            if status.to_ascii_lowercase().contains("error") {
+                panic!("sequencer row expansion status after click: {status}");
+            }
+        }
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("seqv-expanded-track-ids")
+                .expect("read expanded track ids"),
+            Some(test_number_list(&[0.0])),
+            "ellipsis click should add the stable track id to expansion state"
+        );
+
+        let expanded_layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&expanded_layout, "seqv-step-cell-"),
+            0,
+            "expanded rows should replace the compact dot grid"
+        );
+        assert_eq!(
+            count_stable_key_prefix(&expanded_layout, "seqv-expanded-step-slider-"),
+            16,
+            "expanded row should render the metal-style step sliders"
+        );
+        assert_eq!(
+            count_stable_key_prefix(&expanded_layout, "seqv-expanded-step-toggle-"),
+            16,
+            "expanded row should render the metal-style step toggles"
+        );
+        for key in [
+            "seqv-expanded-param-tab-0-0",
+            "seqv-expanded-timebase-0",
+            "seqv-expanded-param-number-picker-0",
+            "seqv-expanded-half-0",
+            "seqv-expanded-double-0",
+            "seqv-expanded-page-0-0",
+        ] {
+            let node = find_layout_node_by_stable_key(&expanded_layout, key)
+                .unwrap_or_else(|| panic!("missing expanded control {key}"));
+            assert_finite_nonzero_rect(node, key);
+        }
+
+        let first_tab =
+            find_layout_node_by_stable_key(&expanded_layout, "seqv-expanded-param-tab-0-0")
+                .expect("expanded first tab should render");
+        let track_name = find_layout_node_by_stable_key(&expanded_layout, "seqv-select-0")
+            .expect("expanded row track-name block should render");
+        assert!(
+            first_tab.rect.col < track_name.rect.col,
+            "expanded editor should start from the row's left edge, not after the track header"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_selected_track_row_can_scroll_into_view() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 8, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 12);
+
+        let layout = editor
+            .widget_layout()
+            .expect("multi-track sequencer layout should build");
+        let row = find_layout_node_by_stable_key(&layout, "sequencer-track-7")
+            .expect("last sequencer track row should render");
+        assert!(
+            row.rect.row + row.rect.height > editor.widget_scroll_top() + 12.0,
+            "fixture should start with the last track below the viewport"
+        );
+
+        assert!(
+            editor.ensure_widget_stable_key_visible("sequencer-track-7", 1.0),
+            "ensuring the last track should adjust widget scroll"
+        );
+        let scroll_top = editor.widget_scroll_top();
+        assert!(scroll_top > 0.0);
+        assert!(
+            row.rect.row + row.rect.height <= scroll_top + 12.0,
+            "last track should be visible after scrolling, row={:?} scroll_top={scroll_top}",
+            row.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_selected_track_row_can_scroll_into_view_after_height_change() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 8, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 12);
+
+        editor.ensure_widget_stable_key_visible("sequencer-track-7", 1.0);
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 7)")
+            .expect("expand selected bottom row");
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.ensure_widget_stable_key_visible("sequencer-track-7", 1.0),
+            "expanding a bottom-row track should adjust scroll to keep the larger row visible"
+        );
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded bottom-row sequencer layout should build");
+        let row = find_layout_node_by_stable_key(&layout, "sequencer-track-7")
+            .expect("expanded last sequencer track row should render");
+        let scroll_top = editor.widget_scroll_top();
+        assert!(
+            row.rect.row + row.rect.height <= scroll_top + 12.0,
+            "expanded selected row should stay in view, row={:?} scroll_top={scroll_top}",
+            row.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_rows_keep_independent_tab_and_page_state() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 32);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .expect("expand two sequencer rows");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded two-track sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&layout, "seqv-expanded-step-slider-"),
+            32,
+            "two expanded rows should render independent metal-style slider grids"
+        );
+
+        let tab_track_0 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-0-2")
+            .expect("track 0 aux tab");
+        let tab_track_1 = find_layout_node_by_stable_key(&layout, "seqv-expanded-param-tab-1-4")
+            .expect("track 1 pan tab");
+        editor
+            .runtime_mut()
+            .invoke(
+                tab_track_0
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("track 0 tab callback"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("select track 0 aux tab");
+        editor
+            .runtime_mut()
+            .invoke(
+                tab_track_1
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("track 1 tab callback"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("select track 1 pan tab");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-param-mode 0)")
+                .unwrap(),
+            Some(Value::Number(2.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-param-mode 1)")
+                .unwrap(),
+            Some(Value::Number(4.0))
+        );
+
+        let paged_layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should rebuild after tab clicks");
+        let track_0_page_1 =
+            find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-page-0-1")
+                .expect("track 0 page 2");
+        editor
+            .runtime_mut()
+            .invoke(
+                track_0_page_1
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("track 0 page callback"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("select track 0 second page");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-current-page 0 0)")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-current-page 1 1)")
+                .unwrap(),
+            Some(Value::Number(0.0))
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_cursor_highlight_uses_current_track_cursor() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do
+                  (seqv-track-menu-click 0)
+                  (seqv-track-menu-click 1)
+                  (seqv-set-cursor-step 0 6)
+                  (set! cursor-step 3))",
+            )
+            .expect("expand rows and seed cursors");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded two-track sequencer layout should build");
+        let current_track_cursor =
+            find_layout_node_by_stable_key(&layout, "seqv-expanded-step-column-1-3")
+                .expect("current track cursor column should render");
+        assert_eq!(
+            current_track_cursor.props.get("background"),
+            Some(&Value::String("cursor-highlight".to_string())),
+            "current expanded row should highlight the shared current-track cursor"
+        );
+
+        let inactive_track_cursor =
+            find_layout_node_by_stable_key(&layout, "seqv-expanded-step-column-0-6")
+                .expect("inactive track cursor column should render");
+        assert!(
+            !matches!(
+                inactive_track_cursor.props.get("background"),
+                Some(Value::String(background)) if background == "cursor-highlight"
+            ),
+            "inactive expanded rows should not show an independent cursor highlight"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(cursor-right)")
+            .expect("move sequencer cursor right");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-current-step 1 1)")
+                .unwrap(),
+            Some(Value::Number(4.0)),
+            "arrow movement should move the expanded editor cursor for the current track"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_keyboard_shortcuts_target_current_track() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (seqv-set-param-mode 0 4)
+                  (seqv-set-param-mode 1 0)
+                  (set! selected-bus 1)
+                  (seqv-set-track-expanded 0 true)
+                  (seqv-set-track-expanded 1 true))
+                "#,
+            )
+            .expect("seed sequencer shortcut state");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-param-mode 0)")
+                .unwrap(),
+            Some(Value::Number(4.0)),
+            "parameter shortcuts should not mutate inactive expanded rows"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-param-mode 1)")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "duration shortcut should select duration for the current track"
+        );
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(Value::Number(1.0)),
+            "plain parameter shortcuts should not disturb bus selection"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_row_controls_activate_target_track_before_mutating() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-clear-selection", move |_args, _ctx| {
+                    calls.lock().unwrap().push("clear".to_string());
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-track", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(track)) => *track as usize,
+                        _ => usize::MAX,
+                    };
+                    calls.lock().unwrap().push(format!("track:{track}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param", move |args, _ctx| {
+                    let step = match args.first() {
+                        Some(Value::Number(step)) => *step as usize,
+                        _ => usize::MAX,
+                    };
+                    let param = match args.get(1) {
+                        Some(Value::Keyword(param)) => param.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("param:{step}:{param}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-double-track-pattern", move |_args, _ctx| {
+                    calls.lock().unwrap().push("double".to_string());
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-halve-track-pattern", move |_args, _ctx| {
+                    calls.lock().unwrap().push("halve".to_string());
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 1)")
+            .expect("expand second sequencer row");
+        editor.refresh_runtime_side_effects();
+        calls.lock().unwrap().clear();
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded second-row sequencer layout should build");
+        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-1-0")
+            .expect("second row first step slider");
+        editor
+            .runtime_mut()
+            .invoke(
+                slider
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("expanded row slider on-change"),
+                vec![Value::Number(0.42)],
+            )
+            .expect("change inactive expanded row slider");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["clear", "track:1", "param:0:velocity"],
+            "slider edits on an inactive expanded row should activate that row before mutating"
+        );
+
+        calls.lock().unwrap().clear();
+        let double_button = find_layout_node_by_stable_key(&layout, "seqv-expanded-double-1")
+            .expect("second row double button");
+        editor
+            .runtime_mut()
+            .invoke(
+                double_button
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("expanded row double on-click"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("click expanded row double");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["clear", "track:1", "double"],
+            "double pattern should target the expanded row's track"
+        );
+
+        calls.lock().unwrap().clear();
+        let half_button = find_layout_node_by_stable_key(&layout, "seqv-expanded-half-1")
+            .expect("second row half button");
+        editor
+            .runtime_mut()
+            .invoke(
+                half_button
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("expanded row half on-click"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("click expanded row half");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["clear", "track:1", "halve"],
+            "halve pattern should target the expanded row's track"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_current_row_slider_uses_plock_path_for_selected_step() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_bool_list(&[
+                true, false, false, false, false, false, false, false, false, false, false, false,
+                false, false, false, false,
+            ]),
+        );
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param-plock", move |args, _ctx| {
+                    let param = match args.first() {
+                        Some(Value::Keyword(param)) => param.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("plock:{param}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand current sequencer row");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should build");
+        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+            .expect("current row selected step slider");
+        editor
+            .runtime_mut()
+            .invoke(
+                slider
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("expanded current row slider on-change"),
+                vec![Value::Number(0.77)],
+            )
+            .expect("change selected current row slider");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["plock:velocity"],
+            "selected current-row slider edits should use the p-lock path"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_playhead_uses_per_track_active_fields() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand current sequencer row");
+        editor.refresh_runtime_side_effects();
+
+        let initial_layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should build");
+        let step_0 = find_layout_node_by_stable_key(
+            &initial_layout,
+            "seqv-expanded-step-playhead-probe-0-0",
+        )
+        .expect("expanded step 0 playhead probe");
+        let step_1 = find_layout_node_by_stable_key(
+            &initial_layout,
+            "seqv-expanded-step-playhead-probe-0-1",
+        )
+        .expect("expanded step 1 playhead probe");
+        assert!(layout_tree_has_bool_prop(step_0, "active", true));
+        assert!(layout_tree_has_bool_prop(step_1, "active", false));
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_playhead_active_field(0, 0),
+            Value::Bool(false),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_playhead_active_field(0, 1),
+            Value::Bool(true),
+        );
+        editor.refresh_runtime_side_effects();
+        let moved_layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should rebuild after playhead move");
+        let moved_step_0 =
+            find_layout_node_by_stable_key(&moved_layout, "seqv-expanded-step-playhead-probe-0-0")
+                .expect("expanded step 0 playhead probe after move");
+        let moved_step_1 =
+            find_layout_node_by_stable_key(&moved_layout, "seqv-expanded-step-playhead-probe-0-1")
+                .expect("expanded step 1 playhead probe after move");
+        assert!(layout_tree_has_bool_prop(moved_step_0, "active", false));
+        assert!(layout_tree_has_bool_prop(moved_step_1, "active", true));
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_playhead_tick_does_not_rebuild_rows() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 32);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor
+            .runtime_mut()
+            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .expect("expand two sequencer rows");
+        editor.refresh_runtime_side_effects();
+        editor
+            .widget_layout()
+            .expect("expanded two-row sequencer layout should build");
+
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        for track in 0..2 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, 0),
+                Value::Bool(false),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, 1),
+                Value::Bool(true),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_row_field(track, 0),
+                Value::Number(1.0),
+            );
+        }
+        editor.runtime_mut().run_reactive_cycle();
+        let pending = editor.runtime_mut().take_pending_buffer_widget_trees();
+        let pending_summary = pending
+            .iter()
+            .map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(tree) => {
+                    let tree_debug = format!("{:?}", tree.tree);
+                    let preview = tree_debug.chars().take(160).collect::<String>();
+                    format!(
+                        "full target={:?} expanded-row={} collapsed-row={} playhead-probe={} tree={preview}",
+                        tree.target,
+                        value_contains_string(&tree.tree, "seqv-expanded-step-slider-"),
+                        value_contains_string(&tree.tree, "seqv-playhead-row-"),
+                        value_contains_string(&tree.tree, "seqv-expanded-step-playhead-probe-")
+                    )
+                }
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree {
+                    target,
+                    subtree_root_id,
+                    tree,
+                    ..
+                } => {
+                    let tree_debug = format!("{tree:?}");
+                    let preview = tree_debug.chars().take(160).collect::<String>();
+                    format!(
+                        "subtree#{subtree_root_id} target={target:?} expanded-row={} collapsed-row={} playhead-probe={} tree={preview}",
+                        value_contains_string(tree, "seqv-expanded-step-slider-"),
+                        value_contains_string(tree, "seqv-playhead-row-"),
+                        value_contains_string(tree, "seqv-expanded-step-playhead-probe-")
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let sequencer_updates = pending
+            .iter()
+            .filter(|pending| {
+                matches!(
+                    pending.target(),
+                    eseqlisp::vm::EffectTarget::BufferName(name) if name == "*sequencer*"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            sequencer_updates.is_empty(),
+            "per-step playhead ticks should update bound props without rebuilding sequencer rows; got {} sequencer updates out of {} pending updates: {pending_summary:?}",
+            sequencer_updates.len(),
+            pending.len()
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_selection_recolors_after_empty_selection() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand current sequencer row");
+        editor.refresh_runtime_side_effects();
+
+        let initial_layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should build");
+        let slot_0_label =
+            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+                .expect("initial slot 0 label");
+        assert_eq!(
+            slot_0_label.props.get("color"),
+            Some(&Value::Keyword("dim".to_string())),
+            "empty selection should render the step label as dim"
+        );
+        let _ = editor.take_dirty_widget_ids();
+        let before_revision = editor.widget_layout_revision();
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_bool_list(&[
+                true, false, false, false, false, false, false, false, false, false, false, false,
+                false, false, false, false,
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+
+        let trace = editor
+            .runtime()
+            .last_ui_invalidation_trace()
+            .expect("selection invalidation trace");
+        assert_ne!(
+            trace.relayout_mode.as_deref(),
+            Some("full"),
+            "selection recolor should not require full active-tree layout: {trace:?}"
+        );
+        assert_eq!(
+            editor.widget_layout_revision(),
+            before_revision,
+            "selection recolor should reuse active layout"
+        );
+
+        let selected_layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should still exist");
+        let slot_0_label =
+            find_layout_node_by_stable_key(&selected_layout, "seqv-expanded-step-label-0-0")
+                .expect("selected slot 0 label");
+        assert_eq!(
+            slot_0_label.props.get("color"),
+            Some(&Value::Keyword("yellow".to_string())),
+            "selection changes from an initially empty selection should recolor step labels"
+        );
+        let slot_0_toggle =
+            find_layout_node_by_stable_key(&selected_layout, "seqv-expanded-step-toggle-0-0")
+                .expect("selected slot 0 toggle");
+        assert!(
+            layout_tree_has_bool_prop(slot_0_toggle, "selected", true),
+            "selection changes should also update the expanded toggle selected prop"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_page_boundary_reuses_active_subtree_layout() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 32);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playing", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "auto-follow", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .expect("expand two sequencer rows");
+        editor.refresh_runtime_side_effects();
+        let initial_layout = editor
+            .widget_layout()
+            .expect("expanded two-row sequencer layout should build");
+        assert_eq!(
+            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+                .and_then(|node| node.props.get("text")),
+            Some(&Value::String("1".to_string())),
+            "slot 0 should initially show absolute step 1"
+        );
+        assert_eq!(
+            find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
+                .and_then(|node| node.props.get("h-align")),
+            Some(&Value::Keyword("center".to_string())),
+            "fixed-width step labels should center their text under the toggle"
+        );
+        let _ = editor.take_dirty_widget_ids();
+        let before_revision = editor.widget_layout_revision();
+
+        for track in 0..2 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_page_field(track),
+                Value::Number(1.0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, 0),
+                Value::Bool(false),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_active_field(track, 16),
+                Value::Bool(true),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_row_field(track, 0),
+                Value::Number(-1.0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_playhead_row_field(track, 1),
+                Value::Number(0.0),
+            );
+        }
+        editor.runtime_mut().run_reactive_cycle();
+
+        let trace = editor
+            .runtime()
+            .last_ui_invalidation_trace()
+            .expect("page-boundary invalidation trace");
+        assert_eq!(
+            trace.relayout_mode.as_deref(),
+            Some("subtree-reuse"),
+            "page-boundary updates should reuse active subtree layout: {trace:?}"
+        );
+        assert_eq!(trace.relayout_failure_reason, None);
+        assert_eq!(trace.subtree_failure_reason, None);
+        assert_eq!(trace.full_buffer_reruns, 0);
+        assert_eq!(trace.subtree_reruns, 2);
+        assert_eq!(
+            editor.widget_layout_revision(),
+            before_revision,
+            "page-boundary subtree reuse should not bump the active layout revision"
+        );
+
+        let paged_layout = editor
+            .widget_layout()
+            .expect("paged expanded sequencer layout should still exist");
+        let slot_0_label =
+            find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-step-label-0-0")
+                .expect("track 0 slot 0 label after page flip");
+        assert_finite_nonzero_rect(slot_0_label, "track 0 slot 0 label after page flip");
+        assert_eq!(
+            slot_0_label.props.get("text"),
+            Some(&Value::String("17".to_string())),
+            "stable slot 0 should now display absolute step 17"
+        );
+        let slot_0_playhead =
+            find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-step-playhead-probe-0-0")
+                .expect("track 0 slot 0 playhead after page flip");
+        assert!(
+            layout_tree_has_bool_prop(slot_0_playhead, "active", true),
+            "slot 0 playhead binding should retarget to absolute step 16"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_timebase_uses_default_or_selected_step_plock_path() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 20);
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let has_selection = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-track", move |args, _ctx| {
+                    let track = match args.first() {
+                        Some(Value::Number(track)) => track.to_string(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("track:{track}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        editor
+            .runtime_mut()
+            .register_native("seq-pause-auto-follow", |_args, _ctx| Ok(Value::Bool(true)));
+        {
+            let has_selection = Arc::clone(&has_selection);
+            editor
+                .runtime_mut()
+                .register_native("seq-has-selection?", move |_args, _ctx| {
+                    Ok(Value::Bool(has_selection.load(Ordering::Relaxed)))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-timebase", move |args, _ctx| {
+                    let label = match args.first() {
+                        Some(Value::String(label)) => label.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("default:{label}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-plock-timebase", move |args, _ctx| {
+                    let label = match args.first() {
+                        Some(Value::String(label)) => label.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("plock:{label}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand sequencer row");
+        editor.refresh_runtime_side_effects();
+        calls.lock().unwrap().clear();
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-timebase-0").is_none(),
+            "collapsed-row timebase dropdown should stay removed"
+        );
+        let timebase = find_layout_node_by_stable_key(&layout, "seqv-expanded-timebase-0")
+            .expect("expanded sequencer row timebase should render");
+        let callback = timebase
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("expanded sequencer row timebase on-change");
+
+        editor
+            .runtime_mut()
+            .invoke(callback.clone(), vec![Value::String("8".to_string())])
+            .expect("invoke expanded sequencer row default timebase");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["track:0", "default:8"],
+            "without selected steps the expanded row dropdown should update the track default"
+        );
+
+        calls.lock().unwrap().clear();
+        has_selection.store(true, Ordering::Relaxed);
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::String("4T".to_string())])
+            .expect("invoke expanded sequencer row selected-step timebase");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["track:0", "plock:4T"],
+            "with selected steps on the current expanded row the dropdown should p-lock timebase"
         );
     }
 
@@ -8997,7 +11328,7 @@ mod tests {
                     })]),
                 ),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
-                ("track-pans", test_list(vec![Value::Number(0.0)])),
+                ("track-mixer-pans", test_list(vec![Value::Number(0.0)])),
                 (
                     "track-outputs",
                     test_list(vec![Value::String("main".to_string())]),
@@ -9014,40 +11345,12 @@ mod tests {
                 (
                     "track-bus-sends",
                     test_list(vec![test_list(vec![
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "bus-idx".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map.insert(
-                                "name".to_string(),
-                                Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                            );
-                            map.insert(
-                                "amount".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map
-                        }),
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "bus-idx".to_string(),
-                                Rc::new(RefCell::new(Value::Number(1.0))),
-                            );
-                            map.insert(
-                                "name".to_string(),
-                                Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                            );
-                            map.insert(
-                                "amount".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map
-                        }),
+                        test_track_bus_send(0, "Bus A", 0.0),
+                        test_track_bus_send(1, "Bus B", 0.0),
                     ])]),
                 ),
+                ("track-0-bus-0-send", Value::Number(0.0)),
+                ("track-0-bus-1-send", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
@@ -9156,7 +11459,7 @@ mod tests {
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
         editor.runtime_mut().set_reactive(
             "SEQ",
-            "track-pans",
+            "track-mixer-pans",
             test_list(vec![Value::Number(-0.35)]),
         );
         editor.runtime_mut().run_reactive_cycle();
@@ -9974,6 +12277,941 @@ mod tests {
             "Reverb fallback param grid should have visible labels, mix={:?} size={:?}",
             mix.rect,
             size.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_without_metadata_uses_flat_fallback() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map("mix", 0, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("size", 1, 0.2, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 2, 1.0, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("flat param grid layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-group-").is_none(),
+            "flat fallback should not render metadata group panels"
+        );
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let mix = find_layout_node_by_text(&layout, "mix")
+            .unwrap_or_else(|| panic!("mix label; layout={layout_summaries:#?}"));
+        let size = find_layout_node_by_text(&layout, "size")
+            .unwrap_or_else(|| panic!("size label; layout={layout_summaries:#?}"));
+        assert!(
+            mix.rect.width > 0.5 && size.rect.width > 0.5,
+            "flat fallback labels should remain visible, mix={:?} size={:?}",
+            mix.rect,
+            size.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_groups_metadata_params_into_visible_panels() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "osc_gain",
+                0,
+                0.5,
+                0.0,
+                1.0,
+                Some("osc"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_cutoff",
+                1,
+                1000.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("mix", 2, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 3, 1.0, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("metadata param grid layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        for (debug_name, control_name) in [
+            ("fx-param-group-osc", "fx-param-compact-knob-osc_gain"),
+            (
+                "fx-param-group-filter",
+                "fx-param-compact-knob-filter_cutoff",
+            ),
+            ("fx-param-group-misc", "fx-param-compact-knob-mix"),
+        ] {
+            let panel = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{debug_name}; layout={layout_summaries:#?}"));
+            assert_eq!(
+                panel
+                    .props
+                    .get("background-color")
+                    .cloned(),
+                Some(Value::Keyword("instrument-group-bg".to_string())),
+                "{debug_name} should use the softer group background rather than the dark control background"
+            );
+            let group_label =
+                find_layout_node_by_text(panel, debug_name.trim_start_matches("fx-param-group-"))
+                    .unwrap_or_else(|| {
+                        panic!("group label inside {debug_name}; layout={layout_summaries:#?}")
+                    });
+            assert!(
+                group_label.rect.col > panel.rect.col + 0.25,
+                "{debug_name} label should be inset from the panel edge, panel={:?} label={:?}",
+                panel.rect,
+                group_label.rect
+            );
+            let control =
+                find_layout_node_by_debug_name(panel, control_name).unwrap_or_else(|| {
+                    panic!("{control_name} inside {debug_name}; layout={layout_summaries:#?}")
+                });
+            let knob =
+                find_layout_node_by_widget_type(control, "knob-number").unwrap_or_else(|| {
+                    panic!("knob-number inside {control_name}; layout={layout_summaries:#?}")
+                });
+            assert!(
+                panel.rect.width > 1.0
+                    && panel.rect.width <= 13.0
+                    && panel.rect.height > 1.0
+                    && panel.rect.height <= 3.1
+                    && control.rect.width > 1.0
+                    && control.rect.height > 1.0
+                    && knob.rect.width > 1.0
+                    && knob.rect.height > 1.0,
+                "{debug_name} and {control_name} should have compact visible measured rects, panel={:?} control={:?} knob={:?}",
+                panel.rect,
+                control.rect,
+                knob.rect
+            );
+        }
+        assert_eq!(
+            count_widget_type(&layout, "knob-number"),
+            3,
+            "metadata grouped numeric params should render as compact knob rows"
+        );
+    }
+
+    #[test]
+    fn param_grid_group_rows_fit_control_count_width() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_env",
+                0,
+                1.0,
+                0.0,
+                1.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "hires",
+                1,
+                2.0,
+                0.0,
+                4.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "hicut",
+                2,
+                100.0,
+                0.0,
+                127.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "res",
+                3,
+                2.24,
+                0.0,
+                8.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "cutoff",
+                4,
+                7037.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("gain", 5, 0.5, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("fit-width row layout");
+        assert_finite_layout_tree(&layout);
+        let filter_panel = find_layout_node_by_debug_name(&layout, "fx-param-group-filter")
+            .expect("filter group panel");
+        let misc_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-misc").expect("misc panel");
+        assert!(
+            filter_panel.rect.width > 38.0 && filter_panel.rect.width < 40.0,
+            "five-control group row should fit its controls instead of using a wide default, got {:?}",
+            filter_panel.rect
+        );
+        assert!(
+            misc_panel.rect.width > 12.0 && misc_panel.rect.width <= 13.0,
+            "one-control misc row should use the compact minimum width, got {:?}",
+            misc_panel.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_group_rows_wrap_to_at_most_two_control_rows() {
+        let mut params = Vec::new();
+        for idx in 0..9 {
+            let name = format!("wide_{idx}");
+            params.push(Value::Map(test_param_map_with_ui_metadata(
+                &name,
+                idx,
+                idx as f64,
+                0.0,
+                10.0,
+                Some("wide"),
+                None,
+                None,
+            )));
+        }
+        let editor = param_grid_test_editor(params);
+        let layout = editor.widget_layout().expect("two-row group layout");
+        assert_finite_layout_tree(&layout);
+        let panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-wide").expect("wide group");
+        assert!(
+            panel.rect.height > 5.4 && panel.rect.height < 5.9,
+            "nine controls should wrap into two larger knob rows, not three or more, got {:?}",
+            panel.rect
+        );
+        assert!(
+            panel.rect.width > 38.0 && panel.rect.width < 40.0,
+            "nine controls should use the widest five-control row width, got {:?}",
+            panel.rect
+        );
+    }
+
+    #[test]
+    fn param_grid_packs_group_panels_into_three_row_columns() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_cutoff",
+                0,
+                500.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "fm_amount",
+                1,
+                2.0,
+                0.0,
+                4.0,
+                Some("fm"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "osc_level",
+                2,
+                0.7,
+                0.0,
+                1.0,
+                Some("osc"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("gain", 3, 0.5, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("three-row panel layout");
+        assert_finite_layout_tree(&layout);
+        let filter_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-filter").expect("filter panel");
+        let fm_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-fm").expect("fm panel");
+        let osc_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-osc").expect("osc panel");
+        let misc_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-misc").expect("misc panel");
+        assert!(
+            (filter_panel.rect.col - fm_panel.rect.col).abs() < 0.1
+                && fm_panel.rect.row > filter_panel.rect.row,
+            "first two panels should stack in the first column, filter={:?} fm={:?}",
+            filter_panel.rect,
+            fm_panel.rect
+        );
+        assert!(
+            (filter_panel.rect.col - osc_panel.rect.col).abs() < 0.1
+                && osc_panel.rect.row > fm_panel.rect.row,
+            "third panel should stay in the first column, fm={:?} osc={:?}",
+            fm_panel.rect,
+            osc_panel.rect
+        );
+        assert!(
+            misc_panel.rect.col > filter_panel.rect.col + filter_panel.rect.width
+                && (misc_panel.rect.row - filter_panel.rect.row).abs() < 0.1,
+            "fourth panel should start a new column, filter={:?} misc={:?}",
+            filter_panel.rect,
+            misc_panel.rect
+        );
+    }
+
+    #[test]
+    fn custom_audio_effect_fallback_groups_metadata_params_without_envelope_ui() {
+        let editor = custom_audio_fx_body_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "drive",
+                0,
+                0.4,
+                0.0,
+                1.0,
+                Some("tone"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "cutoff",
+                1,
+                1200.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "res",
+                2,
+                0.35,
+                0.0,
+                1.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("mix", 3, 0.5, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 4, 1.0, 0.0, 1.0)),
+        ]);
+        let layout = editor
+            .widget_layout()
+            .expect("custom audio effect metadata fallback layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        for (debug_name, control_name) in [
+            ("fx-param-group-tone", "fx-param-compact-knob-drive"),
+            ("fx-param-group-filter", "fx-param-compact-knob-cutoff"),
+            ("fx-param-group-misc", "fx-param-compact-knob-mix"),
+        ] {
+            let panel = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{debug_name}; layout={layout_summaries:#?}"));
+            let control =
+                find_layout_node_by_debug_name(panel, control_name).unwrap_or_else(|| {
+                    panic!("{control_name} inside {debug_name}; layout={layout_summaries:#?}")
+                });
+            assert_eq!(
+                panel.props.get("background-color").cloned(),
+                Some(Value::Keyword("instrument-group-bg".to_string())),
+                "{debug_name} should use the same subtle grouped panel surface in custom effects"
+            );
+            assert!(
+                panel.rect.width > 1.0
+                    && panel.rect.height > 1.0
+                    && control.rect.width > 1.0
+                    && control.rect.height > 1.0,
+                "{debug_name} and {control_name} should have visible measured rects, panel={:?} control={:?}",
+                panel.rect,
+                control.rect
+            );
+        }
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            0,
+            "custom effect metadata grouping should not introduce envelope UI"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "custom-audio-fx-wrapper").is_none(),
+            "custom effect without ui.lisp should use the metadata fallback"
+        );
+    }
+
+    #[test]
+    fn param_grid_complete_adsr_metadata_renders_editor_and_updates_roles() {
+        let mut editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_attack",
+                0,
+                5.0,
+                1.0,
+                1000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_decay",
+                1,
+                120.0,
+                1.0,
+                2000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_sustain",
+                2,
+                0.7,
+                0.0,
+                1.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("sustain"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_release",
+                3,
+                120.0,
+                1.0,
+                3000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("release"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_level",
+                4,
+                0.8,
+                0.0,
+                1.0,
+                Some("amp"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("enabled", 5, 1.0, 0.0, 1.0)),
+        ]);
+        let layout = editor.widget_layout().expect("complete ADSR grid layout");
+        assert_finite_layout_tree(&layout);
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            1,
+            "complete envelope should render exactly one adsr-editor"
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "amp_attac").is_none()
+                && find_layout_node_by_text(&layout, "amp_decay").is_none()
+                && find_layout_node_by_text(&layout, "amp_susta").is_none()
+                && find_layout_node_by_text(&layout, "amp_relea").is_none(),
+            "complete envelope role params should be consumed from standalone rows"
+        );
+        let env_editor = find_layout_node_by_widget_type(&layout, "adsr-editor")
+            .expect("complete envelope adsr-editor");
+        let env_panel = find_layout_node_by_debug_name(&layout, "fx-param-env-amp_env")
+            .expect("complete envelope panel");
+        assert!(
+            env_panel.rect.width > 8.0
+                && env_panel.rect.height > 8.0
+                && env_editor.rect.width > 8.0
+                && env_editor.rect.height > 2.0
+                && env_editor.rect.height < 4.0,
+            "ADSR panel should fill the fallback UI height while keeping a compact visible editor, panel={:?} editor={:?}",
+            env_panel.rect,
+            env_editor.rect
+        );
+        let env_label = find_layout_node_by_text(&layout, "amp_env")
+            .expect("selected envelope label should identify the rendered ADSR");
+        assert!(
+            env_label.rect.width > 1.0 && env_label.rect.height > 0.2,
+            "selected envelope label should be visible, got {:?}",
+            env_label.rect
+        );
+        for debug_name in [
+            "fx-param-adsr-number-atk",
+            "fx-param-adsr-number-dec",
+            "fx-param-adsr-number-sus",
+            "fx-param-adsr-number-rel",
+        ] {
+            let number = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{debug_name} should render below ADSR editor"));
+            assert!(
+                number.rect.width > 1.0 && number.rect.height > 0.5,
+                "{debug_name} should have a visible measured rect, got {:?}",
+                number.rect
+            );
+        }
+        let callback = env_editor
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("adsr-editor on-change");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Map(HashMap::from([
+                    (
+                        "attack".to_string(),
+                        Rc::new(RefCell::new(Value::Number(11.0))),
+                    ),
+                    (
+                        "decay".to_string(),
+                        Rc::new(RefCell::new(Value::Number(220.0))),
+                    ),
+                    (
+                        "sustain".to_string(),
+                        Rc::new(RefCell::new(Value::Number(0.42))),
+                    ),
+                    (
+                        "release".to_string(),
+                        Rc::new(RefCell::new(Value::Number(330.0))),
+                    ),
+                ]))],
+            )
+            .expect("invoke ADSR metadata on-change");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 4, "commands={commands:?}");
+        for (command, (expected_idx, expected_value)) in
+            commands
+                .iter()
+                .zip([(0.0, 11.0), (1.0, 220.0), (2.0, 0.42), (3.0, 330.0)])
+        {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-effect-param");
+                    let Value::Map(payload) = payload else {
+                        panic!("set-effect-param payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("slot-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(0.0))
+                    );
+                    assert_eq!(
+                        payload.get("param-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_idx))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                }
+                other => panic!("expected set-effect-param host command, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn param_grid_multiple_complete_envelopes_shows_selected_group_envelope_only() {
+        let mut editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_attack",
+                0,
+                0.0,
+                0.0,
+                1000.0,
+                Some("filter"),
+                Some("filter_env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_decay",
+                1,
+                42.0,
+                0.0,
+                2000.0,
+                Some("filter"),
+                Some("filter_env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_sustain",
+                2,
+                0.0,
+                0.0,
+                1.0,
+                Some("filter"),
+                Some("filter_env"),
+                Some("sustain"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_release",
+                3,
+                550.0,
+                0.0,
+                5000.0,
+                Some("filter"),
+                Some("filter_env"),
+                Some("release"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_cutoff",
+                4,
+                900.0,
+                20.0,
+                20000.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "filter_resonance",
+                5,
+                0.45,
+                0.0,
+                1.0,
+                Some("filter"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_attack",
+                6,
+                5.0,
+                1.0,
+                1000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_decay",
+                7,
+                120.0,
+                1.0,
+                2000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_sustain",
+                8,
+                0.8,
+                0.0,
+                1.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("sustain"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_release",
+                9,
+                180.0,
+                1.0,
+                5000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("release"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_level",
+                10,
+                0.8,
+                0.0,
+                1.0,
+                Some("amp"),
+                None,
+                None,
+            )),
+            Value::Map(test_param_map("gain", 11, 0.5, 0.0, 1.0)),
+        ]);
+
+        let layout = editor.widget_layout().expect("multi envelope grid layout");
+        assert_finite_layout_tree(&layout);
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            1,
+            "only one metadata envelope should render at a time"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-filter_env").is_none(),
+            "non-default envelope should not be selected initially"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-amp_env").is_some(),
+            "amp envelope should be selected by default even when amp is not the first group"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-filter_cutoff")
+                .is_some()
+                && find_layout_node_by_debug_name(
+                    &layout,
+                    "fx-param-compact-knob-filter_resonance"
+                )
+                .is_some()
+                && find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-amp_level")
+                    .is_some()
+                && find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-gain").is_some(),
+            "group panels should keep non-envelope controls visible"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-filter_attack")
+                .is_none()
+                && find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-amp_attack")
+                    .is_none(),
+            "envelope role params should be consumed by the shared selected ADSR"
+        );
+
+        let filter_panel = find_layout_node_by_debug_name(&layout, "fx-param-group-filter")
+            .expect("filter group panel");
+        let callback = filter_panel
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("filter group panel click callback");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Bool(false)])
+            .expect("select filter group");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("multi envelope grid layout after selecting filter");
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            1,
+            "selecting another group should still render exactly one envelope"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-filter_env").is_some(),
+            "selected filter group envelope should render"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-amp_env").is_none(),
+            "default amp envelope should be hidden after selecting filter"
+        );
+
+        let misc_panel =
+            find_layout_node_by_debug_name(&layout, "fx-param-group-misc").expect("misc panel");
+        let callback = misc_panel
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("misc panel click callback");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Bool(false)])
+            .expect("select misc group");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("multi envelope grid layout after selecting misc");
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-filter_env").is_none(),
+            "clicking a non-envelope panel should leave the group envelope"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-amp_env").is_some(),
+            "clicking a non-envelope panel should return to the default amp envelope"
+        );
+    }
+
+    #[test]
+    fn param_grid_envelope_only_default_amp_group_hides_empty_panel() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "attack",
+                0,
+                5.0,
+                0.0,
+                1000.0,
+                Some("amp"),
+                Some("amp-env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "decay",
+                1,
+                120.0,
+                1.0,
+                2000.0,
+                Some("amp"),
+                Some("amp-env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "sustain",
+                2,
+                0.8,
+                0.0,
+                1.0,
+                Some("amp"),
+                Some("amp-env"),
+                Some("sustain"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "release",
+                3,
+                180.0,
+                1.0,
+                5000.0,
+                Some("amp"),
+                Some("amp-env"),
+                Some("release"),
+            )),
+            Value::Map(test_param_map("gain", 4, 0.5, 0.0, 1.0)),
+        ]);
+        let layout = editor
+            .widget_layout()
+            .expect("envelope-only amp default layout");
+        assert_finite_layout_tree(&layout);
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            1,
+            "complete amp envelope should render as the default selected ADSR"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-env-amp-env").is_some(),
+            "default amp envelope should render"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-group-amp").is_none(),
+            "envelope-only amp group should not render an empty control panel"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fx-param-group-misc").is_some()
+                && find_layout_node_by_debug_name(&layout, "fx-param-compact-knob-gain").is_some(),
+            "ungrouped controls should still render in the misc row"
+        );
+    }
+
+    #[test]
+    fn param_grid_incomplete_envelope_metadata_falls_back_to_rows() {
+        let editor = param_grid_test_editor(vec![
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_attack",
+                0,
+                5.0,
+                1.0,
+                1000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("attack"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_decay",
+                1,
+                120.0,
+                1.0,
+                2000.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("decay"),
+            )),
+            Value::Map(test_param_map_with_ui_metadata(
+                "amp_sustain",
+                2,
+                0.7,
+                0.0,
+                1.0,
+                Some("amp"),
+                Some("amp_env"),
+                Some("sustain"),
+            )),
+        ]);
+        let layout = editor
+            .widget_layout()
+            .expect("incomplete envelope grid layout");
+        assert_finite_layout_tree(&layout);
+        assert_eq!(
+            count_widget_type(&layout, "adsr-editor"),
+            0,
+            "incomplete envelope should not render an adsr-editor"
+        );
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        for control_name in [
+            "fx-param-compact-knob-amp_attack",
+            "fx-param-compact-knob-amp_decay",
+            "fx-param-compact-knob-amp_sustain",
+        ] {
+            let node = find_layout_node_by_debug_name(&layout, control_name)
+                .unwrap_or_else(|| panic!("{control_name}; layout={layout_summaries:#?}"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 1.0,
+                "incomplete envelope role {control_name} should render as a compact control, got {:?}",
+                node.rect
+            );
+        }
+        assert_eq!(
+            count_widget_type(&layout, "knob-number"),
+            3,
+            "incomplete envelope role params should render as compact knobs"
+        );
+    }
+
+    #[test]
+    fn custom_instrument_ui_still_wins_over_metadata_fallback() {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Map(
+                test_param_map_with_ui_metadata(
+                    "amp_attack",
+                    0,
+                    5.0,
+                    1.0,
+                    1000.0,
+                    Some("amp"),
+                    Some("amp_env"),
+                    Some("attack"),
+                ),
+            )]))),
+        );
+        editor
+            .runtime_mut()
+            .register_reactive("TEST", vec![("inst", Value::Map(inst))], true);
+        load_param_grid_test_lisp(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def custom-instrument-synth-ui (inst)
+                  (label "custom metadata ui" :font-size 10 :bg :transparent))
+                (load "metal-seq-fx/panel-bodies.lisp")
+                (effect-buffer "*custom-metadata-ui-test*" (instrument-synth-panel-body TEST.inst))
+                "#,
+            )
+            .expect("load custom metadata ui test");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom metadata ui test status after refresh: {status}");
+        }
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*custom-metadata-ui-test*")
+            .expect("custom metadata ui test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(80, 12);
+        let layout = editor.widget_layout().expect("custom metadata ui layout");
+        assert!(
+            find_layout_node_by_debug_name(&layout, "custom-synth-wrapper").is_some(),
+            "custom wrapper should render instead of fallback"
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "custom metadata ui").is_some(),
+            "custom UI body should be visible"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "fallback-synth-wrapper").is_none()
+                && find_layout_node_by_debug_name(&layout, "fx-param-group-").is_none(),
+            "metadata fallback should not render when custom UI is present"
         );
     }
 
@@ -11095,7 +14333,7 @@ mod tests {
                     ),
                     (
                         "label".to_string(),
-                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
                     ),
                 ])),
                 Value::Map(HashMap::from([
@@ -11105,7 +14343,7 @@ mod tests {
                     ),
                     (
                         "label".to_string(),
-                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 2".to_string()))),
                     ),
                 ])),
             ]))),
@@ -11145,7 +14383,23 @@ mod tests {
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
-                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            29,
+                            1.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
                     ),
                     (
                         "params".to_string(),
@@ -11161,7 +14415,23 @@ mod tests {
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
-                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 2".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            19,
+                            2.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
                     ),
                     (
                         "params".to_string(),
@@ -11253,8 +14523,10 @@ mod tests {
             .eval_str("(defstate lower-panel-buffer \"*fx*\")")
             .expect("install lower panel state for mods toggle action");
         let grid_src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
+        let effect_panels_src = std::fs::read_to_string("metal-seq-fx/effect-panels.lisp")
+            .expect("read effect panels lisp");
         let toggle_action_src = lisp_def_slice(
-            &src,
+            &effect_panels_src,
             "(def instrument-toggle-mods-view",
             "(def instrument-mods-toggle-button",
         );
@@ -11309,7 +14581,7 @@ mod tests {
             "selector must have a nonzero rect: {:?}",
             selector.rect
         );
-        assert!(find_layout_node_by_text(&layout, "LFO 1").is_some());
+        assert!(find_layout_node_by_text(&layout, "Mod 1").is_some());
         let lfo_editor = find_layout_node_by_debug_name(&layout, "instrument-lfo-source-editor")
             .expect("selected LFO source editor should render");
         assert!(
@@ -11386,19 +14658,19 @@ mod tests {
         assert_set_instrument_param(&commands[1], 13.0, 0.75);
 
         editor.set_active_buffer(fx_id);
-        let env_layout = editor.widget_layout().expect("ENV 1 source editor layout");
+        let env_layout = editor.widget_layout().expect("Mod 2 source editor layout");
         let env_editor = find_layout_node_by_widget_type(&env_layout, "adsr-editor")
-            .expect("ENV 1 source editor should use an adsr-editor widget");
+            .expect("Mod 2 source editor should use an adsr-editor widget");
         assert!(
             env_editor.rect.width > 8.0 && env_editor.rect.height > 1.5,
-            "ENV 1 adsr-editor should have a visible measured rect, got {:?}",
+            "Mod 2 adsr-editor should have a visible measured rect, got {:?}",
             env_editor.rect
         );
         let env_callback = env_editor
             .props
             .get("on-change")
             .cloned()
-            .expect("ENV 1 adsr-editor should expose on-change");
+            .expect("Mod 2 adsr-editor should expose on-change");
         editor
             .runtime_mut()
             .invoke(
@@ -11422,7 +14694,7 @@ mod tests {
                     ),
                 ]))],
             )
-            .expect("edit ENV 1 source ADSR");
+            .expect("edit Mod 2 source ADSR");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 4, "commands={commands:?}");
         assert_set_instrument_param(&commands[0], 20.0, 11.0);
@@ -11575,7 +14847,7 @@ mod tests {
                     ),
                     (
                         "label".to_string(),
-                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
                     ),
                 ])),
                 Value::Map(HashMap::from([
@@ -11585,7 +14857,7 @@ mod tests {
                     ),
                     (
                         "label".to_string(),
-                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 2".to_string()))),
                     ),
                 ])),
             ]))),
@@ -11596,7 +14868,23 @@ mod tests {
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
-                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            39,
+                            1.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
                     ),
                     (
                         "params".to_string(),
@@ -11655,7 +14943,23 @@ mod tests {
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
-                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                        Rc::new(RefCell::new(Value::String("Mod 2".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            29,
+                            2.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
                     ),
                     (
                         "params".to_string(),
@@ -11778,10 +15082,10 @@ mod tests {
         assert_set_instrument_param(&commands[0], 21.0, 0.75);
 
         let env_editor = find_layout_node_by_widget_type(&layout, "adsr-editor")
-            .expect("sampler ENV 1 source editor should use an adsr-editor widget");
+            .expect("sampler Mod 2 source editor should use an adsr-editor widget");
         assert!(
             env_editor.rect.width > 8.0 && env_editor.rect.height > 1.5,
-            "sampler ENV 1 adsr-editor should be visible, got {:?}",
+            "sampler Mod 2 adsr-editor should be visible, got {:?}",
             env_editor.rect
         );
 
@@ -12197,6 +15501,585 @@ mod tests {
                 instrument_panel.rect
             );
         }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_audio_effect_mod_selector() {
+        fn layout_has_double_click(node: &eseqlisp::layout::LayoutNode) -> bool {
+            node.props.contains_key("on-double-click")
+                || node.children.iter().any(layout_has_double_click)
+        }
+
+        fn test_mod_target(depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-4.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(4.0))),
+                ),
+            ]))
+        }
+
+        let mut enabled = test_param_map("enabled", 0, 1.0, 0.0, 1.0);
+        enabled.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let mut cutoff = test_param_map("cutoff", 1, 1200.0, 20.0, 20_000.0);
+        cutoff.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        cutoff.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                11.0, 1.0, 0.5,
+            )]))),
+        );
+        let mut mod1_sync = test_param_map("sync", 31, 0.0, 0.0, 1.0);
+        mod1_sync.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+
+        let effect = Value::Map(HashMap::from([
+            (
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String("Filter".to_string()))),
+            ),
+            (
+                "slot-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            ),
+            (
+                "builtin".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            ),
+            (
+                "params".to_string(),
+                Rc::new(RefCell::new(test_list(vec![
+                    Value::Map(enabled),
+                    Value::Map(cutoff),
+                    Value::Map(test_param_map("resonance", 2, 0.4, 0.0, 1.0)),
+                ]))),
+            ),
+            (
+                "modulators".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                ]))]))),
+            ),
+            (
+                "sources".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            30,
+                            1.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("rate", 31, 2.0, 0.1, 20.0)),
+                            Value::Map(mod1_sync),
+                            Value::Map(test_enum_param_map(
+                                "division",
+                                32,
+                                1.0,
+                                vec!["1/8", "1/4", "1/2"],
+                            )),
+                            Value::Map(test_enum_param_map(
+                                "shape",
+                                33,
+                                1.0,
+                                vec!["triangle", "sine", "pulse"],
+                            )),
+                            Value::Map(test_param_map("pulse width", 34, 0.5, 0.0, 1.0)),
+                            Value::Map(test_param_map("retrigger", 35, 0.0, 0.0, 1.0)),
+                        ]))),
+                    ),
+                ]))]))),
+            ),
+        ]));
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![effect])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(do
+                  (set! effect-mods-open true)
+                  (set! effect-mods-chain "audio")
+                  (set! effect-mods-slot 0)
+                  (set! effect-mods-bus -1)
+                  (set! effect-selected-mod-slot 1))"#,
+            )
+            .expect("open effect mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("effect mods fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("effect mods layout");
+        assert_finite_layout_tree(&layout);
+        let selector = find_layout_node_by_debug_name(&layout, "effect-mod-selector")
+            .expect("effect mods selector should render");
+        let inline_body = find_layout_node_by_debug_name(&layout, "effect-mods-inline-body")
+            .expect("effect mods inline body should render");
+        let control_panel = find_layout_node_by_debug_name(&layout, "effect-mod-control-panel")
+            .expect("effect mods control panel should render");
+        assert!(
+            selector.rect.width > 0.0 && selector.rect.height > 0.0,
+            "effect selector must have a nonzero rect: {:?}",
+            selector.rect
+        );
+        assert!(
+            control_panel.rect.height >= inline_body.rect.height - 0.1,
+            "effect mods black panel should fill the inline body height; panel={:?}, body={:?}",
+            control_panel.rect,
+            inline_body.rect
+        );
+        assert!(
+            control_panel.rect.height > 6.5,
+            "effect mods black panel should use the available fixed effect panel height, got {:?}",
+            control_panel.rect
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "effect-lfo-source-editor").is_some(),
+            "selected LFO editor should render for effect-local Mod 1"
+        );
+        assert!(
+            layout_has_double_click(&layout),
+            "modulatable effect cutoff should render an interactive modulation wrapper"
+        );
+    }
+
+    #[test]
+    fn custom_audio_effect_mods_button_reopens_after_close() {
+        fn test_mod_target(depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-1.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]))
+        }
+
+        fn layout_node_contains_string(node: &eseqlisp::layout::LayoutNode, needle: &str) -> bool {
+            node.props
+                .values()
+                .any(|value| value_contains_string(value, needle))
+                || node
+                    .children
+                    .iter()
+                    .any(|child| layout_node_contains_string(child, needle))
+        }
+
+        fn find_clickable_node_containing<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            needle: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if let Some(child) = node
+                .children
+                .iter()
+                .find_map(|child| find_clickable_node_containing(child, needle))
+            {
+                return Some(child);
+            }
+            if node.props.contains_key("on-click") && layout_node_contains_string(node, needle) {
+                return Some(node);
+            }
+            None
+        }
+
+        fn find_effect_mods_button_rect(editor: &eseqlisp::Editor) -> eseqlisp::layout::Rect {
+            let layout = editor.widget_layout().expect("custom effect layout");
+            let panel =
+                find_layout_node_by_debug_name(&layout, "audio-fx-panel-root-0-toggle-effect")
+                    .expect("custom effect panel should render");
+            let header = find_layout_node_by_debug_name(panel, "audio-fx-panel-header")
+                .expect("custom effect header should render");
+            let button = find_clickable_node_containing(header, "mods")
+                .expect("custom effect mods button should be clickable");
+            assert!(
+                button.rect.row >= header.rect.row - 0.05
+                    && button.rect.row + button.rect.height
+                        <= header.rect.row + header.rect.height + 0.05,
+                "mods button hit area should stay inside the FX header; button={:?} header={:?}",
+                button.rect,
+                header.rect
+            );
+            let hit = eseqlisp::layout::hit_test_layout(
+                &layout,
+                button.rect.row + button.rect.height * 0.85,
+                button.rect.col + button.rect.width * 0.5,
+            )
+            .expect("mods button lower hit area should hit a widget");
+            assert_eq!(
+                hit.widget_id, button.widget_id,
+                "mods button lower hit area should hit the button, got {} {:?}",
+                hit.widget_type, hit.rect
+            );
+            button.rect
+        }
+
+        fn assert_effect_mods_open(editor: &mut eseqlisp::Editor, expected: bool, context: &str) {
+            assert_eq!(
+                editor
+                    .runtime_mut()
+                    .eval_str("effect-mods-open")
+                    .expect("read effect mods open"),
+                Some(Value::Bool(expected)),
+                "{context}"
+            );
+            let layout = editor.widget_layout().expect("custom effect layout");
+            assert_eq!(
+                find_layout_node_by_debug_name(&layout, "effect-mods-inline-body").is_some(),
+                expected,
+                "{context}: visible layout should match effect-mods-open"
+            );
+        }
+
+        fn click_effect_mods_button(editor: &mut eseqlisp::Editor) {
+            let rect = find_effect_mods_button_rect(editor);
+            let col = rect.col + rect.width * 0.5;
+            let row = rect.row + rect.height * 0.85;
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: col.floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                160,
+                18,
+                col,
+                row,
+            );
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Drag(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: (col + 1.25).floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                160,
+                18,
+                col + 1.25,
+                row,
+            );
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                    column: (col + 1.25).floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                160,
+                18,
+                col + 1.25,
+                row,
+            );
+            editor.refresh_runtime_side_effects();
+        }
+
+        let mut cutoff = test_param_map("cutoff", 1, 1200.0, 20.0, 20_000.0);
+        cutoff.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        cutoff.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                11.0, 1.0, 0.5,
+            )]))),
+        );
+        let effect = Value::Map(HashMap::from([
+            (
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String("toggle-effect".to_string()))),
+            ),
+            (
+                "slot-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            ),
+            (
+                "builtin".to_string(),
+                Rc::new(RefCell::new(Value::Bool(false))),
+            ),
+            (
+                "params".to_string(),
+                Rc::new(RefCell::new(test_list(vec![
+                    Value::Map(cutoff),
+                    Value::Map(test_param_map("mix", 2, 0.5, 0.0, 1.0)),
+                ]))),
+            ),
+            (
+                "modulators".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                ]))]))),
+            ),
+            (
+                "sources".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            30,
+                            1.0,
+                            vec![
+                                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3",
+                                "ext4",
+                            ],
+                        )))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![Value::Map(test_param_map(
+                            "rate", 31, 2.0, 0.1, 20.0,
+                        ))]))),
+                    ),
+                ]))]))),
+            ),
+        ]));
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![effect])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom effect mods toggle status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+
+        assert_effect_mods_open(&mut editor, false, "mods should start closed");
+        for toggle_idx in 0..12 {
+            click_effect_mods_button(&mut editor);
+            let commands = editor.drain_host_commands();
+            assert!(
+                commands.is_empty(),
+                "mods button click-drag should not arm the FX header drag/drop path: {commands:?}"
+            );
+            assert_effect_mods_open(
+                &mut editor,
+                toggle_idx % 2 == 0,
+                &format!("mods toggle {} should flip state", toggle_idx + 1),
+            );
+        }
+    }
+
+    #[test]
+    fn effect_source_dropdown_keeps_options_without_slot_state() {
+        fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow())
+        }
+
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let effects = build_effects_value(&state, 0, &[vec![desc]], &selected);
+
+        let Value::List(slots) = effects else {
+            panic!("effects value should be a list");
+        };
+        let first_slot = slots
+            .first()
+            .expect("descriptor should produce an effect row")
+            .borrow();
+        let sources = map_get(&first_slot, "sources").expect("effect should expose sources");
+        let Value::List(source_sections) = &*sources else {
+            panic!("sources should be a list: {sources:?}");
+        };
+        let mod1 = source_sections
+            .first()
+            .expect("mod1 source section should exist")
+            .borrow();
+        let source_param = map_get(&mod1, "source-param")
+            .expect("mod1 should keep its source-param even before slot state is synced");
+        let options = map_get(&source_param, "options").expect("source-param should have options");
+        let Value::List(options) = &*options else {
+            panic!("source options should be a list: {options:?}");
+        };
+        let labels = options
+            .iter()
+            .map(|value| match &*value.borrow() {
+                Value::String(label) => label.clone(),
+                other => panic!("source option should be a string, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
+        );
     }
 
     #[test]
@@ -12618,11 +16501,11 @@ mod tests {
             selector.rect
         );
         let selector_button_count = count_widget_type(selector, "button");
-        assert!(selector_button_count >= 8, "{}", {
+        assert!(selector_button_count >= 4, "{}", {
             let mut summaries = Vec::new();
             collect_layout_node_summaries(selector, &mut summaries);
             format!(
-                "909 mods-open layout should render the mod selector buttons; got {selector_button_count}\n{}",
+                "909 mods-open layout should render one selector button per mod slot; got {selector_button_count}\n{}",
                 summaries.join("\n")
             )
         });
@@ -13695,7 +17578,7 @@ mod tests {
                     test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
                 ),
                 (
-                    "track-pans",
+                    "track-mixer-pans",
                     test_list(vec![Value::Number(0.0), Value::Number(0.0)]),
                 ),
                 (
@@ -13718,75 +17601,19 @@ mod tests {
                     "track-bus-sends",
                     test_list(vec![
                         test_list(vec![
-                            Value::Map({
-                                let mut map = std::collections::HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map
-                            }),
-                            Value::Map({
-                                let mut map = std::collections::HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(1.0))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map
-                            }),
+                            test_track_bus_send(1, "Bus A", 0.0),
+                            test_track_bus_send(2, "Bus B", 0.0),
                         ]),
                         test_list(vec![
-                            Value::Map({
-                                let mut map = std::collections::HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map
-                            }),
-                            Value::Map({
-                                let mut map = std::collections::HashMap::new();
-                                map.insert(
-                                    "bus-idx".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(1.0))),
-                                );
-                                map.insert(
-                                    "name".to_string(),
-                                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                                );
-                                map.insert(
-                                    "amount".to_string(),
-                                    Rc::new(RefCell::new(Value::Number(0.0))),
-                                );
-                                map
-                            }),
+                            test_track_bus_send(1, "Bus A", 0.0),
+                            test_track_bus_send(2, "Bus B", 0.0),
                         ]),
                     ]),
                 ),
+                ("track-0-bus-1-send", Value::Number(0.0)),
+                ("track-0-bus-2-send", Value::Number(0.0)),
+                ("track-1-bus-1-send", Value::Number(0.0)),
+                ("track-1-bus-2-send", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("track-peak-1", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
@@ -14117,6 +17944,31 @@ mod tests {
             .current_layout
             .clone()
             .expect("mixer layout should be available");
+        let send_knob = find_node_by_stable_key(&layout, "mixer-v2-track-0-send-1")
+            .expect("track 1 Bus A send knob");
+        assert!(matches!(
+            send_knob.props.get("value"),
+            Some(Value::ReactiveRef {
+                namespace,
+                field,
+                ..
+            }) if namespace == "SEQ" && field == "track-0-bus-1-send"
+        ));
+        assert!(
+            send_knob.rect.width > 0.0 && send_knob.rect.height > 0.0,
+            "track send knob should have a finite visible rect: {:?}",
+            send_knob.rect
+        );
+        let send_knob_widget_id = send_knob.widget_id;
+        let _ = editor.take_dirty_widget_ids();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-0-bus-1-send", Value::Number(0.42));
+        assert_eq!(
+            editor.take_dirty_widget_ids(),
+            vec![send_knob_widget_id],
+            "send amount binding should dirty only the send knob widget"
+        );
         let drop_zone = find_node_by_stable_key(&layout, "mixer-v2-sample-drop-zone")
             .expect("sample drop zone");
         assert!(
@@ -15168,6 +19020,7 @@ pub(crate) fn poll_pending_compile_status(
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     fx_epoch: &Arc<AtomicUsize>,
+    ui_epoch: &Arc<AtomicUsize>,
 ) {
     if let Some(status) = app.poll_pending_compile() {
         let ct = current_track.load(Ordering::Relaxed);
@@ -15200,10 +19053,21 @@ pub(crate) fn poll_pending_compile_status(
                 build_instrument_panel_value(&app, ct, &selected_steps)
             },
         );
+        sync_fx_param_binding_fields(rt, app, state, ct, selected_steps);
+        rt.set_reactive(
+            "SEQ",
+            "step-has-plocks",
+            if app.tracks.is_empty() {
+                Value::List(vec![])
+            } else {
+                build_step_has_plocks(state, ct, &app.graph.effect_descriptors)
+            },
+        );
         rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*fx*");
         fx_epoch.fetch_add(1, Ordering::Relaxed);
+        ui_epoch.fetch_add(1, Ordering::Relaxed);
         editor.handle_host_event(HostEvent::Status(status));
     }
 }

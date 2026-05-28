@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use super::super::bump_widget_state_generation;
 use super::super::text_input::TextInputState;
 use crate::layout::LayoutNode;
+use crate::parser::{ASTParser, Expression, Parser};
 use crate::vm::Value;
 
 use super::lisp::{
@@ -19,8 +20,9 @@ use super::metrics::{
 };
 use super::model::{
     ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef,
-    MacroPatch, MacroSignature, NodeKind, OutputPortRef, Patch, PatchConnection, PatchNode,
-    PatcherIntent, SourceOwner,
+    InputPresentation, MacroPatch, MacroSignature, NodeKind, OutputPortRef, ParamNodeInfo, Patch,
+    PatchConnection, PatchNode, PatcherIntent, SourceOwner, hidden_inline_node_ids,
+    refresh_patch_inline_inputs,
 };
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
@@ -73,14 +75,13 @@ pub(super) fn patcher_state_key_from_parts(
     stable_widget_id: Option<u64>,
     props: &HashMap<String, Value>,
 ) -> u64 {
-    stable_widget_id.unwrap_or_else(|| {
-        let mut hasher = DefaultHasher::new();
-        "patcher".hash(&mut hasher);
-        prop_str(props, "path").hash(&mut hasher);
-        prop_str(props, "file").hash(&mut hasher);
-        prop_str(props, "intent").hash(&mut hasher);
-        hasher.finish()
-    })
+    let mut hasher = DefaultHasher::new();
+    "patcher".hash(&mut hasher);
+    stable_widget_id.hash(&mut hasher);
+    prop_str(props, "path").hash(&mut hasher);
+    prop_str(props, "file").hash(&mut hasher);
+    prop_str(props, "intent").hash(&mut hasher);
+    hasher.finish()
 }
 
 pub(super) fn get_patcher_pan_state(key: u64) -> PatcherPanState {
@@ -228,6 +229,7 @@ pub(super) struct PatchEditState {
     pub(super) deleted_nodes: HashSet<String>,
     pub(super) connections: HashMap<String, PatcherConnectionEdit>,
     pub(super) deleted_connections: HashSet<String>,
+    pub(super) input_presentations: HashMap<String, PatcherInputPresentationEdit>,
     pub(super) created_macros: HashMap<String, PatcherMacroEdit>,
     pub(super) next_created_node: u64,
     pub(super) next_created_connection: u64,
@@ -285,6 +287,14 @@ pub(super) struct PatcherConnectionEdit {
 pub(super) enum PatcherConnectionOrigin {
     Source { source_connection_id: String },
     Created { created_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PatcherInputPresentationEdit {
+    pub(super) view_key: String,
+    pub(super) node_id: String,
+    pub(super) input_index: usize,
+    pub(super) presentation: InputPresentation,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -579,9 +589,11 @@ pub(super) fn ordered_patch_nodes<'a>(
     state: &PatcherInteractionState,
     view_key: &str,
 ) -> Vec<&'a PatchNode> {
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     let by_id = patch
         .nodes
         .iter()
+        .filter(|node| !hidden_node_ids.contains(&node.id))
         .map(|node| (node.id.as_str(), node))
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();
@@ -598,6 +610,7 @@ pub(super) fn ordered_patch_nodes<'a>(
         patch
             .nodes
             .iter()
+            .filter(|node| !hidden_node_ids.contains(&node.id))
             .filter(|node| !seen.contains(node.id.as_str())),
     );
     ordered
@@ -652,6 +665,10 @@ pub(super) fn connection_id_from_ports(from: &OutputPortRef, to: &InputPortRef) 
 
 pub(super) fn connection_edit_key(view_key: &str, connection_id: &str) -> String {
     format!("{view_key}::{connection_id}")
+}
+
+pub(super) fn input_presentation_key(view_key: &str, node_id: &str, input_index: usize) -> String {
+    format!("{view_key}::{node_id}:{input_index}")
 }
 
 pub(super) fn allocate_created_node(
@@ -749,13 +766,38 @@ pub(super) fn allocate_created_connection(
                 created_id: id.clone(),
             },
             from,
-            to,
+            to: to.clone(),
             kind: ConnectionKind::Forward,
             segment: None,
         },
     );
+    set_input_presentation_override(
+        state,
+        view_key,
+        &to.node_id,
+        to.input_index,
+        InputPresentation::Cable,
+    );
     debug_log_edit_event(&action, state);
     id
+}
+
+pub(super) fn set_input_presentation_override(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+    input_index: usize,
+    presentation: InputPresentation,
+) {
+    state.edit_state.input_presentations.insert(
+        input_presentation_key(view_key, node_id, input_index),
+        PatcherInputPresentationEdit {
+            view_key: view_key.to_string(),
+            node_id: node_id.to_string(),
+            input_index,
+            presentation,
+        },
+    );
 }
 
 pub(super) fn set_connection_segment_edit(
@@ -1024,6 +1066,16 @@ pub(super) fn patch_with_interaction_state(
         {
             connection.segment = edit.segment;
         }
+        let presentation_key =
+            input_presentation_key(view_key, &connection.to_node, connection.to_input);
+        if let Some(edit) = interaction_state
+            .edit_state
+            .input_presentations
+            .get(&presentation_key)
+        {
+            connection.presentation = edit.presentation;
+            connection.presentation_override = Some(edit.presentation);
+        }
     }
     for edit in interaction_state
         .edit_state
@@ -1068,9 +1120,12 @@ pub(super) fn patch_with_interaction_state(
                 to_input: edit.to.input_index,
                 kind: edit.kind,
                 segment: edit.segment,
+                presentation: InputPresentation::Cable,
+                presentation_override: Some(InputPresentation::Cable),
                 source: None,
             }),
     );
+    refresh_patch_inline_inputs(&mut patch);
     patch
 }
 
@@ -1315,6 +1370,8 @@ fn apply_node_text_override(
     node.label = edited.label;
     node.args = edited.args;
     node.outputs = edited.outputs;
+    node.param = edited.param;
+    node.inline_inputs = edited.inline_inputs;
     node.diagnostic = edited.diagnostic;
 }
 
@@ -1336,6 +1393,8 @@ pub(super) fn node_from_editor_text(
             outputs: Vec::new(),
             position,
             width: None,
+            param: None,
+            inline_inputs: Vec::new(),
             diagnostic: None,
             source: None,
         };
@@ -1349,6 +1408,7 @@ pub(super) fn node_from_editor_text(
     let known_macros = macro_signatures.keys().cloned().collect::<HashSet<_>>();
     let kind = node_kind_for_op(&op, &known_macros);
     let shape = editor_node_port_shape(&op, kind, macro_signatures);
+    let param = editor_param_node_info(&op, trimmed, &inline_args);
     let args = match kind {
         NodeKind::In => inline_args
             .into_iter()
@@ -1396,6 +1456,8 @@ pub(super) fn node_from_editor_text(
             }),
         position,
         width: None,
+        param,
+        inline_inputs: Vec::new(),
         diagnostic: parse_diagnostic.or_else(|| {
             let known =
                 dgenlisp_operator_names().contains(&op) || macro_signatures.contains_key(&op);
@@ -1411,5 +1473,45 @@ pub(super) fn node_from_editor_text(
             .then(|| format!("unknown DGenLisp operator `{op}`"))
         }),
         source: None,
+    }
+}
+
+fn editor_param_node_info(
+    op: &str,
+    text: &str,
+    positional_args: &[String],
+) -> Option<ParamNodeInfo> {
+    if op != "param" {
+        return None;
+    }
+    let items = parse_editor_node_items(text).unwrap_or_default();
+    let name = items
+        .get(1)
+        .and_then(|expr| match expr {
+            Expression::Symbol(name) => Some(name.clone()),
+            _ => None,
+        })
+        .or_else(|| positional_args.first().cloned())?;
+    let modulatable = items.windows(2).any(|pair| {
+        matches!(
+            (&pair[0], &pair[1]),
+            (Expression::Symbol(key), Expression::Symbol(value))
+                if key == "@mod" && value == "true"
+        )
+    });
+    Some(ParamNodeInfo { name, modulatable })
+}
+
+fn parse_editor_node_items(text: &str) -> Result<Vec<Expression>, String> {
+    let source = format!("({text})");
+    let tokens = Parser::new(source)
+        .parse()
+        .map_err(|error| format!("failed to tokenize node text: {error:?}"))?;
+    let exprs = ASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("failed to parse node text: {error:?}"))?;
+    match exprs.first() {
+        Some(Expression::List(items)) => Ok(items.clone()),
+        _ => Err("node text must parse as a list".to_string()),
     }
 }

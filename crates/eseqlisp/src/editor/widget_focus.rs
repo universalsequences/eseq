@@ -464,7 +464,13 @@ impl Editor {
     }
 
     pub(super) fn save_current_widget_tree(&mut self) {
-        if let Some(tree) = self.runtime.current_widget_tree() {
+        if let Some(runtime_generation) = self.runtime.current_committed_ui_snapshot_generation() {
+            let Some(snapshot) = self.runtime.current_committed_ui_snapshot() else {
+                return;
+            };
+            self.active_buffer_mut()
+                .adopt_runtime_committed_ui_snapshot(snapshot, runtime_generation);
+        } else if let Some(tree) = self.runtime.current_widget_tree() {
             let source = self.active_buffer().widget_tree_source;
             self.active_buffer_mut().set_widget_tree(Some(tree), source);
         }
@@ -531,25 +537,6 @@ impl Editor {
             }
             None => {
                 self.clear_widget_focus();
-            }
-        }
-    }
-
-    pub(super) fn auto_focus_first_widget(&mut self) {
-        if !self.widgets_active() {
-            self.clear_focused_widget();
-            return;
-        }
-        let Some(layout) = self.runtime.current_layout.clone() else {
-            return;
-        };
-        let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
-        collect_focusable_nodes(&layout, &mut focusable_nodes);
-        if let Some((id, _, _, _, _)) = focusable_nodes.first() {
-            if let Some(node) = find_node_by_id(&layout, *id) {
-                self.set_focused_widget(node);
-            } else {
-                self.active_leaf_mut().focused_widget_id = Some(*id);
             }
         }
     }

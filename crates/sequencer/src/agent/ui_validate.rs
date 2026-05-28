@@ -577,8 +577,13 @@ mod tests {
                     max: 1.0,
                     unit: None,
                     hidden: false,
+                    group: None,
+                    env: None,
+                    role: None,
                 })
                 .collect(),
+            groups: Vec::new(),
+            envelopes: Vec::new(),
             inputs: Vec::new(),
             modulators: Vec::new(),
             mod_destinations: Vec::new(),

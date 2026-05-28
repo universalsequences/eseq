@@ -227,6 +227,12 @@ fn dgenlisp_vtable() -> NodeVTable {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectGraphNodeIds {
+    pub effect_node_id: i32,
+    pub modulator_node_id: Option<i32>,
+}
+
 // ── Manifest types ──
 
 #[derive(Clone)]
@@ -234,6 +240,8 @@ pub struct DGenManifest {
     pub dylib_path: PathBuf,
     pub total_memory_slots: usize,
     pub params: Vec<DGenParam>,
+    pub groups: Vec<DGenUiGroup>,
+    pub envelopes: Vec<DGenEnvelope>,
     pub inputs: Vec<DGenInput>,
     pub modulators: Vec<DGenModulator>,
     pub mod_destinations: Vec<DGenModDestination>,
@@ -255,6 +263,29 @@ pub struct DGenParam {
     pub max: f32,
     pub unit: Option<String>,
     pub hidden: bool,
+    pub group: Option<String>,
+    pub env: Option<String>,
+    pub role: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct DGenUiGroup {
+    pub name: String,
+}
+
+#[derive(Clone)]
+pub struct DGenEnvelope {
+    pub name: String,
+    pub group: Option<String>,
+    pub roles: DGenEnvelopeRoles,
+}
+
+#[derive(Clone, Default)]
+pub struct DGenEnvelopeRoles {
+    pub attack: Option<String>,
+    pub decay: Option<String>,
+    pub sustain: Option<String>,
+    pub release: Option<String>,
 }
 
 #[derive(Clone)]
@@ -361,6 +392,7 @@ pub struct EffectRenderOptions {
     pub block_size: usize,
     pub frames: usize,
     pub param_overrides: Vec<(String, f32)>,
+    pub input_overrides: Vec<(usize, f32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -376,7 +408,15 @@ pub struct EffectRenderReport {
 }
 
 pub fn compile_and_load(source: &str, sample_rate: u32) -> Result<CompileResult, String> {
-    let json = compile_lisp(source, sample_rate)?;
+    compile_and_load_with_asset_base(source, sample_rate, None)
+}
+
+pub fn compile_and_load_with_asset_base(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+) -> Result<CompileResult, String> {
+    let json = compile_lisp_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
     let lib = load_dylib(&manifest.dylib_path)?;
     Ok(CompileResult { manifest, lib })
@@ -508,6 +548,14 @@ fn output_dir() -> PathBuf {
 }
 
 pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
+    compile_lisp_with_asset_base(source, sample_rate, None)
+}
+
+pub fn compile_lisp_with_asset_base(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+) -> Result<String, String> {
     let dir = output_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
 
@@ -523,11 +571,16 @@ pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
     let tool_path = std::env::current_dir()
         .unwrap_or_default()
         .join("tools/DGenLisp");
-    let output = std::process::Command::new(&tool_path)
+    let mut command = std::process::Command::new(&tool_path);
+    command
         .args(["compile", src_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", &dylib_name])
-        .args(["--sample-rate", &sample_rate.to_string()])
+        .args(["--sample-rate", &sample_rate.to_string()]);
+    if let Some(asset_base) = asset_base {
+        command.args(["--asset-base", asset_base.to_str().unwrap_or(".")]);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("Failed to run DGenLisp: {e}"))?;
 
@@ -588,6 +641,43 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
                     max: p["max"].as_f64().unwrap_or(1.0) as f32,
                     unit: p["unit"].as_str().map(|s| s.to_string()),
                     hidden: p["hidden"].as_bool().unwrap_or(false),
+                    group: p["group"].as_str().map(|s| s.to_string()),
+                    env: p["env"].as_str().map(|s| s.to_string()),
+                    role: p["role"].as_str().map(|s| s.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let groups = v["groups"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|group| {
+                    Some(DGenUiGroup {
+                        name: group["name"].as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let envelopes = v["envelopes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|env| {
+                    let roles = &env["roles"];
+                    Some(DGenEnvelope {
+                        name: env["name"].as_str()?.to_string(),
+                        group: env["group"].as_str().map(|s| s.to_string()),
+                        roles: DGenEnvelopeRoles {
+                            attack: roles["attack"].as_str().map(|s| s.to_string()),
+                            decay: roles["decay"].as_str().map(|s| s.to_string()),
+                            sustain: roles["sustain"].as_str().map(|s| s.to_string()),
+                            release: roles["release"].as_str().map(|s| s.to_string()),
+                        },
+                    })
                 })
                 .collect()
         })
@@ -697,6 +787,8 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
         dylib_path,
         total_memory_slots: v["totalMemorySlots"].as_u64().unwrap_or(256) as usize,
         params,
+        groups,
+        envelopes,
         inputs,
         modulators,
         mod_destinations,
@@ -721,6 +813,38 @@ pub fn instrument_descriptor_from_manifest(
     desc.params
         .extend(crate::voice_modulator::ui_param_descriptors());
 
+    append_dgen_modulator_descriptors(&mut desc, manifest);
+    append_dgen_modulation_target_params(&mut desc, manifest);
+
+    desc
+}
+
+pub fn effect_has_host_modulation(manifest: &DGenManifest) -> bool {
+    !manifest.mod_destinations.is_empty()
+}
+
+pub fn append_effect_host_modulation_controls(
+    desc: &mut crate::effects::EffectDescriptor,
+    manifest: &DGenManifest,
+) {
+    if !effect_has_host_modulation(manifest) {
+        return;
+    }
+    desc.params
+        .extend(crate::voice_modulator::effect_param_descriptors());
+    desc.instrument_modulators = (1..=crate::voice_modulator::SLOT_COUNT)
+        .map(|slot| crate::effects::InstrumentModulatorDescriptor {
+            slot,
+            label: crate::voice_modulator::modulator_slot_label(slot, ""),
+        })
+        .collect();
+    append_dgen_modulation_target_params(desc, manifest);
+}
+
+fn append_dgen_modulator_descriptors(
+    desc: &mut crate::effects::EffectDescriptor,
+    manifest: &DGenManifest,
+) {
     let mut sorted_modulators = manifest.modulators.clone();
     sorted_modulators.sort_by_key(|m| m.slot);
     desc.instrument_modulators = sorted_modulators
@@ -730,7 +854,12 @@ pub fn instrument_descriptor_from_manifest(
             label: crate::voice_modulator::modulator_slot_label(m.slot, &m.name),
         })
         .collect();
+}
 
+fn append_dgen_modulation_target_params(
+    desc: &mut crate::effects::EffectDescriptor,
+    manifest: &DGenManifest,
+) {
     let param_by_cell: std::collections::HashMap<usize, &DGenParam> =
         manifest.params.iter().map(|p| (p.cell_id, p)).collect();
     for dest in &manifest.mod_destinations {
@@ -758,6 +887,7 @@ pub fn instrument_descriptor_from_manifest(
             node_param_idx: (HEADER_SLOTS + dest.active_cell_id) as u32,
             node_param_span: active_span,
             host_control: None,
+            ui_metadata: None,
         });
         for lane in &dest.depth_lanes {
             let depth_default = param_by_cell
@@ -794,6 +924,7 @@ pub fn instrument_descriptor_from_manifest(
                 node_param_idx: (HEADER_SLOTS + lane.depth_cell_id) as u32,
                 node_param_span: depth_span,
                 host_control: None,
+                ui_metadata: None,
             });
             if let Some(base_param_idx) = base_param_idx {
                 desc.instrument_modulation_targets.push(
@@ -829,8 +960,6 @@ pub fn instrument_descriptor_from_manifest(
             }
         }
     }
-
-    desc
 }
 
 // ── Load dylib ──
@@ -921,6 +1050,12 @@ pub unsafe fn remove_effect_from_chain(
         }
     }
     audiograph::delete_node(lg, effect_node_id);
+}
+
+pub unsafe fn remove_effect_modulator(lg: *mut LiveGraph, modulator_node_id: i32) {
+    if modulator_node_id > 0 {
+        audiograph::delete_node(lg, modulator_node_id);
+    }
 }
 
 unsafe fn disconnect_direct_chain(lg: *mut LiveGraph, predecessor_id: i32, successor_id: i32) {
@@ -1025,7 +1160,9 @@ pub unsafe fn add_effect_to_chain_at(
     successor_id: i32,
     successor_inputs: usize,
     existing_effect: Option<i32>,
-) -> Result<i32, String> {
+    existing_modulator: Option<i32>,
+    ext_mod_input_nodes: Option<&[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]>,
+) -> Result<EffectGraphNodeIds, String> {
     // Full state allocation (header + distinct read/write buffers), zeroed by the engine
     let state_size =
         dgen_total_state_slots(manifest.total_memory_slots) * std::mem::size_of::<f32>();
@@ -1051,6 +1188,27 @@ pub unsafe fn add_effect_to_chain_at(
         return Err("Failed to add DGenLisp node to graph".to_string());
     }
 
+    let modulator_node_id = if effect_has_host_modulation(manifest) {
+        let mod_name = CString::new(format!("dgenlisp_fx_{}_mod", slot_id)).unwrap();
+        let mod_id = audiograph::add_node(
+            lg,
+            crate::voice_modulator::effect_modulator_vtable(),
+            crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+            mod_name.as_ptr(),
+            crate::voice_modulator::INPUT_COUNT as c_int,
+            crate::voice_modulator::NUM_OUTPUTS as c_int,
+            std::ptr::null(),
+            0,
+        );
+        if mod_id < 0 {
+            audiograph::delete_node(lg, node_id);
+            return Err("Failed to add DGenLisp effect modulator node to graph".to_string());
+        }
+        Some(mod_id)
+    } else {
+        None
+    };
+
     // Commit the replacement only after the new node exists and can be wired.
     // Until this batch succeeds, the old node and process function remain the
     // rollback target for the live graph.
@@ -1070,17 +1228,67 @@ pub unsafe fn add_effect_to_chain_at(
     if let Err(error) = connect_result {
         set_dgen_process_fn_raw(slot_id, previous_process_fn);
         audiograph::delete_node(lg, node_id);
+        if let Some(mod_id) = modulator_node_id {
+            audiograph::delete_node(lg, mod_id);
+        }
         audiograph::end_graph_edit_batch(lg);
         return Err(error);
     }
+
+    let mod_connect_result = (|| {
+        if let Some(mod_id) = modulator_node_id {
+            if let Some(ext_nodes) = ext_mod_input_nodes {
+                for (input, &ext_node) in ext_nodes.iter().enumerate() {
+                    connect_effect_port(
+                        lg,
+                        ext_node,
+                        0,
+                        mod_id,
+                        (4 + input) as i32,
+                        "connect effect modulator ext input",
+                    )?;
+                }
+            }
+            for modulator in &manifest.modulators {
+                if !(1..=crate::voice_modulator::SLOT_COUNT).contains(&modulator.slot) {
+                    continue;
+                }
+                connect_effect_port(
+                    lg,
+                    mod_id,
+                    (modulator.slot - 1) as i32,
+                    node_id,
+                    modulator.input_channel as i32,
+                    "connect effect modulator output",
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = mod_connect_result {
+        set_dgen_process_fn_raw(slot_id, previous_process_fn);
+        audiograph::delete_node(lg, node_id);
+        if let Some(mod_id) = modulator_node_id {
+            audiograph::delete_node(lg, mod_id);
+        }
+        audiograph::end_graph_edit_batch(lg);
+        return Err(error);
+    }
+
     if let Some(old_id) = existing_effect {
         remove_effect_from_chain(lg, old_id, predecessor_id, successor_id);
     } else {
         disconnect_direct_chain(lg, predecessor_id, successor_id);
     }
+    if let Some(old_mod_id) = existing_modulator {
+        remove_effect_modulator(lg, old_mod_id);
+    }
     audiograph::end_graph_edit_batch(lg);
 
-    Ok(node_id)
+    Ok(EffectGraphNodeIds {
+        effect_node_id: node_id,
+        modulator_node_id,
+    })
 }
 
 // ── Full interactive editor-compile-load flow ──
@@ -1088,19 +1296,23 @@ pub unsafe fn add_effect_to_chain_at(
 pub const EFFECT_TEMPLATE: &str = r#"; DGenLisp stereo effect
 ;
 ; Params: (def name (param name @min 0 @max 1 @default 0.5))
+; Modulatable: add @mod true @mod-mode additive
+;   then use (mod name) to read the modulated value
 ; Delay:  (def h (history N)), (read-history h delay_samples), (write-history h sample)
 ; Math:   +, -, *, /, sin, cos, tan, atan, atan2, tanh, clamp, min, max, mix
 ; Filters: (onepole input coeff)
 
-(def input (in 1 @name signal))
+(def input_l (in 1 @name Left))
+(def input_r (in 2 @name Right))
 (def mix-amt (param mix @min 0 @max 1 @default 0.5))
 
 ; -- Your processing here --
-(def processed input)
+(def processed_l input_l)
+(def processed_r input_r)
 
 ; -- Stereo output --
-(out (mix input processed mix-amt) 1 @name Left)
-(out (mix input processed mix-amt) 2 @name Right)
+(out (mix input_l processed_l mix-amt) 1 @name Left)
+(out (mix input_r processed_r mix-amt) 2 @name Right)
 "#;
 
 pub struct LispEditResult {
@@ -1166,9 +1378,11 @@ pub fn run_editor_flow(
                                         successor_id,
                                         2,
                                         existing_effect,
+                                        None,
+                                        None,
                                     )
                                 } {
-                                    Ok(node_id) => {
+                                    Ok(node_ids) => {
                                         println!(" OK!");
                                         let n = manifest.params.len();
                                         if n > 0 {
@@ -1223,7 +1437,7 @@ pub fn run_editor_flow(
                                         let mut buf = String::new();
                                         std::io::stdin().read_line(&mut buf).ok();
                                         return Some(LispEditResult {
-                                            node_id,
+                                            node_id: node_ids.effect_node_id,
                                             lib,
                                             source,
                                             manifest,
@@ -2341,24 +2555,33 @@ pub fn render_loaded_effect_for_test(
     memory_write.copy_from_slice(&memory_read);
 
     for (name, value) in &options.param_overrides {
-        let param = manifest
-            .params
-            .iter()
-            .find(|param| param.name == *name)
-            .ok_or_else(|| format!("unknown effect parameter '{name}'"))?;
-        if param.cell_id >= total_slots {
+        if let Some(param) = manifest.params.iter().find(|param| param.name == *name) {
+            if param.cell_id >= total_slots {
+                return Err(format!(
+                    "parameter '{}' cell {} is outside memory size {}",
+                    param.name, param.cell_id, total_slots
+                ));
+            }
+            for lane in 0..param.cell_span {
+                let idx = param.cell_id + lane;
+                if idx < total_slots {
+                    memory_read[idx] = *value;
+                    memory_write[idx] = *value;
+                }
+            }
+            continue;
+        }
+
+        let Some(cell_id) = host_mod_descriptor_param_cell(manifest, name) else {
+            return Err(format!("unknown effect parameter '{name}'"));
+        };
+        if cell_id >= total_slots {
             return Err(format!(
-                "parameter '{}' cell {} is outside memory size {}",
-                param.name, param.cell_id, total_slots
+                "parameter '{name}' cell {cell_id} is outside memory size {total_slots}"
             ));
         }
-        for lane in 0..param.cell_span {
-            let idx = param.cell_id + lane;
-            if idx < total_slots {
-                memory_read[idx] = *value;
-                memory_write[idx] = *value;
-            }
-        }
+        memory_read[cell_id] = *value;
+        memory_write[cell_id] = *value;
     }
 
     let n_inputs = manifest.n_inputs.max(2);
@@ -2387,6 +2610,11 @@ pub fn render_loaded_effect_for_test(
             input_buffers[1][frame] = right;
             input_reference.push(left);
             input_reference.push(right);
+        }
+        for &(channel, value) in &options.input_overrides {
+            if let Some(buffer) = input_buffers.get_mut(channel) {
+                buffer.fill(value);
+            }
         }
         let input_ptrs: Vec<*mut f32> = input_buffers
             .iter_mut()
@@ -2453,6 +2681,20 @@ pub fn render_loaded_effect_for_test(
     })
 }
 
+fn host_mod_descriptor_param_cell(manifest: &DGenManifest, name: &str) -> Option<usize> {
+    for dest in &manifest.mod_destinations {
+        if name == format!("__dgen_mod_active__{}", dest.name) {
+            return Some(dest.active_cell_id);
+        }
+        for lane in &dest.depth_lanes {
+            if name == format!("mod {} slot {} amt", dest.name, lane.slot) {
+                return Some(lane.depth_cell_id);
+            }
+        }
+    }
+    None
+}
+
 // ── Instrument editor flow ──
 
 pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
@@ -2461,7 +2703,7 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 ; Modulatable: add @mod true @mod-mode additive
 ;   then use (mod name) to read the modulated value
 ; Envelope: (adsr gate trigger attack_ms decay_ms sustain release_ms)
-; Oscillators: (sin expr), (phasor freq_hz), (noise)
+; Oscillators: (phasor freq_hz), (sin expr), (noise)
 ; Math: +, -, *, /, sin, cos, tan, atan, atan2, tanh, clamp, min, max
 ; Constants: twopi, samplerate
 
@@ -2473,26 +2715,22 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 (def mod2 (in 6 @name mod2 @modulator 2))
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
-(def mod5 (in 9 @name mod5 @modulator 5))
-(def mod6 (in 10 @name mod6 @modulator 6))
-(def ext1 (in 11 @name ext1 @modulator 7))
-(def ext2 (in 12 @name ext2 @modulator 8))
-(def ext3 (in 13 @name ext3 @modulator 9))
-(def ext4 (in 14 @name ext4 @modulator 10))
 
 ; -- Parameters --
 (param attack  @default 5    @min 0   @max 1000 @unit ms)
-(param release @default 200  @min 10  @max 5000 @unit ms)
+(param decay   @default 120  @min 1   @max 2000 @unit ms)
+(param sustain @default 0.8  @min 0   @max 1)
+(param release @default 180  @min 1   @max 5000 @unit ms)
 (param gain    @default 0.5  @min 0   @max 1    @mod true @mod-mode additive)
 
 ; -- Envelope --
-(def env (adsr gate trigger attack 100 1 release))
+(def env (adsr gate trigger attack decay sustain release))
 
 ; -- Oscillator --
-(def osc (sin (* (phasor pitch) twopi)))
+(def phase (phasor pitch))
 
 ; -- Output --
-(out (* osc env velocity (mod gain)) 1 @name audio)
+(out (* phase env velocity (mod gain)) 1 @name audio)
 "#;
 
 pub struct InstrumentEditResult {
@@ -6281,6 +6519,7 @@ fn parse_midi_fx_param_descriptor(
         node_param_idx: 0,
         node_param_span: 1,
         host_control: None,
+        ui_metadata: None,
     })
 }
 
@@ -6452,6 +6691,7 @@ where
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            init_source_path: None,
             vim_mode: true,
         },
     );
@@ -6876,6 +7116,7 @@ pub fn run_embedded_scratch_flow(
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            init_source_path: None,
             vim_mode: true,
         },
     );
@@ -7340,6 +7581,83 @@ mod tests {
         assert_eq!(manifest.params[0].cell_span, 1);
         assert_eq!(manifest.params[1].cell_span, 1);
         assert_eq!(manifest.params[2].cell_span, 4);
+        assert!(manifest.params.iter().all(|param| param.group.is_none()));
+        assert!(manifest.params.iter().all(|param| param.env.is_none()));
+        assert!(manifest.params.iter().all(|param| param.role.is_none()));
+        assert!(manifest.groups.is_empty());
+        assert!(manifest.envelopes.is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_reads_ui_metadata() {
+        let manifest = parse_manifest(
+            r#"{
+                "dylib": "test.dylib",
+                "totalMemorySlots": 16,
+                "params": [
+                    {
+                        "name": "amp_attack",
+                        "cellId": 2,
+                        "default": 0.01,
+                        "min": 0,
+                        "max": 2,
+                        "group": "amp",
+                        "env": "amp_env",
+                        "role": "attack"
+                    },
+                    {
+                        "name": "cutoff",
+                        "cellId": 3,
+                        "default": 1000,
+                        "min": 20,
+                        "max": 20000,
+                        "group": "filter"
+                    }
+                ],
+                "groups": [
+                    { "name": "amp" },
+                    { "name": "filter" }
+                ],
+                "envelopes": [
+                    {
+                        "name": "amp_env",
+                        "group": "amp",
+                        "roles": {
+                            "attack": "amp_attack",
+                            "decay": "amp_decay",
+                            "sustain": "amp_sustain",
+                            "release": "amp_release"
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(manifest.params[0].group.as_deref(), Some("amp"));
+        assert_eq!(manifest.params[0].env.as_deref(), Some("amp_env"));
+        assert_eq!(manifest.params[0].role.as_deref(), Some("attack"));
+        assert_eq!(manifest.params[1].group.as_deref(), Some("filter"));
+        assert_eq!(manifest.params[1].env, None);
+        assert_eq!(
+            manifest
+                .groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["amp", "filter"]
+        );
+        assert_eq!(manifest.envelopes.len(), 1);
+        assert_eq!(manifest.envelopes[0].name, "amp_env");
+        assert_eq!(manifest.envelopes[0].group.as_deref(), Some("amp"));
+        assert_eq!(
+            manifest.envelopes[0].roles.attack.as_deref(),
+            Some("amp_attack")
+        );
+        assert_eq!(
+            manifest.envelopes[0].roles.release.as_deref(),
+            Some("amp_release")
+        );
     }
 
     #[test]
@@ -7357,6 +7675,9 @@ mod tests {
                     max: 1.0,
                     unit: None,
                     hidden: false,
+                    group: None,
+                    env: None,
+                    role: None,
                 },
                 DGenParam {
                     name: "vector".to_string(),
@@ -7367,8 +7688,13 @@ mod tests {
                     max: 1.0,
                     unit: None,
                     hidden: false,
+                    group: None,
+                    env: None,
+                    role: None,
                 },
             ],
+            groups: Vec::new(),
+            envelopes: Vec::new(),
             inputs: Vec::new(),
             modulators: Vec::new(),
             mod_destinations: Vec::new(),
@@ -7436,6 +7762,88 @@ mod tests {
             vec![(1, 21), (2, 22)]
         );
     }
+
+    #[test]
+    fn effect_host_modulation_controls_use_effect_local_bank() {
+        let manifest = parse_manifest(
+            r#"
+            {
+              "totalMemorySlots": 128,
+              "params": [
+                { "name": "gain", "cellId": 10, "default": 0.5, "min": 0, "max": 1 }
+              ],
+              "inputs": [],
+              "outputs": [{ "channel": 0, "name": "out" }],
+              "modulators": [
+                { "slot": 1, "inputChannel": 2, "name": "mod1" },
+                { "slot": 2, "inputChannel": 3, "name": "mod2" }
+              ],
+              "modDestinations": [
+                {
+                  "name": "gain",
+                  "paramCellId": 10,
+                  "activeCellId": 20,
+                  "depthLanes": [
+                    { "slot": 1, "depthCellId": 21 },
+                    { "slot": 2, "depthCellId": 22 }
+                  ],
+                  "mode": "additive",
+                  "min": 0,
+                  "max": 1
+                }
+              ],
+              "tensors": [],
+              "tensorInitData": []
+            }
+            "#,
+        )
+        .expect("manifest parses");
+
+        let mut desc = EffectDescriptor::from_lisp_manifest(
+            "MODDED_GAIN",
+            &manifest.params,
+            manifest.n_inputs,
+            manifest.n_outputs,
+        );
+        super::append_effect_host_modulation_controls(&mut desc, &manifest);
+
+        assert!(super::effect_has_host_modulation(&manifest));
+        assert_eq!(
+            desc.instrument_modulators.len(),
+            crate::voice_modulator::SLOT_COUNT
+        );
+        let mod1_source = desc
+            .params
+            .iter()
+            .find(|param| param.name == "mod1_source")
+            .expect("effect descriptor should expose Mod 1 source");
+        assert_eq!(mod1_source.default, 0.0);
+        assert!(mod1_source.node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE);
+
+        let depth = desc
+            .params
+            .iter()
+            .find(|param| param.name == "mod gain slot 1 amt")
+            .expect("effect descriptor should expose DGen depth param");
+        assert_eq!(depth.node_param_idx, (super::HEADER_SLOTS + 21) as u32);
+        assert_eq!(
+            desc.instrument_modulation_targets
+                .iter()
+                .map(|target| {
+                    (
+                        desc.params[target.base_param_idx].name.as_str(),
+                        target.modulator_slot,
+                        desc.params[target.depth_param_idx].name.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("gain", 1, "mod gain slot 1 amt"),
+                ("gain", 2, "mod gain slot 2 amt"),
+            ]
+        );
+    }
+
     use std::sync::Arc;
 
     #[test]
@@ -7770,6 +8178,9 @@ mod tests {
                 max: 1.0,
                 unit: None,
                 hidden: false,
+                group: None,
+                env: None,
+                role: None,
             }],
             0,
             0,
@@ -7813,6 +8224,9 @@ mod tests {
                 max: 1.0,
                 unit: None,
                 hidden: false,
+                group: None,
+                env: None,
+                role: None,
             }],
             2,
             2,
@@ -7856,6 +8270,9 @@ mod tests {
                 max: 1.0,
                 unit: None,
                 hidden: false,
+                group: None,
+                env: None,
+                role: None,
             }],
             0,
             0,
@@ -9290,6 +9707,53 @@ mod tests {
             .expect("effect compiler should inject shared preamble helpers");
         assert_eq!(result.manifest.n_inputs, 2);
         assert_eq!(result.manifest.n_outputs, 2);
+    }
+
+    #[test]
+    fn custom_effect_mod_input_changes_mod_accessor_output_when_active() {
+        let source = r#"
+            (def input_l (in 1 @name Left))
+            (def input_r (in 2 @name Right))
+            (def mod1 (in 3 @name mod1 @modulator 1))
+            (def mod2 (in 4 @name mod2 @modulator 2))
+            (def mod3 (in 5 @name mod3 @modulator 3))
+            (def mod4 (in 6 @name mod4 @modulator 4))
+            (param xyz @default 0.25 @min 0.0 @max 1.0 @mod true @mod-mode additive)
+            (def amount (mod xyz))
+            (out (* input_l amount) 1 @name Left)
+            (out (* input_r amount) 2 @name Right)
+        "#;
+
+        let render = |mod_value: f32| {
+            super::render_effect_source_for_test(
+                source,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size: 128,
+                    frames: 2048,
+                    param_overrides: vec![
+                        ("__dgen_mod_active__xyz".to_string(), 1.0),
+                        ("mod xyz slot 1 amt".to_string(), 0.5),
+                    ],
+                    input_overrides: vec![(2, mod_value)],
+                },
+            )
+            .expect("effect should compile and render")
+        };
+
+        let unmodulated = render(0.0);
+        let modulated = render(1.0);
+        let diff = unmodulated
+            .first_samples
+            .iter()
+            .zip(modulated.first_samples.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+
+        assert!(
+            diff > 0.01,
+            "expected mod1 input to affect (mod xyz), diff={diff}"
+        );
     }
 
     #[test]

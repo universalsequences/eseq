@@ -10,12 +10,6 @@
 (def mod2 (in 6 @name mod2 @modulator 2))
 (def mod3 (in 7 @name mod3 @modulator 3))
 (def mod4 (in 8 @name mod4 @modulator 4))
-(def mod5 (in 9 @name mod5 @modulator 5))
-(def mod6 (in 10 @name mod6 @modulator 6))
-(def ext1 (in 11 @name ext1 @modulator 7))
-(def ext2 (in 12 @name ext2 @modulator 8))
-(def ext3 (in 13 @name ext3 @modulator 9))
-(def ext4 (in 14 @name ext4 @modulator 10))
 
 (defmacro pulse_from_phase (phase width)
   (scale (lt phase width) 0 1 -1 1))
@@ -68,7 +62,7 @@
 (def lfo (triangle (phasor lfo_rate)))
 
 (def key_follow_hz (* pitch (clip (mod keytrack) 0 1)))
-(def pitch_mod_semi (+ (* lfo (mod lfo_pitch_amt)) (* mod1 (mod vibrato_amt))))
+(def pitch_mod_semi (* lfo (mod lfo_pitch_amt)))
 (def pitch_ratio (semi_ratio pitch_mod_semi))
 (def drift1 (+ 1 (* drift 0.17)))
 (def drift2 (+ 1 (* drift -0.13)))
@@ -81,8 +75,8 @@
 (def ph2 (phasor osc2_pitch))
 (def phsub (phasor (* pitch 0.5)))
 
-(def shape1 (clip (+ (mod osc1_shape) (* lfo (mod lfo_shape_amt)) (* mod2 0.5)) 0 1))
-(def shape2 (clip (+ (mod osc2_shape) (* lfo (mod lfo_shape_amt)) (* mod2 0.5)) 0 1))
+(def shape1 (clip (+ (mod osc1_shape) (* lfo (mod lfo_shape_amt))) 0 1))
+(def shape2 (clip (+ (mod osc2_shape) (* lfo (mod lfo_shape_amt))) 0 1))
 
 (def saw1 (polyblep_saw ph1 osc1_pitch))
 (def saw2 (polyblep_saw ph2 osc2_pitch))
@@ -100,8 +94,7 @@
 
 (def filter_cutoff (clip (+ (mod cutoff)
                             key_follow_hz
-                            (* filt_env (mod filter_env_amt))
-                            (* mod3 4000))
+                            (* filt_env (mod filter_env_amt)))
                          40 16000))
 (def filt (biquad raw_mix filter_cutoff (clip (mod resonance) 0.5 4.5) 1 0))
 (def driven (tanh (* filt (mod drive))))

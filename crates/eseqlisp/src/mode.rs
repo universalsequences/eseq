@@ -207,7 +207,7 @@ const DGENLISP_SPECIALS: &[(&str, &str, &str)] = &[
     ),
     (
         "param",
-        "(param name @default v @min v @max v ...)",
+        "(param name @default v @min v @max v @group g @env e @role r ...)",
         "Declare a host-controllable parameter.",
     ),
     (

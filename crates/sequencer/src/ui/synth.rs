@@ -17,157 +17,13 @@ impl App {
             return Vec::new();
         };
         let slot = &self.state.pattern.instrument_slots[track];
-        let source_indices = self.source_param_indices(track);
-
-        let find_idx_by_node = |node_param_idx: u32| {
-            source_indices
-                .iter()
-                .copied()
-                .find(|&idx| desc.params.get(idx).map(|p| p.node_param_idx) == Some(node_param_idx))
-        };
-
-        let mut out = Vec::new();
-
-        let lfo_sync = |sync_idx: u32| -> bool {
-            find_idx_by_node(sync_idx)
-                .map(|idx| slot.defaults.get(idx) > 0.5)
-                .unwrap_or(false)
-        };
-        let lfo_shape_is_pulse = |shape_idx: u32| -> bool {
-            find_idx_by_node(shape_idx)
-                .map(|idx| slot.defaults.get(idx).round() as i32 == 2)
-                .unwrap_or(false)
-        };
-
-        let push_lfo = |out: &mut Vec<usize>,
-                        rate_idx: usize,
-                        sync_idx: usize,
-                        div_idx: usize,
-                        shape_idx: usize,
-                        pw_idx: usize,
-                        retrig_idx: usize| {
-            let rate_node = crate::voice_modulator::MOD_PARAM_BASE + rate_idx as u32;
-            let sync_node = crate::voice_modulator::MOD_PARAM_BASE + sync_idx as u32;
-            let div_node = crate::voice_modulator::MOD_PARAM_BASE + div_idx as u32;
-            let shape_node = crate::voice_modulator::MOD_PARAM_BASE + shape_idx as u32;
-            let pw_node = crate::voice_modulator::MOD_PARAM_BASE + pw_idx as u32;
-            let retrig_node = crate::voice_modulator::MOD_PARAM_BASE + retrig_idx as u32;
-
-            if let Some(idx) = if lfo_sync(sync_node) {
-                find_idx_by_node(div_node)
+        crate::voice_modulator::selected_source_param_indices(&desc.params, |idx, param| {
+            if idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                slot.defaults.get(idx)
             } else {
-                find_idx_by_node(rate_node)
-            } {
-                out.push(idx);
+                param.default
             }
-            if let Some(idx) = find_idx_by_node(sync_node) {
-                out.push(idx);
-            }
-            if let Some(idx) = find_idx_by_node(shape_node) {
-                out.push(idx);
-            }
-            if let Some(idx) = find_idx_by_node(retrig_node) {
-                out.push(idx);
-            }
-            if lfo_shape_is_pulse(shape_node) {
-                if let Some(idx) = find_idx_by_node(pw_node) {
-                    out.push(idx);
-                }
-            }
-        };
-
-        push_lfo(
-            &mut out,
-            crate::voice_modulator::PARAM_LFO1_RATE_HZ,
-            crate::voice_modulator::PARAM_LFO1_SYNC,
-            crate::voice_modulator::PARAM_LFO1_DIV,
-            crate::voice_modulator::PARAM_LFO1_SHAPE,
-            crate::voice_modulator::PARAM_LFO1_PW,
-            crate::voice_modulator::PARAM_LFO1_RETRIGGER,
-        );
-
-        for idx_const in [
-            crate::voice_modulator::PARAM_ENV_ATTACK_MS,
-            crate::voice_modulator::PARAM_ENV_DECAY_MS,
-            crate::voice_modulator::PARAM_ENV_SUSTAIN,
-            crate::voice_modulator::PARAM_ENV_RELEASE_MS,
-        ] {
-            if let Some(idx) =
-                find_idx_by_node(crate::voice_modulator::MOD_PARAM_BASE + idx_const as u32)
-            {
-                out.push(idx);
-            }
-        }
-
-        if let Some(idx) = if lfo_sync(
-            crate::voice_modulator::MOD_PARAM_BASE + crate::voice_modulator::PARAM_RAND_SYNC as u32,
-        ) {
-            find_idx_by_node(
-                crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_RAND_DIV as u32,
-            )
-        } else {
-            find_idx_by_node(
-                crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_RAND_RATE_HZ as u32,
-            )
-        } {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(
-            crate::voice_modulator::MOD_PARAM_BASE + crate::voice_modulator::PARAM_RAND_SYNC as u32,
-        ) {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(
-            crate::voice_modulator::MOD_PARAM_BASE + crate::voice_modulator::PARAM_RAND_SLEW as u32,
-        ) {
-            out.push(idx);
-        }
-
-        if let Some(idx) = if lfo_sync(
-            crate::voice_modulator::MOD_PARAM_BASE
-                + crate::voice_modulator::PARAM_DRIFT_SYNC as u32,
-        ) {
-            find_idx_by_node(
-                crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_DRIFT_DIV as u32,
-            )
-        } else {
-            find_idx_by_node(
-                crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_DRIFT_RATE as u32,
-            )
-        } {
-            out.push(idx);
-        }
-        if let Some(idx) = find_idx_by_node(
-            crate::voice_modulator::MOD_PARAM_BASE
-                + crate::voice_modulator::PARAM_DRIFT_SYNC as u32,
-        ) {
-            out.push(idx);
-        }
-
-        push_lfo(
-            &mut out,
-            crate::voice_modulator::PARAM_LFO2_RATE_HZ,
-            crate::voice_modulator::PARAM_LFO2_SYNC,
-            crate::voice_modulator::PARAM_LFO2_DIV,
-            crate::voice_modulator::PARAM_LFO2_SHAPE,
-            crate::voice_modulator::PARAM_LFO2_PW,
-            crate::voice_modulator::PARAM_LFO2_RETRIGGER,
-        );
-        push_lfo(
-            &mut out,
-            crate::voice_modulator::PARAM_LFO3_RATE_HZ,
-            crate::voice_modulator::PARAM_LFO3_SYNC,
-            crate::voice_modulator::PARAM_LFO3_DIV,
-            crate::voice_modulator::PARAM_LFO3_SHAPE,
-            crate::voice_modulator::PARAM_LFO3_PW,
-            crate::voice_modulator::PARAM_LFO3_RETRIGGER,
-        );
-
-        out
+        })
     }
 
     pub(super) fn source_display_rows(
@@ -175,69 +31,23 @@ impl App {
         track: usize,
     ) -> Vec<(Option<&'static str>, Option<usize>)> {
         let actual = self.source_param_actual_indices(track);
-        let Some(desc) = self.graph.instrument_descriptors.get(track) else {
-            return Vec::new();
-        };
-
         let mut rows = Vec::new();
-        let mut cursor = 0usize;
-        let sections = [
-            ("LFO 1", 0usize),
-            ("ENV 1", 0usize),
-            ("RAND", 0usize),
-            ("DRIFT", 0usize),
-            ("LFO 2", 0usize),
-            ("LFO 3", 0usize),
-        ];
-
-        let section_name = |idx: usize, desc: &EffectDescriptor| -> &'static str {
-            let node_idx = desc.params[idx].node_param_idx;
-            if (crate::voice_modulator::MOD_PARAM_BASE
-                + crate::voice_modulator::PARAM_LFO1_RATE_HZ as u32
-                ..=crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_LFO1_RETRIGGER as u32)
-                .contains(&node_idx)
-            {
-                "LFO 1"
-            } else if (crate::voice_modulator::MOD_PARAM_BASE
-                + crate::voice_modulator::PARAM_ENV_ATTACK_MS as u32
-                ..=crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_ENV_RELEASE_MS as u32)
-                .contains(&node_idx)
-            {
-                "ENV 1"
-            } else if (crate::voice_modulator::MOD_PARAM_BASE
-                + crate::voice_modulator::PARAM_RAND_RATE_HZ as u32
-                ..=crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_RAND_SLEW as u32)
-                .contains(&node_idx)
-            {
-                "RAND"
-            } else if (crate::voice_modulator::MOD_PARAM_BASE
-                + crate::voice_modulator::PARAM_DRIFT_RATE as u32
-                ..=crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_DRIFT_DIV as u32)
-                .contains(&node_idx)
-            {
-                "DRIFT"
-            } else if (crate::voice_modulator::MOD_PARAM_BASE
-                + crate::voice_modulator::PARAM_LFO2_RATE_HZ as u32
-                ..=crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_LFO2_RETRIGGER as u32)
-                .contains(&node_idx)
-            {
-                "LFO 2"
-            } else {
-                "LFO 3"
-            }
-        };
-
-        for (section, _) in sections {
+        for source_slot in 1..=crate::voice_modulator::SLOT_COUNT {
+            let Some(section) = crate::voice_modulator::modulator_slot_label_static(source_slot)
+            else {
+                continue;
+            };
             let section_params: Vec<usize> = actual
                 .iter()
                 .enumerate()
                 .filter_map(|(row_idx, &actual_idx)| {
-                    (section_name(actual_idx, desc) == section).then_some(row_idx)
+                    self.graph
+                        .instrument_descriptors
+                        .get(track)
+                        .and_then(|desc| desc.params.get(actual_idx))
+                        .and_then(|param| crate::voice_modulator::slot_from_param_name(&param.name))
+                        .is_some_and(|slot| slot == source_slot)
+                        .then_some(row_idx)
                 })
                 .collect();
             if section_params.is_empty() {
@@ -247,8 +57,6 @@ impl App {
             for row_idx in section_params {
                 rows.push((None, Some(row_idx)));
             }
-            cursor += 1;
-            let _ = cursor;
         }
 
         rows
@@ -863,42 +671,14 @@ impl App {
 
     pub(super) fn current_source_descriptor(&self) -> Option<EffectDescriptor> {
         let desc = self.current_instrument_descriptor()?;
-        let slot = &self.state.pattern.instrument_slots[self.ui.cursor_track];
         let params = self
             .source_param_actual_indices(self.ui.cursor_track)
             .into_iter()
             .filter_map(|i| desc.params.get(i).cloned())
             .map(|mut p| {
-                if p.name.ends_with("_div") {
-                    p.name = "rate".to_string();
-                } else if p.name.ends_with("_rate") {
-                    p.name = "rate".to_string();
-                } else if p.name.ends_with("_sync") {
-                    p.name = "sync".to_string();
-                } else if p.name.ends_with("_shape") {
-                    p.name = "shape".to_string();
-                } else if p.name.ends_with("_pw") {
-                    p.name = "pulse width".to_string();
-                } else if p.name.ends_with("_retrigger") {
-                    p.name = "retrigger".to_string();
-                } else if p.name == "mod_rand_slew" {
-                    p.name = "slew".to_string();
-                } else if p.name == "mod_env_attack" {
-                    p.name = "attack".to_string();
-                } else if p.name == "mod_env_decay" {
-                    p.name = "decay".to_string();
-                } else if p.name == "mod_env_sustain" {
-                    p.name = "sustain".to_string();
-                } else if p.name == "mod_env_release" {
-                    p.name = "release".to_string();
-                }
-
+                p.name = crate::voice_modulator::source_param_display_name(&p.name);
                 if p.name == "rate" && matches!(p.kind, crate::effects::ParamKind::Enum { .. }) {
                     p.scaling = crate::effects::ParamScaling::Linear;
-                }
-
-                if p.name == "sustain" {
-                    let _ = slot;
                 }
                 p
             })

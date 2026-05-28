@@ -361,9 +361,6 @@ pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
             .collect();
 
     let mut sections = Vec::new();
-    if query_lower.is_empty() || "+ New Effect".to_lowercase().contains(&query_lower) {
-        sections.push(effect_leaf("+ New Effect".to_string(), "new-audio-effect"));
-    }
     if let Some(section) = effect_section("Built-in", builtin) {
         sections.push(section);
     }

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatcherIntent {
     Instrument,
@@ -22,6 +24,27 @@ pub enum ArgValue {
     Literal(String),
     SymbolRef(String),
     ConnectedExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamNodeInfo {
+    pub name: String,
+    pub modulatable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InlineInput {
+    RawParam(String),
+    ModParam(String),
+}
+
+impl InlineInput {
+    pub fn label(&self) -> String {
+        match self {
+            InlineInput::RawParam(name) => name.clone(),
+            InlineInput::ModParam(name) => format!("{name}~"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -170,6 +193,8 @@ pub struct PatchNode {
     pub outputs: Vec<String>,
     pub position: (f32, f32),
     pub width: Option<f32>,
+    pub param: Option<ParamNodeInfo>,
+    pub inline_inputs: Vec<Option<InlineInput>>,
     pub diagnostic: Option<String>,
     pub source: Option<NodeSource>,
 }
@@ -186,6 +211,14 @@ pub struct CableSegmentInfo {
     pub segment_row: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputPresentation {
+    Cable,
+    InlineRawParam,
+    InlineModParam,
+}
+
 #[derive(Debug, Clone)]
 pub struct PatchConnection {
     pub from_node: String,
@@ -194,6 +227,8 @@ pub struct PatchConnection {
     pub to_input: usize,
     pub kind: ConnectionKind,
     pub segment: Option<CableSegmentInfo>,
+    pub presentation: InputPresentation,
+    pub presentation_override: Option<InputPresentation>,
     pub source: Option<ConnectionSource>,
 }
 
@@ -241,4 +276,101 @@ pub struct Patch {
     pub connections: Vec<PatchConnection>,
     pub macros: Vec<MacroPatch>,
     pub diagnostics: Vec<String>,
+}
+
+pub fn refresh_patch_inline_inputs(patch: &mut Patch) {
+    for node in &mut patch.nodes {
+        node.inline_inputs = vec![None; node.args.len()];
+    }
+
+    let connections = patch.connections.clone();
+    for connection in connections {
+        if connection.presentation == InputPresentation::Cable {
+            continue;
+        }
+        let inline = match connection.presentation {
+            InputPresentation::InlineRawParam => inline_raw_param(patch, &connection),
+            InputPresentation::InlineModParam => inline_mod_param(patch, &connection),
+            InputPresentation::Cable => unreachable!(),
+        };
+        let Some(inline) = inline else {
+            if let Some(connection) = patch.connections.iter_mut().find(|candidate| {
+                candidate.from_node == connection.from_node
+                    && candidate.from_output == connection.from_output
+                    && candidate.to_node == connection.to_node
+                    && candidate.to_input == connection.to_input
+            }) {
+                connection.presentation = InputPresentation::Cable;
+                connection.presentation_override = None;
+            }
+            continue;
+        };
+        let Some(node) = patch
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == connection.to_node)
+        else {
+            continue;
+        };
+        if node.inline_inputs.len() <= connection.to_input {
+            node.inline_inputs.resize(connection.to_input + 1, None);
+        }
+        node.inline_inputs[connection.to_input] = Some(inline);
+    }
+}
+
+pub fn hidden_inline_node_ids(patch: &Patch) -> HashSet<String> {
+    patch
+        .connections
+        .iter()
+        .filter(|connection| connection.presentation == InputPresentation::InlineModParam)
+        .filter(|connection| inline_mod_param(patch, connection).is_some())
+        .map(|connection| connection.from_node.clone())
+        .collect()
+}
+
+pub fn connection_touches_hidden_inline_node(
+    connection: &PatchConnection,
+    hidden_node_ids: &HashSet<String>,
+) -> bool {
+    hidden_node_ids.contains(&connection.from_node) || hidden_node_ids.contains(&connection.to_node)
+}
+
+fn inline_raw_param(patch: &Patch, connection: &PatchConnection) -> Option<InlineInput> {
+    let source = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == connection.from_node)?;
+    source
+        .param
+        .as_ref()
+        .map(|param| InlineInput::RawParam(param.name.clone()))
+}
+
+fn inline_mod_param(patch: &Patch, connection: &PatchConnection) -> Option<InlineInput> {
+    let mod_node = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == connection.from_node)?;
+    if mod_node.op != "mod" {
+        return None;
+    }
+    if !matches!(
+        mod_node.source.as_ref().map(|source| &source.owner),
+        Some(SourceOwner::NestedExpr { .. })
+    ) {
+        return None;
+    }
+    let inbound = patch
+        .connections
+        .iter()
+        .find(|candidate| candidate.to_node == mod_node.id && candidate.to_input == 0)?;
+    let param = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == inbound.from_node)?;
+    let param = param.param.as_ref()?;
+    param
+        .modulatable
+        .then(|| InlineInput::ModParam(param.name.clone()))
 }

@@ -101,6 +101,7 @@ fn changed_numeric_indices(previous: Option<&Value>, next: &Value) -> Vec<usize>
     changed
 }
 
+#[derive(Clone)]
 pub struct ReactiveRegistry {
     namespaces: HashMap<String, Namespace>,
     dirty: Vec<(String, String, Value)>,
@@ -109,6 +110,7 @@ pub struct ReactiveRegistry {
     batching: bool,
 }
 
+#[derive(Clone)]
 struct Namespace {
     fields: HashMap<String, Value>,
     map: HashMap<String, Rc<RefCell<Value>>>,
@@ -234,6 +236,21 @@ impl ReactiveRegistry {
         }
     }
 
+    pub fn replace_widget_bindings_for_layout_subtree(
+        &mut self,
+        old_subtree: &LayoutNode,
+        new_subtree: &LayoutNode,
+    ) {
+        let mut removed_widget_ids = HashSet::new();
+        collect_layout_widget_ids(old_subtree, &mut removed_widget_ids);
+        for widgets in self.field_to_widgets.values_mut() {
+            widgets.retain(|widget_id| !removed_widget_ids.contains(widget_id));
+        }
+        self.field_to_widgets
+            .retain(|_, widgets| !widgets.is_empty());
+        self.collect_widget_bindings(new_subtree);
+    }
+
     pub fn replace_widget_bindings_from_layouts<'a>(
         &mut self,
         layouts: impl IntoIterator<Item = &'a LayoutNode>,
@@ -310,5 +327,12 @@ impl ReactiveRegistry {
             .get(namespace)
             .map(|ns| ns.writable)
             .unwrap_or(false)
+    }
+}
+
+fn collect_layout_widget_ids(node: &LayoutNode, ids: &mut HashSet<u64>) {
+    ids.insert(node.widget_id);
+    for child in &node.children {
+        collect_layout_widget_ids(child, ids);
     }
 }

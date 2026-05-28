@@ -55,6 +55,16 @@ fn instrument_display_name(name: &str) -> String {
 }
 
 impl App {
+    fn compile_saved_effect(&self, name: &str) -> Result<lisp_effect::CompileResult, String> {
+        let source_path = lisp_effect::effect_source_path(name);
+        let source = std::fs::read_to_string(&source_path).map_err(|e| e.to_string())?;
+        lisp_effect::compile_and_load_with_asset_base(
+            &source,
+            self.graph.sample_rate,
+            source_path.parent(),
+        )
+    }
+
     fn sync_scratch_runtime_descriptors(&self) {
         self.state.set_scratch_runtime_descriptors(
             self.graph.effect_descriptors.clone(),
@@ -449,10 +459,12 @@ impl App {
             &self.tracks,
             &self.graph.track_instrument_types,
         );
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx == current_pattern {
-                *snapshot = current_snapshot.clone();
+        {
+            let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+                if pattern_idx == current_pattern {
+                    *snapshot = current_snapshot.clone();
+                }
             }
         }
 
@@ -807,26 +819,9 @@ impl App {
         target_slot: usize,
         name: &str,
     ) -> Result<usize, String> {
-        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
-        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let result = self.compile_saved_effect(name)?;
         let slot_idx = self.prepare_custom_effect_insert_slot(track, target_slot)?;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_custom_slot_wiring(track, slot_idx);
-        let node_id = unsafe {
-            lisp_effect::add_effect_to_chain_at(
-                self.graph.lg.0,
-                slot_id,
-                &result.manifest,
-                &result.lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
-                existing,
-            )
-        }?;
-        self.apply_effect_to_slot(track, slot_idx, node_id, name, &result.manifest);
-        self.editor.lisp_libs.push(result.lib);
+        self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
         Ok(slot_idx)
     }
 
@@ -1143,6 +1138,88 @@ impl App {
         }
     }
 
+    fn create_effect_modulator_node(&self, name: &str, slot_id: usize) -> Result<i32, String> {
+        let mod_name = CString::new(format!("{}_{}_mod", name.to_lowercase(), slot_id)).unwrap();
+        let mod_id = unsafe {
+            crate::audiograph::add_node(
+                self.graph.lg.0,
+                crate::voice_modulator::effect_modulator_vtable(),
+                crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+                mod_name.as_ptr(),
+                crate::voice_modulator::INPUT_COUNT as i32,
+                crate::voice_modulator::NUM_OUTPUTS as i32,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if mod_id < 0 {
+            Err(format!("Failed to create effect modulator for '{name}'"))
+        } else {
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::voice_modulator::PARAM_BPM as u64,
+                        logical_id: mod_id as u64,
+                        fvalue: self.state.transport.bpm.load(Ordering::Relaxed) as f32,
+                    },
+                );
+            }
+            Ok(mod_id)
+        }
+    }
+
+    unsafe fn connect_effect_modulator_for_descriptor(
+        &self,
+        modulator_node_id: i32,
+        effect_node_id: i32,
+        desc: &EffectDescriptor,
+        ext_mod_input_nodes: Option<&[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]>,
+    ) -> Result<(), String> {
+        if let Some(ext_nodes) = ext_mod_input_nodes {
+            for (input, &ext_node) in ext_nodes.iter().enumerate() {
+                if !crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    ext_node,
+                    0,
+                    modulator_node_id,
+                    (4 + input) as i32,
+                ) {
+                    return Err(format!(
+                        "Failed to connect Ext {} to effect modulator",
+                        input + 1
+                    ));
+                }
+            }
+        }
+
+        let mut slots = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| target.modulator_slot)
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        slots.dedup();
+        for slot in slots {
+            if !(1..=crate::voice_modulator::SLOT_COUNT).contains(&slot) {
+                continue;
+            }
+            if !crate::audiograph::graph_connect(
+                self.graph.lg.0,
+                modulator_node_id,
+                (slot - 1) as i32,
+                effect_node_id,
+                (2 + slot - 1) as i32,
+            ) {
+                return Err(format!(
+                    "Failed to connect effect Mod {} output to effect input",
+                    slot
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn push_track_effect_slot_defaults(&self, track: usize, slot_idx: usize) {
         let Some(desc) = self
             .graph
@@ -1174,6 +1251,19 @@ impl App {
                     continue;
                 };
                 let node_id = slot.node_id.load(Ordering::Relaxed);
+                let modulator_node_id = slot.modulator_node_id.load(Ordering::Relaxed);
+                if modulator_node_id != 0 {
+                    unsafe {
+                        crate::audiograph::params_push_wrapper(
+                            self.graph.lg.0,
+                            crate::audiograph::ParamMsg {
+                                logical_id: modulator_node_id as u64,
+                                idx: crate::voice_modulator::PARAM_BPM as u64,
+                                fvalue: bpm,
+                            },
+                        );
+                    }
+                }
                 if node_id != 0 {
                     let idx = match desc.name.as_str() {
                         "Delay" => crate::delay::DELAY_PARAM_BPM,
@@ -1200,6 +1290,18 @@ impl App {
                     continue;
                 };
                 if slot.node_id != 0 {
+                    if slot.modulator_node_id != 0 {
+                        unsafe {
+                            crate::audiograph::params_push_wrapper(
+                                self.graph.lg.0,
+                                crate::audiograph::ParamMsg {
+                                    logical_id: slot.modulator_node_id as u64,
+                                    idx: crate::voice_modulator::PARAM_BPM as u64,
+                                    fvalue: bpm,
+                                },
+                            );
+                        }
+                    }
                     let idx = match desc.name.as_str() {
                         "Delay" => crate::delay::DELAY_PARAM_BPM,
                         "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
@@ -1228,8 +1330,23 @@ impl App {
         node_id: i32,
         desc: EffectDescriptor,
     ) {
+        self.apply_builtin_effect_to_slot_with_modulator(track, slot_idx, node_id, None, desc);
+    }
+
+    fn apply_builtin_effect_to_slot_with_modulator(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        node_id: i32,
+        modulator_node_id: Option<i32>,
+        desc: EffectDescriptor,
+    ) {
         self.graph.effect_descriptors[track][slot_idx] = desc.clone();
-        self.state.pattern.effect_chains[track][slot_idx].apply_descriptor(&desc, node_id as u32);
+        self.state.pattern.effect_chains[track][slot_idx].apply_descriptor_with_modulator(
+            &desc,
+            node_id as u32,
+            modulator_node_id.unwrap_or(0) as u32,
+        );
 
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
         let current_snapshot = self.state.capture_current_pattern_snapshot(
@@ -1244,7 +1361,13 @@ impl App {
             if pattern_idx == current_pattern {
                 *snapshot = current_snapshot.clone();
             } else {
-                snapshot.sync_effect_slot(track, slot_idx, &desc, node_id as u32);
+                snapshot.sync_effect_slot_with_modulator(
+                    track,
+                    slot_idx,
+                    &desc,
+                    node_id as u32,
+                    modulator_node_id.unwrap_or(0) as u32,
+                );
             }
         }
     }
@@ -1260,9 +1383,19 @@ impl App {
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
             self.resolve_custom_slot_wiring(track, slot_idx);
         let node_id = self.create_builtin_effect_node(slot_id, &desc)?;
+        let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
+        let modulator_node_id = if desc.instrument_modulation_targets.is_empty() {
+            None
+        } else {
+            Some(self.create_effect_modulator_node(&desc.name, slot_id)?)
+        };
+        let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
         unsafe {
             if let Some(old_id) = existing {
                 lisp_effect::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
+            }
+            if let Some(old_mod_id) = existing_modulator {
+                lisp_effect::remove_effect_modulator(self.graph.lg.0, old_mod_id);
             }
             self.connect_builtin_effect_chain(
                 pred,
@@ -1273,8 +1406,22 @@ impl App {
                 succ,
                 succ_inputs,
             );
+            if let Some(mod_id) = modulator_node_id {
+                self.connect_effect_modulator_for_descriptor(
+                    mod_id,
+                    node_id,
+                    &desc,
+                    ext_mod_inputs.as_ref(),
+                )?;
+            }
         }
-        self.apply_builtin_effect_to_slot(track, slot_idx, node_id, desc);
+        self.apply_builtin_effect_to_slot_with_modulator(
+            track,
+            slot_idx,
+            node_id,
+            modulator_node_id,
+            desc,
+        );
         self.push_track_effect_slot_defaults(track, slot_idx);
         self.push_all_delay_bpm();
         self.ui.effect_tab = EffectTab::Slot(slot_idx);
@@ -1340,25 +1487,30 @@ impl App {
             manifest.n_outputs,
         );
 
+        lisp_effect::append_effect_host_modulation_controls(&mut desc, manifest);
+
         let sidechain_labels = self.effect_sidechain_labels(track);
         let mut modulators = manifest.modulators.clone();
         modulators.sort_by_key(|m| m.slot);
-        desc.params
-            .extend(modulators.into_iter().map(|modulator| ParamDescriptor {
-                name: format!("sidechain {}", modulator.name),
-                min: 0.0,
-                max: sidechain_labels.len().saturating_sub(1) as f32,
-                default: 0.0,
-                kind: ParamKind::Enum {
-                    labels: sidechain_labels.clone(),
-                },
-                scaling: ParamScaling::Linear,
-                node_param_idx: u32::MAX,
-                node_param_span: 1,
-                host_control: Some(HostControl::FxSidechain {
-                    input_channel: modulator.input_channel,
-                }),
-            }));
+        if !lisp_effect::effect_has_host_modulation(manifest) {
+            desc.params
+                .extend(modulators.into_iter().map(|modulator| ParamDescriptor {
+                    name: format!("sidechain {}", modulator.name),
+                    min: 0.0,
+                    max: sidechain_labels.len().saturating_sub(1) as f32,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: sidechain_labels.clone(),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: u32::MAX,
+                    node_param_span: 1,
+                    host_control: Some(HostControl::FxSidechain {
+                        input_channel: modulator.input_channel,
+                    }),
+                    ui_metadata: None,
+                }));
+        }
         desc
     }
 
@@ -1373,27 +1525,51 @@ impl App {
             manifest.n_inputs,
             manifest.n_outputs,
         );
+        lisp_effect::append_effect_host_modulation_controls(&mut desc, manifest);
 
         let sidechain_labels = self.bus_effect_sidechain_labels();
         let mut modulators = manifest.modulators.clone();
         modulators.sort_by_key(|m| m.slot);
-        desc.params
-            .extend(modulators.into_iter().map(|modulator| ParamDescriptor {
-                name: format!("sidechain {}", modulator.name),
-                min: 0.0,
-                max: sidechain_labels.len().saturating_sub(1) as f32,
-                default: 0.0,
-                kind: ParamKind::Enum {
-                    labels: sidechain_labels.clone(),
-                },
-                scaling: ParamScaling::Linear,
-                node_param_idx: u32::MAX,
-                node_param_span: 1,
-                host_control: Some(HostControl::FxSidechain {
-                    input_channel: modulator.input_channel,
-                }),
-            }));
+        if !lisp_effect::effect_has_host_modulation(manifest) {
+            desc.params
+                .extend(modulators.into_iter().map(|modulator| ParamDescriptor {
+                    name: format!("sidechain {}", modulator.name),
+                    min: 0.0,
+                    max: sidechain_labels.len().saturating_sub(1) as f32,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: sidechain_labels.clone(),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: u32::MAX,
+                    node_param_span: 1,
+                    host_control: Some(HostControl::FxSidechain {
+                        input_channel: modulator.input_channel,
+                    }),
+                    ui_metadata: None,
+                }));
+        }
         desc
+    }
+
+    fn track_effect_ext_mod_input_nodes(
+        &self,
+        track: usize,
+    ) -> Option<[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]> {
+        self.graph
+            .track_node_ids
+            .get(track)
+            .map(|nodes| nodes.mod_in_clip_ids)
+    }
+
+    fn current_effect_modulator_node(&self, track: usize, slot_idx: usize) -> Option<i32> {
+        self.state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+            .map(|slot| slot.modulator_node_id.load(Ordering::Relaxed) as i32)
+            .filter(|node_id| *node_id > 0)
     }
 
     fn bus_effect_sidechain_labels(&self) -> Vec<String> {
@@ -1596,24 +1772,19 @@ impl App {
         &mut self,
         track: usize,
         slot_idx: usize,
-        node_id: i32,
+        node_ids: lisp_effect::EffectGraphNodeIds,
         name: &str,
         manifest: &lisp_effect::DGenManifest,
     ) {
         let desc = self.build_effect_descriptor(track, name, manifest);
-        self.graph.effect_descriptors[track][slot_idx] = desc;
+        self.graph.effect_descriptors[track][slot_idx] = desc.clone();
 
         let slot = &self.state.pattern.effect_chains[track][slot_idx];
-        slot.node_id.store(node_id as u32, Ordering::Relaxed);
-        let params = &self.graph.effect_descriptors[track][slot_idx].params;
-        slot.num_params
-            .store(params.len() as u32, Ordering::Relaxed);
-        for (i, p) in params.iter().enumerate() {
-            slot.defaults.set(i, p.default);
-            if i < slot.param_node_indices.len() {
-                slot.param_node_indices[i].store(p.node_param_idx, Ordering::Relaxed);
-            }
-        }
+        slot.apply_descriptor_with_modulator(
+            &desc,
+            node_ids.effect_node_id as u32,
+            node_ids.modulator_node_id.unwrap_or(0) as u32,
+        );
 
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
         let current_snapshot = self.state.capture_current_pattern_snapshot(
@@ -1629,7 +1800,13 @@ impl App {
             if pattern_idx == current_pattern {
                 *snapshot = current_snapshot.clone();
             } else {
-                snapshot.sync_effect_slot(track, slot_idx, &desc, node_id as u32);
+                snapshot.sync_effect_slot_with_modulator(
+                    track,
+                    slot_idx,
+                    &desc,
+                    node_ids.effect_node_id as u32,
+                    node_ids.modulator_node_id.unwrap_or(0) as u32,
+                );
             }
         }
         drop(bank);
@@ -1665,6 +1842,8 @@ impl App {
         );
 
         if let Some(r) = result {
+            let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
+            let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
             match unsafe {
                 lisp_effect::add_effect_to_chain_at(
                     self.graph.lg.0,
@@ -1676,10 +1855,12 @@ impl App {
                     successor_id,
                     successor_inputs,
                     existing,
+                    existing_modulator,
+                    ext_mod_inputs.as_ref(),
                 )
             } {
-                Ok(node_id) => {
-                    self.apply_effect_to_slot(track, slot_idx, node_id, &r.name, &r.manifest);
+                Ok(node_ids) => {
+                    self.apply_effect_to_slot(track, slot_idx, node_ids, &r.name, &r.manifest);
                     self.ui.effect_tab = EffectTab::Slot(slot_idx);
                     self.ui.effect_param_cursor = 0;
                     self.ui.effect_scroll_offset = 0;
@@ -1695,8 +1876,9 @@ impl App {
     }
 
     pub fn start_effect_compile(&mut self, name: &str, slot_idx: usize) {
-        let source = match lisp_effect::load_effect_source(name) {
-            Ok(s) => s,
+        let source_path = lisp_effect::effect_source_path(name);
+        let source = match std::fs::read_to_string(&source_path) {
+            Ok(source) => source,
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
                 return;
@@ -1704,8 +1886,13 @@ impl App {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let sample_rate = self.graph.sample_rate;
+        let asset_base = source_path.parent().map(|path| path.to_path_buf());
         std::thread::spawn(move || {
-            let result = lisp_effect::compile_and_load(&source, sample_rate);
+            let result = lisp_effect::compile_and_load_with_asset_base(
+                &source,
+                sample_rate,
+                asset_base.as_deref(),
+            );
             let _ = tx.send(result);
         });
         self.editor.pending_compile = Some(PendingCompile {
@@ -1769,17 +1956,25 @@ impl App {
         }
     }
 
-    pub fn apply_compiled_effect(
+    pub fn apply_compiled_effect_to_slot_sync(
         &mut self,
         result: lisp_effect::CompileResult,
         name: &str,
         slot_idx: usize,
         track: usize,
-    ) {
+    ) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        if slot_idx >= self.graph.effect_descriptors[track].len() {
+            return Err("Invalid effect slot".to_string());
+        }
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
             self.resolve_custom_slot_wiring(track, slot_idx);
 
-        match unsafe {
+        let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
+        let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
+        let node_ids = unsafe {
             lisp_effect::add_effect_to_chain_at(
                 self.graph.lg.0,
                 slot_id,
@@ -1790,20 +1985,33 @@ impl App {
                 succ,
                 succ_inputs,
                 existing,
+                existing_modulator,
+                ext_mod_inputs.as_ref(),
             )
-        } {
-            Ok(node_id) => {
-                self.apply_effect_to_slot(track, slot_idx, node_id, name, &result.manifest);
-                self.editor.lisp_libs.push(result.lib);
-                self.ui.effect_tab = EffectTab::Slot(slot_idx);
-                self.ui.effect_param_cursor = 0;
-                self.ui.effect_scroll_offset = 0;
-                self.ui.focused_region = Region::Params;
-                self.ui.params_column = 1;
+        }?;
+        self.apply_effect_to_slot(track, slot_idx, node_ids, name, &result.manifest);
+        self.editor.lisp_libs.push(result.lib);
+        self.ui.effect_tab = EffectTab::Slot(slot_idx);
+        self.ui.effect_param_cursor = 0;
+        self.ui.effect_scroll_offset = 0;
+        self.ui.focused_region = Region::Params;
+        self.ui.params_column = 1;
+        Ok(())
+    }
+
+    pub fn apply_compiled_effect(
+        &mut self,
+        result: lisp_effect::CompileResult,
+        name: &str,
+        slot_idx: usize,
+        track: usize,
+    ) {
+        match self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track) {
+            Ok(()) => {
                 self.editor.status_message = Some((format!("Loaded '{}'", name), Instant::now()));
             }
-            Err(e) => {
-                self.editor.status_message = Some((format!("Error: {}", e), Instant::now()));
+            Err(error) => {
+                self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
             }
         }
     }
@@ -1814,25 +2022,8 @@ impl App {
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
-        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
-        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_custom_slot_wiring(track, slot_idx);
-        let node_id = unsafe {
-            lisp_effect::add_effect_to_chain_at(
-                self.graph.lg.0,
-                slot_id,
-                &result.manifest,
-                &result.lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
-                existing,
-            )
-        }?;
-        self.apply_effect_to_slot(track, slot_idx, node_id, name, &result.manifest);
-        self.editor.lisp_libs.push(result.lib);
+        let result = self.compile_saved_effect(name)?;
+        self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
         Ok(())
     }
 
@@ -2025,38 +2216,9 @@ impl App {
         target_slot: usize,
         name: &str,
     ) -> Result<usize, String> {
-        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
-        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let result = self.compile_saved_effect(name)?;
         let slot_idx = self.prepare_bus_effect_insert_slot(bus_idx, target_slot)?;
-        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
-            self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
-        let node_id = unsafe {
-            lisp_effect::add_effect_to_chain_at(
-                self.graph.lg.0,
-                slot_id,
-                &result.manifest,
-                &result.lib,
-                pred,
-                pred_outputs,
-                succ,
-                succ_inputs,
-                existing,
-            )
-        }?;
-        let desc = self.build_bus_effect_descriptor(name, &result.manifest);
-        let bus = self
-            .buses
-            .get_mut(bus_idx)
-            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
-        bus.effect_descriptors[slot_idx] = desc;
-        bus.effect_slots[slot_idx] =
-            EffectSlotSnapshot::new_default(&bus.effect_descriptors[slot_idx], node_id as u32);
-        if slot_idx < bus.custom_effect_names.len() {
-            bus.custom_effect_names[slot_idx] = Some(name.to_string());
-        }
-        self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
-        self.push_all_delay_bpm();
-        self.editor.lisp_libs.push(result.lib);
+        self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)?;
         Ok(slot_idx)
     }
 
@@ -2122,9 +2284,23 @@ impl App {
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
             self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
         let node_id = self.create_builtin_effect_node(slot_id, &desc)?;
+        let existing_modulator = self
+            .buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(slot_idx))
+            .map(|slot| slot.modulator_node_id as i32)
+            .filter(|node_id| *node_id > 0);
+        let modulator_node_id = if desc.instrument_modulation_targets.is_empty() {
+            None
+        } else {
+            Some(self.create_effect_modulator_node(&desc.name, slot_id)?)
+        };
         unsafe {
             if let Some(old_id) = existing {
                 lisp_effect::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
+            }
+            if let Some(old_mod_id) = existing_modulator {
+                lisp_effect::remove_effect_modulator(self.graph.lg.0, old_mod_id);
             }
             self.connect_builtin_effect_chain(
                 pred,
@@ -2135,14 +2311,20 @@ impl App {
                 succ,
                 succ_inputs,
             );
+            if let Some(mod_id) = modulator_node_id {
+                self.connect_effect_modulator_for_descriptor(mod_id, node_id, &desc, None)?;
+            }
         }
         let bus = self
             .buses
             .get_mut(bus_idx)
             .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
         bus.effect_descriptors[slot_idx] = desc.clone();
-        bus.effect_slots[slot_idx] =
-            crate::effects::EffectSlotSnapshot::new_default(&desc, node_id as u32);
+        bus.effect_slots[slot_idx] = crate::effects::EffectSlotSnapshot::new_default_with_modulator(
+            &desc,
+            node_id as u32,
+            modulator_node_id.unwrap_or(0) as u32,
+        );
         if slot_idx < bus.custom_effect_names.len() {
             bus.custom_effect_names[slot_idx] =
                 EffectDescriptor::builtin_insert_project_name(&desc.name);
@@ -2166,11 +2348,32 @@ impl App {
                 bus_idx + 1
             ));
         }
-        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
-        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let result = self.compile_saved_effect(name)?;
+        self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)
+    }
+
+    pub fn apply_compiled_bus_effect_to_slot_sync(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        name: &str,
+        result: lisp_effect::CompileResult,
+    ) -> Result<(), String> {
+        if bus_idx >= lisp_effect::MAX_BUS_FX_CHAINS {
+            return Err(format!(
+                "Bus {} is outside the current bus FX registry limit",
+                bus_idx + 1
+            ));
+        }
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
             self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
-        let node_id = unsafe {
+        let existing_modulator = self
+            .buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(slot_idx))
+            .map(|slot| slot.modulator_node_id as i32)
+            .filter(|node_id| *node_id > 0);
+        let node_ids = unsafe {
             lisp_effect::add_effect_to_chain_at(
                 self.graph.lg.0,
                 slot_id,
@@ -2181,6 +2384,8 @@ impl App {
                 succ,
                 succ_inputs,
                 existing,
+                existing_modulator,
+                None,
             )
         }?;
         let desc = self.build_bus_effect_descriptor(name, &result.manifest);
@@ -2190,9 +2395,10 @@ impl App {
             .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
         bus.effect_descriptors[slot_idx] = desc;
         let slot = &mut bus.effect_slots[slot_idx];
-        *slot = crate::effects::EffectSlotSnapshot::new_default(
+        *slot = crate::effects::EffectSlotSnapshot::new_default_with_modulator(
             &bus.effect_descriptors[slot_idx],
-            node_id as u32,
+            node_ids.effect_node_id as u32,
+            node_ids.modulator_node_id.unwrap_or(0) as u32,
         );
         if slot_idx < bus.custom_effect_names.len() {
             bus.custom_effect_names[slot_idx] = Some(name.to_string());
@@ -2208,27 +2414,35 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
     ) -> Result<(), String> {
-        let (node_id, pred, pred_outputs, succ, succ_inputs) = {
+        let (node_id, modulator_node_id, pred, pred_outputs, succ, succ_inputs) = {
             let bus = self
                 .buses
                 .get(bus_idx)
                 .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
-            let node_id = bus
+            let (node_id, modulator_node_id) = bus
                 .effect_slots
                 .get(slot_idx)
-                .map(|slot| slot.node_id)
-                .unwrap_or(0);
+                .map(|slot| (slot.node_id, slot.modulator_node_id))
+                .unwrap_or((0, 0));
             if node_id == 0 {
-                (0, 0, 0, 0, 0)
+                (0, 0, 0, 0, 0, 0)
             } else {
                 let (_, pred, pred_outputs, succ, succ_inputs, _) =
                     self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
-                (node_id, pred, pred_outputs, succ, succ_inputs)
+                (
+                    node_id,
+                    modulator_node_id,
+                    pred,
+                    pred_outputs,
+                    succ,
+                    succ_inputs,
+                )
             }
         };
         if node_id != 0 {
             unsafe {
                 lisp_effect::remove_effect_from_chain(self.graph.lg.0, node_id as i32, pred, succ);
+                lisp_effect::remove_effect_modulator(self.graph.lg.0, modulator_node_id as i32);
             }
             self.connect_bus_effect_gap(pred, pred_outputs, succ, succ_inputs);
         }
@@ -2294,19 +2508,30 @@ impl App {
         if param_idx < slot.defaults.len() {
             slot.defaults[param_idx] = value.clamp(param.min, param.max);
         }
-        let node_id = slot.node_id;
         let node_param_idx = param.node_param_idx;
-        if node_id != 0 && node_param_idx != u32::MAX {
-            unsafe {
-                crate::audiograph::params_push_wrapper(
-                    self.graph.lg.0,
-                    crate::audiograph::ParamMsg {
-                        logical_id: node_id as u64,
-                        idx: node_param_idx as u64,
-                        fvalue: value.clamp(param.min, param.max),
-                    },
-                );
-            }
+        let Some((logical_id, node_param_idx)) =
+            (if node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+                (slot.modulator_node_id != 0).then_some((
+                    slot.modulator_node_id as u64,
+                    node_param_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
+                ))
+            } else if slot.node_id != 0 && node_param_idx != u32::MAX {
+                Some((slot.node_id as u64, node_param_idx as u64))
+            } else {
+                None
+            })
+        else {
+            return Ok(());
+        };
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                self.graph.lg.0,
+                crate::audiograph::ParamMsg {
+                    logical_id,
+                    idx: node_param_idx,
+                    fvalue: value.clamp(param.min, param.max),
+                },
+            );
         }
         Ok(())
     }
@@ -2410,12 +2635,24 @@ impl App {
                 }
                 continue;
             }
+            let (logical_id, node_param_idx) =
+                if param.node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+                    if slot.modulator_node_id == 0 {
+                        continue;
+                    }
+                    (
+                        slot.modulator_node_id as u64,
+                        param.node_param_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
+                    )
+                } else {
+                    (slot.node_id as u64, param.node_param_idx as u64)
+                };
             unsafe {
                 crate::audiograph::params_push_wrapper(
                     self.graph.lg.0,
                     crate::audiograph::ParamMsg {
-                        logical_id: slot.node_id as u64,
-                        idx: param.node_param_idx as u64,
+                        logical_id,
+                        idx: node_param_idx,
                         fvalue: slot.defaults[param_idx],
                     },
                 );
@@ -2827,5 +3064,67 @@ impl App {
             },
             tick: 0,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audiograph::LiveGraphPtr;
+    use crate::recorder::MasterRecorder;
+    use crate::sequencer::{default_empty_effect_chain, SequencerState};
+    use crate::ui::AudioBuses;
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    fn test_app_with_track() -> App {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let (keyboard_tx, _keyboard_rx) = mpsc::channel();
+        let mut app = App::new(
+            state,
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app
+    }
+
+    #[test]
+    fn add_midi_fx_to_track_publishes_snapshot_without_deadlocking_pattern_bank() {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut app = test_app_with_track();
+            let _ = ready_tx.send(());
+            let result = app.add_midi_fx_to_track_sync(0, "arp");
+            let published_chain = app
+                .state
+                .latest_scheduler_snapshot()
+                .tracks
+                .first()
+                .map(|track| track.params.midi_fx_chain.clone())
+                .unwrap_or_default();
+            let _ = done_tx.send((result, published_chain));
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("test app should initialize");
+        let (result, published_chain) = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("adding MIDI FX should not block on pattern_bank");
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(published_chain, vec!["arp".to_string()]);
     }
 }

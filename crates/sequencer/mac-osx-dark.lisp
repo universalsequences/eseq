@@ -77,7 +77,7 @@
       :instrument-group-bg '(0.15 0.15 0.155)
       :instrument-group-selected-bg '(0.11 0.115 0.11)
       :mixer-strip-bg    '(0.17 0.17 0.18)
-      :mixer-strip-selected-bg '(0.23 0.23 0.26)
+      :mixer-strip-selected-bg '(0.28 0.28 0.31)
       :mixer-strip-muted-bg '(0.095 0.095 0.10)
       :mixer-strip-border '(0.14 0.15 0.16)
       :mixer-strip-selected-border '(0.92 0.92 0.94)
