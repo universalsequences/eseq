@@ -10924,6 +10924,63 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_sequencer_header_controls_activate_target_track_before_mutating() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 40);
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        for name in [
+            "seq-clear-selection",
+            "seq-set-track",
+            "seq-toggle-record-arm",
+        ] {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native(name, move |args, _ctx| {
+                    calls.lock().unwrap().push(format!("{name}:{args:?}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        let layout = editor
+            .widget_layout()
+            .expect("sequencer layout should build");
+        let arm = find_layout_node_by_stable_key(&layout, "seqv-arm-1")
+            .expect("second sequencer row record-arm control");
+        editor
+            .runtime_mut()
+            .invoke(
+                arm.props
+                    .get("on-click")
+                    .cloned()
+                    .expect("record-arm on-click"),
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke second-row record-arm");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                "seq-clear-selection:[]",
+                "seq-set-track:[1]",
+                "seq-toggle-record-arm:[1]",
+            ],
+            "sequencer header controls should select their row before mutating it"
+        );
+    }
+
+    #[test]
     fn metal_seq_sequencer_expanded_current_row_slider_uses_plock_path_for_selected_step() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let sequencer_id = editor
@@ -17942,6 +17999,23 @@ mod tests {
                 .find_map(|child| find_descendant_button_by_text(child, text))
         }
 
+        fn assert_reveal_command(commands: &[eseqlisp::host::HostCommand], expected_track: f64) {
+            assert_eq!(commands.len(), 1, "expected one reveal command");
+            match &commands[0] {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "reveal-sequencer-track");
+                    let Value::Map(payload) = payload else {
+                        panic!("reveal-sequencer-track payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("track").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_track))
+                    );
+                }
+                other => panic!("expected reveal-sequencer-track command, got {other:?}"),
+            }
+        }
+
         let src = std::fs::read_to_string("metal-seq-mixer-v2.lisp").expect("read mixer lisp");
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -18199,6 +18273,7 @@ mod tests {
             .runtime_mut()
             .eval_str("(mixer-v2-select-track 0)")
             .expect("explicit mixer track selection should claim delete target");
+        assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
             editor
                 .runtime_mut()
@@ -18459,6 +18534,7 @@ mod tests {
             .runtime_mut()
             .eval_str("(mixer-v2-select-track 0)")
             .expect("select track before clicking track control");
+        assert_reveal_command(&editor.drain_host_commands(), 0.0);
         editor
             .runtime_mut()
             .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
@@ -18491,6 +18567,7 @@ mod tests {
             .runtime_mut()
             .invoke(track_select_callback, vec![Value::Bool(true)])
             .expect("invoke track mute click");
+        assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
             Some("seq-toggle-track-mute:[0]")
@@ -18513,6 +18590,7 @@ mod tests {
             .runtime_mut()
             .invoke(track_label_callback, vec![Value::Bool(true)])
             .expect("invoke track label click");
+        assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
             Some("seq-set-track:[0]")

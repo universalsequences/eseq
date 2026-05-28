@@ -486,14 +486,27 @@ fn current_track_for_app(app: &mut ui::App, current_track: &Arc<AtomicUsize>) ->
 }
 
 fn ensure_sequencer_current_track_visible(editor: &mut Editor, app: &ui::App, track: usize) {
-    if editor.active_buffer().name != "*sequencer*" {
-        return;
-    }
     let Some(track_id) = app.graph.track_node_ids.get(track).map(|ids| ids.pan_id) else {
         return;
     };
     let key = format!("sequencer-track-{track_id}");
-    editor.ensure_widget_stable_key_visible(&key, 1.0);
+    editor.ensure_widget_stable_key_visible_in_buffer_named("*sequencer*", &key, 1.0);
+}
+
+fn reveal_sequencer_current_track(editor: &mut Editor, app: &ui::App, track: usize) {
+    editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+    ensure_sequencer_current_track_visible(editor, app, track);
+}
+
+fn key_should_reveal_sequencer_track(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Tab, KeyModifiers::NONE)
+            | (KeyCode::Up, KeyModifiers::NONE)
+            | (KeyCode::Down, KeyModifiers::NONE)
+    )
 }
 
 fn track_button_state_snapshot(state: &Arc<SequencerState>) -> Vec<(bool, bool)> {
@@ -1667,12 +1680,14 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 mod tests {
     use super::{
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
-        escape_lisp_string, instrument_patcher_buffer_source, patcher_layout_sidecar_path_for_dsp,
-        reconciled_track_index, restore_instrument_patcher_layout_source,
-        should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
-        show_instrument_patcher_source_layout_source, ActiveDeleteTarget, FxDeleteChain, Runtime,
-        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
+        escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
+        patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
+        restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
+        show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
+        ActiveDeleteTarget, FxDeleteChain, Runtime, Value, AGENT_INSTRUMENT_STUB_UI,
+        NEW_INSTRUMENT_STARTER_DSP,
     };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
     use std::path::Path;
 
@@ -1709,6 +1724,33 @@ mod tests {
         assert_eq!(reconciled_track_index(7, 1, 4), Some(1));
         assert_eq!(reconciled_track_index(7, 9, 4), Some(3));
         assert_eq!(reconciled_track_index(0, 0, 0), None);
+    }
+
+    #[test]
+    fn sequencer_reveal_is_limited_to_navigation_keys() {
+        assert!(key_should_reveal_sequencer_track(&KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE
+        )));
+        assert!(key_should_reveal_sequencer_track(&KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE
+        )));
+        assert!(key_should_reveal_sequencer_track(&KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE
+        )));
+        assert!(
+            !key_should_reveal_sequencer_track(&KeyEvent::new(
+                KeyCode::Char('v'),
+                KeyModifiers::NONE
+            )),
+            "parameter shortcuts should not reveal and scroll the current row"
+        );
+        assert!(
+            !key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)),
+            "non-track-navigation tab shortcuts should not reveal the sequencer row"
+        );
     }
 
     #[test]
@@ -2187,11 +2229,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &step_clipboard,
                         &ui_epoch,
                     ) {
-                        ensure_sequencer_current_track_visible(
-                            &mut editor,
-                            &app,
-                            current_track.load(Ordering::Relaxed),
-                        );
+                        if key_should_reveal_sequencer_track(&raw_key) {
+                            let track = current_track.load(Ordering::Relaxed);
+                            reveal_sequencer_current_track(&mut editor, &app, track);
+                        }
                         editor.mark_needs_redraw();
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
@@ -2247,15 +2288,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Only pass Press events to the editor (Release is only for note-off)
                     if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
                         let should_reload_custom_ui = should_reload_custom_ui_after_key(&key);
+                        let previous_track = current_track.load(Ordering::Relaxed);
                         editor.handle_key(key);
                         if should_reload_custom_ui {
                             reload_custom_instrument_ui(&mut editor);
                         }
-                        ensure_sequencer_current_track_visible(
-                            &mut editor,
-                            &app,
-                            current_track.load(Ordering::Relaxed),
-                        );
+                        let next_track = current_track.load(Ordering::Relaxed);
+                        if editor.active_buffer().name == "*sequencer*"
+                            && next_track != previous_track
+                        {
+                            let track = current_track.load(Ordering::Relaxed);
+                            reveal_sequencer_current_track(&mut editor, &app, track);
+                        }
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -2272,17 +2316,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             pending_drag = None;
                         }
                         editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-                        if matches!(
-                            mouse.kind,
-                            crossterm::event::MouseEventKind::Down(_)
-                                | crossterm::event::MouseEventKind::Up(_)
-                        ) {
-                            ensure_sequencer_current_track_visible(
-                                &mut editor,
-                                &app,
-                                current_track.load(Ordering::Relaxed),
-                            );
-                        }
                         backend.set_widget_cursor(editor.widget_cursor());
                     }
                 }
@@ -2376,6 +2409,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let HostCommand::Custom { name, payload } = command {
                 let _ = current_track_for_app(&mut app, &current_track);
                 match name.as_str() {
+                    "reveal-sequencer-track" => {
+                        if let Some(track) = extract_usize_from_payload(&payload, "track") {
+                            if track < app.tracks.len() {
+                                reveal_sequencer_current_track(&mut editor, &app, track);
+                            }
+                        }
+                    }
                     "audition-sample" => {
                         let path_str = extract_path_from_payload(&payload);
                         if let Some(path_str) = path_str {
@@ -10182,7 +10222,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if refresh_visible_sequencer_after_cycle {
                     let started = Instant::now();
                     editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
-                    ensure_sequencer_current_track_visible(&mut editor, &app, ct);
                     refresh_seq_elapsed = started.elapsed();
                 }
                 if refresh_visible_mixer_after_cycle {

@@ -2217,6 +2217,78 @@ impl Editor {
         true
     }
 
+    pub fn ensure_widget_stable_key_visible_in_buffer_named(
+        &mut self,
+        buffer_name: &str,
+        stable_key: &str,
+        margin_rows: f32,
+    ) -> bool {
+        let Some(buffer_idx) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == buffer_name)
+        else {
+            return false;
+        };
+        if buffer_idx == self.active_buffer_idx() {
+            return self.ensure_widget_stable_key_visible(stable_key, margin_rows);
+        }
+
+        let mut changed = false;
+        for tile_id in self.tile_root.leaf_ids() {
+            let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) else {
+                continue;
+            };
+            if leaf.buffer_idx != buffer_idx {
+                continue;
+            }
+            let Some(layout) = leaf.cached_layout.as_ref() else {
+                continue;
+            };
+            let Some((target_row, target_height)) =
+                find_layout_node_by_stable_key(layout, stable_key)
+                    .map(|node| (node.rect.row, node.rect.height))
+            else {
+                continue;
+            };
+            let viewport_height = leaf.widget_viewport_height.max(0.0);
+            if viewport_height <= 0.0 {
+                continue;
+            }
+
+            let margin = margin_rows.max(0.0).min(viewport_height * 0.5);
+            let target_top = target_row.floor();
+            let target_bottom = (target_row + target_height).ceil();
+            let current_scroll = leaf.widget_scroll_top;
+            let max_scroll = {
+                const SCROLL_SLOP_ROWS: f32 = 0.5;
+                let overflow = max_layout_bottom(layout.as_ref()) - viewport_height;
+                if overflow <= SCROLL_SLOP_ROWS {
+                    0.0
+                } else {
+                    overflow.max(0.0)
+                }
+            };
+            let desired_scroll = if target_top < current_scroll + margin {
+                target_top - margin
+            } else if target_bottom > current_scroll + viewport_height - margin {
+                target_bottom - viewport_height + margin
+            } else {
+                current_scroll
+            }
+            .clamp(0.0, max_scroll);
+
+            if (desired_scroll - current_scroll).abs() > f32::EPSILON {
+                leaf.widget_scroll_top = desired_scroll;
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_needs_redraw();
+        }
+        changed
+    }
+
     /// Combined vertical scroll: widget scroll + text scroll.
     pub fn total_scroll_top(&self) -> f32 {
         let text_scroll = if self.active_buffer().view_mode == ViewMode::UiOnly {

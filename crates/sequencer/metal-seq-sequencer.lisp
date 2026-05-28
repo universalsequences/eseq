@@ -390,19 +390,19 @@
           :background "seqv-rec-arm-dot"
           :key (str "seqv-arm-" i)
           :active (if (nth SEQ.record-armed i) 1 0)
-          :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-record-arm i)))
+          :on-click |x y r| (do (seqv-activate-track-for-edit i) (seq-toggle-record-arm i)))
         (button (str (+ i 1))
           :key (str "seqv-mute-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :background-color (seqv-mute-bg (nth SEQ.track-mutes i))
           :color (if (nth SEQ.track-mutes i) :gray :blue)
-          :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-track-mute i)))
+          :on-click |x y r| (do (seqv-activate-track-for-edit i) (seq-toggle-track-mute i)))
         (button "S"
           :key (str "seqv-solo-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :background-color (seqv-solo-bg (nth SEQ.track-solos i))
           :color (if (nth SEQ.track-solos i) :white :gray)
-          :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-track-solo i)))
+          :on-click |x y r| (do (seqv-activate-track-for-edit i) (seq-toggle-track-solo i)))
         (box :width 8.6 :height 1
           :key (str "seqv-select-" i)
           :bg (if (and (< selected-bus 0) (= SEQ.current-track i)) :blue :dark-gray)

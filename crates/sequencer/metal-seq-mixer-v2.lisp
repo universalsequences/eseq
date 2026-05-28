@@ -66,7 +66,15 @@
   (do
     (set! selected-bus -1)
     (seq-set-track i)
+    (host-command "reveal-sequencer-track" (dict :track i))
     (seq-set-delete-target :mixer-track (dict :track i))))
+
+(def mixer-v2-activate-track-control (i)
+  (do
+    (set! selected-bus -1)
+    (seq-set-track i)
+    (host-command "reveal-sequencer-track" (dict :track i))
+    (mixer-v2-clear-delete-target)))
 
 (def mixer-v2-select-bus (i)
   (do
@@ -456,17 +464,17 @@
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
             :color (if muted :dim :black)
-            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-track-mute i))))
+            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.track-solos i))
             :color (if (nth SEQ.track-solos i) :black :dim)
-            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-track-solo i))))
+            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-solo i))))
           (button "R"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
             :color (if (nth SEQ.record-armed i) :black :dim)
-            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-record-arm i)))))
+            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))
         (button (substring (nth SEQ.track-names i) 0 10)
           :width 9.8 :height 1.0 :padding 0 :font-size 10
           :background-color (if (mixer-v2-delete-target-track? i)

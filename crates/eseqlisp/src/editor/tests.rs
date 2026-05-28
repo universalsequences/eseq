@@ -6585,6 +6585,65 @@ fn ui_only_widget_scrolls_when_content_is_taller_than_viewport() {
 }
 
 #[test]
+fn can_reveal_widget_in_visible_inactive_buffer_without_switching_focus() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect-buffer "*sequencer*"
+                  (v-stack :width :fill :gap 0
+                    (box :width :fill :height 18)
+                    (box :key "target-row" :width :fill :height 3)))
+                (split-window-right "*sequencer*")
+                "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 10);
+
+    let active_before = editor.active_tile;
+    let sequencer_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*sequencer*")
+        .expect("sequencer buffer");
+    let sequencer_scroll_before = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .filter_map(|tile_id| editor.tile_root.find_leaf(tile_id))
+        .find(|leaf| leaf.buffer_idx == sequencer_idx)
+        .expect("visible sequencer leaf")
+        .widget_scroll_top;
+    assert_eq!(sequencer_scroll_before, 0.0);
+
+    assert!(
+        editor.ensure_widget_stable_key_visible_in_buffer_named("*sequencer*", "target-row", 1.0),
+        "revealing a below-viewport row should update the inactive tile scroll"
+    );
+
+    assert_eq!(
+        editor.active_tile, active_before,
+        "revealing an inactive buffer must not steal tile focus"
+    );
+    let sequencer_scroll_after = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .filter_map(|tile_id| editor.tile_root.find_leaf(tile_id))
+        .find(|leaf| leaf.buffer_idx == sequencer_idx)
+        .expect("visible sequencer leaf")
+        .widget_scroll_top;
+    assert!(
+        sequencer_scroll_after > 0.0,
+        "inactive sequencer tile should scroll to reveal the target row"
+    );
+}
+
+#[test]
 fn ui_only_widget_does_not_scroll_when_content_exactly_fits_viewport() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
