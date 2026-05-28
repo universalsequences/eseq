@@ -2339,7 +2339,7 @@ impl EffectDescriptor {
                     name: "bias".to_string(),
                     min: 0.0,
                     max: 1.0,
-                    default: 0.4,
+                    default: 0.5,
                     kind: ParamKind::Continuous {
                         unit: Some("%".to_string()),
                     },

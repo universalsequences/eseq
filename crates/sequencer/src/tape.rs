@@ -241,17 +241,33 @@ fn loss_params(speed_idx: usize) -> (f32, f32, f32) {
     }
 }
 
-// Map `bias` (0..1) to J-A material constants. Higher bias = harder knee.
+// `bias` models a tape machine's HF bias current. A real bias signal pushes
+// the audio into the linear region of the magnetization curve, so:
+//
+//   under-biased (low)  → brighter, more distortion, edgier, less headroom
+//   calibrated (~0.5)   → balanced
+//   over-biased (high)  → darker, smoother, cleaner, compressed highs
+//
+// We capture the two audible dimensions: the saturation curve (here) and the
+// HF brightness (see `bias_brightness`, applied to the loss-filter cutoff).
 fn material_constants(bias: f32) -> (f32, f32, f32, f32) {
-    // a: Langevin shape — smaller is harder.
-    let a = 1.2 - bias.clamp(0.0, 1.0) * 0.9;
-    // k: pinning. More k = more hysteresis loop area = more harmonic richness.
-    let k = 0.35 + bias.clamp(0.0, 1.0) * 0.65;
-    // alpha and c held fixed at sane values; bias controls the audible
-    // dimensions instead of all five at once.
+    let bias = bias.clamp(0.0, 1.0);
+    // a: Langevin shape — smaller bends the curve sooner/harder. Under-biasing
+    // gives a harder knee (distorts earlier, more harmonics).
+    let a = 0.35 + bias * 0.85;
+    // k: hysteresis loop width. Under-biasing widens the loop → more low-level
+    // nonlinearity and "edge".
+    let k = 0.9 - bias * 0.55;
     let alpha = 1.6e-3;
     let c = 0.17;
     (a, alpha, k, c)
+}
+
+// HF brightness multiplier applied to the loss-filter cutoff. Under-biasing
+// leaves the highs intact (>1); over-biasing erases them (<1). This is the
+// "back off the bias to brighten it up" behaviour of a real deck.
+fn bias_brightness(bias: f32) -> f32 {
+    1.3 - bias.clamp(0.0, 1.0) * 0.6
 }
 
 unsafe extern "C" fn tape_init(
@@ -263,7 +279,7 @@ unsafe extern "C" fn tape_init(
     let s = state as *mut f32;
     *s.add(STATE_ENABLED) = 1.0;
     *s.add(STATE_DRIVE_DB) = 0.0;
-    *s.add(STATE_BIAS) = 0.4;
+    *s.add(STATE_BIAS) = 0.5;
     *s.add(STATE_SPEED) = 1.0; // 15 ips default
     *s.add(STATE_OUTPUT_DB) = 0.0;
     *s.add(STATE_MIX) = 1.0;
@@ -372,7 +388,7 @@ unsafe extern "C" fn tape_process(
 
     // Anti-image/anti-alias cutoff at the base Nyquist (slightly under).
     let os_lp = butterworth_lp(sr * 0.45, fs_os);
-    let loss_lp = butterworth_lp(loss_cut_hz, sr);
+    let loss_lp = butterworth_lp(loss_cut_hz * bias_brightness(bias), sr);
     let loss_shelf = low_shelf(bump_hz, bump_db, sr);
 
     let mut m_l = *s.add(STATE_M_L);
@@ -498,7 +514,8 @@ mod tests {
     fn output_stays_finite_and_bounded_under_extreme_drive() {
         let mut state = init_state();
         state[STATE_DRIVE_DB] = 24.0;
-        state[STATE_BIAS] = 1.0;
+        // bias=0 is the under-biased / hardest-knee end — most likely to blow up.
+        state[STATE_BIAS] = 0.0;
         let sr = 48_000.0;
         let left: Vec<f32> = (0..2048)
             .map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / sr).sin())
@@ -531,6 +548,30 @@ mod tests {
             .collect();
         let r = rms(&residual);
         assert!(r > 1.0e-3, "residual rms was {r}, expected harmonic content");
+    }
+
+    #[test]
+    fn under_bias_passes_more_treble_than_over_bias() {
+        // Backing off the bias should brighten the top end.
+        let sr = 48_000.0;
+        let left: Vec<f32> = (0..4096)
+            .map(|i| (std::f32::consts::TAU * 10_000.0 * i as f32 / sr).sin() * 0.3)
+            .collect();
+
+        let mut under = init_state();
+        under[STATE_BIAS] = 0.0;
+        let (out_under, _) = process_block(&mut under, &left, &left);
+
+        let mut over = init_state();
+        over[STATE_BIAS] = 1.0;
+        let (out_over, _) = process_block(&mut over, &left, &left);
+
+        let r_under = rms(&out_under[2048..]);
+        let r_over = rms(&out_over[2048..]);
+        assert!(
+            r_under > r_over,
+            "under-biased rms {r_under} should exceed over-biased rms {r_over}"
+        );
     }
 
     #[test]
