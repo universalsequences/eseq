@@ -1111,6 +1111,10 @@ impl App {
                 crate::limiter::limiter_vtable(),
                 crate::limiter::LIMITER_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Tape" => (
+                crate::tape::tape_vtable(),
+                crate::tape::TAPE_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             other => return Err(format!("Unknown built-in effect '{other}'")),
         };
         let name = CString::new(format!(

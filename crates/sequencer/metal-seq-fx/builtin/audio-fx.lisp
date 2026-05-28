@@ -13,4 +13,6 @@
             (builtin-fx-compressor-ui fx)
             (if (= (get fx :name) "Limiter")
               (builtin-fx-limiter-ui fx)
-              false)))))))
+              (if (= (get fx :name) "Tape")
+                (builtin-fx-tape-ui fx)
+                false))))))))

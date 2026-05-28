@@ -83,6 +83,8 @@ pub mod sequencer;
 pub mod stereo_panner;
 #[allow(dead_code)]
 mod str8_delay;
+#[allow(dead_code)]
+mod tape;
 pub mod track_color;
 #[allow(dead_code)]
 pub mod track_modulator;

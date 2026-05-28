@@ -5034,6 +5034,7 @@ mod tests {
             "metal-seq-fx/builtin/str8-delay.lisp",
             "metal-seq-fx/builtin/filter-panel.lisp",
             "metal-seq-fx/builtin/dynamics.lisp",
+            "metal-seq-fx/builtin/tape.lisp",
             "metal-seq-fx/builtin/dj-mixer.lisp",
             "metal-seq-fx/builtin/audio-fx.lisp",
             "metal-seq-fx.lisp",

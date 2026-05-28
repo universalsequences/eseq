@@ -1164,6 +1164,7 @@ impl EffectDescriptor {
             "Glue Compressor",
             "Compressor",
             "Limiter",
+            "Tape",
         ]
     }
 
@@ -1208,6 +1209,7 @@ impl EffectDescriptor {
             "Glue Compressor" => Some(Self::builtin_glue_compressor()),
             "Compressor" => Some(Self::builtin_compressor()),
             "Limiter" => Some(Self::builtin_limiter()),
+            "Tape" => Some(Self::builtin_tape()),
             _ => None,
         }
     }
@@ -2306,6 +2308,94 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
                 Self::enabled_param(crate::limiter::LIMITER_PARAM_ENABLED as u32, 1.0),
+            ],
+        }
+    }
+
+    /// Analog tape emulation built on Jiles–Atherton hysteresis.
+    pub fn builtin_tape() -> Self {
+        Self {
+            name: "Tape".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                ParamDescriptor {
+                    name: "drive".to_string(),
+                    min: -12.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::tape::TAPE_PARAM_DRIVE_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "bias".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.4,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::tape::TAPE_PARAM_BIAS as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "speed".to_string(),
+                    min: 0.0,
+                    max: 2.0,
+                    default: 1.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "7.5 ips".to_string(),
+                            "15 ips".to_string(),
+                            "30 ips".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::tape::TAPE_PARAM_SPEED as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "output".to_string(),
+                    min: -24.0,
+                    max: 12.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::tape::TAPE_PARAM_OUTPUT_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mix".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::tape::TAPE_PARAM_MIX as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                Self::enabled_param(crate::tape::TAPE_PARAM_ENABLED as u32, 1.0),
             ],
         }
     }
