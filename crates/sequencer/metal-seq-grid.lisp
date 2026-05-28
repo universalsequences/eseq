@@ -239,7 +239,8 @@
     (instrument-toggle-mods-view)
     (seq-show-fx-lower-panel)))
 
-(bind-key "Tab" "seq-toggle-main-or-piano-roll")
+(bind-key "Tab" "seq-toggle-current-track-expanded-main")
+(bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync
 (defstate param-mode 0)

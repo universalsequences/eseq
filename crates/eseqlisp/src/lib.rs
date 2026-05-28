@@ -1407,6 +1407,49 @@ mod tests {
     }
 
     #[test]
+    fn reactive_set_reruns_only_matching_field_subtree() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![], true);
+
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*rows*"
+                  (v-stack
+                    (subtree :key "row-a"
+                      (label (if (reactive-get "APP" "a") "a on" "a off")))
+                    (subtree :key "row-b"
+                      (label (if (reactive-get "APP" "b") "b on" "b off")))))
+                "#,
+            )
+            .expect("install row subtrees");
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        runtime
+            .eval_str(r#"(reactive-set "APP" "a" true)"#)
+            .expect("set reactive field from Lisp");
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(
+            pending.len(),
+            1,
+            "reactive-set should rerun only subtrees that read the changed field"
+        );
+        let rendered_tree = match &pending[0] {
+            crate::vm::PendingUiUpdate::FullTree(update) => format!("{:?}", update.tree),
+            crate::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => format!("{tree:?}"),
+        };
+        assert!(
+            rendered_tree.contains("a on"),
+            "updated subtree should be the row-a subtree: {rendered_tree}"
+        );
+        assert!(
+            !rendered_tree.contains("b off"),
+            "row-b must not be rerendered when APP.a changes: {rendered_tree}"
+        );
+    }
+
+    #[test]
     fn set_reactive_updates_unsubscribed_fields_before_dependent_rerun() {
         let mut runtime = Runtime::new();
         runtime.register_reactive(

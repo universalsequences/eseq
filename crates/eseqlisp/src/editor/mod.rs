@@ -983,6 +983,25 @@ impl Editor {
         self.switch_active_tile(ids[next_idx]);
     }
 
+    pub fn switch_active_tile_to_buffer_named(&mut self, buffer_name: &str) -> bool {
+        let Some(buffer_idx) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == buffer_name)
+        else {
+            return false;
+        };
+        let Some(tile_id) = self
+            .tile_root
+            .find_leaf_by_buffer_idx(buffer_idx)
+            .map(|leaf| leaf.id)
+        else {
+            return false;
+        };
+        self.switch_active_tile(tile_id);
+        true
+    }
+
     /// Handle tiled mouse event: hit-test tiles, switch active, then dispatch.
     /// `border_inset`: 1 for TUI (cell-based borders), 0 for Metal (pixel borders).
     pub fn handle_tiled_mouse_precise(

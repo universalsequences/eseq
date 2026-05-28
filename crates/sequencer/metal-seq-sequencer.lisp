@@ -65,6 +65,9 @@
 (def seqv-list-remove (xs item)
   (filter (lambda (x) (not (= x item))) xs))
 
+(def seqv-expanded-track-field (track-id)
+  (str "track-expanded-" track-id))
+
 (def seqv-track-id (track)
   (if (< track (len SEQ.track-ids))
     (nth SEQ.track-ids track)
@@ -79,7 +82,17 @@
     (seq-set-track track)))
 
 (def seqv-track-expanded? (track-id)
-  (seqv-list-contains? seqv-expanded-track-ids track-id))
+  (reactive-get "SEQV" (seqv-expanded-track-field track-id)))
+
+(def seqv-set-track-expanded (track-id expanded)
+  (do
+    (reactive-set "SEQV" (seqv-expanded-track-field track-id) expanded)
+    (set! seqv-expanded-track-ids
+      (if expanded
+        (if (seqv-list-contains? seqv-expanded-track-ids track-id)
+          seqv-expanded-track-ids
+          (append seqv-expanded-track-ids (list track-id)))
+        (seqv-list-remove seqv-expanded-track-ids track-id)))))
 
 (def seqv-editor-state-for (track-id)
   (let ((matches (filter
@@ -153,16 +166,17 @@
     (select-all-steps)))
 
 (def seqv-collapse-all-tracks ()
-  (set! seqv-expanded-track-ids '()))
+  (do
+    (for-each
+      (lambda (track-id) (seqv-set-track-expanded track-id false))
+      seqv-expanded-track-ids)
+    (set! seqv-expanded-track-ids '())))
 
 (def seqv-toggle-current-track-expanded ()
   (let ((track-id (seqv-current-track-id)))
     (do
       (set! selected-bus -1)
-      (set! seqv-expanded-track-ids
-        (if (seqv-track-expanded? track-id)
-          (seqv-list-remove seqv-expanded-track-ids track-id)
-          (append seqv-expanded-track-ids (list track-id)))))))
+      (seqv-set-track-expanded track-id (not (seqv-track-expanded? track-id))))))
 
 (def seqv-handle-key (key text)
   (let ((mode (seqv-param-mode-for-key key)))
@@ -186,10 +200,7 @@
   (let ((track-id (seqv-track-id track)))
     (do
       (seqv-activate-track-for-edit track)
-      (set! seqv-expanded-track-ids
-        (if (seqv-track-expanded? track-id)
-          (seqv-list-remove seqv-expanded-track-ids track-id)
-          (append seqv-expanded-track-ids (list track-id)))))))
+      (seqv-set-track-expanded track-id (not (seqv-track-expanded? track-id))))))
 
 (defwidget seqv-track-container
   :width 1.5 :height 1.5
@@ -220,14 +231,14 @@
 
 (defwidget seqv-ellipsis-button
   :width 2.2 :height 1.2
-  :state ()
+  :state (expanded)
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.98)
       (material
         :lighting (lighting :edge-min -0.45 :edge-max 0.4
           :light (vec3 0.1 -1.2 2.4) :shininess 24.0)
-        :color :mixer-control-bg))
+        :color (if expanded (rgba 0.18 0.18 0.20 1.0) :mixer-control-bg)))
     (sdf/fill
       (sdf/translate -0.48 0
         (sdf/circle 0.12))
@@ -403,13 +414,14 @@
             :bg :transparent))))))
 
 (def seqv-track-actions (i)
-  (h-stack :gap 0.35 :align :center
+  (h-stack :gap 0.35 :padding 0.85
     (box
       :key (str "seqv-expand-" i)
       :width 3.5 :height 1.0
       :background "seqv-ellipsis-button"
+      :expanded (if (seqv-track-expanded? (nth SEQ.track-ids i)) 1 0)
       :on-click |x y r| (seqv-track-menu-click i))
-    (box :width 1 :height 0.0)
+    (box :width 0.1 :height 0.0)
     ))
 
 (def sequencer-row-width 16)
@@ -783,11 +795,12 @@
     :bg (if (= (seqv-param-mode track-id) mode) (seqv-param-color mode) :dark-gray)
     :on-click |x y r| (do (seqv-activate-track-for-edit track) (seqv-set-param-mode track-id mode))
     (label tab-label :font-size 12
-      :color (if (= (seqv-param-mode track-id) mode) :white :gray)
+      :color (if (= (seqv-param-mode track-id) mode) :primary :dim)
       :bg :transparent)))
 
 (def seqv-expanded-track-quick-controls (track track-id)
   (let ((mode (seqv-param-mode track-id)))
+    (v-stack (box :height 0.2 :width 1)
     (h-stack :gap 0.55 :align :center
       (box :width 9.4 :height 1.3
         :key (str "seqv-expanded-step-summary-" track-id)
@@ -834,7 +847,7 @@
                   (label (fmt " {} " (+ page 1))
                     :font-size 11
                     :color (if (= page (seqv-visible-page track track-id)) :white :dim)
-                    :bg :transparent))))))))))
+                    :bg :transparent)))))))))))
 
 (def seqv-expanded-track-editor (track track-id)
   (let ((mode (seqv-param-mode track-id)))
@@ -992,7 +1005,7 @@
             :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
             (if (seqv-track-expanded? (nth SEQ.track-ids i))
               (v-stack :width :fill :gap 0.2
-                (h-stack :width :fill :gap 0.6 :align :center
+                (h-stack :width :fill :gap 0.6 :align :start
                   (seqv-track-header i)
                   (seqv-expanded-track-quick-controls i (nth SEQ.track-ids i))
                   (box :flex 1 :width 0 :height 0.1 :bg :transparent)

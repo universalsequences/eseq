@@ -1013,6 +1013,22 @@ pub fn register_core_natives(vm: &mut VM) {
         vm.current_reactive_value(namespace, field)
     });
 
+    vm.register_native_with_vm("reactive-set", |args, vm| {
+        let (Some(Value::String(namespace)), Some(Value::String(field)), Some(value)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Value::Bool(false);
+        };
+        if !vm.writable_reactive_namespaces.contains(namespace) {
+            return Value::Bool(false);
+        }
+        let value = value.clone();
+        vm.update_reactive_global(namespace, field, value.clone());
+        let source_id = vm.get_or_create_source_node(namespace, field);
+        vm.mark_source_dependents_dirty(source_id, value);
+        Value::Bool(true)
+    });
+
     vm.register_native("bind", |args| {
         let (Some(Value::String(namespace)), Some(Value::String(field))) =
             (args.first(), args.get(1))
@@ -2971,9 +2987,10 @@ impl VM {
                                 });
                             self.dag.clear_dirty(node_id);
                             if let Some(label) = label {
+                                let elapsed = started.elapsed();
                                 self.reactive_exec_timings.push(ReactiveExecTiming {
                                     label,
-                                    elapsed: started.elapsed(),
+                                    elapsed,
                                     source_buffer_id: self.current_effect_source_buffer_id,
                                     target: self.current_effect_target.clone(),
                                     subtree_root_id: Some(root_id),
@@ -3044,9 +3061,10 @@ impl VM {
                         );
                     }
                     if let Some(label) = label {
+                        let elapsed = started.elapsed();
                         self.reactive_exec_timings.push(ReactiveExecTiming {
                             label,
-                            elapsed: started.elapsed(),
+                            elapsed,
                             source_buffer_id: self.current_effect_source_buffer_id,
                             target: self.current_effect_target.clone(),
                             subtree_root_id: self.dag.nodes.get(&node_id).and_then(

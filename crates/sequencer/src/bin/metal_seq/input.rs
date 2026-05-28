@@ -106,6 +106,26 @@ fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     }
 }
 
+fn is_plain_tab_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Tab, KeyModifiers::NONE)
+    )
+}
+
+fn is_shift_tab_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Tab, KeyModifiers::SHIFT)
+            | (KeyCode::BackTab, KeyModifiers::SHIFT)
+            | (KeyCode::BackTab, KeyModifiers::NONE)
+    )
+}
+
 pub(crate) fn held_note_for_key(
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     key: &crossterm::event::KeyEvent,
@@ -467,6 +487,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn handle_metal_command_shortcut(
     editor: &mut Editor,
     key: &crossterm::event::KeyEvent,
@@ -474,6 +495,27 @@ pub(crate) fn handle_metal_command_shortcut(
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     step_clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
+) -> bool {
+    let ui_epoch = AtomicUsize::new(0);
+    handle_metal_command_shortcut_with_ui_epoch(
+        editor,
+        key,
+        state,
+        current_track,
+        selected_steps,
+        step_clipboard,
+        &ui_epoch,
+    )
+}
+
+pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    step_clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
+    ui_epoch: &AtomicUsize,
 ) -> bool {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
@@ -497,7 +539,7 @@ pub(crate) fn handle_metal_command_shortcut(
     if editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
         && !focused_widget_captures_text_input(editor)
-        && matches!((key.code, key.modifiers), (KeyCode::Tab, KeyModifiers::NONE))
+        && is_shift_tab_shortcut(key)
         && editor
             .runtime_mut()
             .eval_str(r#"(or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "edit-instrument"))"#)
@@ -540,7 +582,6 @@ pub(crate) fn handle_metal_command_shortcut(
                 editor.mark_needs_redraw();
                 return true;
             }
-            _ if editor.focused_widget_id().is_some() => {}
             (KeyCode::Tab, KeyModifiers::CONTROL) => {
                 let _ = editor
                     .runtime_mut()
@@ -548,20 +589,30 @@ pub(crate) fn handle_metal_command_shortcut(
                 editor.refresh_runtime_side_effects();
                 return true;
             }
-            (KeyCode::Tab, KeyModifiers::NONE) => {
+            _ if is_plain_tab_shortcut(key) => {
+                let sequencer_visible = editor.switch_active_tile_to_buffer_named("*sequencer*");
+                let command_name = if sequencer_visible {
+                    "seqv-toggle-current-track-expanded"
+                } else {
+                    "seq-toggle-current-track-expanded-main"
+                };
+                let _ = if let Some(callable) = editor.runtime_mut().global_value(command_name) {
+                    editor.runtime_mut().invoke(callable, vec![])
+                } else {
+                    editor.runtime_mut().eval_str(&format!("({command_name})"))
+                };
+                editor.refresh_runtime_side_effects();
+                editor.switch_active_tile_to_buffer_named("*sequencer*");
+                return true;
+            }
+            _ if is_shift_tab_shortcut(key) => {
                 let _ = editor
                     .runtime_mut()
                     .eval_str("(seq-toggle-main-or-piano-roll)");
                 editor.refresh_runtime_side_effects();
                 return true;
             }
-            (KeyCode::Tab, KeyModifiers::SHIFT) => {
-                let _ = editor
-                    .runtime_mut()
-                    .eval_str("(seq-toggle-current-track-expanded-main)");
-                editor.refresh_runtime_side_effects();
-                return true;
-            }
+            _ if editor.focused_widget_id().is_some() => {}
             (KeyCode::Char('h') | KeyCode::Char('H'), KeyModifiers::CONTROL) => {
                 let _ = editor.runtime_mut().eval_str("(seqv-collapse-all-tracks)");
                 editor.refresh_runtime_side_effects();
@@ -686,6 +737,7 @@ pub(crate) fn handle_metal_command_shortcut(
                 let track = current_track.load(Ordering::Relaxed);
                 let preserve_audio_plocks = source_track == track;
                 let num_steps = state.pattern.track_params[track].get_num_steps();
+                let mut applied_count = 0usize;
                 for (offset, snapshot) in &clipboard {
                     let dest = dest_start + offset;
                     if dest >= num_steps {
@@ -700,12 +752,17 @@ pub(crate) fn handle_metal_command_shortcut(
                         snapshot.without_audio_plocks()
                     };
                     state.restore_step_snapshot(track, dest, &sanitized);
+                    applied_count += 1;
                 }
-                state.publish_scheduler_snapshot();
+                if applied_count > 0 {
+                    state.publish_scheduler_snapshot();
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    editor.mark_needs_redraw();
+                }
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Pasted {} step{}",
-                    clipboard.len(),
-                    if clipboard.len() == 1 { "" } else { "s" }
+                    applied_count,
+                    if applied_count == 1 { "" } else { "s" }
                 )));
                 return true;
             }
@@ -896,7 +953,9 @@ mod live_keyboard_tests {
         build_selection_value, handle_metal_command_shortcut, handle_metal_soft_step_param_key,
         held_note_for_key, note_from_key, HeldKeyboardNote, SoftStepParamEdit,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use eseqlisp::editor::ViewMode;
     use eseqlisp::mode::BufferMode;
     use eseqlisp::vm::Value;
@@ -1006,7 +1065,7 @@ mod live_keyboard_tests {
         ));
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("piano".to_string()))
+            Some(eseqlisp::vm::Value::String("expand".to_string()))
         );
 
         assert!(handle_metal_command_shortcut(
@@ -1019,7 +1078,20 @@ mod live_keyboard_tests {
         ));
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("expand".to_string()))
+            Some(eseqlisp::vm::Value::String("piano".to_string()))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("piano".to_string()))
         );
 
         assert!(handle_metal_command_shortcut(
@@ -1033,6 +1105,119 @@ mod live_keyboard_tests {
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
             Some(eseqlisp::vm::Value::String("placement".to_string()))
+        );
+    }
+
+    #[test]
+    fn tab_expand_uses_visible_sequencer_tile_fast_path() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let transport_id =
+            editor.open_scratch_buffer_with_mode("*transport*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let sequencer_id =
+            editor.open_scratch_buffer_with_mode("*sequencer*", "", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.set_active_buffer(sequencer_id);
+        assert_eq!(editor.active_buffer().name, "*sequencer*");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :tool :draw
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items ()
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| e))
+                (def seqv-toggle-current-track-expanded ()
+                  (set! tab-target "fast"))
+                (def seq-toggle-current-track-expanded-main ()
+                  (do
+                    (set! tab-target "slow")
+                    (set-layout
+                      (list :cols
+                        0.5 (list :buf "*transport*" :hide-status true)
+                        0.5 (list :buf "*sequencer*" :hide-status true)))))
+                "#,
+            )
+            .expect("install tab expand handler");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (set-layout
+                  (list :cols
+                    0.5 (list :buf "*transport*" :hide-status true)
+                    0.5 (list :buf "*sequencer*" :hide-status true)))
+                "#,
+            )
+            .expect("install visible sequencer layout");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.active_buffer().id,
+            transport_id,
+            "fixture should start on the first layout tile"
+        );
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*sequencer*"),
+            "sequencer tile should be visible"
+        );
+        editor.handle_mouse_precise(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 10,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            },
+            0,
+            0,
+            30,
+            8,
+            10.0,
+            3.0,
+        );
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "fixture should cover the focused-widget path that used to bypass the Tab fast path"
+        );
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set! tab-target "")"#)
+            .expect("reset tab target");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert_eq!(
+            editor.active_buffer().name,
+            "*sequencer*",
+            "Tab expansion should leave the sequencer tile active so follow-up keys and auto-scroll target the expanded track"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("fast".to_string())),
+            "Tab should use the visible sequencer fast path instead of rebuilding the whole layout"
+        );
+        assert_ne!(
+            editor.active_buffer().id,
+            transport_id,
+            "the layout reset's first tile must not remain active after Tab expansion"
         );
     }
 

@@ -246,6 +246,18 @@ impl TileNode {
         }
     }
 
+    /// Find a leaf by the buffer index it is currently showing.
+    pub fn find_leaf_by_buffer_idx(&self, buffer_idx: usize) -> Option<&TileLeaf> {
+        match self {
+            TileNode::Leaf(leaf) if leaf.buffer_idx == buffer_idx => Some(leaf),
+            TileNode::Leaf(_) => None,
+            TileNode::Split(s) => {
+                s.a.find_leaf_by_buffer_idx(buffer_idx)
+                    .or_else(|| s.b.find_leaf_by_buffer_idx(buffer_idx))
+            }
+        }
+    }
+
     /// Find a leaf by tile ID and return a mutable reference.
     pub fn find_leaf_mut(&mut self, id: TileId) -> Option<&mut TileLeaf> {
         match self {

@@ -2163,14 +2163,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let event_started = Instant::now();
             match event {
                 Event::Key(raw_key) => {
-                    if handle_metal_command_shortcut(
+                    if handle_metal_command_shortcut_with_ui_epoch(
                         &mut editor,
                         &raw_key,
                         &state,
                         &current_track,
                         &selected_steps,
                         &step_clipboard,
+                        &ui_epoch,
                     ) {
+                        ensure_sequencer_current_track_visible(
+                            &mut editor,
+                            &app,
+                            current_track.load(Ordering::Relaxed),
+                        );
+                        editor.mark_needs_redraw();
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
                     }

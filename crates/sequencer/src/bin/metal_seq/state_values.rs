@@ -8702,6 +8702,7 @@ mod tests {
             ],
             true,
         );
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         for step in 0..16 {
             editor.runtime_mut().set_reactive(
                 "SEQ",
@@ -9569,6 +9570,7 @@ mod tests {
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let step_clipboard = Arc::new(Mutex::new(None));
+        let ui_epoch = AtomicUsize::new(0);
 
         state.pattern.patterns[0].set_step_active(0, true);
         editor
@@ -9582,29 +9584,41 @@ mod tests {
             .expect("switch to fx buffer and set cursor");
         editor.refresh_runtime_side_effects();
 
-        assert!(handle_metal_command_shortcut(
+        assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
             &state,
             &current_track,
             &selected_steps,
             &step_clipboard,
+            &ui_epoch,
         ));
         assert!(step_clipboard.lock().unwrap().is_some());
+        assert_eq!(
+            ui_epoch.load(Ordering::Relaxed),
+            0,
+            "copy should not invalidate sequencer UI state"
+        );
 
         editor
             .runtime_mut()
             .eval_str("(set! cursor-step 1)")
             .expect("move cursor");
-        assert!(handle_metal_command_shortcut(
+        assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
             &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
             &state,
             &current_track,
             &selected_steps,
             &step_clipboard,
+            &ui_epoch,
         ));
         assert!(state.pattern.patterns[0].is_active(1));
+        assert_eq!(
+            ui_epoch.load(Ordering::Relaxed),
+            1,
+            "paste must invalidate sequencer UI state so expanded tracks repaint"
+        );
 
         editor
             .runtime_mut()
@@ -10309,7 +10323,8 @@ mod tests {
                   (seqv-set-param-mode 0 4)
                   (seqv-set-param-mode 1 0)
                   (set! selected-bus 1)
-                  (set! seqv-expanded-track-ids '(0 1)))
+                  (seqv-set-track-expanded 0 true)
+                  (seqv-set-track-expanded 1 true))
                 "#,
             )
             .expect("seed sequencer shortcut state");

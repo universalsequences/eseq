@@ -1417,6 +1417,11 @@ impl Runtime {
                 "Read a reactive namespace field and track it as a dependency.",
             ),
             (
+                "reactive-set",
+                "(reactive-set namespace field value)",
+                "Write a field in a writable reactive namespace and rerun dependent effects.",
+            ),
+            (
                 "subtree-owner",
                 "(subtree-owner key callback)",
                 "Evaluate callback while assigning stable ownership to the generated widget subtree.",
@@ -2720,6 +2725,8 @@ impl Runtime {
             let Some(child_path) = paths.get(&subtree_root_id) else {
                 return Err(format!("missing-subtree-path:{subtree_root_id}"));
             };
+            let child_layout = layout_node_at_path(layout.as_ref(), child_path)
+                .ok_or_else(|| format!("missing-layout-path:{subtree_root_id}"))?;
             let updated = reuse_layout_node_for_subtree_path_result(
                 layout.as_ref(),
                 tree,
@@ -2727,6 +2734,10 @@ impl Runtime {
                 &mut dirty_widget_ids,
             )
             .map_err(|reason| format!("subtree:{subtree_root_id}:{reason}"))?;
+            let updated_child = layout_node_at_path(&updated, child_path)
+                .ok_or_else(|| format!("missing-updated-layout-path:{subtree_root_id}"))?;
+            self.reactive_registry
+                .replace_widget_bindings_for_layout_subtree(child_layout, updated_child);
             layout = Arc::new(updated);
         }
         let mut combined_dirty_widget_ids = std::mem::take(&mut self.dirty_widget_ids);
@@ -2734,8 +2745,6 @@ impl Runtime {
         combined_dirty_widget_ids.sort_unstable();
         combined_dirty_widget_ids.dedup();
         self.current_layout = Some(layout);
-        self.reactive_registry
-            .replace_widget_bindings_from_layout(self.current_layout.as_deref());
         self.dirty_widget_ids = combined_dirty_widget_ids;
         if self.force_layout_revision_bump {
             self.layout_revision = self.layout_revision.wrapping_add(1);
@@ -3133,6 +3142,14 @@ fn effect_target_label(target: &EffectTarget) -> String {
         EffectTarget::BufferId(None) => "active-buffer".to_string(),
         EffectTarget::BufferName(name) => name.clone(),
     }
+}
+
+fn layout_node_at_path<'a>(node: &'a LayoutNode, path: &[usize]) -> Option<&'a LayoutNode> {
+    let mut current = node;
+    for index in path {
+        current = current.children.get(*index)?;
+    }
+    Some(current)
 }
 
 fn collect_shader_widget_ids_recursive(node: &LayoutNode, ids: &mut Vec<u64>) {
