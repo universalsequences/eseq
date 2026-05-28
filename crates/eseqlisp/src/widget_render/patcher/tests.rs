@@ -8107,7 +8107,10 @@ fn moving_metadata_mod_param_preserves_inline_mod_presentation() {
         .find(|node| node.id == "cutoff")
         .expect("moved cutoff param");
     assert_eq!(
-        cutoff.param.as_ref().map(|param| (param.name.as_str(), param.modulatable)),
+        cutoff
+            .param
+            .as_ref()
+            .map(|param| (param.name.as_str(), param.modulatable)),
         Some(("cutoff", true))
     );
 
@@ -8119,10 +8122,7 @@ fn moving_metadata_mod_param_preserves_inline_mod_presentation() {
     assert_eq!(node_display_label(filtered), "svf cutoff~ res~ 0");
     for (input_index, name) in [(1, "cutoff~"), (2, "res~")] {
         let connection = source_connection_for_input(&patch, "filtered", input_index);
-        assert_eq!(
-            connection.presentation,
-            InputPresentation::InlineModParam
-        );
+        assert_eq!(connection.presentation, InputPresentation::InlineModParam);
         assert_eq!(
             filtered
                 .inline_inputs
@@ -8139,7 +8139,9 @@ fn moving_metadata_mod_param_preserves_inline_mod_presentation() {
         "touching a modulatable param must not expose the hidden mod accessor nodes"
     );
     assert_eq!(
-        patch_input_indices(&patch).get("filtered").map(Vec::as_slice),
+        patch_input_indices(&patch)
+            .get("filtered")
+            .map(Vec::as_slice),
         Some(&[0][..])
     );
 }
