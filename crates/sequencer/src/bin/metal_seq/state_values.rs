@@ -4295,6 +4295,15 @@ pub(crate) fn extract_usize_from_payload(payload: &Value, key: &str) -> Option<u
     None
 }
 
+pub(crate) fn extract_bool_from_payload(payload: &Value, key: &str) -> bool {
+    if let Value::Map(map) = payload {
+        if let Some(cell) = map.get(key) {
+            return matches!(&*cell.borrow(), Value::Bool(true));
+        }
+    }
+    false
+}
+
 /// Push individual tp-* reactive fields for the current track.
 pub(crate) fn sync_track_params(
     rt: &mut Runtime,
@@ -6484,6 +6493,115 @@ mod tests {
                 .eval_str("(len sbrowser-selected-tags)"),
             Ok(Some(Value::Number(2.0))),
             "switching sampler tracks should load the selected sample's tags"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_audition_preserves_sample_filter_context() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync initial sampler track");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-filter \"break\")")
+            .expect("set sample search");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-selected-tags (list \"kick\" \"808\"))")
+            .expect("seed selected tags");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-audition
+                    (dict :label "audition.wav" :path "samples/audition.wav"))"#,
+            )
+            .expect("audition sample");
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-selected-sample",
+            Value::String("samples/audition.wav".to_string()),
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync auditioned sampler sample");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("break".to_string()))),
+            "auditioning a sample should preserve the active sample search"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len sbrowser-selected-tags)"),
+            Ok(Some(Value::Number(2.0))),
+            "auditioning a sample should preserve selected tag filters"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(sbrowser-list-contains? sbrowser-selected-tags \"kick\")"),
+            Ok(Some(Value::Bool(true))),
+            "auditioning a sample should not replace selected tags with that sample's tags"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_browser_initiated_new_track_preserves_sample_filter_context() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync initial sampler track");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-filter \"break\")")
+            .expect("set sample search");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-selected-tags (list \"kick\" \"808\"))")
+            .expect("seed selected tags");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-auditioned-sample \"samples/new-track.wav\")")
+            .expect("mark browser initiated sample load");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sidebar-track-index", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-selected-sample",
+            Value::String("samples/new-track.wav".to_string()),
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync browser-created sampler track");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("break".to_string()))),
+            "browser-initiated new sampler tracks should preserve sample search"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len sbrowser-selected-tags)"),
+            Ok(Some(Value::Number(2.0))),
+            "browser-initiated new sampler tracks should preserve selected tag filters"
         );
     }
 
@@ -12364,6 +12482,12 @@ mod tests {
                     payload.get("path").map(|value| value.borrow().clone()),
                     Some(Value::String("samples/snare.wav".to_string()))
                 );
+                assert_eq!(
+                    payload
+                        .get("preserve-browser-context")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Bool(true))
+                );
             }
             other => panic!("expected load-sample-into-track host command, got {other:?}"),
         }
@@ -18127,6 +18251,12 @@ mod tests {
                     payload.get("path").map(|value| value.borrow().clone()),
                     Some(Value::String("samples/kick.wav".to_string()))
                 );
+                assert_eq!(
+                    payload
+                        .get("preserve-browser-context")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Bool(true))
+                );
             }
             other => panic!("expected load-sample-into-track host command, got {other:?}"),
         }
@@ -18239,6 +18369,12 @@ mod tests {
                 assert_eq!(
                     payload.get("path").map(|value| value.borrow().clone()),
                     Some(Value::String("samples/kick.wav".to_string()))
+                );
+                assert_eq!(
+                    payload
+                        .get("preserve-browser-context")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Bool(true))
                 );
             }
             other => panic!("expected add-track-sample host command, got {other:?}"),

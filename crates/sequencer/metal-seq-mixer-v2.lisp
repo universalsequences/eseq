@@ -82,7 +82,7 @@
       (do
         (mixer-v2-clear-delete-target)
         (if path
-          (host-command "load-sample-into-track" (dict :track track :path path))
+          (host-command "load-sample-into-track" (dict :track track :path path :preserve-browser-context true))
           (status "Drop a sample file, not a folder"))))))
 
 (def mixer-v2-drop-sample-new-track (event)
@@ -91,7 +91,7 @@
       (do
         (mixer-v2-clear-delete-target)
         (if path
-          (host-command "add-track-sample" (dict :path path))
+          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
           (status "Drop a sample file, not a folder"))))))
 
 (def mixer-v2-drop-effect-on-track (event)

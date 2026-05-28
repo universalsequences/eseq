@@ -12,6 +12,7 @@
 (defstate sbrowser-last-sidebar-sample "")
 (defstate sbrowser-selected-sample "")
 (defstate sbrowser-selected-tags (list))
+(defstate sbrowser-auditioned-sample "")
 
 ;; Editor state for inline instrument/effect creation
 (def sbrowser-editor-name (state ""))
@@ -85,21 +86,25 @@
   (if (sbrowser-audition-mode?) "audition" "create"))
 
 (def sbrowser-sync-track-search ()
-  (if (or
-       (not (= sbrowser-last-track-index SEQ.sidebar-track-index))
-       (not (= sbrowser-last-sidebar-sample SEQ.sidebar-selected-sample)))
+  (let ((track-changed (not (= sbrowser-last-track-index SEQ.sidebar-track-index)))
+        (sample-changed (not (= sbrowser-last-sidebar-sample SEQ.sidebar-selected-sample))))
+  (if (or track-changed sample-changed)
     (do
       (set! sbrowser-last-track-index SEQ.sidebar-track-index)
       (set! sbrowser-last-sidebar-sample SEQ.sidebar-selected-sample)
       (if (and (sbrowser-audition-mode?) (= SEQ.sidebar-kind "sampler"))
         (do
           (set! sbrowser-selected-sample SEQ.sidebar-selected-sample)
-          (if (= sbrowser-tab "samples")
-            (set! sbrowser-filter ""))
-          (set! sbrowser-selected-tags
-            (if (= SEQ.sidebar-selected-sample "")
-              (list)
-              (seq-sample-tags-for-path SEQ.sidebar-selected-sample))))))))
+          (if (and (or sample-changed track-changed) (= sbrowser-auditioned-sample SEQ.sidebar-selected-sample))
+            (set! sbrowser-auditioned-sample "")
+            (do
+              (set! sbrowser-auditioned-sample "")
+              (if (= sbrowser-tab "samples")
+                (set! sbrowser-filter ""))
+              (set! sbrowser-selected-tags
+                (if (= SEQ.sidebar-selected-sample "")
+                  (list)
+                  (seq-sample-tags-for-path SEQ.sidebar-selected-sample)))))))))))
 
 (def sbrowser-reset-to-audition ()
   (set! sbrowser-mode "audition")
@@ -207,6 +212,7 @@
   (let ((path (get item :path)))
     (if path
       (do
+        (set! sbrowser-auditioned-sample path)
         (host-command "audition-sample" (dict :path path))
         (status (str "Audition: " (get item :label))))
       (status (str (get item :label))))))
@@ -236,6 +242,7 @@
   (let ((path (get item :path)))
     (if path
       (do
+        (set! sbrowser-auditioned-sample path)
         (host-command "add-track-sample" (dict :path path))
         (sbrowser-leave-create-mode)
         (status (str "Add track: " (get item :label))))

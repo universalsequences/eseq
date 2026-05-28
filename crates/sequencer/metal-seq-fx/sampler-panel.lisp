@@ -51,7 +51,7 @@
     (let ((path (get payload :path))
         (track (get target :track)))
       (if path
-        (host-command "load-sample-into-track" (dict :track track :path path))
+        (host-command "load-sample-into-track" (dict :track track :path path :preserve-browser-context true))
         (status "Drop a sample file, not a folder")))))
 
 (def sampler-param-knob (p key)

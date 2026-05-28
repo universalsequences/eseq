@@ -390,6 +390,16 @@ fn escape_lisp_string(value: &str) -> String {
         .collect()
 }
 
+fn preserve_sample_browser_context_for_loaded_sample(editor: &mut Editor, path: &str) {
+    let path = escape_lisp_string(path);
+    if let Err(error) = editor
+        .runtime_mut()
+        .eval_str(&format!("(set! sbrowser-auditioned-sample \"{path}\")"))
+    {
+        eprintln!("sample browser: failed to mark browser-initiated sample load: {error:?}");
+    }
+}
+
 impl ActiveDeleteTarget {
     fn buffer_name(&self) -> &'static str {
         match self {
@@ -2565,8 +2575,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "load-sample-into-track" => {
                         let path_str = extract_path_from_payload(&payload);
                         let track = extract_usize_from_payload(&payload, "track");
+                        let preserve_browser_context =
+                            extract_bool_from_payload(&payload, "preserve-browser-context");
                         match (track, path_str) {
                             (Some(track), Some(path_str)) => {
+                                if preserve_browser_context {
+                                    preserve_sample_browser_context_for_loaded_sample(
+                                        &mut editor,
+                                        &path_str,
+                                    );
+                                }
                                 let path = Path::new(&path_str);
                                 match load_sample_into_sampler_track(
                                     &mut app,
@@ -2586,6 +2604,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )));
                                     }
                                     Err(e) => {
+                                        if preserve_browser_context {
+                                            preserve_sample_browser_context_for_loaded_sample(
+                                                &mut editor,
+                                                "",
+                                            );
+                                        }
                                         editor.handle_host_event(HostEvent::Status(format!(
                                             "Error loading sample: {e}"
                                         )));
@@ -2601,7 +2625,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "add-track-sample" => {
                         let path_str = extract_path_from_payload(&payload);
+                        let preserve_browser_context =
+                            extract_bool_from_payload(&payload, "preserve-browser-context");
                         if let Some(path_str) = path_str {
+                            if preserve_browser_context {
+                                preserve_sample_browser_context_for_loaded_sample(
+                                    &mut editor,
+                                    &path_str,
+                                );
+                            }
                             let path = Path::new(&path_str);
                             match app.graph_controller().add_track(path) {
                                 Ok(idx) => {
@@ -2696,6 +2728,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     )));
                                 }
                                 Err(e) => {
+                                    if preserve_browser_context {
+                                        preserve_sample_browser_context_for_loaded_sample(
+                                            &mut editor,
+                                            "",
+                                        );
+                                    }
                                     editor.handle_host_event(HostEvent::Status(format!(
                                         "Error adding track: {e}"
                                     )));
