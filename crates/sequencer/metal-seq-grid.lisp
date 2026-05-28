@@ -305,7 +305,7 @@
     (do
       (cool-off-follow)
       (let ((num-steps (max 1 (cursor-num-steps))))
-        (set! cursor-step
+        (set-track-cursor-step
           (if (= (current-step) 0)
             (- num-steps 1)
             (- (current-step) 1)))))))
@@ -320,7 +320,7 @@
     (do
       (cool-off-follow)
       (let ((num-steps (max 1 (cursor-num-steps))))
-        (set! cursor-step
+        (set-track-cursor-step
           (if (>= (current-step) (- num-steps 1))
             0
             (+ (current-step) 1)))))))
@@ -339,6 +339,14 @@
     (get evt :meta)
     (get evt :ctrl)))
 
+(def sequencer-cursor-step-changed (track step)
+  nil)
+
+(def set-track-cursor-step (step)
+  (do
+    (set! cursor-step step)
+    (sequencer-cursor-step-changed SEQ.current-track step)))
+
 (defstate step-drag-anchor nil)
 (defstate step-click-pending nil)
 (defstate step-move-last nil)
@@ -350,12 +358,17 @@
 (def step-select-drag-start (step evt)
   (do
     (cool-off-follow)
-    (set! cursor-step step)
+    (set-track-cursor-step step)
     (set! step-click-pending nil)
     (set! step-drag-anchor step)
     (seq-select-step-range step step)))
 
-(def step-select-drag-over-for-track (track step evt)
+(def step-set-cursor-if (update-cursor step)
+  (if update-cursor
+    (set-track-cursor-step step)
+    nil))
+
+(def step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
   (if (selection-click? evt)
     (do
       (set! step-click-pending nil)
@@ -363,13 +376,13 @@
       (set! step-toggle-drag-value nil)
       (cool-off-follow)
       (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
-      (set! cursor-step step)
+      (step-set-cursor-if update-cursor step)
       (seq-select-step-range step-drag-anchor step))
     (if (not (= step-toggle-drag-value nil))
       (do
         (set! step-click-pending nil)
         (cool-off-follow)
-        (set! cursor-step step)
+        (step-set-cursor-if update-cursor step)
         (if (= (seq-track-step-active? track step) step-toggle-drag-value)
           nil
           (seq-toggle-step step)))
@@ -382,7 +395,13 @@
             (cool-off-follow)
             (seq-move-step-drag step-move-last step)
             (set! step-move-last step)
-            (set! cursor-step step)))))))
+            (step-set-cursor-if update-cursor step)))))))
+
+(def step-select-drag-over-for-track (track step evt)
+  (step-select-drag-over-for-track-with-cursor track step evt true))
+
+(def step-select-drag-over-for-track-no-cursor (track step evt)
+  (step-select-drag-over-for-track-with-cursor track step evt false))
 
 (def step-select-drag-over (step evt)
   (step-select-drag-over-for-track SEQ.current-track step evt))
@@ -392,7 +411,7 @@
     (step-select-drag-start step evt)
     (do
       (cool-off-follow)
-      (set! cursor-step step)
+      (set-track-cursor-step step)
       (set! step-drag-anchor nil)
       (if (or (seq-track-step-active? track step) (and use-selection (step-selected? step)))
         (do
@@ -498,19 +517,19 @@
 (def goto-page (page)
   (do
     (cool-off-follow)
-    (set! cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (set-track-cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 (def double-track-pattern ()
   (do
     (cool-off-follow)
     (seq-double-track-pattern)
-    (set! cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (set-track-cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 (def halve-track-pattern ()
   (do
     (cool-off-follow)
     (seq-halve-track-pattern)
-    (set! cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (set-track-cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 ;; Cursor keys scoped to *metal* buffer via mode
 (define-mode "seq-grid-mode" :read-only true :on-key "seq-grid-handle-key")

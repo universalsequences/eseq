@@ -56,6 +56,12 @@ unsafe impl Sync for LiveGraphPtr {}
 #[derive(Copy, Clone)]
 pub struct LiveGraphPtr(pub *mut LiveGraph);
 
+impl LiveGraphPtr {
+    pub unsafe fn process_next_block(self, output_buffer: *mut f32, nframes: c_int) {
+        process_next_block(self.0, output_buffer, nframes);
+    }
+}
+
 extern "C" {
     // Engine lifecycle
     pub fn initialize_engine(block_size: c_int, sample_rate: c_int);

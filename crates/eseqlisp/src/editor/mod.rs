@@ -308,6 +308,14 @@ pub struct MajorMode {
     pub on_key: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LayoutRefreshTiming {
+    pub buffer_name: String,
+    pub tile_id: Option<TileId>,
+    pub mode: String,
+    pub elapsed: Duration,
+}
+
 pub struct Editor {
     pub buffers: Vec<Buffer>,
     buffer_recency: Vec<BufferId>,
@@ -354,6 +362,7 @@ pub struct Editor {
     suppress_mouse_until_left_up: bool,
     pointer_drag_started_on_slider: bool,
     last_slider_drag_widget_id: Option<u64>,
+    last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
     #[cfg(test)]
     test_clipboard: Option<String>,
 }
@@ -411,6 +420,25 @@ impl Editor {
         }
     }
 
+    fn record_layout_refresh_timing(
+        &mut self,
+        buffer_name: &str,
+        tile_id: Option<TileId>,
+        mode: &str,
+        elapsed: Duration,
+    ) {
+        self.last_layout_refresh_timings.push(LayoutRefreshTiming {
+            buffer_name: buffer_name.to_string(),
+            tile_id,
+            mode: mode.to_string(),
+            elapsed,
+        });
+    }
+
+    pub fn last_layout_refresh_timings(&self) -> &[LayoutRefreshTiming] {
+        &self.last_layout_refresh_timings
+    }
+
     pub fn new(mut runtime: Runtime, config: EditorConfig) -> Self {
         register_editor_natives(&mut runtime);
 
@@ -461,6 +489,7 @@ impl Editor {
             suppress_mouse_until_left_up: false,
             pointer_drag_started_on_slider: false,
             last_slider_drag_widget_id: None,
+            last_layout_refresh_timings: Vec::new(),
             #[cfg(test)]
             test_clipboard: None,
         };
@@ -2287,6 +2316,36 @@ impl Editor {
             self.mark_needs_redraw();
         }
         changed
+    }
+
+    pub fn visible_buffer_layout_contains_stable_key(
+        &self,
+        buffer_name: &str,
+        stable_key: &str,
+    ) -> bool {
+        let Some(buffer_idx) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == buffer_name)
+        else {
+            return false;
+        };
+        if buffer_idx == self.active_buffer_idx() {
+            return self
+                .runtime
+                .current_layout
+                .as_ref()
+                .and_then(|layout| find_layout_node_by_stable_key(layout, stable_key))
+                .is_some();
+        }
+        self.tile_root.leaf_ids().into_iter().any(|tile_id| {
+            self.tile_root
+                .find_leaf(tile_id)
+                .filter(|leaf| leaf.buffer_idx == buffer_idx)
+                .and_then(|leaf| leaf.cached_layout.as_ref())
+                .and_then(|layout| find_layout_node_by_stable_key(layout, stable_key))
+                .is_some()
+        })
     }
 
     /// Combined vertical scroll: widget scroll + text scroll.
@@ -4570,6 +4629,7 @@ impl Editor {
             .collect();
 
         for (tile_id, cols, rows) in tiles_to_update {
+            let layout_started = Instant::now();
             let existing_layout = self
                 .tile_root
                 .find_leaf(tile_id)
@@ -4580,10 +4640,15 @@ impl Editor {
                 crate::layout::reuse_layout_node(existing, tree, &mut dirty_widget_ids)
                     .map(|layout| (std::sync::Arc::new(layout), dirty_widget_ids))
             });
+            let mut mode = "none";
             let (layout, dirty_widget_ids) =
                 if let Some((layout, dirty_widget_ids)) = reused_layout_and_dirty {
+                    mode = "reuse";
                     (Some(layout), dirty_widget_ids)
                 } else {
+                    if tree.is_some() {
+                        mode = "full";
+                    }
                     let layout = tree.as_ref().and_then(|tree| {
                         self.runtime
                             .layout_snapshot_for_tree_with_viewport_and_offset(
@@ -4605,6 +4670,12 @@ impl Editor {
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;
             }
+            self.record_layout_refresh_timing(
+                &buffer_name,
+                Some(tile_id),
+                mode,
+                layout_started.elapsed(),
+            );
         }
         self.sync_reactive_bindings_for_visible_layouts();
         self.mark_needs_redraw();
@@ -4673,6 +4744,7 @@ impl Editor {
             .collect();
 
         for (tile_id, cols, rows) in tiles_to_update {
+            let layout_started = Instant::now();
             let buffer_name = self.buffers[buffer_idx].name.clone();
             let existing_layout = self
                 .tile_root
@@ -4770,6 +4842,12 @@ impl Editor {
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;
             }
+            self.record_layout_refresh_timing(
+                &buffer_name,
+                Some(tile_id),
+                reuse_mode,
+                layout_started.elapsed(),
+            );
         }
         self.sync_reactive_bindings_for_visible_layouts();
         self.mark_needs_redraw();
@@ -5111,6 +5189,7 @@ impl Editor {
     }
 
     pub fn refresh_runtime_side_effects(&mut self) {
+        self.last_layout_refresh_timings.clear();
         self.lisp_bindings = self.default_lisp_bindings.clone();
         self.lisp_bindings.extend(self.runtime.lisp_bindings());
 

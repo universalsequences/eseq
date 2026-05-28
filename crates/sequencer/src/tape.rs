@@ -48,7 +48,26 @@ const STATE_OS_BLOCK_SIZE: usize = 32;
 const STATE_LOSS_BLOCK_OFFSET: usize = STATE_OS_BLOCK_OFFSET + STATE_OS_BLOCK_SIZE;
 const STATE_LOSS_BLOCK_SIZE: usize = 16;
 
-pub const TAPE_STATE_SIZE: usize = STATE_LOSS_BLOCK_OFFSET + STATE_LOSS_BLOCK_SIZE;
+// New params (appended so existing param ids 0..6 stay stable).
+const STATE_WOW: usize = STATE_LOSS_BLOCK_OFFSET + STATE_LOSS_BLOCK_SIZE; // 59
+const STATE_FLUTTER: usize = STATE_WOW + 1;
+const STATE_HISS: usize = STATE_FLUTTER + 1;
+
+// Wow/flutter LFO + delay-line state, and the noise generator state for hiss.
+const STATE_WOW_PHASE: usize = STATE_HISS + 1;
+const STATE_FLUT_PHASE1: usize = STATE_WOW_PHASE + 1;
+const STATE_FLUT_PHASE2: usize = STATE_FLUT_PHASE1 + 1;
+const STATE_DELAY_WPOS: usize = STATE_FLUT_PHASE2 + 1;
+const STATE_NOISE_COUNTER: usize = STATE_DELAY_WPOS + 1;
+const STATE_HISS_LP_L: usize = STATE_NOISE_COUNTER + 1;
+const STATE_HISS_LP_R: usize = STATE_HISS_LP_L + 1;
+
+// Modulated delay line for wow/flutter, one buffer per channel. 2048 samples
+// covers the maximum wow+flutter swing up to 192 kHz with headroom.
+const DELAY_BUF_LEN: usize = 2048;
+const STATE_DELAY_OFFSET: usize = STATE_HISS_LP_R + 1;
+
+pub const TAPE_STATE_SIZE: usize = STATE_DELAY_OFFSET + DELAY_BUF_LEN * 2;
 
 pub const TAPE_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 pub const TAPE_PARAM_DRIVE_DB: u64 = STATE_DRIVE_DB as u64;
@@ -56,6 +75,20 @@ pub const TAPE_PARAM_BIAS: u64 = STATE_BIAS as u64;
 pub const TAPE_PARAM_SPEED: u64 = STATE_SPEED as u64;
 pub const TAPE_PARAM_OUTPUT_DB: u64 = STATE_OUTPUT_DB as u64;
 pub const TAPE_PARAM_MIX: u64 = STATE_MIX as u64;
+pub const TAPE_PARAM_WOW: u64 = STATE_WOW as u64;
+pub const TAPE_PARAM_FLUTTER: u64 = STATE_FLUTTER as u64;
+pub const TAPE_PARAM_HISS: u64 = STATE_HISS as u64;
+
+// Wow/flutter shaping constants. Depths are the peak delay-line swing; the
+// resulting pitch deviation is depth · 2π · freq, so these give roughly ±1 %
+// wow and a subtler fast flutter at full settings.
+const MAX_WOW_MS: f32 = 4.0;
+const MAX_FLUTTER_MS: f32 = 0.25;
+const WOW_HZ: f32 = 0.6;
+const FLUTTER_HZ1: f32 = 6.0;
+const FLUTTER_HZ2: f32 = 11.0;
+// Noise counter wraps well within f32's exact-integer range (2^23).
+const NOISE_COUNTER_WRAP: f32 = 8_388_608.0;
 
 #[inline]
 fn db_to_amp(db: f32) -> f32 {
@@ -235,9 +268,9 @@ fn low_shelf(cutoff_hz: f32, gain_db: f32, fs: f32) -> BiquadCoefs {
 // head-bump gain dB). Slower tape = darker + bigger low-mid resonance.
 fn loss_params(speed_idx: usize) -> (f32, f32, f32) {
     match speed_idx.min(2) {
-        0 => (14_000.0, 80.0, 1.4),  // 7.5 ips
-        1 => (18_000.0, 50.0, 0.7),  // 15 ips
-        _ => (21_000.0, 30.0, 0.3),  // 30 ips
+        0 => (14_000.0, 80.0, 1.4), // 7.5 ips
+        1 => (18_000.0, 50.0, 0.7), // 15 ips
+        _ => (21_000.0, 30.0, 0.3), // 30 ips
     }
 }
 
@@ -270,6 +303,44 @@ fn bias_brightness(bias: f32) -> f32 {
     1.3 - bias.clamp(0.0, 1.0) * 0.6
 }
 
+// White-noise value mapped to [-1, 1) from an integer counter. This is a
+// counter-based RNG: each sample feeds a fresh counter value through a strong
+// avalanche finalizer (Wellons' "lowbias32"), so we get high-quality noise
+// without storing a mutable RNG word in the f32 state array (which would risk
+// parking NaN bit patterns there).
+//
+// NOTE: a plain xorshift *step* (`x^=x<<13; x^=x>>17; x^=x<<5`) is a generator
+// meant to be iterated on its own output — applied to a sequential counter it
+// leaves periodic structure in the bits and sounds rhythmic. A finalizer with
+// full avalanche does not.
+#[inline]
+fn hash_noise(mut x: u32) -> f32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    // Use the top 24 bits for clean f32 mantissa precision.
+    ((x >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+}
+
+// Linear-interpolated read from a circular delay buffer. `delay` is in samples
+// and assumed to be in [1, DELAY_BUF_LEN-2].
+#[inline]
+unsafe fn delay_read(buf: *mut f32, wpos: usize, delay: f32) -> f32 {
+    let d = delay.clamp(1.0, (DELAY_BUF_LEN - 2) as f32);
+    // Offset by one buffer length so the result is always positive before the
+    // modulo (delay is always far smaller than the buffer).
+    let read = wpos as f32 - d + DELAY_BUF_LEN as f32;
+    let base = read.floor();
+    let frac = read - base;
+    let i0 = (base as usize) % DELAY_BUF_LEN;
+    let i1 = (i0 + 1) % DELAY_BUF_LEN;
+    let a = *buf.add(i0);
+    let b = *buf.add(i1);
+    a + (b - a) * frac
+}
+
 unsafe extern "C" fn tape_init(
     state: *mut c_void,
     sample_rate: c_int,
@@ -291,6 +362,25 @@ unsafe extern "C" fn tape_init(
     for i in 0..(STATE_OS_BLOCK_SIZE + STATE_LOSS_BLOCK_SIZE) {
         *s.add(STATE_OS_BLOCK_OFFSET + i) = 0.0;
     }
+    // Wow/flutter and hiss defaults — off by default so a fresh Tape is clean.
+    *s.add(STATE_WOW) = 0.0;
+    *s.add(STATE_FLUTTER) = 0.0;
+    *s.add(STATE_HISS) = 0.0;
+    *s.add(STATE_WOW_PHASE) = 0.0;
+    *s.add(STATE_FLUT_PHASE1) = 0.0;
+    *s.add(STATE_FLUT_PHASE2) = 0.0;
+    *s.add(STATE_DELAY_WPOS) = 0.0;
+    *s.add(STATE_NOISE_COUNTER) = 0.0;
+    *s.add(STATE_HISS_LP_L) = 0.0;
+    *s.add(STATE_HISS_LP_R) = 0.0;
+    for i in 0..(DELAY_BUF_LEN * 2) {
+        *s.add(STATE_DELAY_OFFSET + i) = 0.0;
+    }
+}
+
+#[inline]
+unsafe fn delay_ptr(s: *mut f32, channel: usize) -> *mut f32 {
+    s.add(STATE_DELAY_OFFSET + channel * DELAY_BUF_LEN)
 }
 
 // Layout inside the OS block, per channel (16 floats each):
@@ -335,7 +425,11 @@ unsafe fn process_channel_sample(
     // restore the energy lost to the zero samples).
     let mut last = 0.0;
     for k_os in 0..OVERSAMPLE {
-        let stuffed = if k_os == 0 { h_in * OVERSAMPLE as f32 } else { 0.0 };
+        let stuffed = if k_os == 0 {
+            h_in * OVERSAMPLE as f32
+        } else {
+            0.0
+        };
         let y1 = biquad_process(os_lp, os_state.add(0), stuffed);
         let h_os = biquad_process(os_lp, os_state.add(4), y1);
 
@@ -382,6 +476,9 @@ unsafe extern "C" fn tape_process(
     let bias = (*s.add(STATE_BIAS)).clamp(0.0, 1.0);
     let mix = (*s.add(STATE_MIX)).clamp(0.0, 1.0);
     let speed_idx = (*s.add(STATE_SPEED)).round().clamp(0.0, 2.0) as usize;
+    let wow_amt = (*s.add(STATE_WOW)).clamp(0.0, 1.0);
+    let flutter_amt = (*s.add(STATE_FLUTTER)).clamp(0.0, 1.0);
+    let hiss_amt = (*s.add(STATE_HISS)).clamp(0.0, 1.0);
 
     let (a, alpha, k, c) = material_constants(bias);
     let (loss_cut_hz, bump_hz, bump_db) = loss_params(speed_idx);
@@ -391,6 +488,21 @@ unsafe extern "C" fn tape_process(
     let loss_lp = butterworth_lp(loss_cut_hz * bias_brightness(bias), sr);
     let loss_shelf = low_shelf(bump_hz, bump_db, sr);
 
+    // Wow/flutter: peak delay swings (samples), a base delay that keeps the
+    // read pointer positive, and per-sample LFO phase increments (cycles/sample).
+    let wow_depth = wow_amt * MAX_WOW_MS * 0.001 * sr;
+    let flutter_depth = flutter_amt * MAX_FLUTTER_MS * 0.001 * sr;
+    let base_delay = wow_depth + flutter_depth + 4.0;
+    let wow_inc = WOW_HZ / sr;
+    let flut_inc1 = FLUTTER_HZ1 / sr;
+    let flut_inc2 = FLUTTER_HZ2 / sr;
+    let wf_active = wow_amt > 1.0e-4 || flutter_amt > 1.0e-4;
+
+    // Hiss: squared taper for a usable knob, gentle one-pole LP to soften the
+    // white noise into something closer to tape-head hiss.
+    let hiss_gain = hiss_amt * hiss_amt * 0.02;
+    let hiss_lp_coef = 1.0 - (-std::f32::consts::TAU * 11_000.0 / sr).exp();
+
     let mut m_l = *s.add(STATE_M_L);
     let mut h_prev_l = *s.add(STATE_H_PREV_L);
     let mut m_r = *s.add(STATE_M_R);
@@ -399,6 +511,16 @@ unsafe extern "C" fn tape_process(
     let os_r = os_state_ptr(s, 1);
     let loss_l = loss_state_ptr(s, 0);
     let loss_r = loss_state_ptr(s, 1);
+
+    let mut wow_phase = *s.add(STATE_WOW_PHASE);
+    let mut flut_phase1 = *s.add(STATE_FLUT_PHASE1);
+    let mut flut_phase2 = *s.add(STATE_FLUT_PHASE2);
+    let mut wpos = (*s.add(STATE_DELAY_WPOS)) as usize % DELAY_BUF_LEN;
+    let mut noise_counter = *s.add(STATE_NOISE_COUNTER);
+    let mut hiss_lp_l = *s.add(STATE_HISS_LP_L);
+    let mut hiss_lp_r = *s.add(STATE_HISS_LP_R);
+    let delay_l = delay_ptr(s, 0);
+    let delay_r = delay_ptr(s, 1);
 
     for i in 0..nf {
         let dry_l = *in0.add(i);
@@ -435,7 +557,50 @@ unsafe extern "C" fn tape_process(
             loss_r,
         ) * output;
 
-        // Dry blend uses raw input — `drive` is purely a wet-path knob.
+        // Wow/flutter: write the wet sample into each channel's delay line
+        // (always, so the line stays warm) and read it back through the shared
+        // pitch modulation. The transport modulation is mono — one tape, one
+        // capstan — so L and R use the same read delay.
+        *delay_l.add(wpos) = wet_l;
+        *delay_r.add(wpos) = wet_r;
+        let (wet_l, wet_r) = if wf_active {
+            let wow_lfo = (std::f32::consts::TAU * wow_phase).sin();
+            let flut_lfo = 0.6 * (std::f32::consts::TAU * flut_phase1).sin()
+                + 0.4 * (std::f32::consts::TAU * flut_phase2).sin();
+            let read_delay = base_delay + wow_depth * wow_lfo + flutter_depth * flut_lfo;
+            (
+                delay_read(delay_l, wpos, read_delay),
+                delay_read(delay_r, wpos, read_delay),
+            )
+        } else {
+            (wet_l, wet_r)
+        };
+        wpos = (wpos + 1) % DELAY_BUF_LEN;
+        wow_phase = (wow_phase + wow_inc).fract();
+        flut_phase1 = (flut_phase1 + flut_inc1).fract();
+        flut_phase2 = (flut_phase2 + flut_inc2).fract();
+
+        // Hiss: decorrelated per-channel filtered white noise from one counter.
+        let cbits = noise_counter as u32;
+        let hiss_l = {
+            let n = hash_noise(cbits ^ 0x1234_5678);
+            hiss_lp_l += hiss_lp_coef * (n - hiss_lp_l);
+            hiss_lp_l * hiss_gain
+        };
+        let hiss_r = {
+            let n = hash_noise(cbits ^ 0x9E37_79B9);
+            hiss_lp_r += hiss_lp_coef * (n - hiss_lp_r);
+            hiss_lp_r * hiss_gain
+        };
+        noise_counter += 1.0;
+        if noise_counter >= NOISE_COUNTER_WRAP {
+            noise_counter = 0.0;
+        }
+        let wet_l = wet_l + hiss_l;
+        let wet_r = wet_r + hiss_r;
+
+        // Dry blend uses raw input — `drive` is purely a wet-path knob, and the
+        // wet-only hiss means mix=0 is true bypass.
         *out0.add(i) = dry_l + (wet_l - dry_l) * mix;
         *out1.add(i) = dry_r + (wet_r - dry_r) * mix;
     }
@@ -444,6 +609,13 @@ unsafe extern "C" fn tape_process(
     *s.add(STATE_H_PREV_L) = h_prev_l;
     *s.add(STATE_M_R) = m_r;
     *s.add(STATE_H_PREV_R) = h_prev_r;
+    *s.add(STATE_WOW_PHASE) = wow_phase;
+    *s.add(STATE_FLUT_PHASE1) = flut_phase1;
+    *s.add(STATE_FLUT_PHASE2) = flut_phase2;
+    *s.add(STATE_DELAY_WPOS) = wpos as f32;
+    *s.add(STATE_NOISE_COUNTER) = noise_counter;
+    *s.add(STATE_HISS_LP_L) = hiss_lp_l;
+    *s.add(STATE_HISS_LP_R) = hiss_lp_r;
 }
 
 pub fn tape_vtable() -> NodeVTable {
@@ -547,7 +719,10 @@ mod tests {
             .map(|(o, i)| o - i)
             .collect();
         let r = rms(&residual);
-        assert!(r > 1.0e-3, "residual rms was {r}, expected harmonic content");
+        assert!(
+            r > 1.0e-3,
+            "residual rms was {r}, expected harmonic content"
+        );
     }
 
     #[test]
@@ -597,5 +772,92 @@ mod tests {
             r_fast > r_slow,
             "fast rms {r_fast} should exceed slow rms {r_slow}"
         );
+    }
+
+    #[test]
+    fn wow_flutter_modulates_the_signal() {
+        // A pitch-modulated sine should diverge from the un-modulated version.
+        let sr = 48_000.0;
+        let left: Vec<f32> = (0..8192)
+            .map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / sr).sin() * 0.5)
+            .collect();
+
+        let mut clean = init_state();
+        let (out_clean, _) = process_block(&mut clean, &left, &left);
+
+        let mut modd = init_state();
+        modd[STATE_WOW] = 1.0;
+        modd[STATE_FLUTTER] = 1.0;
+        let (out_mod, _) = process_block(&mut modd, &left, &left);
+
+        let diff: Vec<f32> = out_mod[4096..]
+            .iter()
+            .zip(&out_clean[4096..])
+            .map(|(a, b)| a - b)
+            .collect();
+        let d = rms(&diff);
+        assert!(d > 1.0e-3, "wow/flutter should alter the signal, diff rms {d}");
+    }
+
+    #[test]
+    fn hiss_adds_noise_to_silence_only_when_enabled() {
+        let silence = vec![0.0; 4096];
+
+        let mut quiet = init_state();
+        let (out_quiet, _) = process_block(&mut quiet, &silence, &silence);
+        assert!(
+            rms(&out_quiet) < 1.0e-6,
+            "with hiss off, silence stays silent"
+        );
+
+        let mut noisy = init_state();
+        noisy[STATE_HISS] = 1.0;
+        let (out_noisy, _) = process_block(&mut noisy, &silence, &silence);
+        assert!(
+            rms(&out_noisy[1024..]) > 1.0e-4,
+            "hiss should add a measurable noise floor"
+        );
+    }
+
+    #[test]
+    fn hash_noise_is_statistically_white_over_a_counter() {
+        // Feeding a sequential counter must give near-zero mean and near-zero
+        // lag-1 autocorrelation — i.e. no rhythmic/periodic structure. A weak
+        // xorshift-step "hash" fails this; a real avalanche finalizer passes.
+        let n = 1 << 16;
+        let xs: Vec<f32> = (0..n).map(|i| hash_noise(i as u32 ^ 0x1234_5678)).collect();
+        let mean = xs.iter().sum::<f32>() / n as f32;
+        assert!(mean.abs() < 0.01, "mean {mean} too far from zero");
+
+        let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / n as f32;
+        let mut cov = 0.0;
+        for w in xs.windows(2) {
+            cov += (w[0] - mean) * (w[1] - mean);
+        }
+        cov /= (n - 1) as f32;
+        let autocorr = cov / var;
+        assert!(
+            autocorr.abs() < 0.02,
+            "lag-1 autocorrelation {autocorr} indicates periodic structure"
+        );
+    }
+
+    #[test]
+    fn everything_maxed_stays_finite() {
+        let mut state = init_state();
+        state[STATE_DRIVE_DB] = 24.0;
+        state[STATE_BIAS] = 0.0;
+        state[STATE_WOW] = 1.0;
+        state[STATE_FLUTTER] = 1.0;
+        state[STATE_HISS] = 1.0;
+        let sr = 48_000.0;
+        let left: Vec<f32> = (0..4096)
+            .map(|i| (std::f32::consts::TAU * 660.0 * i as f32 / sr).sin())
+            .collect();
+        let (out_l, out_r) = process_block(&mut state, &left, &left);
+        for s in out_l.iter().chain(out_r.iter()) {
+            assert!(s.is_finite(), "non-finite sample: {s}");
+            assert!(s.abs() < 4.0, "runaway sample: {s}");
+        }
     }
 }

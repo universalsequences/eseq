@@ -77,6 +77,7 @@ pub struct UiInvalidationTrace {
     pub pending_subtree_patch_count: usize,
     pub subtree_failure_reason: Option<String>,
     pub relayout_mode: Option<String>,
+    pub relayout_duration: Duration,
     pub relayout_failure_reason: Option<String>,
 }
 
@@ -347,7 +348,7 @@ fn format_ui_invalidation_trace(
     let relayout_failure = trace.relayout_failure_reason.as_deref().unwrap_or("-");
     let subtree_failure = trace.subtree_failure_reason.as_deref().unwrap_or("-");
     format!(
-        "[ui-trace] dirty=[{dirty_fields}] affected=[{affected_buffers}] targets=a{} i{} flushes={} pending={} reruns=full:{} sub:{} roots:{} patches:{} subtree-fail={} relayout={} fail={} hot=[{}]",
+        "[ui-trace] dirty=[{dirty_fields}] affected=[{affected_buffers}] targets=a{} i{} flushes={} pending={} reruns=full:{} sub:{} roots:{} patches:{} subtree-fail={} relayout={} relayout_ms={:.3} fail={} hot=[{}]",
         trace.active_buffer_targets,
         trace.inactive_buffer_targets,
         trace.widget_tree_flushes,
@@ -358,6 +359,7 @@ fn format_ui_invalidation_trace(
         trace.pending_subtree_patch_count,
         subtree_failure,
         relayout_mode,
+        trace.relayout_duration.as_secs_f64() * 1000.0,
         relayout_failure,
         summarize_cycle_exec_timings(exec_timings),
     )
@@ -1598,6 +1600,7 @@ impl Runtime {
 
         let result = self.vm.eval_str(src);
         if result.is_ok() {
+            self.flush_vm_reactive_sets();
             if self.sync_theme_to_global {
                 self.sync_theme_from_vm();
             }
@@ -2084,6 +2087,7 @@ impl Runtime {
         self.vm.set_current_effect_context(current_buffer_id);
         let result = self.vm.invoke(callable, args);
         if result.is_ok() {
+            self.flush_vm_reactive_sets();
             if self.sync_theme_to_global {
                 self.sync_theme_from_vm();
             }
@@ -2115,6 +2119,7 @@ impl Runtime {
             Ok(()) => {
                 let apply_elapsed = apply_started.elapsed();
                 let exec_timings = self.vm.take_reactive_exec_timings();
+                self.flush_vm_reactive_sets();
                 if self.sync_theme_to_global {
                     self.sync_theme_from_vm();
                 }
@@ -2163,6 +2168,17 @@ impl Runtime {
                     eprintln!(
                         "[ui-trace] reactive-cycle-error dirty=[{dirty_label}] context={context} error={error:?} detail={detail}"
                     );
+                }
+            }
+        }
+    }
+
+    fn flush_vm_reactive_sets(&mut self) {
+        for (namespace, field, value) in self.vm.take_pending_reactive_sets() {
+            let outcome = self.reactive_registry.set(&namespace, &field, value, false);
+            for widget_id in outcome.widget_ids {
+                if !self.dirty_widget_ids.contains(&widget_id) {
+                    self.dirty_widget_ids.push(widget_id);
                 }
             }
         }
@@ -2751,7 +2767,7 @@ impl Runtime {
             self.layout_revision = self.layout_revision.wrapping_add(1);
         }
         self.force_layout_revision_bump = false;
-        self.update_last_trace_relayout("subtree-reuse", None);
+        self.update_last_trace_relayout("subtree-reuse", None, relayout_started.elapsed());
         self.perf_stats
             .note_relayout(true, true, relayout_started.elapsed(), None);
         Ok(())
@@ -3049,7 +3065,7 @@ impl Runtime {
             if had_layout {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
-            self.update_last_trace_relayout("clear", None);
+            self.update_last_trace_relayout("clear", None, relayout_started.elapsed());
             self.perf_stats
                 .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
@@ -3069,7 +3085,7 @@ impl Runtime {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
             self.force_layout_revision_bump = false;
-            self.update_last_trace_relayout("reuse", None);
+            self.update_last_trace_relayout("reuse", None, relayout_started.elapsed());
             self.perf_stats
                 .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
@@ -3111,15 +3127,25 @@ impl Runtime {
                 self.dirty_widget_ids = collect_shader_widget_ids(layout);
             }
             self.force_layout_revision_bump = false;
-            self.update_last_trace_relayout("full", failure_reason.clone());
+            self.update_last_trace_relayout(
+                "full",
+                failure_reason.clone(),
+                relayout_started.elapsed(),
+            );
             self.perf_stats
                 .note_relayout(false, false, relayout_started.elapsed(), failure_reason);
         }
     }
 
-    fn update_last_trace_relayout(&mut self, mode: &str, failure_reason: Option<String>) {
+    fn update_last_trace_relayout(
+        &mut self,
+        mode: &str,
+        failure_reason: Option<String>,
+        elapsed: Duration,
+    ) {
         if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
             trace.relayout_mode = Some(mode.to_string());
+            trace.relayout_duration = elapsed;
             trace.relayout_failure_reason = failure_reason;
         }
     }

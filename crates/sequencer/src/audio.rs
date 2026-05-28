@@ -1759,7 +1759,8 @@ fn render_chunk(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     publish_sampler_modulator_activity(data);
     unsafe {
-        process_next_block(data.lg.0, output.as_mut_ptr(), nframes as i32);
+        data.lg
+            .process_next_block(output.as_mut_ptr(), nframes as i32);
     }
 }
 

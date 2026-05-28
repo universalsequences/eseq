@@ -165,6 +165,65 @@ pub(crate) fn track_step_selected_field(track: usize, step: usize) -> String {
     format!("seq-track-step-selected-{track}-{step}")
 }
 
+pub(crate) fn track_selected_field(track: usize) -> String {
+    format!("track-selected-{track}")
+}
+
+pub(crate) fn sync_track_selection_binding_fields(
+    rt: &mut Runtime,
+    track_count: usize,
+    current_track_idx: usize,
+) {
+    for track in 0..track_count {
+        rt.set_reactive(
+            "SEQ",
+            &track_selected_field(track),
+            Value::Bool(track == current_track_idx),
+        );
+    }
+}
+
+pub(crate) fn set_current_track_reactive(
+    rt: &mut Runtime,
+    track_count: usize,
+    current_track_idx: usize,
+) {
+    rt.set_reactive(
+        "SEQ",
+        "current-track",
+        Value::Number(current_track_idx as f64),
+    );
+    sync_track_selection_binding_fields(rt, track_count, current_track_idx);
+}
+
+pub(crate) fn track_step_param_slider_field(track: usize, mode: usize, step: usize) -> String {
+    format!("seq-track-step-param-slider-{track}-{mode}-{step}")
+}
+
+pub(crate) fn track_step_param_haptic_field(track: usize, mode: usize, step: usize) -> String {
+    format!("seq-track-step-param-haptic-{track}-{mode}-{step}")
+}
+
+fn expanded_step_param_for_mode(mode: usize) -> StepParam {
+    match mode {
+        0 => StepParam::Velocity,
+        1 => StepParam::Duration,
+        2 => StepParam::AuxA,
+        3 => StepParam::Transpose,
+        4 => StepParam::Pan,
+        5 => StepParam::Sync,
+        _ => StepParam::Velocity,
+    }
+}
+
+fn expanded_step_param_slider_value(param: StepParam, value: f32) -> f32 {
+    if param == StepParam::Duration {
+        param.normalize(value)
+    } else {
+        value
+    }
+}
+
 pub(crate) fn sync_all_track_step_binding_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -202,6 +261,24 @@ pub(crate) fn sync_all_track_step_binding_fields(
                 &track_step_selected_field(track, step),
                 Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
             );
+            for mode in 0..6 {
+                let param = expanded_step_param_for_mode(mode);
+                let value = if visible {
+                    state.pattern.step_data[track].get(step, param)
+                } else {
+                    0.0
+                };
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_param_slider_field(track, mode, step),
+                    Value::Number(expanded_step_param_slider_value(param, value) as f64),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_param_haptic_field(track, mode, step),
+                    Value::Number(value as f64),
+                );
+            }
         }
     }
 }
@@ -2018,11 +2095,7 @@ pub(crate) fn sync_track_topology_state(
     sync_track_name_state(rt, track_names, app);
     sync_bus_mixer_state(rt, app);
     sync_pattern_state(rt, state);
-    rt.set_reactive(
-        "SEQ",
-        "current-track",
-        Value::Number(current_track_idx as f64),
-    );
+    set_current_track_reactive(rt, app.tracks.len(), current_track_idx);
     rt.set_reactive(
         "SEQ",
         "record-armed",
@@ -10124,7 +10197,8 @@ mod tests {
             .widget_scroll_top;
 
         assert_eq!(
-            after, before,
+            after,
+            before,
             "*fx* content fits but vertical scroll changed; tile_id={fx_tile_id}, content_bottom={content_bottom:.3}, viewport={:.3}",
             editor
                 .tile_root
@@ -10656,9 +10730,10 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_sequencer_expanded_cursor_highlight_uses_current_track_cursor() {
+    fn metal_seq_sequencer_expanded_cursor_highlight_uses_bound_track_selection_and_cursor() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
+        set_current_track_reactive(editor.runtime_mut(), 2, 0);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let sequencer_id = editor
@@ -10676,14 +10751,38 @@ mod tests {
                   (seqv-track-menu-click 0)
                   (seqv-track-menu-click 1)
                   (seqv-set-cursor-step 0 6)
+                  (seqv-set-cursor-step 1 3)
                   (set! cursor-step 3))",
             )
             .expect("expand rows and seed cursors");
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(1.0));
-        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        let _ = editor.take_dirty_widget_ids();
+        let before_revision = editor.widget_layout_revision();
+
+        set_current_track_reactive(editor.runtime_mut(), 2, 1);
+        editor.runtime_mut().run_reactive_cycle();
+        let pending = editor.runtime_mut().take_pending_buffer_widget_trees();
+        let sequencer_updates = pending
+            .iter()
+            .filter(|pending| {
+                matches!(
+                    pending.target(),
+                    eseqlisp::vm::EffectTarget::BufferName(name) if name == "*sequencer*"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            sequencer_updates.is_empty(),
+            "track selection should update expanded cursor highlight bindings without rerendering sequencer rows; got {} sequencer updates out of {} pending updates",
+            sequencer_updates.len(),
+            pending.len()
+        );
+        assert_eq!(
+            editor.widget_layout_revision(),
+            before_revision,
+            "track selection should not require a sequencer layout revision"
+        );
 
         let layout = editor
             .widget_layout()
@@ -10694,18 +10793,31 @@ mod tests {
         assert_eq!(
             current_track_cursor.props.get("background"),
             Some(&Value::String("cursor-highlight".to_string())),
-            "current expanded row should highlight the shared current-track cursor"
+            "current expanded row should keep the cursor-highlight background widget"
+        );
+        assert_eq!(
+            layout_prop_bool(current_track_cursor, "active"),
+            Some(true),
+            "current expanded row should activate its bound cursor step"
+        );
+        assert_eq!(
+            layout_prop_bool(current_track_cursor, "selected"),
+            Some(true),
+            "current expanded row should become visible through the bound selected state"
         );
 
         let inactive_track_cursor =
             find_layout_node_by_stable_key(&layout, "seqv-expanded-step-column-0-6")
                 .expect("inactive track cursor column should render");
-        assert!(
-            !matches!(
-                inactive_track_cursor.props.get("background"),
-                Some(Value::String(background)) if background == "cursor-highlight"
-            ),
-            "inactive expanded rows should not show an independent cursor highlight"
+        assert_eq!(
+            layout_prop_bool(inactive_track_cursor, "active"),
+            Some(true),
+            "inactive expanded row should retain its independent cursor step"
+        );
+        assert_eq!(
+            layout_prop_bool(inactive_track_cursor, "selected"),
+            Some(false),
+            "inactive expanded row should hide the cursor through bound track selection"
         );
 
         editor
@@ -11236,27 +11348,21 @@ mod tests {
 
         editor.runtime_mut().set_reactive(
             "SEQ",
-            "selected-steps",
-            test_bool_list(&[
-                true, false, false, false, false, false, false, false, false, false, false, false,
-                false, false, false, false,
-            ]),
+            &track_step_selected_field(0, 0),
+            Value::Bool(true),
         );
         editor.runtime_mut().run_reactive_cycle();
 
-        let trace = editor
-            .runtime()
-            .last_ui_invalidation_trace()
-            .expect("selection invalidation trace");
-        assert_ne!(
-            trace.relayout_mode.as_deref(),
-            Some("full"),
-            "selection recolor should not require full active-tree layout: {trace:?}"
+        let pending = editor.runtime_mut().take_pending_buffer_widget_trees();
+        assert!(
+            pending.is_empty(),
+            "bound selection recolor should not enqueue widget tree updates; got {}",
+            pending.len()
         );
         assert_eq!(
             editor.widget_layout_revision(),
             before_revision,
-            "selection recolor should reuse active layout"
+            "selection recolor should not require a layout revision"
         );
 
         let selected_layout = editor
@@ -11266,9 +11372,14 @@ mod tests {
             find_layout_node_by_stable_key(&selected_layout, "seqv-expanded-step-label-0-0")
                 .expect("selected slot 0 label");
         assert_eq!(
-            slot_0_label.props.get("color"),
+            layout_prop_bool(slot_0_label, "active"),
+            Some(true),
+            "selection changes from an initially empty selection should activate the bound step label"
+        );
+        assert_eq!(
+            slot_0_label.props.get("active-color"),
             Some(&Value::Keyword("yellow".to_string())),
-            "selection changes from an initially empty selection should recolor step labels"
+            "active selected labels should render with the selected color"
         );
         let slot_0_toggle =
             find_layout_node_by_stable_key(&selected_layout, "seqv-expanded-step-toggle-0-0")
@@ -11276,6 +11387,176 @@ mod tests {
         assert!(
             layout_tree_has_bool_prop(slot_0_toggle, "selected", true),
             "selection changes should also update the expanded toggle selected prop"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_step_hot_state_uses_widget_bindings() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-track-menu-click 0)")
+            .expect("expand current sequencer row");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded current-row sequencer layout should build");
+        let row_id = find_layout_node_by_stable_key(&layout, "sequencer-track-0")
+            .expect("expanded row")
+            .widget_id;
+        let slider_id = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-slider-0-0")
+            .expect("expanded step slider")
+            .widget_id;
+        let toggle_id = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-toggle-0-0")
+            .expect("expanded step toggle")
+            .widget_id;
+        let label_id = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-label-0-0")
+            .expect("expanded step label")
+            .widget_id;
+        let _ = editor.take_dirty_widget_ids();
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_step_selected_field(0, 0),
+            Value::Bool(true),
+        );
+        let selected_dirty = editor.take_dirty_widget_ids();
+        assert!(
+            selected_dirty.contains(&toggle_id) && selected_dirty.contains(&label_id),
+            "selected field should dirty only bound step widgets, got {selected_dirty:?}"
+        );
+        assert!(
+            !selected_dirty.contains(&row_id),
+            "selected binding must not dirty the expanded row container"
+        );
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "selected binding must not enqueue expanded row subtree updates"
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_step_param_slider_field(0, 0, 0),
+            Value::Number(0.37),
+        );
+        let slider_dirty = editor.take_dirty_widget_ids();
+        assert!(
+            slider_dirty.contains(&slider_id),
+            "param slider field should dirty the bound vslider, got {slider_dirty:?}"
+        );
+        assert!(
+            !slider_dirty.contains(&row_id),
+            "param slider binding must not dirty the expanded row container"
+        );
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "param slider binding must not enqueue expanded row subtree updates"
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_step_active_field(0, 0),
+            Value::Bool(false),
+        );
+        let active_dirty = editor.take_dirty_widget_ids();
+        assert!(
+            active_dirty.contains(&slider_id) && active_dirty.contains(&toggle_id),
+            "active field should dirty bound slider/toggle widgets, got {active_dirty:?}"
+        );
+        assert!(
+            !active_dirty.contains(&row_id),
+            "active binding must not dirty the expanded row container"
+        );
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "active binding must not enqueue expanded row subtree updates"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_expanded_selection_drag_does_not_rerender_rows() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .register_native("seq-select-step-range", |_args, _ctx| Ok(Value::Nil));
+        set_full_grid_track_count(&mut editor, 2, 32);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .eval_str("(do (seqv-track-menu-click 0) (seqv-track-menu-click 1))")
+            .expect("expand two sequencer rows");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("expanded two-row sequencer layout should build");
+        let down = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-toggle-0-0")
+            .expect("drag start toggle")
+            .props
+            .get("on-mouse-down")
+            .cloned()
+            .expect("drag start callback");
+        let drag = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-toggle-0-4")
+            .expect("drag target toggle")
+            .props
+            .get("on-drag")
+            .cloned()
+            .expect("drag target callback");
+        let selection_evt = map_value([("shift", Value::Bool(true))]);
+
+        editor
+            .runtime_mut()
+            .invoke(down, vec![selection_evt.clone()])
+            .expect("start expanded selection drag");
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        let _ = editor.take_dirty_widget_ids();
+
+        editor
+            .runtime_mut()
+            .invoke(drag, vec![selection_evt])
+            .expect("continue expanded selection drag");
+        let pending = editor.runtime_mut().take_pending_buffer_widget_trees();
+        let sequencer_updates = pending
+            .iter()
+            .filter(|pending| {
+                matches!(
+                    pending.target(),
+                    eseqlisp::vm::EffectTarget::BufferName(name) if name == "*sequencer*"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            sequencer_updates.is_empty(),
+            "expanded selection drag should not rerender sequencer rows; got {} sequencer updates out of {} pending updates",
+            sequencer_updates.len(),
+            pending.len()
         );
     }
 
@@ -12165,7 +12446,9 @@ mod tests {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
                 assert_eq!(name, "insert-builtin-bus-effect-before-slot");
                 let Value::Map(payload) = payload else {
-                    panic!("insert-builtin-bus-effect-before-slot payload should be a dict: {payload:?}");
+                    panic!(
+                        "insert-builtin-bus-effect-before-slot payload should be a dict: {payload:?}"
+                    );
                 };
                 assert_eq!(
                     payload.get("bus").map(|value| value.borrow().clone()),
@@ -12835,10 +13118,7 @@ mod tests {
             let panel = find_layout_node_by_debug_name(&layout, debug_name)
                 .unwrap_or_else(|| panic!("{debug_name}; layout={layout_summaries:#?}"));
             assert_eq!(
-                panel
-                    .props
-                    .get("background-color")
-                    .cloned(),
+                panel.props.get("background-color").cloned(),
                 Some(Value::Keyword("instrument-group-bg".to_string())),
                 "{debug_name} should use the softer group background rather than the dark control background"
             );
@@ -14334,8 +14614,11 @@ mod tests {
             voice_subtree.rect
         );
         assert!(
-            find_layout_node_by_stable_key(&layout, "custom-ui-lego-knob-shimmerpitch-slot-0-shift")
-                .is_some(),
+            find_layout_node_by_stable_key(
+                &layout,
+                "custom-ui-lego-knob-shimmerpitch-slot-0-shift"
+            )
+            .is_some(),
             "shimmerpitch should render after the instrument and leave the render globals in audio scope"
         );
 
@@ -16565,7 +16848,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
+            vec![
+                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
+            ]
         );
     }
 
@@ -18568,7 +18853,10 @@ mod tests {
             .runtime_mut()
             .invoke(track_select_callback, vec![Value::Bool(true)])
             .expect("invoke track mute click");
-        assert_reveal_command(&editor.drain_host_commands(), 0.0);
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "mixer control clicks should not request sequencer reveal"
+        );
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
             Some("seq-toggle-track-mute:[0]")

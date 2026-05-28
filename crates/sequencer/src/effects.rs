@@ -803,7 +803,8 @@ mod tests {
                 "444 Compressor",
                 "Glue Compressor",
                 "Compressor",
-                "Limiter"
+                "Limiter",
+                "Tape"
             ]
         );
         assert_eq!(
@@ -2391,6 +2392,48 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::tape::TAPE_PARAM_MIX as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "wow".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::tape::TAPE_PARAM_WOW as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "flutter".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::tape::TAPE_PARAM_FLUTTER as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "hiss".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::tape::TAPE_PARAM_HISS as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,

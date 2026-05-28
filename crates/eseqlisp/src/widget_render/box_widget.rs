@@ -4,7 +4,7 @@ use std::rc::Rc;
 use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
 #[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
+    MetalPrimitive, MetalRectPrimitive, WidgetInstance, WidgetViewport, get_f32_prop, ndc_bounds,
     resolve_named_color,
 };
 #[cfg(target_os = "macos")]
@@ -54,6 +54,34 @@ fn child_extent(node: &LayoutNode) -> Rect {
 pub struct BoxWidget;
 
 pub static BOX_WIDGET: BoxWidget = BoxWidget;
+
+#[cfg(target_os = "macos")]
+fn box_state_active(props: &std::collections::HashMap<String, Value>, key: &str) -> bool {
+    match props.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => *value != 0.0,
+        Some(Value::ReactiveRef { .. }) => get_f32_prop(props, key, 0.0) != 0.0,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn state_color_prop<'a>(
+    props: &'a std::collections::HashMap<String, Value>,
+    base_prop: &'a str,
+    selected_prop: &'a str,
+    muted_prop: &'a str,
+) -> Option<&'a str> {
+    if box_state_active(props, "selected") && props.contains_key(selected_prop) {
+        Some(selected_prop)
+    } else if box_state_active(props, "muted") && props.contains_key(muted_prop) {
+        Some(muted_prop)
+    } else if props.contains_key(base_prop) {
+        Some(base_prop)
+    } else {
+        None
+    }
+}
 
 fn box_mouse_info(
     phase: &str,
@@ -240,6 +268,10 @@ impl WidgetDefinition for BoxWidget {
         &[
             "padding", "width", "height", "aspect", "align", "h-align", "v-align",
         ]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["selected", "muted"]
     }
 
     fn measure(
@@ -517,14 +549,14 @@ impl WidgetDefinition for BoxWidget {
                     "drop-hover-background-color",
                     Color::rgba(0.0, 0.0, 0.0, 0.0),
                 ))
-            } else if node.props.contains_key("background-color") {
-                Some(resolve_named_color(
+            } else {
+                state_color_prop(
                     &node.props,
                     "background-color",
-                    Color::rgba(0.0, 0.0, 0.0, 0.0),
-                ))
-            } else {
-                None
+                    "selected-background-color",
+                    "muted-background-color",
+                )
+                .map(|prop| resolve_named_color(&node.props, prop, Color::rgba(0.0, 0.0, 0.0, 0.0)))
             };
         let border_color = if hover_drop && node.props.contains_key("drop-hover-border-color") {
             Some(resolve_named_color(
@@ -532,14 +564,14 @@ impl WidgetDefinition for BoxWidget {
                 "drop-hover-border-color",
                 Color::rgba(0.0, 0.0, 0.0, 0.0),
             ))
-        } else if node.props.contains_key("border-color") {
-            Some(resolve_named_color(
+        } else {
+            state_color_prop(
                 &node.props,
                 "border-color",
-                Color::rgba(0.0, 0.0, 0.0, 0.0),
-            ))
-        } else {
-            None
+                "selected-border-color",
+                "muted-border-color",
+            )
+            .map(|prop| resolve_named_color(&node.props, prop, Color::rgba(0.0, 0.0, 0.0, 0.0)))
         };
 
         if has_rounded_corners {
@@ -651,5 +683,44 @@ impl WidgetDefinition for BoxWidget {
         }
 
         prims
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use crate::theme;
+
+    #[test]
+    fn selected_state_color_takes_precedence_over_muted_and_default() {
+        let props = std::collections::HashMap::from([
+            (
+                "background-color".to_string(),
+                Value::Keyword("black".to_string()),
+            ),
+            (
+                "muted-background-color".to_string(),
+                Value::Keyword("gray".to_string()),
+            ),
+            (
+                "selected-background-color".to_string(),
+                Value::Keyword("blue".to_string()),
+            ),
+            ("selected".to_string(), Value::Number(1.0)),
+            ("muted".to_string(), Value::Bool(true)),
+        ]);
+
+        let prop = state_color_prop(
+            &props,
+            "background-color",
+            "selected-background-color",
+            "muted-background-color",
+        );
+
+        assert_eq!(prop, Some("selected-background-color"));
+        assert_eq!(
+            resolve_named_color(&props, prop.unwrap(), theme::BLACK()),
+            theme::BLUE()
+        );
     }
 }

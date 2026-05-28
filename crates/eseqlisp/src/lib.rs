@@ -1635,6 +1635,85 @@ mod tests {
     }
 
     #[test]
+    fn reactive_set_updates_bindable_float_slots() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive("APP", vec![("active", Value::Bool(false))], true);
+        runtime
+            .eval_str(
+                r#"
+                (def active-ref (bind "APP" "active"))
+                (effect (label "cursor" :active active-ref :active-color :yellow))
+                "#,
+            )
+            .expect("create reactive binding and bound widget");
+        let widget_id = runtime
+            .current_layout
+            .as_ref()
+            .expect("bound label layout")
+            .widget_id;
+        let _ = runtime.take_dirty_widget_ids();
+
+        assert_eq!(
+            runtime.eval_str("(reactive-value active-ref)").unwrap(),
+            Some(Value::Number(0.0))
+        );
+        runtime
+            .eval_str(r#"(reactive-set "APP" "active" true)"#)
+            .expect("set active through lisp reactive-set");
+        assert_eq!(
+            runtime.eval_str("(reactive-value active-ref)").unwrap(),
+            Some(Value::Number(1.0)),
+            "Lisp reactive-set should update the slot read by bind/reactive-value"
+        );
+        assert_eq!(
+            runtime.take_dirty_widget_ids(),
+            vec![widget_id],
+            "Lisp reactive-set should dirty widgets bound through bind"
+        );
+    }
+
+    #[test]
+    fn box_accepts_selected_and_muted_reactive_bindings() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "APP",
+            vec![
+                ("selected", Value::Bool(true)),
+                ("muted", Value::Bool(false)),
+            ],
+            true,
+        );
+
+        let value = runtime
+            .eval_str(
+                r#"(box
+                    :selected (bind "APP" "selected")
+                    :muted (bind "APP" "muted")
+                    :background-color :black
+                    :selected-background-color :blue
+                    :muted-background-color :gray
+                    :border-color :dim
+                    :selected-border-color :white
+                    :muted-border-color :dark-gray)"#,
+            )
+            .expect("evaluate box state bindings")
+            .expect("box should return a widget");
+
+        let Value::Map(map) = value else {
+            panic!("box should return a widget map, got {value:?}");
+        };
+        assert!(matches!(
+            map.get("selected").map(|value| value.borrow().clone()),
+            Some(Value::ReactiveRef { .. })
+        ));
+        assert!(matches!(
+            map.get("muted").map(|value| value.borrow().clone()),
+            Some(Value::ReactiveRef { .. })
+        ));
+    }
+
+    #[test]
     fn removed_bound_subtree_stops_receiving_binding_dirty_marks() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);

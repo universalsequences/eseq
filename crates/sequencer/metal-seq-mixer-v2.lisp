@@ -17,6 +17,11 @@
 (def mixer-v2-muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
 
+(def mixer-v2-track-selected-binding (i)
+  (if (< selected-bus 0)
+    (bind-seq (str "track-selected-" i))
+    0))
+
 (def mixer-v2-track-color (i)
   (if (< i (len SEQ.track-colors))
     (nth SEQ.track-colors i)
@@ -72,8 +77,6 @@
 (def mixer-v2-activate-track-control (i)
   (do
     (set! selected-bus -1)
-    (seq-set-track i)
-    (host-command "reveal-sequencer-track" (dict :track i))
     (mixer-v2-clear-delete-target)))
 
 (def mixer-v2-select-bus (i)
@@ -418,14 +421,19 @@
           (dict :track track :bus (get send :bus-idx) :amount v))))))
 
 (def mixer-v2-track-strip (i)
-  (let ((selected (and (< selected-bus 0) (= SEQ.current-track i)))
-      (muted (mixer-v2-muted? i))
+  (let ((muted (mixer-v2-muted? i))
       (sends (nth SEQ.track-bus-sends i)))
     (box :width 10.9 :height 12.15
-      :background-color (mixer-v2-strip-bg selected muted)
+      :selected (mixer-v2-track-selected-binding i)
+      :muted muted
+      :background-color :mixer-strip-bg
+      :selected-background-color :mixer-strip-selected-bg
+      :muted-background-color :mixer-strip-muted-bg
       :border-width 2
       :corner-radius 10
-      :border-color (mixer-v2-strip-border selected)
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
+      :muted-border-color :mixer-strip-border
       :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
       :drop-types (list "sample" "audio-effect" "midi-effect")
@@ -516,7 +524,12 @@
 (def mixer-v2-current-channel-index ()
   (if (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names)))
     (+ SEQ.num-tracks (mixer-v2-bus-display-index selected-bus))
-    (min (max SEQ.current-track 0) (- (max SEQ.num-tracks 1) 1))))
+    (let ((selected (filter
+            (lambda (i) (> (reactive-value (bind-seq (str "track-selected-" i))) 0.5))
+            (range 0 SEQ.num-tracks))))
+      (if (> (len selected) 0)
+        (nth selected 0)
+        0))))
 
 (def mixer-v2-select-channel-index (idx)
   (let ((clamped (min (max idx 0) (- (max (mixer-v2-channel-count) 1) 1))))

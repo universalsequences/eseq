@@ -616,6 +616,10 @@ pub(crate) fn init_runtime(
             ];
             for idx in 0..track_count {
                 fields.push((
+                    Box::leak(track_selected_field(idx).into_boxed_str()),
+                    Value::Bool(idx == 0),
+                ));
+                fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
                 ));
