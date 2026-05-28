@@ -29,6 +29,7 @@ pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
 pub mod waveform;
+pub mod wrap;
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -815,6 +816,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &vstack::VSTACK_WIDGET,
+    &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,
     &box_widget::BOX_WIDGET,
     &grid::GRID_WIDGET,

@@ -122,6 +122,7 @@ fn is_widget_name(name: &str) -> bool {
             | "select"
             | "v-stack"
             | "h-stack"
+            | "wrap"
             | "box"
             | "grid"
             | "tabs"

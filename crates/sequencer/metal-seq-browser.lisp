@@ -11,6 +11,7 @@
 (defstate sbrowser-last-track-index -1)
 (defstate sbrowser-last-sidebar-sample "")
 (defstate sbrowser-selected-sample "")
+(defstate sbrowser-selected-tags (list))
 
 ;; Editor state for inline instrument/effect creation
 (def sbrowser-editor-name (state ""))
@@ -91,15 +92,24 @@
       (set! sbrowser-last-track-index SEQ.sidebar-track-index)
       (set! sbrowser-last-sidebar-sample SEQ.sidebar-selected-sample)
       (if (and (sbrowser-audition-mode?) (= SEQ.sidebar-kind "sampler"))
-        (set! sbrowser-selected-sample SEQ.sidebar-selected-sample)))))
+        (do
+          (set! sbrowser-selected-sample SEQ.sidebar-selected-sample)
+          (if (= sbrowser-tab "samples")
+            (set! sbrowser-filter ""))
+          (set! sbrowser-selected-tags
+            (if (= SEQ.sidebar-selected-sample "")
+              (list)
+              (seq-sample-tags-for-path SEQ.sidebar-selected-sample))))))))
 
 (def sbrowser-reset-to-audition ()
   (set! sbrowser-mode "audition")
-  (set! sbrowser-filter ""))
+  (set! sbrowser-filter "")
+  (set! sbrowser-selected-tags (list)))
 
 (def sbrowser-leave-create-mode ()
   (set! sbrowser-mode "audition")
-  (set! sbrowser-filter ""))
+  (set! sbrowser-filter "")
+  (set! sbrowser-selected-tags (list)))
 
 (def sbrowser-enter-create-track-mode ()
   (set! sbrowser-filter "")
@@ -111,6 +121,7 @@
 
 (def sbrowser-enter-create-sampler-mode ()
   (set! sbrowser-filter "")
+  (set! sbrowser-selected-tags (list))
   (set! sbrowser-mode "create-sampler")
   (set! sbrowser-tab "samples")
   (status "Create sampler track: choose a sample"))
@@ -237,7 +248,40 @@
 
 (def sbrowser-select-tab (name)
   (set! sbrowser-tab name)
-  (set! sbrowser-filter ""))
+  (set! sbrowser-filter "")
+  (if (not (= name "samples"))
+    (set! sbrowser-selected-tags (list))))
+
+(def sbrowser-list-contains? (items value)
+  (> (len (filter (lambda (item) (= item value)) items)) 0))
+
+(def sbrowser-list-remove (items value)
+  (filter (lambda (item) (not (= item value))) items))
+
+(def sbrowser-toggle-tag (tag)
+  (if (sbrowser-list-contains? sbrowser-selected-tags tag)
+    (set! sbrowser-selected-tags (sbrowser-list-remove sbrowser-selected-tags tag))
+    (set! sbrowser-selected-tags (append sbrowser-selected-tags (list tag)))))
+
+(def sbrowser-clear-tags ()
+  (set! sbrowser-selected-tags (list)))
+
+(def sbrowser-set-search-filter (value)
+  (if (and (= sbrowser-tab "samples") (not (= value sbrowser-filter)))
+    (sbrowser-clear-tags))
+  (set! sbrowser-filter value))
+
+(def sbrowser-tag-chip (tag)
+  (let ((name (get tag :name))
+        (selected (get tag :selected)))
+    (button name
+      :variant :ghost
+      :background-color (if selected "#f0f0f2" "#26272b")
+      :color (if selected "#141416" "#9ea1a8")
+      :height 0.82
+      :padding 0.32
+      :font-size 7.6
+      :on-click |x y r| (sbrowser-toggle-tag name))))
 
 (def sbrowser-search-placeholder ()
   (if (= sbrowser-tab "samples") "Search samples..."
@@ -323,7 +367,7 @@
         :width :fill
         :value sbrowser-filter
         :placeholder (sbrowser-search-placeholder)
-        :on-change (lambda (v) (set! sbrowser-filter v))
+        :on-change (lambda (v) (sbrowser-set-search-filter v))
         :height 1.5
         :font-size 12
         (mag-glass)))))
@@ -350,7 +394,7 @@
           :flex 1
           :value sbrowser-filter
           :placeholder "Search projects..."
-          :on-change (lambda (v) (set! sbrowser-filter v))
+          :on-change (lambda (v) (sbrowser-set-search-filter v))
           :height 1.5
           :font-size 12
           (mag-glass))
@@ -408,7 +452,7 @@
         :flex 1
         :value sbrowser-filter
         :placeholder "Search instruments..."
-        :on-change (lambda (v) (set! sbrowser-filter v))
+        :on-change (lambda (v) (sbrowser-set-search-filter v))
         :height 1.5
         :font-size 12
         (mag-glass)))))
@@ -475,23 +519,42 @@
     (sbrowser-tab-button "projects" "Projects")))
 
 (def sbrowser-samples-panel ()
-  (let ((items (seq-filter-sample-tree sbrowser-filter)))
-    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-      (if (= (len items) 0)
-        (sbrowser-empty-message "No samples found.")
-        (scroll :key "samples-tab-scroll" :width :fill :flex 1
-          (tree
-            :key "samples-tab-tree"
-            :width :fill
-            :focusable true
-            :background-color :buffer-bg
-            :items items
-            :selected-path (sbrowser-sample-selected-path)
-            :expand-all (not (= sbrowser-filter ""))
-            :drag-type "sample"
-            :on-select (lambda (item) (sbrowser-select-sample item))
-            :on-cursor-change (lambda (item) (sbrowser-select-sample item))
-            :on-activate (lambda (item) (sbrowser-activate-sample item))))))))
+  (let ((browser (seq-sample-browser sbrowser-filter sbrowser-selected-tags)))
+    (let ((tags (get browser :tags))
+          (items (get browser :items)))
+      (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
+        (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
+          (v-stack :width :fill :gap 0.35
+            (if (> (len sbrowser-selected-tags) 0)
+              (button "Clear"
+                :variant :ghost
+                :width :fill
+                :height 1.15
+                :font-size 9
+                :on-click |x y r| (sbrowser-clear-tags)
+                :color :white))
+            (wrap :width :fill :gap 0.25 :row-gap 0.18 :align :center
+              (each (range 0 (len tags)) |i|
+                (sbrowser-tag-chip (nth tags i))))))
+        (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+          (if (= (len items) 0)
+            (sbrowser-empty-message
+              (if (and (= sbrowser-filter "") (= (len sbrowser-selected-tags) 0))
+                "Choose a tag or search samples."
+                "No samples found."))
+            (scroll :key "samples-tab-scroll" :width :fill :flex 1
+              (tree
+                :key "samples-tab-tree"
+                :width :fill
+                :focusable true
+                :background-color :buffer-bg
+                :items items
+                :selected-path (sbrowser-sample-selected-path)
+                :expand-all true
+                :drag-type "sample"
+                :on-select (lambda (item) (sbrowser-select-sample item))
+                :on-cursor-change (lambda (item) (sbrowser-select-sample item))
+                :on-activate (lambda (item) (sbrowser-activate-sample item))))))))))
 
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1

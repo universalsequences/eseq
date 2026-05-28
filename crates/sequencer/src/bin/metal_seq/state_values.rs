@@ -288,6 +288,24 @@ pub(crate) fn track_active_playhead_step(state: &Arc<SequencerState>, track: usi
     playhead.min(num_steps.saturating_sub(1))
 }
 
+fn selected_plock_step(selected_steps: &Arc<Mutex<HashSet<usize>>>) -> Option<usize> {
+    selected_steps.lock().unwrap().iter().copied().min()
+}
+
+fn displayed_plock_step(
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_step: Option<usize>,
+) -> Option<usize> {
+    selected_step.or_else(|| {
+        state
+            .transport
+            .playing
+            .load(Ordering::Relaxed)
+            .then(|| track_active_playhead_step(state, track))
+    })
+}
+
 fn track_playhead_row_count(state: &Arc<SequencerState>, track: usize) -> usize {
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
@@ -473,11 +491,29 @@ fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDescriptor) -> 
         || pdesc.name.eq_ignore_ascii_case("enabled")
 }
 
+fn slot_param_stored_value(
+    slot: &sequencer::effects::EffectSlotState,
+    pdesc: &sequencer::effects::ParamDescriptor,
+    param_idx: usize,
+    display_step: Option<usize>,
+) -> f32 {
+    display_step
+        .and_then(|step| slot.plocks.get(step, param_idx))
+        .unwrap_or_else(|| {
+            if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                slot.defaults.get(param_idx)
+            } else {
+                pdesc.default
+            }
+        })
+}
+
 pub(crate) fn sync_instrument_param_value_field(
     rt: &mut Runtime,
     app: &ui::App,
     track: usize,
     param_idx: usize,
+    display_step: Option<usize>,
 ) {
     if let Some((name, value)) = app
         .graph
@@ -486,11 +522,7 @@ pub(crate) fn sync_instrument_param_value_field(
         .and_then(|desc| desc.params.get(param_idx))
         .and_then(|pdesc| {
             app.state.pattern.instrument_slots.get(track).map(|slot| {
-                let stored = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                    slot.defaults.get(param_idx)
-                } else {
-                    pdesc.default
-                };
+                let stored = slot_param_stored_value(slot, pdesc, param_idx, display_step);
                 (pdesc.name.clone(), pdesc.stored_to_user(stored))
             })
         })
@@ -507,7 +539,7 @@ pub(crate) fn sync_sampler_selection_time_fields(
     rt: &mut Runtime,
     app: &ui::App,
     track: usize,
-    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    display_step: Option<usize>,
 ) {
     if !app.is_sampler_track(track) {
         return;
@@ -521,11 +553,10 @@ pub(crate) fn sync_sampler_selection_time_fields(
     let Some(slot) = app.state.pattern.instrument_slots.get(track) else {
         return;
     };
-    let plock_step = selected_steps.lock().unwrap().iter().copied().min();
-    let start_raw = plock_step
+    let start_raw = display_step
         .and_then(|step| slot.plocks.get(step, 2))
         .unwrap_or_else(|| slot.defaults.get(2));
-    let end_raw = plock_step
+    let end_raw = display_step
         .and_then(|step| slot.plocks.get(step, 3))
         .unwrap_or_else(|| slot.defaults.get(3));
     let start = start_raw as f64 * sample_duration;
@@ -562,6 +593,7 @@ pub(crate) fn sync_track_effect_param_value_field(
     track: usize,
     slot_idx: usize,
     param_idx: usize,
+    display_step: Option<usize>,
 ) {
     if let Some((name, value)) = descriptors
         .get(track)
@@ -574,11 +606,7 @@ pub(crate) fn sync_track_effect_param_value_field(
                 .get(track)
                 .and_then(|chain| chain.get(slot_idx))
                 .map(|slot| {
-                    let stored = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                        slot.defaults.get(param_idx)
-                    } else {
-                        pdesc.default
-                    };
+                    let stored = slot_param_stored_value(slot, pdesc, param_idx, display_step);
                     (pdesc.name.clone(), stored)
                 })
         })
@@ -597,6 +625,7 @@ pub(crate) fn sync_midi_fx_param_value_field(
     track: usize,
     slot_idx: usize,
     param_idx: usize,
+    display_step: Option<usize>,
 ) {
     let chain = state.pattern.track_params[track].midi_fx_chain();
     if let Some((name, value)) = chain
@@ -610,11 +639,7 @@ pub(crate) fn sync_midi_fx_param_value_field(
                 .get(track)
                 .and_then(|slots| slots.get(slot_idx))
                 .map(|slot| {
-                    let stored = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                        slot.defaults.get(param_idx)
-                    } else {
-                        pdesc.default
-                    };
+                    let stored = slot_param_stored_value(slot, &pdesc, param_idx, display_step);
                     (pdesc.name, stored)
                 })
         })
@@ -666,12 +691,14 @@ pub(crate) fn sync_fx_param_binding_fields(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
     if track < app.tracks.len() {
+        let selected_step = selected_plock_step(selected_steps);
+        let display_step = displayed_plock_step(state, track, selected_step);
         sync_instrument_base_note_value_field(rt, app, track);
-        sync_sampler_selection_time_fields(rt, app, track, selected_steps);
+        sync_sampler_selection_time_fields(rt, app, track, display_step);
         if let Some(desc) = app.graph.instrument_descriptors.get(track) {
             for (param_idx, pdesc) in desc.params.iter().enumerate() {
                 if param_supports_value_binding(pdesc) {
-                    sync_instrument_param_value_field(rt, app, track, param_idx);
+                    sync_instrument_param_value_field(rt, app, track, param_idx, display_step);
                 }
             }
         }
@@ -686,6 +713,7 @@ pub(crate) fn sync_fx_param_binding_fields(
                             track,
                             slot_idx,
                             param_idx,
+                            display_step,
                         );
                     }
                 }
@@ -699,7 +727,14 @@ pub(crate) fn sync_fx_param_binding_fields(
             if let Some(desc) = sequencer::lisp_effect::load_midi_fx_descriptor(name) {
                 for (param_idx, pdesc) in desc.params.iter().enumerate() {
                     if param_supports_value_binding(pdesc) {
-                        sync_midi_fx_param_value_field(rt, state, track, slot_idx, param_idx);
+                        sync_midi_fx_param_value_field(
+                            rt,
+                            state,
+                            track,
+                            slot_idx,
+                            param_idx,
+                            display_step,
+                        );
                     }
                 }
             }
@@ -4269,17 +4304,15 @@ pub(crate) fn sync_track_params(
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) {
     let tp = &state.pattern.track_params[track];
-    let selected_step = {
-        let sel = selected.lock().unwrap();
-        sel.iter().copied().min()
-    };
+    let selected_step = selected_plock_step(selected);
+    let display_step = displayed_plock_step(state, track, selected_step);
     rt.set_reactive("SEQ", "tp-attack", Value::Number(tp.get_attack_ms() as f64));
     rt.set_reactive(
         "SEQ",
         "tp-release",
         Value::Number(tp.get_release_ms() as f64),
     );
-    let swing = selected_step
+    let swing = display_step
         .and_then(|step| state.pattern.swing_plocks[track].get(step))
         .unwrap_or_else(|| tp.get_swing());
     rt.set_reactive("SEQ", "tp-swing", Value::Number(swing as f64));
@@ -4304,14 +4337,14 @@ pub(crate) fn sync_track_params(
         "tp-max-polyphony",
         Value::Number(tp.get_max_polyphony() as f64),
     );
-    // Resolve timebase: show p-locked value from first selected step, otherwise track default
-    let timebase_label = selected_step
+    // Resolve timebase through the same display overlay used by parameter controls.
+    let timebase_label = display_step
         .and_then(|step| state.pattern.timebase_plocks[track].get(step))
         .unwrap_or_else(|| tp.get_timebase())
         .label()
         .to_string();
     rt.set_reactive("SEQ", "tp-timebase", Value::String(timebase_label));
-    let swing_resolution = selected_step
+    let swing_resolution = display_step
         .and_then(|step| state.pattern.swing_resolution_plocks[track].get(step))
         .unwrap_or_else(|| tp.get_swing_resolution());
     rt.set_reactive(
@@ -5791,6 +5824,22 @@ mod tests {
             });
         editor
             .runtime_mut()
+            .register_native(
+                "seq-sample-browser",
+                |_args, _ctx| Ok(test_sample_browser()),
+            );
+        editor
+            .runtime_mut()
+            .register_native("seq-sample-tags-for-path", |_args, _ctx| {
+                Ok(test_list(
+                    vec!["kick", "808"]
+                        .into_iter()
+                        .map(|tag| Value::String(tag.to_string()))
+                        .collect(),
+                ))
+            });
+        editor
+            .runtime_mut()
             .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));
         editor
             .runtime_mut()
@@ -5859,6 +5908,39 @@ mod tests {
                 ]),
             ),
         ])])
+    }
+
+    fn test_sample_browser() -> Value {
+        map_value([
+            (
+                "tags",
+                test_list(vec![
+                    map_value([
+                        ("name", Value::String("kick".to_string())),
+                        ("count", Value::Number(2.0)),
+                        ("selected", Value::Bool(true)),
+                    ]),
+                    map_value([
+                        ("name", Value::String("808".to_string())),
+                        ("count", Value::Number(1.0)),
+                        ("selected", Value::Bool(false)),
+                    ]),
+                ]),
+            ),
+            (
+                "items",
+                test_list(vec![
+                    map_value([
+                        ("label", Value::String("kick.wav".to_string())),
+                        ("path", Value::String("samples/kick.wav".to_string())),
+                    ]),
+                    map_value([
+                        ("label", Value::String("snare.wav".to_string())),
+                        ("path", Value::String("samples/snare.wav".to_string())),
+                    ]),
+                ]),
+            ),
+        ])
     }
 
     fn find_layout_node_by_stable_key<'a>(
@@ -6220,6 +6302,67 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_browser_sample_tag_chips_have_visible_layout() {
+        fn button_text(node: &eseqlisp::layout::LayoutNode) -> Option<&str> {
+            if node.widget_type != "button" {
+                return None;
+            }
+            match node.props.get("text") {
+                Some(Value::String(text)) => Some(text.as_str()),
+                _ => None,
+            }
+        }
+
+        fn find_button_with_text<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            text: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if button_text(node) == Some(text) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_button_with_text(child, text))
+        }
+
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(72, 60);
+
+        let layout = editor.widget_layout().expect("browser layout");
+        let rendered = render_layout_cells(&layout, 72, 60);
+        let tag_filter = find_layout_node_by_stable_key(&layout, "sample-tag-filter")
+            .unwrap_or_else(|| panic!("sample tag filter should render; rendered:\n{rendered}"));
+        let kick = find_button_with_text(&layout, "kick")
+            .unwrap_or_else(|| panic!("kick tag chip should render; rendered:\n{rendered}"));
+
+        assert!(
+            tag_filter.rect.width > 1.0 && tag_filter.rect.height > 0.4,
+            "tag filter should have a finite visible rect: {:?}; rendered:\n{rendered}",
+            tag_filter.rect
+        );
+        assert!(
+            kick.rect.width > 1.0 && kick.rect.height > 0.4,
+            "kick tag chip should have a finite visible rect: {:?}; rendered:\n{rendered}",
+            kick.rect
+        );
+        assert!(
+            kick.rect.height <= 0.95,
+            "tag chips should stay visually smaller than regular browser buttons: {:?}; rendered:\n{rendered}",
+            kick.rect
+        );
+        assert!(
+            matches!(kick.props.get("background-color"), Some(Value::String(color)) if color == "#f0f0f2"),
+            "selected tag chips should use the high-contrast selected sample chip color"
+        );
+    }
+
+    #[test]
     fn metal_seq_browser_projects_tab_renders_visible_new_project_button() {
         fn node_text(node: &eseqlisp::layout::LayoutNode) -> Option<&str> {
             match node.props.get("text") {
@@ -6271,7 +6414,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_render_does_not_mutate_sample_search_on_track_change() {
+    fn metal_seq_browser_render_does_not_mutate_sample_search_without_track_change() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -6279,16 +6422,12 @@ mod tests {
             .expect("select samples tab");
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-filter \"kick\")")
-            .expect("set sample search");
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-kind",
-            Value::String("sampler".to_string()),
-        );
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync initial sampler track");
         editor
             .runtime_mut()
-            .set_reactive("SEQ", "sidebar-track-index", Value::Number(2.0));
+            .eval_str("(set! sbrowser-filter \"kick\")")
+            .expect("set sample search");
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
         editor.set_layout_viewport(72, 60);
@@ -6302,6 +6441,108 @@ mod tests {
             editor.runtime_mut().eval_str("sbrowser-filter"),
             Ok(Some(Value::String("kick".to_string()))),
             "rendering the browser should not clear the search filter as a side effect"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_track_sample_sync_clears_sample_search() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync initial sampler track");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-filter \"snare\")")
+            .expect("set sample search");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sidebar-track-index", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-selected-sample",
+            Value::String("samples/loaded-a.wav".to_string()),
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync switched sampler track");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String(String::new()))),
+            "switching sampler tracks should clear the sample search"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len sbrowser-selected-tags)"),
+            Ok(Some(Value::Number(2.0))),
+            "switching sampler tracks should load the selected sample's tags"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_search_typing_clears_selected_sample_tags() {
+        fn find_widget_type<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == widget_type {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_widget_type(child, widget_type))
+        }
+
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-selected-tags (list \"kick\" \"808\"))")
+            .expect("seed selected tags");
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(72, 60);
+
+        let layout = editor.widget_layout().expect("browser layout");
+        let rendered = render_layout_cells(&layout, 72, 60);
+        let header = find_layout_node_by_stable_key(&layout, "browser-header")
+            .unwrap_or_else(|| panic!("browser header should render; rendered:\n{rendered}"));
+        let input = find_widget_type(header, "text-input").unwrap_or_else(|| {
+            panic!("browser header text input should render; rendered:\n{rendered}")
+        });
+        let on_change = input
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("browser search input should expose on-change");
+
+        editor
+            .runtime_mut()
+            .invoke(on_change, vec![Value::String("snare".to_string())])
+            .expect("invoke browser search on-change");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("snare".to_string()))),
+            "typing in sample search should update the search text"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len sbrowser-selected-tags)"),
+            Ok(Some(Value::Number(0.0))),
+            "typing in sample search should clear selected tag filters"
         );
     }
 
@@ -8356,6 +8597,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn displayed_plock_step_uses_selection_before_playback() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([5, 2])));
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state.transport.track_playheads[0].store(7, Ordering::Relaxed);
+
+        let selected_step = selected_plock_step(&selected_steps);
+
+        assert_eq!(selected_step, Some(2));
+        assert_eq!(displayed_plock_step(&state, 0, selected_step), Some(2));
+    }
+
+    #[test]
+    fn displayed_plock_step_follows_playhead_only_while_playing() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.pattern.track_params[0].set_num_steps(16);
+        state.transport.track_playheads[0].store(4, Ordering::Relaxed);
+
+        assert_eq!(displayed_plock_step(&state, 0, None), None);
+
+        state.transport.playing.store(true, Ordering::Relaxed);
+        assert_eq!(displayed_plock_step(&state, 0, None), Some(4));
+    }
+
+    #[test]
+    fn slot_param_stored_value_returns_played_plock_or_default() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let slot = sequencer::effects::EffectSlotState::new(&desc, 0);
+        slot.defaults.set(cutoff_idx, 5000.0);
+        slot.plocks.set(4, cutoff_idx, 200.0);
+
+        assert_eq!(
+            slot_param_stored_value(&slot, &desc.params[cutoff_idx], cutoff_idx, None),
+            5000.0
+        );
+        assert_eq!(
+            slot_param_stored_value(&slot, &desc.params[cutoff_idx], cutoff_idx, Some(4)),
+            200.0
+        );
+        assert_eq!(
+            slot_param_stored_value(&slot, &desc.params[cutoff_idx], cutoff_idx, Some(5)),
+            5000.0
+        );
+    }
+
     fn test_string_list(values: &[&str]) -> Value {
         test_list(
             values
@@ -8428,6 +8720,19 @@ mod tests {
         editor
             .runtime_mut()
             .register_native("seq-filter-sample-tree", |_args, _ctx| {
+                Ok(test_list(vec![]))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-sample-browser", |_args, _ctx| {
+                Ok(map_value([
+                    ("tags", test_list(vec![])),
+                    ("items", test_list(vec![])),
+                ]))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-sample-tags-for-path", |_args, _ctx| {
                 Ok(test_list(vec![]))
             });
         editor

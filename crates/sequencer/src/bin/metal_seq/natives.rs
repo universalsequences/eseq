@@ -27,6 +27,20 @@ fn value_string_field(value: &Value, field: &str) -> Option<String> {
     })
 }
 
+fn value_string_list(value: Option<&Value>) -> Vec<String> {
+    let Some(Value::List(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match &*item.borrow() {
+            Value::String(value) | Value::Keyword(value) => Some(value.trim().to_string()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 fn delete_kind_name(value: &Value) -> Option<&str> {
     match value {
         Value::Keyword(kind) | Value::String(kind) => Some(kind.as_str()),
@@ -2459,88 +2473,81 @@ pub(crate) fn init_runtime(
         }
     });
 
-    // seq-search-samples — recursively search samples/ for .wav files matching a query
-    // Pre-scan the sample tree once and cache it for fast filtering.
-    let sample_index: Vec<(String, String, String)> = {
-        let mut index = Vec::new();
-        let samples_dir = std::path::Path::new("samples");
-        if samples_dir.is_dir() {
-            let mut stack = vec![samples_dir.to_path_buf()];
-            while let Some(dir) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        stack.push(path);
-                    } else if let Some(ext) = path.extension() {
-                        if ext.eq_ignore_ascii_case("wav") {
-                            let name = path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string();
-                            let parent = path
-                                .parent()
-                                .and_then(|p| p.file_name())
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string();
-                            let full_path = path.to_string_lossy().to_string();
-                            index.push((name, parent, full_path));
-                        }
-                    }
-                }
-            }
-            index.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-        }
-        eprintln!("metal_seq: indexed {} samples", index.len());
-        index
-    };
+    let sample_db = Rc::new(
+        sequencer::sample_db::SampleDb::open(std::path::Path::new("samples.db"))
+            .expect("metal_seq requires crates/sequencer/samples.db for sample browsing"),
+    );
+    eprintln!("metal_seq: sample db opened");
+
+    let sample_db_for_search = sample_db.clone();
     runtime.register_native("seq-search-samples", move |args, _ctx| {
         let query = match args.first() {
-            Some(Value::String(s)) => s.to_lowercase(),
-            _ => String::new(),
+            Some(Value::String(s)) => s.trim(),
+            _ => "",
         };
-        let results: Vec<Rc<RefCell<Value>>> = sample_index
-            .iter()
-            .filter(|(name, _, _)| query.is_empty() || name.to_lowercase().contains(&query))
-            .take(100) // cap results for UI performance
-            .map(|(name, parent, full_path)| {
-                let mut map = std::collections::HashMap::new();
-                map.insert(
-                    "name".to_string(),
-                    Rc::new(RefCell::new(Value::String(name.clone()))),
-                );
-                map.insert(
-                    "parent".to_string(),
-                    Rc::new(RefCell::new(Value::String(parent.clone()))),
-                );
-                map.insert(
-                    "path".to_string(),
-                    Rc::new(RefCell::new(Value::String(full_path.clone()))),
-                );
-                Rc::new(RefCell::new(Value::Map(map)))
-            })
-            .collect();
-        Ok(Value::List(results))
+        let rows = sample_db_for_search
+            .query_samples_for_browser(&[], (!query.is_empty()).then_some(query))
+            .map_err(|error| format!("failed to search samples.db: {error}"))?;
+        Ok(Value::List(
+            rows.into_iter()
+                .take(100)
+                .map(|row| {
+                    let name = row
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or(&row.hash)
+                        .to_string();
+                    Rc::new(RefCell::new(map_value([
+                        ("name", Value::String(name)),
+                        ("parent", Value::String(row.tags.join(", "))),
+                        ("path", Value::String(format!("samples/{}.wav", row.hash))),
+                    ])))
+                })
+                .collect(),
+        ))
     });
 
-    let sample_tree_nodes = build_sample_tree_node(std::path::Path::new("samples"));
-    let sample_tree = sample_tree_nodes_to_value(&sample_tree_nodes);
-    eprintln!("metal_seq: sample tree built");
-    runtime.register_native(
-        "seq-sample-tree",
-        move |_args, _ctx| Ok(sample_tree.clone()),
-    );
-    runtime.register_native("seq-filter-sample-tree", move |args, _ctx| {
-        let query_lower = match args.first() {
-            Some(Value::String(s)) => s.trim().to_lowercase(),
-            _ => String::new(),
+    let sample_db_for_browser = sample_db.clone();
+    runtime.register_native("seq-sample-browser", move |args, _ctx| {
+        let query = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
         };
-        let filtered = filter_sample_tree_nodes(&sample_tree_nodes, &query_lower);
-        Ok(sample_tree_nodes_to_value(&filtered))
+        let selected_tags = value_string_list(args.get(1));
+        let selected_tag_refs: Vec<&str> = selected_tags.iter().map(String::as_str).collect();
+        build_sample_browser_value_from_db(&sample_db_for_browser, query, &selected_tag_refs)
+            .map_err(|error| format!("failed to query samples.db browser state: {error}"))
+    });
+
+    let sample_db_for_tree = sample_db.clone();
+    runtime.register_native("seq-sample-tree", move |_args, _ctx| {
+        build_sample_tree_value_from_db(&sample_db_for_tree, "", &[], &[])
+            .map_err(|error| format!("failed to query samples.db sample tree: {error}"))
+    });
+    let sample_db_for_filter = sample_db.clone();
+    runtime.register_native("seq-filter-sample-tree", move |args, _ctx| {
+        let query = match args.first() {
+            Some(Value::String(s)) => s.trim(),
+            _ => "",
+        };
+        build_sample_tree_value_from_db(&sample_db_for_filter, query, &[], &[])
+            .map_err(|error| format!("failed to filter samples.db sample tree: {error}"))
+    });
+    let sample_db_for_tags = sample_db.clone();
+    runtime.register_native("seq-sample-tags-for-path", move |args, _ctx| {
+        let path = match args.first() {
+            Some(Value::String(path)) => std::path::Path::new(path),
+            _ => return Ok(Value::List(vec![])),
+        };
+        let Some(hash) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            return Ok(Value::List(vec![]));
+        };
+        let tags = sample_db_for_tags
+            .tags_for(hash)
+            .map_err(|error| format!("failed to query sample tags for {hash}: {error}"))?;
+        Ok(build_string_list(&tags))
     });
     runtime.register_native("seq-project-tree", move |args, _ctx| {
         let query = match args.first() {
@@ -3480,17 +3487,27 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
         (
             "seq-search-samples",
             "(seq-search-samples query)",
-            "Search indexed sample files by name.",
+            "Search samples.db by sample title, hash, or tag.",
+        ),
+        (
+            "seq-sample-browser",
+            "(seq-sample-browser query selected-tags)",
+            "Return DB-backed sample tag facets and a flat sample list.",
+        ),
+        (
+            "seq-sample-tags-for-path",
+            "(seq-sample-tags-for-path path)",
+            "Return tags for a DB-backed sample path.",
         ),
         (
             "seq-sample-tree",
             "(seq-sample-tree)",
-            "Return the sample browser tree.",
+            "Return the DB-backed sample browser tree.",
         ),
         (
             "seq-filter-sample-tree",
             "(seq-filter-sample-tree query)",
-            "Return a filtered sample browser tree.",
+            "Return a filtered DB-backed sample browser tree.",
         ),
         (
             "seq-project-tree",

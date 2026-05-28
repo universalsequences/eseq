@@ -72,6 +72,7 @@ pub mod project;
 pub mod recorder;
 #[allow(dead_code)]
 pub mod reverb;
+pub mod sample_db;
 pub mod sampler;
 mod scale;
 mod scheduled_event;

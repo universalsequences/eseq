@@ -671,7 +671,8 @@ impl GraphController<'_> {
         self.app.submit_sample_analysis(&loaded);
         let buffer_id = loaded.buffer_id;
         let sample_rate = loaded.sample_rate;
-        let track_name = loaded.name;
+        let track_name =
+            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
         let shell = self.create_track_shell(idx, &track_name)?;
         let voices = self.build_sampler_voices(
             idx,

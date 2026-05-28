@@ -1498,6 +1498,7 @@ impl Runtime {
             "select",
             "v-stack",
             "h-stack",
+            "wrap",
             "box",
             "grid",
             "tabs",

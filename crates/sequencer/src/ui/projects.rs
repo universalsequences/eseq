@@ -1500,7 +1500,12 @@ impl App {
                 self.submit_sample_analysis(&loaded);
                 let buffer_id = loaded.buffer_id;
                 let sample_rate = loaded.sample_rate;
-                let sample_name = loaded.name;
+                let sample_name = crate::sample_db::display_title_for_sample_path(&path_buf)
+                    .or_else(|| {
+                        let saved_name = saved_name.trim();
+                        (!saved_name.is_empty()).then(|| saved_name.to_string())
+                    })
+                    .unwrap_or(loaded.name);
                 if saved_path.as_ref() != Some(&path_buf) {
                     fallback_count += 1;
                 }

@@ -855,7 +855,7 @@ fn load_sample_into_sampler_track(
     app.submit_sample_analysis(&loaded);
     let new_buffer_id = loaded.buffer_id;
     let sample_rate = loaded.sample_rate;
-    let new_name = loaded.name;
+    let new_name = sequencer::sample_db::display_title_for_sample_path(path).unwrap_or(loaded.name);
     register_waveform_sample(path);
     app.graph_controller()
         .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
@@ -883,7 +883,12 @@ fn load_sample_into_sampler_track(
         "instrument-panel",
         build_instrument_panel_value(app, track, selected_steps),
     );
-    sync_sampler_selection_time_fields(rt, app, track, selected_steps);
+    sync_sampler_selection_time_fields(
+        rt,
+        app,
+        track,
+        selected_steps.lock().unwrap().iter().copied().min(),
+    );
     sync_track_mixer_state(rt, app, state);
     sync_sidebar_browser(rt, app, track);
     rt.run_reactive_cycle();
@@ -3084,13 +3089,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &app,
                                         track,
                                         param_idx,
+                                        None,
                                     );
                                     if param_idx == 2 || param_idx == 3 {
                                         sync_sampler_selection_time_fields(
                                             editor.runtime_mut(),
                                             &app,
                                             track,
-                                            &selected_steps,
+                                            selected_steps.lock().unwrap().iter().copied().min(),
                                         );
                                     }
                                     if param_change_needs_fx_rebuild(&desc) {
@@ -3148,6 +3154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             &app,
                                             track,
                                             param_idx,
+                                            None,
                                         );
                                     } else {
                                         ui::apply_command(
@@ -3213,6 +3220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     track,
                                     slot_idx,
                                     param_idx,
+                                    None,
                                 );
                                 if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -3356,6 +3364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     track,
                                                     slot_idx,
                                                     param_idx,
+                                                    None,
                                                 );
                                             } else {
                                                 for step in selected {
@@ -3411,6 +3420,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
+                                                None,
                                             );
                                         } else {
                                             ui::apply_command(
@@ -3506,7 +3516,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             editor.runtime_mut(),
                                             &app,
                                             track,
-                                            &selected_steps,
+                                            selected_steps.lock().unwrap().iter().copied().min(),
                                         );
                                     }
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -4821,6 +4831,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         track,
                                         slot_idx,
                                         param_idx,
+                                        None,
                                     );
                                     if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -9556,6 +9567,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let master_meter_visible = transport_visible || mixer_visible;
             let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
                 || editor_has_visible_buffer(&editor, "*piano-roll*");
+            let current_track_playhead_changed = playhead != prev_playhead;
             if last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL {
                 cached_peak_l_level = meter_display_level(f32::from_bits(
                     state.transport.peak_l.load(Ordering::Relaxed),
@@ -9663,6 +9675,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 prev_playing = playing;
                 needs_reactive_cycle = true;
+                if fx_visible && !app.tracks.is_empty() {
+                    let rt = editor.runtime_mut();
+                    sync_track_params(rt, &app, &state, ct, &selected_steps);
+                    sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                }
             }
             if bpm != prev_bpm {
                 app.push_all_delay_bpm();
@@ -9791,6 +9808,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if !current_track_playhead_visible && prev_playhead != playhead {
                 prev_playhead = playhead;
+            }
+            if fx_visible && current_track_playhead_changed && !app.tracks.is_empty() {
+                let rt = editor.runtime_mut();
+                sync_track_params(rt, &app, &state, ct, &selected_steps);
+                sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                needs_reactive_cycle = true;
             }
             prev_current_track_playhead_visible = current_track_playhead_visible;
             let mut profile_pattern_reactive_cycle = false;
