@@ -7,7 +7,7 @@
     :debug-name debug-name
     :on-click (lambda (info) (fx-clear-selected-effect))
     :padding fx-panel-body-padding
-    :height :fill
+    :flex 1
     :v-align :start
     :h-align :start))
 

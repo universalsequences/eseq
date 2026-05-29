@@ -12994,6 +12994,142 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_panel_headers_share_height_and_visible_content() {
+        fn assert_visible_inside(
+            node: &eseqlisp::layout::LayoutNode,
+            parent: &eseqlisp::layout::LayoutNode,
+            label: &str,
+        ) {
+            let eps = 0.05;
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.width > 0.0
+                    && node.rect.height > 0.0
+                    && node.rect.col + eps >= parent.rect.col
+                    && node.rect.row + eps >= parent.rect.row
+                    && node.rect.col + node.rect.width <= parent.rect.col + parent.rect.width + eps
+                    && node.rect.row + node.rect.height <= parent.rect.row + parent.rect.height + eps,
+                "{label} should have a finite nonzero rect inside its parent; node={:?}; parent={:?}",
+                node.rect,
+                parent.rect
+            );
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filter".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Filter",
+                        0,
+                        test_filter_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_sampler_instrument_map(0))]),
+                ),
+                ("sampler-playhead", Value::Number(0.0)),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("fx panel layout");
+        assert_finite_layout_tree(&layout);
+
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let sampler_panel = find_layout_node_by_debug_name(&layout, "sampler-panel")
+            .unwrap_or_else(|| panic!("sampler panel; layout={layout_summaries:#?}"));
+        let filter_panel = find_layout_node_by_debug_name(&layout, "audio-fx-panel-root-0-Filter")
+            .unwrap_or_else(|| panic!("filter panel; layout={layout_summaries:#?}"));
+        let sampler_header = find_layout_node_by_debug_name(&layout, "sampler-header-box")
+            .unwrap_or_else(|| panic!("sampler header; layout={layout_summaries:#?}"));
+        let filter_header = find_layout_node_by_debug_name(&layout, "audio-fx-panel-header")
+            .unwrap_or_else(|| panic!("filter header; layout={layout_summaries:#?}"));
+        let sampler_body = find_layout_node_by_debug_name(&layout, "sampler-panel-content")
+            .unwrap_or_else(|| panic!("sampler body; layout={layout_summaries:#?}"));
+        let filter_body = find_layout_node_by_debug_name(&layout, "audio-fx-panel-content")
+            .unwrap_or_else(|| panic!("filter body; layout={layout_summaries:#?}"));
+        let sampler_label = find_layout_node_by_text(&layout, "Sampler")
+            .unwrap_or_else(|| panic!("sampler label; layout={layout_summaries:#?}"));
+        let filter_label = find_layout_node_by_text(&layout, "Filter")
+            .unwrap_or_else(|| panic!("filter label; layout={layout_summaries:#?}"));
+
+        assert!(
+            (sampler_panel.rect.height - filter_panel.rect.height).abs() < 0.01,
+            "instrument and effect panels should share the same fixed height; sampler={:?}; filter={:?}",
+            sampler_panel.rect,
+            filter_panel.rect
+        );
+        assert!(
+            (sampler_header.rect.height - filter_header.rect.height).abs() < 0.01,
+            "sampler and effect headers should reserve the same height; sampler={:?}; filter={:?}",
+            sampler_header.rect,
+            filter_header.rect
+        );
+        assert!(
+            (sampler_header.rect.height - 0.75).abs() < 0.01,
+            "shared panel header height should stay on the compact instrument contract; got {:?}",
+            sampler_header.rect
+        );
+        assert_visible_inside(sampler_header, sampler_panel, "sampler header");
+        assert_visible_inside(filter_header, filter_panel, "filter header");
+        assert_visible_inside(sampler_body, sampler_panel, "sampler body");
+        assert_visible_inside(filter_body, filter_panel, "filter body");
+        assert_visible_inside(sampler_label, sampler_header, "sampler title");
+        assert_visible_inside(filter_label, filter_header, "filter title");
+    }
+
+    #[test]
     fn metal_seq_sampler_panel_accepts_sample_drops_for_current_track() {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());

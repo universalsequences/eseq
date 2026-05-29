@@ -87,7 +87,7 @@
 (def midi-fx-panel (title params fx)
   (let ((selected (fx-panel-selected? fx)))
   (box
-    (v-stack :gap 0
+    (v-stack :gap 0 :height :fill
       (fx-panel-header title params fx)
       (fx-panel-body "midi-fx-panel-content"
         (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))

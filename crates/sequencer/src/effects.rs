@@ -3223,6 +3223,9 @@ pub struct EffectSlotSnapshot {
     pub plocks: Vec<Vec<Option<f32>>>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
+    /// Convolution Reverb IR reference (sample hash/stem) carried through
+    /// save/restore. None for every other effect.
+    pub ir: Option<String>,
 }
 
 impl EffectSlotSnapshot {
@@ -3269,6 +3272,7 @@ impl EffectSlotSnapshot {
             plocks,
             param_node_indices,
             param_node_spans,
+            ir: crate::conv_reverb::ir_ref_for(node_id as i32),
         }
     }
 
@@ -3334,6 +3338,7 @@ impl EffectSlotSnapshot {
             plocks,
             param_node_indices,
             param_node_spans,
+            ir: None,
         }
     }
 
@@ -3346,6 +3351,7 @@ impl EffectSlotSnapshot {
             plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             param_node_indices: Vec::new(),
             param_node_spans: Vec::new(),
+            ir: None,
         }
     }
 

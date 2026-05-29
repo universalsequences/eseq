@@ -3155,30 +3155,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-convolution-reverb-ir" => {
                         let path_str = extract_path_from_payload(&payload);
+                        // bus >= 0 means a bus effect; absent/-1 means a track effect.
+                        let bus = extract_usize_from_payload(&payload, "bus");
                         let track = extract_usize_from_payload(&payload, "track");
                         let slot = extract_usize_from_payload(&payload, "slot");
-                        match (track, slot, path_str) {
-                            (Some(track), Some(slot), Some(path_str)) => {
+                        match (slot, path_str) {
+                            (Some(slot), Some(path_str)) => {
                                 let path = Path::new(&path_str);
                                 let reference = path
                                     .file_stem()
                                     .and_then(|s| s.to_str())
                                     .unwrap_or(path_str.as_str())
                                     .to_string();
-                                match app.set_conv_reverb_ir(track, slot, path, &reference) {
+                                let result = if let Some(bus_idx) = bus {
+                                    app.set_conv_reverb_ir_bus(bus_idx, slot, path, &reference)
+                                } else if let Some(track) = track {
+                                    app.set_conv_reverb_ir(track, slot, path, &reference)
+                                } else {
+                                    Err("need a track or bus".to_string())
+                                };
+                                match result {
                                     Ok(()) => {
-                                        // Refresh the effects view so the panel label updates.
+                                        // Refresh the relevant effects view so the label updates.
                                         let rt = editor.runtime_mut();
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "effects",
-                                            build_effects_value(
-                                                &state,
-                                                track,
-                                                &app.graph.effect_descriptors,
-                                                &selected_steps,
-                                            ),
-                                        );
+                                        if bus.is_some() {
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "bus-effects",
+                                                build_bus_effects_value_for_selection(
+                                                    &app,
+                                                    Some(&selected_steps),
+                                                ),
+                                            );
+                                        } else if let Some(track) = track {
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "effects",
+                                                build_effects_value(
+                                                    &state,
+                                                    track,
+                                                    &app.graph.effect_descriptors,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                        }
                                         editor.handle_host_event(HostEvent::Status(format!(
                                             "Loaded IR: {reference}"
                                         )));
@@ -3189,7 +3209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             _ => editor.handle_host_event(HostEvent::Status(
-                                "set-convolution-reverb-ir: need track, slot, path".to_string(),
+                                "set-convolution-reverb-ir: need slot, path".to_string(),
                             )),
                         }
                     }

@@ -37,7 +37,7 @@
 (def (xRre xRim) (fft fftBlockR @N 1024 @backend accelerated))
 (def (yRre yRim) (partitioned-spectral-mac xRre xRim irR-re irR-im @N 1024))
 (def tdR (ifft yRre yRim @N 1024))
-(def wetR (overlap-add (* tdR out-gain) 512))
+(def wetR (overlap-add (* tdR out-gain) 1))
 
 (out (mix inL wetL wet-amt) 1 @name left)
 (out (mix inR wetR wet-amt) 2 @name right)

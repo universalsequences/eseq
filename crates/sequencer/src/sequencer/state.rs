@@ -2199,6 +2199,7 @@ mod tests {
                 .collect(),
             param_node_indices: vec![id as u32, id as u32 + 10],
             param_node_spans: vec![1, 1],
+            ir: None,
         }
     }
 
@@ -2576,6 +2577,7 @@ mod tests {
                     },
                     param_node_indices: vec![0],
                     param_node_spans: vec![1],
+                    ir: None,
                 }],
                 vec![EffectSlotSnapshot::new_empty()],
                 vec![EffectSlotSnapshot::new_empty()],
