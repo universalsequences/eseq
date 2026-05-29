@@ -339,11 +339,23 @@ pub(crate) fn init_runtime(
                         build_param_list(&state, 0, StepParam::Sync)
                     },
                 ),
+                (
+                    "delays",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::Delay)
+                    },
+                ),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
                 (
                     "track-pans",
                     build_all_track_param_lists_value(&state, &app, StepParam::Pan),
+                ),
+                (
+                    "track-delays",
+                    build_all_track_param_lists_value(&state, &app, StepParam::Delay),
                 ),
                 ("track-mixer-pans", build_track_pans(&state)),
                 ("track-outputs", build_track_outputs(&app, &state)),
@@ -1020,6 +1032,7 @@ pub(crate) fn init_runtime(
             "transpose" => StepParam::Transpose,
             "pan" => StepParam::Pan,
             "sync" | "syn" => StepParam::Sync,
+            "delay" | "dly" => StepParam::Delay,
             "speed" => StepParam::Speed,
             other => return Err(format!("seq-set-step-param: unknown param :{other}").into()),
         };
@@ -1043,6 +1056,7 @@ pub(crate) fn init_runtime(
     let ct = current_track.clone();
     let piano_sel = piano_roll_selection.clone();
     let piano_move = piano_roll_move_state.clone();
+    let piano_clipboard = new_piano_roll_clipboard();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-piano-roll-action", move |args, ctx| {
@@ -1050,7 +1064,14 @@ pub(crate) fn init_runtime(
             return Err("seq-piano-roll-action: expected action map".into());
         };
         let track = ct.load(Ordering::Relaxed);
-        let status = apply_piano_roll_action(&st, track, &piano_sel, &piano_move, action)?;
+        let status = apply_piano_roll_action_with_clipboard(
+            &st,
+            track,
+            &piano_sel,
+            &piano_move,
+            &piano_clipboard,
+            action,
+        )?;
         if piano_roll_action_mutates_pattern(action) {
             st.publish_scheduler_snapshot();
             *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
@@ -1911,6 +1932,7 @@ pub(crate) fn init_runtime(
             "transpose" => StepParam::Transpose,
             "pan" => StepParam::Pan,
             "sync" | "syn" => StepParam::Sync,
+            "delay" | "dly" => StepParam::Delay,
             "speed" => StepParam::Speed,
             other => return Err(format!("unknown param :{other}").into()),
         };

@@ -3839,6 +3839,10 @@ fn validate_single_history_writes(
     };
     let mut counts: HashMap<String, usize> = HashMap::new();
     for connection in &patch.connections {
+        if source_connection_has_semantic_edit(root_patch, interaction_state, view_key, connection)
+        {
+            continue;
+        }
         if interaction_state
             .edit_state
             .deleted_connections
@@ -3859,6 +3863,9 @@ fn validate_single_history_writes(
         .values()
         .filter(|edit| edit.view_key == view_key)
     {
+        if source_connection_edit_is_layout_only(root_patch, connection) {
+            continue;
+        }
         if node_is_history(
             root_patch,
             interaction_state,
@@ -3875,6 +3882,29 @@ fn validate_single_history_writes(
         });
     }
     Ok(())
+}
+
+fn source_connection_has_semantic_edit(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    connection: &PatchConnection,
+) -> bool {
+    let connection_id = source_connection_id(connection);
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .any(|edit| {
+            edit.view_key == view_key
+                && matches!(
+                    &edit.origin,
+                    PatcherConnectionOrigin::Source {
+                        source_connection_id
+                    } if source_connection_id == &connection_id
+                )
+                && !source_connection_edit_is_layout_only(root_patch, edit)
+        })
 }
 
 fn apply_history_read_connection(
@@ -4213,12 +4243,13 @@ fn apply_node_text_edit(
             document, root_patch, view_key, node, binding, *index, text,
         );
     }
-    let replacement = edited_expression_for_node(text, node, source.expr.as_ref(), document)
-        .map_err(|reason| WriteBackError::InvalidEdit {
-            view_key: view_key.to_string(),
-            node_id: node.id.clone(),
-            reason,
-        })?;
+    let replacement =
+        edited_expression_for_node(text, node, source.expr.as_ref(), document, root_patch)
+            .map_err(|reason| WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                reason,
+            })?;
     if let Some(operator) = edited_operator(&replacement)
         && !document.is_known_operator(operator)
     {
@@ -4645,6 +4676,7 @@ fn edited_expression_for_node(
     node: &PatchNode,
     source_expr: Option<&SourceExprId>,
     document: &SourceDocument,
+    root_patch: &Patch,
 ) -> Result<Expression, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -4681,25 +4713,33 @@ fn edited_expression_for_node(
         return Err("node text must include an operator".to_string());
     }
 
-    if edited_items.len() == 1
-        && let Some(source_expr) = source_expr
-        && let Some(Expression::List(original_items)) = document.expr(source_expr)
-    {
-        let mut merged = original_items.clone();
-        merged[0] = edited_items[0].clone();
-        return expand_editor_mod_shorthand_for_node(
-            Expression::List(merged),
-            Some(source_expr),
-            document,
-        );
-    }
-
     if node_display_omits_first_input(node)
         && let Some(source_expr) = source_expr
         && let Some(Expression::List(original_items)) = document.expr(source_expr)
         && let Some(first_input_item) =
             positional_item_index(original_items, 0).and_then(|idx| original_items.get(idx))
     {
+        if let Some(merged) = merge_operator_only_edit_with_required_inputs(
+            node,
+            root_patch,
+            original_items,
+            &edited_items,
+        ) {
+            return expand_editor_mod_shorthand_for_node(
+                Expression::List(merged),
+                Some(source_expr),
+                document,
+            );
+        }
+        if let Some(merged) =
+            merge_operator_rename_preserving_original_inputs(original_items, &edited_items)
+        {
+            return expand_editor_mod_shorthand_for_node(
+                Expression::List(merged),
+                Some(source_expr),
+                document,
+            );
+        }
         if let Some(merged) = merge_edited_inline_inputs(node, original_items, &edited_items) {
             return expand_editor_mod_shorthand_for_node(
                 Expression::List(merged),
@@ -4718,7 +4758,97 @@ fn edited_expression_for_node(
         );
     }
 
+    if edited_items.len() == 1
+        && let Some(source_expr) = source_expr
+        && let Some(Expression::List(original_items)) = document.expr(source_expr)
+    {
+        let mut merged = original_items.clone();
+        merged[0] = edited_items[0].clone();
+        return expand_editor_mod_shorthand_for_node(
+            Expression::List(merged),
+            Some(source_expr),
+            document,
+        );
+    }
+
     expand_editor_mod_shorthand_for_node(Expression::List(edited_items), source_expr, document)
+}
+
+fn merge_operator_rename_preserving_original_inputs(
+    original_items: &[Expression],
+    edited_items: &[Expression],
+) -> Option<Vec<Expression>> {
+    if edited_items.len() != 1 || symbol_at(edited_items, 0)? == symbol_at(original_items, 0)? {
+        return None;
+    }
+    let mut merged = original_items.to_vec();
+    merged[0] = edited_items[0].clone();
+    Some(merged)
+}
+
+fn merge_operator_only_edit_with_required_inputs(
+    node: &PatchNode,
+    root_patch: &Patch,
+    original_items: &[Expression],
+    edited_items: &[Expression],
+) -> Option<Vec<Expression>> {
+    if edited_items.len() != 1 || node_display_input_slots(node).is_empty() {
+        return None;
+    }
+    let edited_op = symbol_at(edited_items, 0)?;
+    let original_op = symbol_at(original_items, 0)?;
+    if edited_op != original_op {
+        return None;
+    }
+
+    let input_count = required_input_count_for_existing_node_edit(node, root_patch, edited_op);
+    let mut merged = Vec::with_capacity(1 + input_count + original_items.len());
+    merged.push(edited_items[0].clone());
+    for semantic_index in 0..input_count {
+        let Some(item_index) = positional_item_index(original_items, semantic_index) else {
+            merged.push(Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()));
+            continue;
+        };
+        merged.push(original_items[item_index].clone());
+    }
+    append_original_attributes(original_items, &mut merged);
+    Some(merged)
+}
+
+fn required_input_count_for_existing_node_edit(
+    node: &PatchNode,
+    root_patch: &Patch,
+    op: &str,
+) -> usize {
+    match node.kind {
+        NodeKind::In | NodeKind::Param | NodeKind::Constant => 0,
+        NodeKind::Out | NodeKind::History => 1,
+        NodeKind::MacroInstance => root_patch
+            .macros
+            .iter()
+            .find(|macro_patch| macro_patch.name == op)
+            .map(|macro_patch| macro_patch.params.len())
+            .unwrap_or_else(|| node.args.len()),
+        _ => dgenlisp_operator_required_input_counts()
+            .get(op)
+            .copied()
+            .unwrap_or_else(|| node.args.len()),
+    }
+}
+
+fn append_original_attributes(original_items: &[Expression], merged: &mut Vec<Expression>) {
+    let mut idx = 1usize;
+    while idx < original_items.len() {
+        if matches!(&original_items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+            merged.push(original_items[idx].clone());
+            if let Some(value) = original_items.get(idx + 1) {
+                merged.push(value.clone());
+            }
+            idx += 2;
+        } else {
+            idx += 1;
+        }
+    }
 }
 
 fn merge_edited_inline_inputs(

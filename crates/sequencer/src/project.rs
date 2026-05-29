@@ -213,6 +213,12 @@ pub struct ProjectPattern {
     )]
     pub chord_duration_snapshots: Vec<Vec<Vec<f32>>>,
     #[serde(
+        default,
+        serialize_with = "serialize_chord_snapshots",
+        deserialize_with = "deserialize_chord_snapshots"
+    )]
+    pub chord_delay_snapshots: Vec<Vec<Vec<f32>>>,
+    #[serde(
         serialize_with = "serialize_timebase_plock_snapshots",
         deserialize_with = "deserialize_timebase_plock_snapshots"
     )]
@@ -401,6 +407,11 @@ impl ProjectPattern {
                 .chord_snapshots
                 .iter()
                 .map(|snap| snap.durations.clone())
+                .collect(),
+            chord_delay_snapshots: snapshot
+                .chord_snapshots
+                .iter()
+                .map(|snap| snap.delays.clone())
                 .collect(),
             timebase_plock_snapshots: snapshot
                 .timebase_plock_snapshots
@@ -915,6 +926,10 @@ fn step_values_from_vec(values: Vec<f32>) -> [f32; NUM_PARAMS] {
     let mut params = default_step_values();
     if values.len() == NUM_PARAMS - 1 {
         for (idx, value) in values.into_iter().enumerate() {
+            params[idx] = value;
+        }
+    } else if values.len() == NUM_PARAMS - 2 {
+        for (idx, value) in values.into_iter().enumerate() {
             let target_idx = if idx >= crate::sequencer::StepParam::Pan.index() {
                 idx + 1
             } else {
@@ -1110,18 +1125,44 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
 
 pub fn chord_snapshot_from_steps(steps: Vec<Vec<f32>>) -> ChordSnapshot {
     let durations = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
-    ChordSnapshot { steps, durations }
+    let delays = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
+    ChordSnapshot {
+        steps,
+        durations,
+        delays,
+    }
+}
+
+pub fn chord_snapshot_from_steps_durations_and_delays(
+    steps: Vec<Vec<f32>>,
+    mut durations: Vec<Vec<f32>>,
+    mut delays: Vec<Vec<f32>>,
+) -> ChordSnapshot {
+    durations.resize_with(steps.len(), Vec::new);
+    delays.resize_with(steps.len(), Vec::new);
+    for (idx, notes) in steps.iter().enumerate() {
+        durations[idx].resize(notes.len(), 0.0);
+        delays[idx].resize(notes.len(), 0.0);
+        for delay in &mut delays[idx] {
+            *delay = delay.clamp(
+                crate::sequencer::StepParam::Delay.min(),
+                crate::sequencer::StepParam::Delay.max(),
+            );
+        }
+    }
+    ChordSnapshot {
+        steps,
+        durations,
+        delays,
+    }
 }
 
 pub fn chord_snapshot_from_steps_and_durations(
     steps: Vec<Vec<f32>>,
-    mut durations: Vec<Vec<f32>>,
+    durations: Vec<Vec<f32>>,
 ) -> ChordSnapshot {
-    durations.resize_with(steps.len(), Vec::new);
-    for (idx, notes) in steps.iter().enumerate() {
-        durations[idx].resize(notes.len(), 0.0);
-    }
-    ChordSnapshot { steps, durations }
+    let delays = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
+    chord_snapshot_from_steps_durations_and_delays(steps, durations, delays)
 }
 
 #[cfg(test)]
@@ -1159,7 +1200,7 @@ mod tests {
             },
             patterns: vec![ProjectPattern {
                 track_bits: vec![[0b1011, 0, 0, 0], [0b0101, 1, 0, 0]],
-                step_data: vec![vec![[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]; 256]; 2],
+                step_data: vec![vec![default_step_values(); 256]; 2],
                 track_params: vec![
                     ProjectTrackParams {
                         gate: true,
@@ -1250,6 +1291,7 @@ mod tests {
                 ],
                 chord_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
                 chord_duration_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
+                chord_delay_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
                 timebase_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_resolution_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
@@ -1366,6 +1408,7 @@ mod tests {
         assert_eq!(step[crate::sequencer::StepParam::Transpose.index()], 7.0);
         assert_eq!(step[crate::sequencer::StepParam::Pan.index()], 0.0);
         assert_eq!(step[crate::sequencer::StepParam::Chop.index()], 1.0);
+        assert_eq!(step[crate::sequencer::StepParam::Delay.index()], 0.0);
     }
 
     #[test]

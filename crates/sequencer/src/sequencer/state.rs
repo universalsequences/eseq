@@ -24,6 +24,8 @@ pub struct StepSnapshot {
     pub active: bool,
     pub params: [f32; NUM_PARAMS],
     pub chord: Vec<f32>,
+    pub chord_durations: Vec<f32>,
+    pub chord_delays: Vec<f32>,
     pub timebase: Option<Timebase>,
     pub swing: Option<f32>,
     pub swing_resolution: Option<SwingResolution>,
@@ -1853,8 +1855,12 @@ impl SequencerState {
 
         let chord_count = self.pattern.chord_data[track].count(step);
         let mut chord = Vec::with_capacity(chord_count);
+        let mut chord_durations = Vec::with_capacity(chord_count);
+        let mut chord_delays = Vec::with_capacity(chord_count);
         for note_idx in 0..chord_count {
             chord.push(self.pattern.chord_data[track].get(step, note_idx));
+            chord_durations.push(self.pattern.chord_data[track].get_duration(step, note_idx));
+            chord_delays.push(self.pattern.chord_data[track].get_delay(step, note_idx));
         }
 
         let mut effect_plocks = Vec::with_capacity(self.pattern.effect_chains[track].len());
@@ -1878,6 +1884,8 @@ impl SequencerState {
             active: self.pattern.patterns[track].is_active(step),
             params,
             chord,
+            chord_durations,
+            chord_delays,
             timebase: self.pattern.timebase_plocks[track].get(step),
             swing: self.pattern.swing_plocks[track].get(step),
             swing_resolution: self.pattern.swing_resolution_plocks[track].get(step),
@@ -1937,11 +1945,15 @@ impl SequencerState {
 
         let mut notes = Vec::with_capacity(chord_count);
         for note_idx in 0..chord_count {
-            notes.push(self.pattern.chord_data[track].get(step, note_idx) + delta);
+            notes.push((
+                self.pattern.chord_data[track].get(step, note_idx) + delta,
+                self.pattern.chord_data[track].get_duration(step, note_idx),
+                self.pattern.chord_data[track].get_delay(step, note_idx),
+            ));
         }
         self.pattern.chord_data[track].clear_step(step);
-        for transpose in notes {
-            self.pattern.chord_data[track].add_note(step, transpose);
+        for (transpose, duration, delay) in notes {
+            self.pattern.chord_data[track].add_note_with_timing(step, transpose, duration, delay);
         }
     }
 
@@ -1963,8 +1975,13 @@ impl SequencerState {
         self.pattern.patterns[track].set_step_active(step, snapshot.active);
 
         self.pattern.chord_data[track].clear_step(step);
-        for &transpose in &snapshot.chord {
-            self.pattern.chord_data[track].add_note(step, transpose);
+        for (idx, &transpose) in snapshot.chord.iter().enumerate() {
+            self.pattern.chord_data[track].add_note_with_timing(
+                step,
+                transpose,
+                snapshot.chord_durations.get(idx).copied().unwrap_or(0.0),
+                snapshot.chord_delays.get(idx).copied().unwrap_or(0.0),
+            );
         }
 
         match snapshot.timebase {

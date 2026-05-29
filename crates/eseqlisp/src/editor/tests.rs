@@ -2408,10 +2408,12 @@ fn valid_patcher_payload_updates_read_only_emitted_source_buffer() {
 }
 
 #[test]
-fn tab_from_patcher_emitted_source_buffer_returns_to_matching_patcher_buffer() {
+fn tab_from_patcher_buffer_toggles_emitted_source_split() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
-    let path = "/tmp/eseq/example/dsp.lisp";
+    let path = temp_file_path("patcher-source-split-toggle");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let path = path.to_string_lossy().to_string();
     let patcher_id = editor.open_scratch_buffer("*patcher*", "");
     let patcher_tree = Value::Map(HashMap::from([
         (
@@ -2420,43 +2422,90 @@ fn tab_from_patcher_emitted_source_buffer_returns_to_matching_patcher_buffer() {
         ),
         (
             "path".to_string(),
-            Rc::new(RefCell::new(Value::String(path.to_string()))),
+            Rc::new(RefCell::new(Value::String(path.clone()))),
         ),
     ]));
     editor
         .active_buffer_mut()
         .set_widget_tree(Some(patcher_tree), Some(patcher_id));
     let emitted_id = editor.upsert_read_only_scratch_buffer_with_mode(
-        &crate::widget_render::patcher::emitted_source_buffer_name(path),
+        &crate::widget_render::patcher::emitted_source_buffer_name(&path),
         "(def out (out 1 0))",
         BufferMode::DGenLisp,
     );
-    editor.set_active_buffer(emitted_id);
+    assert_ne!(patcher_id, emitted_id);
+    editor.set_active_buffer(patcher_id);
+    assert_eq!(editor.active_buffer().id, patcher_id);
+    assert!(editor.patcher_source_tab_available());
 
     editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().id, patcher_id);
+    assert_eq!(editor.tile_root.leaf_count(), 2);
+    assert!(
+        editor.tile_root.leaf_ids().into_iter().any(|tile_id| {
+            editor
+                .tile_root
+                .find_leaf(tile_id)
+                .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
+                .is_some_and(|buffer| buffer.id == emitted_id)
+        }),
+        "source buffer should be visible in a sibling tile"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().id, patcher_id);
+    assert_eq!(editor.tile_root.leaf_count(), 1);
 }
 
 #[test]
-fn tab_from_patcher_emitted_source_buffer_uses_recorded_origin_without_widget_tree() {
+fn tab_from_split_patcher_source_tile_hides_source_and_returns_to_patcher() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
-    let path = "/tmp/eseq/instrument-drafts/dsp.lisp";
-    let patcher_id = editor.open_scratch_buffer("*instrument-patcher:new-instrument*", "");
-    let emitted_id = editor.upsert_read_only_scratch_buffer_with_mode(
-        &crate::widget_render::patcher::emitted_source_buffer_name(path),
-        "(def out (out 1 0))",
-        BufferMode::DGenLisp,
-    );
+    let path = temp_file_path("patcher-source-split-hide-from-source");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let path = path.to_string_lossy().to_string();
+    let patcher_id = editor.open_scratch_buffer("*patcher*", "");
+    editor.set_layout_viewport(40, 12);
     editor
-        .patcher_emitted_source_origins
-        .insert(path.to_string(), patcher_id);
-    editor.set_active_buffer(emitted_id);
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (patcher
+                    :height 10
+                    :intent :effect
+                    :path "{}"))
+                "#,
+            path
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(editor.tile_root.leaf_count(), 2);
+
+    let emitted_name = crate::widget_render::patcher::emitted_source_buffer_name(&path);
+    let source_tile = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| {
+            editor
+                .tile_root
+                .find_leaf(*tile_id)
+                .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
+                .is_some_and(|buffer| buffer.name == emitted_name)
+        })
+        .expect("source tile should be visible");
+    editor.switch_active_tile(source_tile);
+    assert_eq!(editor.active_buffer().name, emitted_name);
 
     editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().id, patcher_id);
+    assert_eq!(editor.tile_root.leaf_count(), 1);
 }
 
 #[test]

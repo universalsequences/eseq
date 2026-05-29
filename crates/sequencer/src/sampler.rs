@@ -1339,25 +1339,70 @@ pub fn sampler_vtable() -> NodeVTable {
 /// Load a WAV file into an audiograph buffer and retain the trimmed mono data
 /// needed by the offline analyzer.
 pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<LoadedSample, String> {
-    let reader =
-        hound::WavReader::open(wav_path).map_err(|e| format!("Failed to open WAV: {e}"))?;
+    let reader = hound::WavReader::open(wav_path).map_err(|e| {
+        let file_len = std::fs::metadata(wav_path).map(|meta| meta.len()).ok();
+        eprintln!(
+            "sampler: failed to open WAV {}; exists={}; len={file_len:?}; error={e}",
+            wav_path.display(),
+            wav_path.exists()
+        );
+        format!("Failed to open WAV: {e}")
+    })?;
     let spec = reader.spec();
     let channels = spec.channels as usize;
 
+    let mut decode_errors = 0usize;
     let samples_f32: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Int => {
             let max_val = (1u32 << (spec.bits_per_sample - 1)) as f32;
             reader
                 .into_samples::<i32>()
-                .filter_map(|s| s.ok())
+                .enumerate()
+                .filter_map(|(idx, sample)| match sample {
+                    Ok(sample) => Some(sample),
+                    Err(error) => {
+                        decode_errors += 1;
+                        if decode_errors <= 8 {
+                            eprintln!(
+                                "sampler: decode error in {} at sample {}: {error}",
+                                wav_path.display(),
+                                idx
+                            );
+                        }
+                        None
+                    }
+                })
                 .map(|s| s as f32 / max_val)
                 .collect()
         }
         hound::SampleFormat::Float => reader
             .into_samples::<f32>()
-            .filter_map(|s| s.ok())
+            .enumerate()
+            .filter_map(|(idx, sample)| match sample {
+                Ok(sample) => Some(sample),
+                Err(error) => {
+                    decode_errors += 1;
+                    if decode_errors <= 8 {
+                        eprintln!(
+                            "sampler: decode error in {} at sample {}: {error}",
+                            wav_path.display(),
+                            idx
+                        );
+                    }
+                    None
+                }
+            })
             .collect(),
     };
+    if decode_errors > 0 {
+        eprintln!(
+            "sampler: decoded {} with {} sample read error(s); spec={:?}",
+            wav_path.display(),
+            decode_errors,
+            spec
+        );
+    }
+    let decoded_sample_count = samples_f32.len();
 
     let stereo: Vec<f32> = if channels == 1 {
         samples_f32
@@ -1400,6 +1445,23 @@ pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<LoadedSamp
         .chunks_exact(2)
         .map(|frame| 0.5 * (frame[0] + frame[1]))
         .collect();
+    let decoded_peak = stereo
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    let trimmed_peak = trimmed
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    eprintln!(
+        "sampler: decoded {} successfully; spec={:?}; decoded_samples={}; stereo_frames={}; skipped_frames={}; trimmed_frames={}; decoded_peak={:.6}; trimmed_peak={:.6}",
+        wav_path.display(),
+        spec,
+        decoded_sample_count,
+        stereo.len() / 2,
+        skip,
+        trimmed.len() / 2,
+        decoded_peak,
+        trimmed_peak
+    );
 
     let buffer_id = unsafe { create_buffer(lg, (trimmed.len() / 2) as c_int, 2, trimmed.as_ptr()) };
     if buffer_id < 0 {

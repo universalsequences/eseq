@@ -42,6 +42,29 @@ struct EditorSubtreeReplacement {
     reactive_dependencies: Vec<ReactiveFieldKey>,
 }
 
+enum PatcherSourceTabTarget {
+    PatcherNode {
+        node: crate::layout::LayoutNode,
+        buffer_id: BufferId,
+        tile_id: Option<TileId>,
+    },
+    SourceBuffer {
+        path: String,
+    },
+    PatcherBuffer {
+        path: String,
+        buffer_id: BufferId,
+        tile_id: Option<TileId>,
+    },
+}
+
+struct ResolvedPatcherSourceTabTarget {
+    path: String,
+    patcher_buffer_id: BufferId,
+    patcher_tile_id: Option<TileId>,
+    source_buffer_id: Option<BufferId>,
+}
+
 fn metal_tile_content_viewport(
     rect: &Rect,
     show_status: bool,
@@ -2444,6 +2467,10 @@ impl Editor {
         self.runtime.layout_revision()
     }
 
+    pub fn patcher_source_tab_available(&self) -> bool {
+        self.patcher_source_tab_target().is_some()
+    }
+
     pub fn take_dirty_widget_ids(&mut self) -> Vec<u64> {
         self.runtime.take_dirty_widget_ids()
     }
@@ -3025,7 +3052,7 @@ impl Editor {
             return;
         }
 
-        if self.handle_patcher_emitted_source_tab(key) {
+        if self.handle_patcher_source_tab(key) {
             return;
         }
 
@@ -5808,46 +5835,235 @@ impl Editor {
         Some(id)
     }
 
-    fn switch_focused_patcher_to_emitted_source_buffer(
+    fn handle_patcher_source_tab(&mut self, key: KeyEvent) -> bool {
+        if key.code != KeyCode::Tab || key.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+        let Some(target) = self.patcher_source_tab_target() else {
+            return false;
+        };
+        self.toggle_patcher_source_split(target);
+        true
+    }
+
+    fn toggle_patcher_source_split(&mut self, target: PatcherSourceTabTarget) {
+        let resolved = match self.resolve_patcher_source_tab_target(target) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.minibuffer = Some(format!("Patch emitted source unavailable: {error}"));
+                self.mark_needs_redraw();
+                return;
+            }
+        };
+        if let Some(source_tile_id) = self.visible_emitted_source_tile_for_path(&resolved.path) {
+            if self.tile_root.leaf_count() <= 1 {
+                self.set_active_buffer(resolved.patcher_buffer_id);
+                return;
+            }
+            self.remove_tile_and_activate(source_tile_id, resolved.patcher_tile_id);
+            return;
+        }
+        let Some(source_buffer_id) = resolved.source_buffer_id else {
+            self.minibuffer = Some(format!(
+                "Patch emitted source unavailable: no source buffer found for {}",
+                resolved.path
+            ));
+            self.mark_needs_redraw();
+            return;
+        };
+        let Some(source_buffer_idx) = self.buffer_idx_for_id(source_buffer_id) else {
+            self.minibuffer = Some(format!(
+                "Patch emitted source unavailable: source buffer disappeared for {}",
+                resolved.path
+            ));
+            self.mark_needs_redraw();
+            return;
+        };
+        let patcher_tile_id = resolved
+            .patcher_tile_id
+            .or_else(|| self.visible_tile_for_buffer_id(resolved.patcher_buffer_id));
+        let Some(patcher_tile_id) = patcher_tile_id else {
+            self.set_active_buffer(resolved.patcher_buffer_id);
+            let tile_id = self.active_tile;
+            self.split_active_tile(SplitDir::Vertical, source_buffer_idx);
+            self.switch_active_tile(tile_id);
+            return;
+        };
+        self.switch_active_tile(patcher_tile_id);
+        self.split_active_tile(SplitDir::Vertical, source_buffer_idx);
+    }
+
+    fn resolve_patcher_source_tab_target(
         &mut self,
-        node: &crate::layout::LayoutNode,
-    ) -> bool {
-        match crate::widget_render::patcher::emitted_source_buffer_snapshot(node) {
-            Ok(snapshot) => {
-                let origin_buffer_id = self.active_buffer().id;
-                let id = self.upsert_read_only_scratch_buffer_with_mode(
+        target: PatcherSourceTabTarget,
+    ) -> Result<ResolvedPatcherSourceTabTarget, String> {
+        match target {
+            PatcherSourceTabTarget::PatcherNode {
+                node,
+                buffer_id,
+                tile_id,
+            } => {
+                let snapshot =
+                    crate::widget_render::patcher::emitted_source_buffer_snapshot(&node)?;
+                let source_buffer_id = self.upsert_read_only_scratch_buffer_with_mode(
                     &snapshot.buffer_name,
                     &snapshot.source,
                     BufferMode::DGenLisp,
                 );
                 self.patcher_emitted_source_origins
-                    .insert(snapshot.path, origin_buffer_id);
-                self.set_active_buffer(id);
+                    .insert(snapshot.path.clone(), buffer_id);
+                Ok(ResolvedPatcherSourceTabTarget {
+                    path: snapshot.path,
+                    patcher_buffer_id: buffer_id,
+                    patcher_tile_id: tile_id,
+                    source_buffer_id: Some(source_buffer_id),
+                })
             }
-            Err(error) => {
-                self.minibuffer = Some(format!("Patch emitted source unavailable: {error}"));
-                self.mark_needs_redraw();
+            PatcherSourceTabTarget::SourceBuffer { path } => {
+                let patcher_buffer_id = self
+                    .patcher_buffer_id_for_path(&path)
+                    .ok_or_else(|| format!("No patcher buffer found for {path}"))?;
+                let source_buffer_name =
+                    crate::widget_render::patcher::emitted_source_buffer_name(&path);
+                let source_buffer_id = self
+                    .buffers
+                    .iter()
+                    .find(|buffer| buffer.name == source_buffer_name)
+                    .map(|buffer| buffer.id);
+                Ok(ResolvedPatcherSourceTabTarget {
+                    path,
+                    patcher_buffer_id,
+                    patcher_tile_id: self.visible_tile_for_buffer_id(patcher_buffer_id),
+                    source_buffer_id,
+                })
+            }
+            PatcherSourceTabTarget::PatcherBuffer {
+                path,
+                buffer_id,
+                tile_id,
+            } => {
+                let source_buffer_name =
+                    crate::widget_render::patcher::emitted_source_buffer_name(&path);
+                let source_buffer_id = self
+                    .buffers
+                    .iter()
+                    .find(|buffer| buffer.name == source_buffer_name)
+                    .map(|buffer| buffer.id);
+                Ok(ResolvedPatcherSourceTabTarget {
+                    path,
+                    patcher_buffer_id: buffer_id,
+                    patcher_tile_id: tile_id,
+                    source_buffer_id,
+                })
             }
         }
-        true
     }
 
-    fn handle_patcher_emitted_source_tab(&mut self, key: KeyEvent) -> bool {
-        if key.code != KeyCode::Tab || key.modifiers != KeyModifiers::NONE {
-            return false;
-        }
-        let Some(path) = crate::widget_render::patcher::emitted_source_path_from_buffer_name(
+    fn patcher_source_tab_target(&self) -> Option<PatcherSourceTabTarget> {
+        if let Some(path) = crate::widget_render::patcher::emitted_source_path_from_buffer_name(
             &self.active_buffer().name,
-        ) else {
-            return false;
-        };
-        let Some(buffer_id) = self.patcher_buffer_id_for_path(&path) else {
-            self.minibuffer = Some(format!("No patcher buffer found for {path}"));
-            self.mark_needs_redraw();
-            return true;
-        };
-        self.set_active_buffer(buffer_id);
-        true
+        ) {
+            return Some(PatcherSourceTabTarget::SourceBuffer { path });
+        }
+        if let Some(node) = self.focused_widget_node()
+            && node.widget_type == "patcher"
+            && !crate::widget_render::patcher::patcher_has_text_edit(&node)
+        {
+            return Some(PatcherSourceTabTarget::PatcherNode {
+                node,
+                buffer_id: self.active_buffer().id,
+                tile_id: Some(self.active_tile),
+            });
+        }
+        if let Some(target) = self.patcher_source_tab_target_for_tile(self.active_tile) {
+            return Some(target);
+        }
+        self.tile_root
+            .leaf_ids()
+            .into_iter()
+            .find_map(|tile_id| self.patcher_source_tab_target_for_tile(tile_id))
+            .or_else(|| {
+                let buffer = self.active_buffer();
+                let path = buffer
+                    .widget_tree
+                    .as_ref()
+                    .and_then(widget_tree_first_patcher_path)?;
+                Some(PatcherSourceTabTarget::PatcherBuffer {
+                    path,
+                    buffer_id: buffer.id,
+                    tile_id: Some(self.active_tile),
+                })
+            })
+    }
+
+    fn patcher_source_tab_target_for_tile(
+        &self,
+        tile_id: TileId,
+    ) -> Option<PatcherSourceTabTarget> {
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        let buffer_id = self.buffers.get(leaf.buffer_idx)?.id;
+        let layout = if tile_id == self.active_tile {
+            self.runtime.current_layout.as_ref()
+        } else {
+            leaf.cached_layout.as_ref()
+        }?;
+        let node = find_patcher_layout_node(layout.as_ref())?;
+        if crate::widget_render::patcher::patcher_has_text_edit(&node) {
+            return None;
+        }
+        Some(PatcherSourceTabTarget::PatcherNode {
+            node,
+            buffer_id,
+            tile_id: Some(tile_id),
+        })
+    }
+
+    fn buffer_idx_for_id(&self, id: BufferId) -> Option<usize> {
+        self.buffers.iter().position(|buffer| buffer.id == id)
+    }
+
+    fn visible_tile_for_buffer_id(&self, id: BufferId) -> Option<TileId> {
+        self.tile_root.leaf_ids().into_iter().find(|tile_id| {
+            self.tile_root
+                .find_leaf(*tile_id)
+                .and_then(|leaf| self.buffers.get(leaf.buffer_idx))
+                .is_some_and(|buffer| buffer.id == id)
+        })
+    }
+
+    fn visible_emitted_source_tile_for_path(&self, path: &str) -> Option<TileId> {
+        let source_buffer_name = crate::widget_render::patcher::emitted_source_buffer_name(path);
+        self.tile_root.leaf_ids().into_iter().find(|tile_id| {
+            self.tile_root
+                .find_leaf(*tile_id)
+                .and_then(|leaf| self.buffers.get(leaf.buffer_idx))
+                .is_some_and(|buffer| buffer.name == source_buffer_name)
+        })
+    }
+
+    fn remove_tile_and_activate(
+        &mut self,
+        remove_tile_id: TileId,
+        activate_tile_id: Option<TileId>,
+    ) {
+        if self.tile_root.leaf_count() <= 1 {
+            return;
+        }
+        if self.tile_root.remove_leaf(remove_tile_id).is_none() {
+            return;
+        }
+        let remaining_ids = self.tile_root.leaf_ids();
+        let next_tile = activate_tile_id
+            .filter(|tile_id| self.tile_root.find_leaf(*tile_id).is_some())
+            .or_else(|| remaining_ids.first().copied());
+        if let Some(next_tile) = next_tile {
+            self.active_tile = next_tile;
+            let buffer_idx = self.active_buffer_idx();
+            self.record_buffer_access_by_idx(buffer_idx);
+            self.sync_runtime_context();
+            self.restore_buffer_widget_tree();
+        }
+        self.mark_needs_redraw();
     }
 
     fn patcher_buffer_id_for_path(&self, path: &str) -> Option<BufferId> {
@@ -6274,6 +6490,46 @@ fn find_layout_node_by_stable_key<'a>(
     node.children
         .iter()
         .find_map(|child| find_layout_node_by_stable_key(child, stable_key))
+}
+
+fn find_patcher_layout_node(node: &crate::layout::LayoutNode) -> Option<crate::layout::LayoutNode> {
+    if node.widget_type == "patcher" {
+        return Some(node.clone());
+    }
+    node.children.iter().find_map(find_patcher_layout_node)
+}
+
+fn widget_tree_first_patcher_path(value: &Value) -> Option<String> {
+    match value {
+        Value::Map(map) => {
+            let is_patcher = map.get("type").is_some_and(
+                |value| matches!(&*value.borrow(), Value::String(kind) if kind == "patcher"),
+            );
+            if is_patcher {
+                for key in ["path", "file"] {
+                    if let Some(path) = map.get(key).and_then(|value| match &*value.borrow() {
+                        Value::String(path) | Value::Keyword(path) | Value::Symbol(path)
+                            if !path.is_empty() =>
+                        {
+                            Some(path.clone())
+                        }
+                        _ => None,
+                    }) {
+                        return Some(path);
+                    }
+                }
+            }
+            map.values().find_map(|value| {
+                let value = value.borrow();
+                widget_tree_first_patcher_path(&value)
+            })
+        }
+        Value::List(items) => items.iter().find_map(|item| {
+            let item = item.borrow();
+            widget_tree_first_patcher_path(&item)
+        }),
+        _ => None,
+    }
 }
 
 fn widget_tree_contains_patcher_path(value: &Value, path: &str) -> bool {

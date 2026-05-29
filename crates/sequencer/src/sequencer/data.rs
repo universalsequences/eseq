@@ -6,7 +6,7 @@ use crate::voice::MAX_VOICES;
 pub const MAX_TRACKS: usize = 64;
 pub const MAX_STEPS: usize = 256;
 pub const STEPS_PER_PAGE: usize = 16;
-pub const NUM_PARAMS: usize = 9;
+pub const NUM_PARAMS: usize = 10;
 pub const DEFAULT_BPM: u32 = 120;
 pub const TRACK_PATTERN_WORDS: usize = MAX_STEPS / 64;
 pub const MIX_BUS_ID: u64 = 0;
@@ -260,6 +260,7 @@ pub enum StepParam {
     Pan = 6,
     Chop = 7,
     Sync = 8,
+    Delay = 9,
 }
 
 impl StepParam {
@@ -273,11 +274,13 @@ impl StepParam {
         StepParam::Pan,
         StepParam::Chop,
         StepParam::Sync,
+        StepParam::Delay,
     ];
 
-    pub const VISIBLE: [StepParam; 6] = [
+    pub const VISIBLE: [StepParam; 7] = [
         StepParam::Duration,
         StepParam::Velocity,
+        StepParam::Delay,
         StepParam::AuxA,
         StepParam::Transpose,
         StepParam::Pan,
@@ -295,6 +298,7 @@ impl StepParam {
             StepParam::Pan => 0.0,
             StepParam::Chop => 1.0,
             StepParam::Sync => 0.0,
+            StepParam::Delay => 0.0,
         }
     }
 
@@ -309,6 +313,7 @@ impl StepParam {
             StepParam::Pan => -1.0,
             StepParam::Chop => 1.0,
             StepParam::Sync => 0.0,
+            StepParam::Delay => 0.0,
         }
     }
 
@@ -323,6 +328,7 @@ impl StepParam {
             StepParam::Pan => 1.0,
             StepParam::Chop => 8.0,
             StepParam::Sync => (SYNC_COUNT - 1) as f32,
+            StepParam::Delay => 1.0,
         }
     }
 
@@ -337,6 +343,7 @@ impl StepParam {
             StepParam::Pan => 0.05,
             StepParam::Chop => 1.0,
             StepParam::Sync => 1.0,
+            StepParam::Delay => 0.05,
         }
     }
 
@@ -351,6 +358,7 @@ impl StepParam {
             StepParam::Pan => "Pan",
             StepParam::Chop => "Chop",
             StepParam::Sync => "Sync",
+            StepParam::Delay => "Delay",
         }
     }
 
@@ -365,6 +373,7 @@ impl StepParam {
             StepParam::Pan => "pan",
             StepParam::Chop => "chp",
             StepParam::Sync => "syn",
+            StepParam::Delay => "dly",
         }
     }
 
@@ -421,6 +430,7 @@ impl StepParam {
                     "Off".to_string()
                 }
             }
+            StepParam::Delay => format!("{:.2}", val),
             _ => format!("{:.2}", val),
         }
     }
@@ -454,6 +464,7 @@ impl StepParam {
             StepParam::Pan => 'p',
             StepParam::Chop => 'c',
             StepParam::Sync => 'y',
+            StepParam::Delay => 'l',
         }
     }
 
@@ -462,6 +473,7 @@ impl StepParam {
             'd' => Some(StepParam::Duration),
             'v' => Some(StepParam::Velocity),
             's' => Some(StepParam::Speed),
+            'l' => Some(StepParam::Delay),
             'a' => Some(StepParam::AuxA),
             't' => Some(StepParam::Transpose),
             'p' => Some(StepParam::Pan),
@@ -481,6 +493,7 @@ impl StepParam {
             StepParam::Pan => ("", "p", "an"),
             StepParam::Chop => ("", "c", "hp"),
             StepParam::Sync => ("s", "y", "n"),
+            StepParam::Delay => ("d", "l", "y"),
         }
     }
 }
@@ -887,6 +900,7 @@ pub struct TrackSoundState {
 pub struct ChordData {
     transposes: [AtomicU32; MAX_STEPS * MAX_VOICES],
     durations: [AtomicU32; MAX_STEPS * MAX_VOICES],
+    delays: [AtomicU32; MAX_STEPS * MAX_VOICES],
     counts: [AtomicU32; MAX_STEPS],
 }
 
@@ -895,6 +909,7 @@ impl ChordData {
         Self {
             transposes: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
             durations: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
+            delays: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
             counts: std::array::from_fn(|_| AtomicU32::new(0)),
         }
     }
@@ -908,24 +923,54 @@ impl ChordData {
     pub fn get_duration(&self, step: usize, n: usize) -> f32 {
         f32::from_bits(self.durations[step * MAX_VOICES + n].load(Ordering::Relaxed))
     }
+    pub fn get_delay(&self, step: usize, n: usize) -> f32 {
+        f32::from_bits(self.delays[step * MAX_VOICES + n].load(Ordering::Relaxed))
+            .clamp(StepParam::Delay.min(), StepParam::Delay.max())
+    }
     pub fn set_duration(&self, step: usize, n: usize, duration: f32) {
         if n < self.count(step).min(MAX_VOICES) {
             self.durations[step * MAX_VOICES + n]
                 .store(duration.max(0.0).to_bits(), Ordering::Relaxed);
         }
     }
+    pub fn set_delay(&self, step: usize, n: usize, delay: f32) {
+        if n < self.count(step).min(MAX_VOICES) {
+            self.delays[step * MAX_VOICES + n].store(
+                delay
+                    .clamp(StepParam::Delay.min(), StepParam::Delay.max())
+                    .to_bits(),
+                Ordering::Relaxed,
+            );
+        }
+    }
 
     pub fn add_note(&self, step: usize, transpose: f32) -> bool {
-        self.add_note_with_duration(step, transpose, 0.0)
+        self.add_note_with_timing(step, transpose, 0.0, 0.0)
     }
 
     pub fn add_note_with_duration(&self, step: usize, transpose: f32, duration: f32) -> bool {
+        self.add_note_with_timing(step, transpose, duration, 0.0)
+    }
+
+    pub fn add_note_with_timing(
+        &self,
+        step: usize,
+        transpose: f32,
+        duration: f32,
+        delay: f32,
+    ) -> bool {
         let c = self.counts[step].load(Ordering::Relaxed) as usize;
         if c >= MAX_VOICES {
             return false;
         }
         self.transposes[step * MAX_VOICES + c].store(transpose.to_bits(), Ordering::Relaxed);
         self.durations[step * MAX_VOICES + c].store(duration.max(0.0).to_bits(), Ordering::Relaxed);
+        self.delays[step * MAX_VOICES + c].store(
+            delay
+                .clamp(StepParam::Delay.min(), StepParam::Delay.max())
+                .to_bits(),
+            Ordering::Relaxed,
+        );
         self.counts[step].store((c + 1) as u32, Ordering::Relaxed);
         true
     }
@@ -946,6 +991,8 @@ impl ChordData {
                     let next_duration =
                         self.durations[step * MAX_VOICES + j + 1].load(Ordering::Relaxed);
                     self.durations[step * MAX_VOICES + j].store(next_duration, Ordering::Relaxed);
+                    let next_delay = self.delays[step * MAX_VOICES + j + 1].load(Ordering::Relaxed);
+                    self.delays[step * MAX_VOICES + j].store(next_delay, Ordering::Relaxed);
                 }
                 self.counts[step].store((c - 1) as u32, Ordering::Relaxed);
                 return false;
@@ -962,6 +1009,8 @@ impl ChordData {
             self.transposes[dst * MAX_VOICES + n].store(val, Ordering::Relaxed);
             let duration = self.durations[src * MAX_VOICES + n].load(Ordering::Relaxed);
             self.durations[dst * MAX_VOICES + n].store(duration, Ordering::Relaxed);
+            let delay = self.delays[src * MAX_VOICES + n].load(Ordering::Relaxed);
+            self.delays[dst * MAX_VOICES + n].store(delay, Ordering::Relaxed);
         }
     }
 }
@@ -970,24 +1019,33 @@ impl ChordData {
 pub struct ChordSnapshot {
     pub steps: Vec<Vec<f32>>,
     pub durations: Vec<Vec<f32>>,
+    pub delays: Vec<Vec<f32>>,
 }
 
 impl ChordSnapshot {
     pub fn capture(cd: &ChordData) -> Self {
         let mut steps = Vec::with_capacity(MAX_STEPS);
         let mut durations = Vec::with_capacity(MAX_STEPS);
+        let mut delays = Vec::with_capacity(MAX_STEPS);
         for s in 0..MAX_STEPS {
             let c = cd.count(s);
             let mut notes = Vec::with_capacity(c);
             let mut note_durations = Vec::with_capacity(c);
+            let mut note_delays = Vec::with_capacity(c);
             for n in 0..c {
                 notes.push(cd.get(s, n));
                 note_durations.push(cd.get_duration(s, n));
+                note_delays.push(cd.get_delay(s, n));
             }
             steps.push(notes);
             durations.push(note_durations);
+            delays.push(note_delays);
         }
-        Self { steps, durations }
+        Self {
+            steps,
+            durations,
+            delays,
+        }
     }
 
     pub fn restore(&self, cd: &ChordData) {
@@ -1005,6 +1063,14 @@ impl ChordSnapshot {
                         .unwrap_or(0.0);
                     cd.durations[s * MAX_VOICES + n]
                         .store(duration.max(0.0).to_bits(), Ordering::Relaxed);
+                    let delay = self
+                        .delays
+                        .get(s)
+                        .and_then(|delays| delays.get(n))
+                        .copied()
+                        .unwrap_or(0.0)
+                        .clamp(StepParam::Delay.min(), StepParam::Delay.max());
+                    cd.delays[s * MAX_VOICES + n].store(delay.to_bits(), Ordering::Relaxed);
                 }
             }
         }
@@ -1014,6 +1080,7 @@ impl ChordSnapshot {
         Self {
             steps: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             durations: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+            delays: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
         }
     }
 }

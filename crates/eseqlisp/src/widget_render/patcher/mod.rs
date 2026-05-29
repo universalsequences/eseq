@@ -1396,6 +1396,10 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
                     }
                 },
                 Err(error) => {
+                    eprintln!(
+                        "[patcher writeback invalid]\npath={path_str}\nintent={intent:?}\nstage=parse-emitted-layout-source\nerror={error}\nemitted-source:\n{}\n[/patcher writeback invalid]",
+                        result.source
+                    );
                     return map_value(vec![
                         ("status", Value::Keyword("invalid".to_string())),
                         ("path", Value::String(path_str)),
@@ -1424,6 +1428,9 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
             map_value(entries)
         }
         Err(error) => {
+            eprintln!(
+                "[patcher writeback invalid]\npath={path_str}\nintent={intent:?}\nstage=emit-writeback\nerror={error:?}\nno emitted source was produced; writeback failed before source generation completed\npre-edit-source:\n{source}\ninteraction-state:\n{state:#?}\n[/patcher writeback invalid]"
+            );
             debug_log_edit_event("writeback-payload-invalid-state", &state);
             debug_log_writeback_event(
                 "payload-invalid",

@@ -6,7 +6,7 @@ use crossterm::event::KeyCode;
 
 use crate::effects::{EffectDescriptor, BUILTIN_SLOT_COUNT};
 use crate::project::{
-    self, chord_snapshot_from_steps_and_durations, project_file_version, ProjectBusChannel,
+    self, chord_snapshot_from_steps_durations_and_delays, project_file_version, ProjectBusChannel,
     ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
     ProjectScratchState, ProjectTrack,
 };
@@ -1599,6 +1599,7 @@ impl App {
             track_sound_states,
             chord_snapshots,
             chord_duration_snapshots,
+            chord_delay_snapshots,
             timebase_plock_snapshots,
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
@@ -1761,7 +1762,14 @@ impl App {
                         .into_iter()
                         .chain(std::iter::repeat_with(|| vec![Vec::new(); MAX_STEPS])),
                 )
-                .map(|(steps, durations)| chord_snapshot_from_steps_and_durations(steps, durations))
+                .zip(
+                    chord_delay_snapshots
+                        .into_iter()
+                        .chain(std::iter::repeat_with(|| vec![Vec::new(); MAX_STEPS])),
+                )
+                .map(|((steps, durations), delays)| {
+                    chord_snapshot_from_steps_durations_and_delays(steps, durations, delays)
+                })
                 .collect(),
             timebase_plock_snapshots: timebase_plock_snapshots
                 .into_iter()
@@ -1924,6 +1932,7 @@ mod tests {
                 track_sound_states: Vec::new(),
                 chord_snapshots: Vec::new(),
                 chord_duration_snapshots: Vec::new(),
+                chord_delay_snapshots: Vec::new(),
                 timebase_plock_snapshots: Vec::new(),
                 swing_plock_snapshots: Vec::new(),
                 swing_resolution_plock_snapshots: Vec::new(),

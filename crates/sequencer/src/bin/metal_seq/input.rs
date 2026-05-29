@@ -63,6 +63,10 @@ pub(crate) fn focused_widget_captures_text_input(editor: &Editor) -> bool {
     focused_widget_matches(editor, widget_captures_text_input)
 }
 
+fn patcher_handles_plain_tab(editor: &Editor) -> bool {
+    editor.patcher_source_tab_available()
+}
+
 fn widget_type_captures_text_input(widget_type: &str) -> bool {
     matches!(widget_type, "text-input" | "textbox")
 }
@@ -270,6 +274,7 @@ fn metal_step_param_for_mode(mode: usize) -> Option<StepParam> {
         2 => Some(StepParam::AuxA),
         3 => Some(StepParam::Transpose),
         4 => Some(StepParam::Pan),
+        6 => Some(StepParam::Delay),
         // Sync is rendered as a label in the step footer, not a numeric picker.
         _ => None,
     }
@@ -583,6 +588,9 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 return true;
             }
             _ if is_plain_tab_shortcut(key) => {
+                if patcher_handles_plain_tab(editor) {
+                    return false;
+                }
                 let sequencer_visible = editor.switch_active_tile_to_buffer_named("*sequencer*");
                 let command_name = if sequencer_visible {
                     "seqv-toggle-current-track-expanded"
@@ -1211,6 +1219,106 @@ mod live_keyboard_tests {
             editor.active_buffer().id,
             transport_id,
             "the layout reset's first tile must not remain active after Tab expansion"
+        );
+    }
+
+    #[test]
+    fn plain_tab_in_focused_patcher_is_left_for_editor_source_toggle() {
+        let path = std::env::temp_dir().join(format!(
+            "eseq-focused-patcher-tab-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.set_layout_viewport(80, 20);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                r#"
+                (defstate tab-target "")
+                (def seq-toggle-current-track-expanded-main () (set! tab-target "expand"))
+                (effect
+                  (patcher
+                    :height 10
+                    :intent :effect
+                    :path "{}"))
+                "#,
+                path.display()
+            ))
+            .expect("install focused patcher fixture");
+        editor.set_layout_viewport(80, 20);
+        editor.handle_mouse_precise(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            },
+            0,
+            0,
+            80,
+            20,
+            20.0,
+            5.0,
+        );
+        assert_eq!(
+            editor
+                .focused_widget_node()
+                .expect("focused widget")
+                .widget_type,
+            "patcher"
+        );
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "metal_seq must not consume Tab while the patcher owns the focused widget"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("".to_string()))
+        );
+
+        editor.handle_key(tab);
+
+        assert_eq!(
+            editor.active_buffer().name,
+            "*scratch*",
+            "Tab should keep the patcher tile active instead of switching to the source buffer"
+        );
+        assert_eq!(editor.tile_root.leaf_count(), 2);
+        assert!(
+            editor.tile_root.leaf_ids().into_iter().any(|tile_id| {
+                editor
+                    .tile_root
+                    .find_leaf(tile_id)
+                    .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
+                    .is_some_and(|buffer| {
+                        buffer.name
+                            == eseqlisp::widget_render::patcher::emitted_source_buffer_name(
+                                &path.to_string_lossy(),
+                            )
+                    })
+            }),
+            "source buffer should be visible in a sibling tile"
         );
     }
 

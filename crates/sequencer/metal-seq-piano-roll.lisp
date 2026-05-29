@@ -9,12 +9,15 @@
 (defstate piano-roll-cursor-time 0)
 (defstate piano-roll-selection-rect nil)
 (defstate piano-roll-status "piano roll")
+(defstate piano-roll-create-duration 1)
 
 (def piano-roll-native-action? (event)
   (or (= event.type :select)
       (= event.type :clear-selection)
       (= event.type :finish-marquee-select)
       (= event.type :delete-items)
+      (= event.type :copy-items)
+      (= event.type :paste-items)
       (= event.type :nudge-selection)
       (= event.type :move-items-absolute)
       (= event.type :resize-item-absolute)
@@ -26,6 +29,18 @@
 
 (def piano-roll-lane-height-value ()
   (if (= piano-roll-lane-height nil) 1 piano-roll-lane-height))
+
+(def piano-roll-action-duration (event)
+  (max 0.03125
+    (piano-roll-event-num event :duration
+      (- (piano-roll-event-num event :end 1)
+         (piano-roll-event-num event :start 0)))))
+
+(def piano-roll-set-cursor-from-event (event)
+  (let ((time (get event :time)))
+    (if (= time nil)
+      nil
+      (set! piano-roll-cursor-time time))))
 
 (def piano-roll-current-track-color ()
   (if (and (< SEQ.current-track (len SEQ.track-colors)) (>= SEQ.current-track 0))
@@ -92,9 +107,17 @@
       :finish-marquee-select
       (set! piano-roll-selection-rect nil)
       :select
-      (set! piano-roll-selection-rect nil)
+      (do
+        (set! piano-roll-selection-rect nil)
+        (piano-roll-set-cursor-from-event event))
       :clear-selection
-      (set! piano-roll-selection-rect nil))
+      (do
+        (set! piano-roll-selection-rect nil)
+        (piano-roll-set-cursor-from-event event))
+      :finish-create-item
+      (set! piano-roll-create-duration (piano-roll-action-duration event))
+      :resize-item-absolute
+      (set! piano-roll-create-duration (piano-roll-action-duration event)))
     (if (piano-roll-native-action? event)
       (set! piano-roll-status (seq-piano-roll-action event))
       (set! piano-roll-status "piano roll"))))
@@ -111,6 +134,7 @@
     :loop-color (piano-roll-current-track-color)
     :tool piano-roll-tool
     :playhead-time (bind-seq "playhead")
+    :cursor-time piano-roll-cursor-time
     :lanes SEQ.piano-roll-lanes
     :items SEQ.piano-roll-items
     :selection SEQ.piano-roll-selection
@@ -123,8 +147,11 @@
     :lane-scroll piano-roll-lane-scroll
     :lane-height (piano-roll-lane-height-value)
     :snap 1
+    :min-duration 0.03125
+    :create-duration piano-roll-create-duration
+    :move-snap-mode :alignment-helper
     :resize-snap :grid
     :snap-mode :floor
-    :resize-snap-mode :round
+    :resize-snap-mode :alignment-helper
     :scroll-mode :smooth
     :on-action |event| (piano-roll-action event)))

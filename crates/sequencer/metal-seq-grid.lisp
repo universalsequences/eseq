@@ -242,7 +242,7 @@
 (bind-key "Tab" "seq-toggle-current-track-expanded-main")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
-; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync
+; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
 (defstate param-mode 0)
 
 (def page-size 16)
@@ -553,6 +553,8 @@
 (mode-bind-key "seq-grid-mode" "p" "set-pan-mode")
 (def set-sync-mode () (set! param-mode 5))
 (mode-bind-key "seq-grid-mode" "s" "set-sync-mode")
+(def set-delay-mode () (set! param-mode 6))
+(mode-bind-key "seq-grid-mode" "l" "set-delay-mode")
 
 
 (def param-values ()
@@ -561,7 +563,8 @@
       (if (= param-mode 2) SEQ.auxas
         (if (= param-mode 3) SEQ.transposes
           (if (= param-mode 4) SEQ.pans
-            SEQ.syncs))))))
+            (if (= param-mode 5) SEQ.syncs
+              SEQ.delays)))))))
 
 (def param-min ()
   (if (= param-mode 0) 0
@@ -577,7 +580,8 @@
       (if (= param-mode 2) 16
         (if (= param-mode 3) 12
           (if (= param-mode 4) 1
-            (- (len SEQ.sync-labels) 1)))))))
+            (if (= param-mode 5) (- (len SEQ.sync-labels) 1)
+              1)))))))
 
 (def param-slider-min ()
   (if (= param-mode 1) 0 (param-min)))
@@ -605,7 +609,8 @@
       (if (= param-mode 2) :aux-a
         (if (= param-mode 3) :transpose
           (if (= param-mode 4) :pan
-            :sync))))))
+            (if (= param-mode 5) :sync
+              :delay)))))))
 
 (def param-color ()
   (if (= param-mode 0) :blue
@@ -613,7 +618,8 @@
       (if (= param-mode 2) :magenta
         (if (= param-mode 3) :yellow
           (if (= param-mode 4) :red
-            :green))))))
+            (if (= param-mode 5) :green
+              :cyan)))))))
 
 (def param-name ()
   (if (= param-mode 0) "Velocity"
@@ -621,7 +627,8 @@
       (if (= param-mode 2) "Aux A"
         (if (= param-mode 3) "Transpose"
           (if (= param-mode 4) "Pan"
-            "Sync"))))))
+            (if (= param-mode 5) "Sync"
+              "Delay")))))))
 
 (def param-origin ()
   (if (= param-mode 3) 0

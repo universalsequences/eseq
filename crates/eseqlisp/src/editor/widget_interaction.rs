@@ -1596,6 +1596,10 @@ impl Editor {
         let (target, hit_row, hit_col) =
             deepest_drop_target(layout, local_row, local_col, &drag_type)?;
         let callback = target.props.get("on-drop")?.clone();
+        eprintln!(
+            "widget-drop: dispatch drag_type={drag_type}; target_type={}; target_key={:?}; payload={payload:?}",
+            target.widget_type, target.stable_key
+        );
         let event = crate::widget_render::box_widget::box_drop_info(
             &target, &drag_type, payload, hit_col, hit_row,
         );

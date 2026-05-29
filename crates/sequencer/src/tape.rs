@@ -67,7 +67,13 @@ const STATE_HISS_LP_R: usize = STATE_HISS_LP_L + 1;
 const DELAY_BUF_LEN: usize = 2048;
 const STATE_DELAY_OFFSET: usize = STATE_HISS_LP_R + 1;
 
-pub const TAPE_STATE_SIZE: usize = STATE_DELAY_OFFSET + DELAY_BUF_LEN * 2;
+// Playback/output AC coupling. The hysteresis model stores absolute
+// magnetization, but a tape playback chain does not pass static flux as DC.
+// State layout per channel: x1, y1.
+const STATE_DC_BLOCK_OFFSET: usize = STATE_DELAY_OFFSET + DELAY_BUF_LEN * 2;
+const STATE_DC_BLOCK_SIZE: usize = 4;
+
+pub const TAPE_STATE_SIZE: usize = STATE_DC_BLOCK_OFFSET + STATE_DC_BLOCK_SIZE;
 
 pub const TAPE_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 pub const TAPE_PARAM_DRIVE_DB: u64 = STATE_DRIVE_DB as u64;
@@ -219,11 +225,7 @@ fn butterworth_lp(cutoff_hz: f32, fs: f32) -> BiquadCoefs {
     let omega = std::f32::consts::TAU * cutoff_hz.clamp(10.0, fs * 0.49) / fs;
     let cos_w = omega.cos();
     let sin_w = omega.sin();
-    // Q = 1/√2 for Butterworth.
-    let alpha = sin_w / (2.0 * std::f32::consts::FRAC_1_SQRT_2 * 2.0_f32.sqrt() * 0.5);
-    // Equivalent to alpha = sin(ω)/√2, classic Butterworth.
-    let alpha = sin_w * std::f32::consts::FRAC_1_SQRT_2;
-    let _ = alpha; // silence unused-var warning from the intermediate
+    // Q = 1/sqrt(2), so alpha = sin(omega) / (2Q).
     let alpha = sin_w * std::f32::consts::FRAC_1_SQRT_2;
     let b0 = (1.0 - cos_w) * 0.5;
     let b1 = 1.0 - cos_w;
@@ -264,13 +266,37 @@ fn low_shelf(cutoff_hz: f32, gain_db: f32, fs: f32) -> BiquadCoefs {
     }
 }
 
-// Per-speed loss-filter characteristics (LP cutoff Hz, head-bump cutoff Hz,
-// head-bump gain dB). Slower tape = darker + bigger low-mid resonance.
-fn loss_params(speed_idx: usize) -> (f32, f32, f32) {
+struct SpeedProfile {
+    loss_cut_hz: f32,
+    bump_hz: f32,
+    bump_db: f32,
+    headroom: f32,
+}
+
+// Per-speed tape characteristics. Slower tape has less HF headroom, a lower
+// playback bandwidth, and a stronger head bump. The headroom term is applied
+// before the magnetic model so speed changes the saturation/compression
+// behaviour, not only the final EQ.
+fn speed_profile(speed_idx: usize) -> SpeedProfile {
     match speed_idx.min(2) {
-        0 => (14_000.0, 80.0, 1.4), // 7.5 ips
-        1 => (18_000.0, 50.0, 0.7), // 15 ips
-        _ => (21_000.0, 30.0, 0.3), // 30 ips
+        0 => SpeedProfile {
+            loss_cut_hz: 9_500.0,
+            bump_hz: 95.0,
+            bump_db: 3.0,
+            headroom: 0.78,
+        },
+        1 => SpeedProfile {
+            loss_cut_hz: 15_000.0,
+            bump_hz: 65.0,
+            bump_db: 1.4,
+            headroom: 1.0,
+        },
+        _ => SpeedProfile {
+            loss_cut_hz: 21_000.0,
+            bump_hz: 35.0,
+            bump_db: 0.4,
+            headroom: 1.18,
+        },
     }
 }
 
@@ -376,11 +402,19 @@ unsafe extern "C" fn tape_init(
     for i in 0..(DELAY_BUF_LEN * 2) {
         *s.add(STATE_DELAY_OFFSET + i) = 0.0;
     }
+    for i in 0..STATE_DC_BLOCK_SIZE {
+        *s.add(STATE_DC_BLOCK_OFFSET + i) = 0.0;
+    }
 }
 
 #[inline]
 unsafe fn delay_ptr(s: *mut f32, channel: usize) -> *mut f32 {
     s.add(STATE_DELAY_OFFSET + channel * DELAY_BUF_LEN)
+}
+
+#[inline]
+unsafe fn dc_block_state_ptr(s: *mut f32, channel: usize) -> *mut f32 {
+    s.add(STATE_DC_BLOCK_OFFSET + channel * 2)
 }
 
 // Layout inside the OS block, per channel (16 floats each):
@@ -399,6 +433,16 @@ unsafe fn os_state_ptr(s: *mut f32, channel: usize) -> *mut f32 {
 #[inline]
 unsafe fn loss_state_ptr(s: *mut f32, channel: usize) -> *mut f32 {
     s.add(STATE_LOSS_BLOCK_OFFSET + channel * 8)
+}
+
+#[inline]
+unsafe fn dc_block_sample(state: *mut f32, r: f32, x: f32) -> f32 {
+    let x1 = *state.add(0);
+    let y1 = *state.add(1);
+    let y = x - x1 + r * y1;
+    *state.add(0) = x;
+    *state.add(1) = y;
+    y
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -481,12 +525,14 @@ unsafe extern "C" fn tape_process(
     let hiss_amt = (*s.add(STATE_HISS)).clamp(0.0, 1.0);
 
     let (a, alpha, k, c) = material_constants(bias);
-    let (loss_cut_hz, bump_hz, bump_db) = loss_params(speed_idx);
+    let speed = speed_profile(speed_idx);
+    let magnetic_drive = drive / speed.headroom;
+    let magnetic_output = output * speed.headroom;
 
     // Anti-image/anti-alias cutoff at the base Nyquist (slightly under).
     let os_lp = butterworth_lp(sr * 0.45, fs_os);
-    let loss_lp = butterworth_lp(loss_cut_hz * bias_brightness(bias), sr);
-    let loss_shelf = low_shelf(bump_hz, bump_db, sr);
+    let loss_lp = butterworth_lp(speed.loss_cut_hz * bias_brightness(bias), sr);
+    let loss_shelf = low_shelf(speed.bump_hz, speed.bump_db, sr);
 
     // Wow/flutter: peak delay swings (samples), a base delay that keeps the
     // read pointer positive, and per-sample LFO phase increments (cycles/sample).
@@ -502,6 +548,7 @@ unsafe extern "C" fn tape_process(
     // white noise into something closer to tape-head hiss.
     let hiss_gain = hiss_amt * hiss_amt * 0.02;
     let hiss_lp_coef = 1.0 - (-std::f32::consts::TAU * 11_000.0 / sr).exp();
+    let dc_block_r = (-std::f32::consts::TAU * 10.0 / sr).exp();
 
     let mut m_l = *s.add(STATE_M_L);
     let mut h_prev_l = *s.add(STATE_H_PREV_L);
@@ -511,6 +558,8 @@ unsafe extern "C" fn tape_process(
     let os_r = os_state_ptr(s, 1);
     let loss_l = loss_state_ptr(s, 0);
     let loss_r = loss_state_ptr(s, 1);
+    let dc_l = dc_block_state_ptr(s, 0);
+    let dc_r = dc_block_state_ptr(s, 1);
 
     let mut wow_phase = *s.add(STATE_WOW_PHASE);
     let mut flut_phase1 = *s.add(STATE_FLUT_PHASE1);
@@ -528,7 +577,7 @@ unsafe extern "C" fn tape_process(
 
         let wet_l = process_channel_sample(
             dry_l,
-            drive,
+            magnetic_drive,
             a,
             alpha,
             k,
@@ -540,10 +589,10 @@ unsafe extern "C" fn tape_process(
             &mut h_prev_l,
             os_l,
             loss_l,
-        ) * output;
+        ) * magnetic_output;
         let wet_r = process_channel_sample(
             dry_r,
-            drive,
+            magnetic_drive,
             a,
             alpha,
             k,
@@ -555,7 +604,7 @@ unsafe extern "C" fn tape_process(
             &mut h_prev_r,
             os_r,
             loss_r,
-        ) * output;
+        ) * magnetic_output;
 
         // Wow/flutter: write the wet sample into each channel's delay line
         // (always, so the line stays warm) and read it back through the shared
@@ -596,8 +645,8 @@ unsafe extern "C" fn tape_process(
         if noise_counter >= NOISE_COUNTER_WRAP {
             noise_counter = 0.0;
         }
-        let wet_l = wet_l + hiss_l;
-        let wet_r = wet_r + hiss_r;
+        let wet_l = dc_block_sample(dc_l, dc_block_r, wet_l + hiss_l);
+        let wet_r = dc_block_sample(dc_r, dc_block_r, wet_r + hiss_r);
 
         // Dry blend uses raw input — `drive` is purely a wet-path knob, and the
         // wet-only hiss means mix=0 is true bypass.
@@ -671,6 +720,10 @@ mod tests {
         (samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32).sqrt()
     }
 
+    fn mean(samples: &[f32]) -> f32 {
+        samples.iter().sum::<f32>() / samples.len() as f32
+    }
+
     #[test]
     fn bypass_copies_input_exactly() {
         let mut state = init_state();
@@ -726,6 +779,44 @@ mod tests {
     }
 
     #[test]
+    fn silence_after_drive_does_not_hold_dc_offset() {
+        let mut state = init_state();
+        state[STATE_DRIVE_DB] = 18.0;
+        state[STATE_BIAS] = 1.0;
+        let sr = 48_000.0;
+        let driven: Vec<f32> = (0..8192)
+            .map(|i| (std::f32::consts::TAU * 110.0 * i as f32 / sr).sin() * 0.8)
+            .collect();
+        let _ = process_block(&mut state, &driven, &driven);
+
+        let silence = vec![0.0; 48_000];
+        let (out_l, out_r) = process_block(&mut state, &silence, &silence);
+        let tail_l = &out_l[out_l.len() - 4096..];
+        let tail_r = &out_r[out_r.len() - 4096..];
+
+        assert!(
+            mean(tail_l).abs() < 1.0e-5,
+            "left channel held DC mean {} after input stopped",
+            mean(tail_l)
+        );
+        assert!(
+            mean(tail_r).abs() < 1.0e-5,
+            "right channel held DC mean {} after input stopped",
+            mean(tail_r)
+        );
+        assert!(
+            rms(tail_l) < 1.0e-5,
+            "left channel held DC/ripple rms {} after input stopped",
+            rms(tail_l)
+        );
+        assert!(
+            rms(tail_r) < 1.0e-5,
+            "right channel held DC/ripple rms {} after input stopped",
+            rms(tail_r)
+        );
+    }
+
+    #[test]
     fn under_bias_passes_more_treble_than_over_bias() {
         // Backing off the bias should brighten the top end.
         let sr = 48_000.0;
@@ -751,11 +842,46 @@ mod tests {
 
     #[test]
     fn high_speed_passes_more_treble_than_low_speed() {
-        // 30 ips should be brighter than 7.5 ips. Feed an 8 kHz sine through
-        // both and check the slower setting attenuates more.
+        // 30 ips should be clearly brighter than 7.5 ips. Feed an 8 kHz sine
+        // and a 1 kHz reference through both and compare spectral tilt, so the
+        // test is not fooled by speed-dependent magnetic headroom.
+        let sr = 48_000.0;
+        let mid: Vec<f32> = (0..4096)
+            .map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / sr).sin() * 0.2)
+            .collect();
+        let high: Vec<f32> = (0..4096)
+            .map(|i| (std::f32::consts::TAU * 8000.0 * i as f32 / sr).sin() * 0.2)
+            .collect();
+
+        let mut slow_mid = init_state();
+        slow_mid[STATE_SPEED] = 0.0;
+        let (slow_mid, _) = process_block(&mut slow_mid, &mid, &mid);
+
+        let mut slow_high = init_state();
+        slow_high[STATE_SPEED] = 0.0;
+        let (slow_high, _) = process_block(&mut slow_high, &high, &high);
+
+        let mut fast_mid = init_state();
+        fast_mid[STATE_SPEED] = 2.0;
+        let (fast_mid, _) = process_block(&mut fast_mid, &mid, &mid);
+
+        let mut fast_high = init_state();
+        fast_high[STATE_SPEED] = 2.0;
+        let (fast_high, _) = process_block(&mut fast_high, &high, &high);
+
+        let slow_tilt = rms(&slow_high[2048..]) / rms(&slow_mid[2048..]);
+        let fast_tilt = rms(&fast_high[2048..]) / rms(&fast_mid[2048..]);
+        assert!(
+            fast_tilt > slow_tilt * 1.18,
+            "fast tilt {fast_tilt} should meaningfully exceed slow tilt {slow_tilt}"
+        );
+    }
+
+    #[test]
+    fn low_speed_has_stronger_head_bump_than_high_speed() {
         let sr = 48_000.0;
         let left: Vec<f32> = (0..4096)
-            .map(|i| (std::f32::consts::TAU * 8000.0 * i as f32 / sr).sin() * 0.3)
+            .map(|i| (std::f32::consts::TAU * 80.0 * i as f32 / sr).sin() * 0.3)
             .collect();
 
         let mut slow = init_state();
@@ -769,8 +895,40 @@ mod tests {
         let r_slow = rms(&out_slow[2048..]);
         let r_fast = rms(&out_fast[2048..]);
         assert!(
-            r_fast > r_slow,
-            "fast rms {r_fast} should exceed slow rms {r_slow}"
+            r_slow > r_fast * 1.08,
+            "slow rms {r_slow} should show more head bump than fast rms {r_fast}"
+        );
+    }
+
+    #[test]
+    fn low_speed_compresses_hot_input_more_than_high_speed() {
+        let sr = 48_000.0;
+        let quiet: Vec<f32> = (0..4096)
+            .map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / sr).sin() * 0.1)
+            .collect();
+        let hot: Vec<f32> = quiet.iter().map(|x| x * 8.0).collect();
+
+        let mut slow_quiet = init_state();
+        slow_quiet[STATE_SPEED] = 0.0;
+        let (slow_quiet, _) = process_block(&mut slow_quiet, &quiet, &quiet);
+
+        let mut slow_hot = init_state();
+        slow_hot[STATE_SPEED] = 0.0;
+        let (slow_hot, _) = process_block(&mut slow_hot, &hot, &hot);
+
+        let mut fast_quiet = init_state();
+        fast_quiet[STATE_SPEED] = 2.0;
+        let (fast_quiet, _) = process_block(&mut fast_quiet, &quiet, &quiet);
+
+        let mut fast_hot = init_state();
+        fast_hot[STATE_SPEED] = 2.0;
+        let (fast_hot, _) = process_block(&mut fast_hot, &hot, &hot);
+
+        let slow_gain_ratio = rms(&slow_hot[2048..]) / rms(&slow_quiet[2048..]);
+        let fast_gain_ratio = rms(&fast_hot[2048..]) / rms(&fast_quiet[2048..]);
+        assert!(
+            slow_gain_ratio < fast_gain_ratio * 0.94,
+            "slow gain ratio {slow_gain_ratio} should compress more than fast ratio {fast_gain_ratio}"
         );
     }
 
@@ -796,7 +954,10 @@ mod tests {
             .map(|(a, b)| a - b)
             .collect();
         let d = rms(&diff);
-        assert!(d > 1.0e-3, "wow/flutter should alter the signal, diff rms {d}");
+        assert!(
+            d > 1.0e-3,
+            "wow/flutter should alter the signal, diff rms {d}"
+        );
     }
 
     #[test]

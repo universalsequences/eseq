@@ -27,7 +27,7 @@
 (def (xLre xLim) (fft fftBlockL @N 1024 @backend accelerated))
 (def (yLre yLim) (partitioned-spectral-mac xLre xLim irL-re irL-im @N 1024))
 (def tdL (ifft yLre yLim @N 1024))
-(def wetL (overlap-add (* tdL out-gain) 512))
+(def wetL (overlap-add (* tdL out-gain 0.25) 512))
 
 ; ---- Right ----
 (def irR-re (wavetable-param @shape [128 1024] @name irR_re))
@@ -37,7 +37,7 @@
 (def (xRre xRim) (fft fftBlockR @N 1024 @backend accelerated))
 (def (yRre yRim) (partitioned-spectral-mac xRre xRim irR-re irR-im @N 1024))
 (def tdR (ifft yRre yRim @N 1024))
-(def wetR (overlap-add (* tdR out-gain) 1))
+(def wetR (overlap-add (* tdR out-gain 0.25) 512))
 
 (out (mix inL wetL wet-amt) 1 @name left)
 (out (mix inR wetR wet-amt) 2 @name right)

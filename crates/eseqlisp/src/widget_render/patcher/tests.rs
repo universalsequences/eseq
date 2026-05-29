@@ -5227,6 +5227,45 @@ fn writeback_multiple_writes_to_created_history_return_blocker() {
 }
 
 #[test]
+fn writeback_macro_history_source_cable_layout_edit_is_not_counted_as_second_write() {
+    let source = r#"
+        (defmacro karplus_strong (excitation)
+          (make-history filter_hist)
+          (def filtered (read-history filter_hist))
+          (write-history filter_hist excitation)
+          filtered)
+        (def input (in 1))
+        (def out1 (karplus_strong input))
+        (out out1 1)
+    "#;
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "karplus_strong")
+        .unwrap();
+    let write = source_connection_for_input(&macro_patch.patch, "filter_hist", 0);
+
+    let mut state = PatcherInteractionState::default();
+    set_connection_segment_edit(
+        &mut state,
+        "macro:karplus_strong",
+        write,
+        Some(CableSegmentInfo {
+            is_segmented: true,
+            segment_row: 12.0,
+        }),
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    assert!(
+        emitted.contains("(write-history filter_hist excitation)"),
+        "{emitted}"
+    );
+}
+
+#[test]
 fn writeback_created_macro_history_emits_inside_defmacro() {
     let source = "(defmacro ap (sig) sig)";
     let patch = parse(source);
@@ -8015,6 +8054,37 @@ fn writeback_preserves_cabled_second_inlet_when_editing_later_inline_param() {
         "{emitted}"
     );
     assert!(!emitted.contains("(adsr gate ?"), "{emitted}");
+}
+
+#[test]
+fn writeback_operator_only_edit_drops_stale_extra_source_args() {
+    let source = r#"
+        (def signal (in 1 @name signal))
+        (def delay_time (in 2 @name delay-time))
+        (def delayed (delay signal delay_time 4000.0))
+    "#;
+    let patch = parse(source);
+    let delay = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "delayed")
+        .expect("delay node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", delay, node_display_label(delay));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "delayed"))
+        .unwrap()
+        .text = "delay".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    assert!(
+        emitted.contains("(def delayed (delay signal delay_time))"),
+        "{emitted}"
+    );
+    assert!(!emitted.contains("4000"), "{emitted}");
 }
 
 #[test]

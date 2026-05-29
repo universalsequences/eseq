@@ -59,8 +59,8 @@ use sequencer::agent::actions::{
 use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
-    KeyboardTrigger, MAX_STEPS, MidiFxPosition, SYNC_RESOLUTIONS, SequencerState, StepParam,
-    SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
+    KeyboardTrigger, MidiFxPosition, SequencerState, StepParam, SwingResolution, Timebase,
+    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
@@ -1688,13 +1688,13 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP,
-        Runtime, Value, build_custom_instrument_ui_source_with_overlay,
-        effect_patcher_buffer_source, escape_lisp_string, instrument_patcher_buffer_source,
-        key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
-        reconciled_track_index, restore_instrument_patcher_layout_source,
-        should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
-        show_instrument_patcher_source_layout_source,
+        build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
+        escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
+        patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
+        restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
+        show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
+        ActiveDeleteTarget, FxDeleteChain, Runtime, Value, AGENT_INSTRUMENT_STUB_UI,
+        NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -2959,6 +2959,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "audition-sample" => {
                         let path_str = extract_path_from_payload(&payload);
+                        eprintln!(
+                            "sample-host-command: audition-sample payload={payload:?}; extracted_path={path_str:?}"
+                        );
                         if let Some(path_str) = path_str {
                             if app.tracks.is_empty() {
                                 editor.handle_host_event(HostEvent::Status(
@@ -3218,6 +3221,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let track = extract_usize_from_payload(&payload, "track");
                         let preserve_browser_context =
                             extract_bool_from_payload(&payload, "preserve-browser-context");
+                        eprintln!(
+                            "sample-host-command: load-sample-into-track payload={payload:?}; extracted_path={path_str:?}; extracted_track={track:?}; preserve_browser_context={preserve_browser_context}"
+                        );
                         match (track, path_str) {
                             (Some(track), Some(path_str)) => {
                                 if preserve_browser_context {
@@ -3268,6 +3274,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let path_str = extract_path_from_payload(&payload);
                         let preserve_browser_context =
                             extract_bool_from_payload(&payload, "preserve-browser-context");
+                        eprintln!(
+                            "sample-host-command: add-track-sample payload={payload:?}; extracted_path={path_str:?}; preserve_browser_context={preserve_browser_context}"
+                        );
                         if let Some(path_str) = path_str {
                             if preserve_browser_context {
                                 preserve_sample_browser_context_for_loaded_sample(
@@ -3636,6 +3645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
                         rt.set_reactive("SEQ", "pans", Value::List(vec![]));
                         rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "delays", Value::List(vec![]));
                         sync_track_mixer_empty_state(rt);
                         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
                         rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
@@ -9539,6 +9549,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
                             rt.set_reactive("SEQ", "pans", Value::List(vec![]));
                             rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "delays", Value::List(vec![]));
                             sync_track_mixer_empty_state(rt);
                             rt.set_reactive("SEQ", "effects", Value::List(vec![]));
                             rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));

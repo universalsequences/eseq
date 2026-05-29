@@ -12,6 +12,7 @@ pub struct ScheduledChordData {
     pub count: usize,
     pub notes: [f32; MAX_VOICES],
     pub durations: [f32; MAX_VOICES],
+    pub delays: [f32; MAX_VOICES],
     pub step_transpose: f32,
 }
 
@@ -189,6 +190,7 @@ mod tests {
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
+                        delays: [0.0; MAX_VOICES],
                         step_transpose: 0.0,
                     },
                     effect_params: vec![ScheduledEffectParam {
@@ -230,6 +232,7 @@ mod tests {
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
+                        delays: [0.0; MAX_VOICES],
                         step_transpose: 0.0,
                     },
                     effect_params: empty_effect_params(),
@@ -262,6 +265,7 @@ mod tests {
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
+                        delays: [0.0; MAX_VOICES],
                         step_transpose: 0.0,
                     },
                     effect_params: vec![ScheduledEffectParam {
@@ -304,6 +308,7 @@ mod tests {
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
+                        delays: [0.0; MAX_VOICES],
                         step_transpose: 0.0,
                     },
                     effect_params: empty_effect_params(),
@@ -340,6 +345,7 @@ mod tests {
                         count: 0,
                         notes: [0.0; MAX_VOICES],
                         durations: [0.0; MAX_VOICES],
+                        delays: [0.0; MAX_VOICES],
                         step_transpose: 0.0,
                     },
                     effect_params: empty_effect_params(),
@@ -370,6 +376,7 @@ mod tests {
                     count: 0,
                     notes: [0.0; MAX_VOICES],
                     durations: [0.0; MAX_VOICES],
+                    delays: [0.0; MAX_VOICES],
                     step_transpose: 0.0,
                 },
                 effect_params: empty_effect_params(),

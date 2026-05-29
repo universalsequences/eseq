@@ -594,7 +594,8 @@
       (if (= mode 2) (seqv-track-list SEQ.track-auxas track)
         (if (= mode 3) (seqv-track-list SEQ.track-transposes track)
           (if (= mode 4) (seqv-track-list SEQ.track-pans track)
-            (seqv-track-list SEQ.track-syncs track)))))))
+            (if (= mode 5) (seqv-track-list SEQ.track-syncs track)
+              (seqv-track-list SEQ.track-delays track))))))))
 
 (def seqv-param-value-at (track mode step)
   (let ((values (seqv-param-values track mode)))
@@ -616,7 +617,8 @@
       (if (= mode 2) 16
         (if (= mode 3) 12
           (if (= mode 4) 1
-            (- (len SEQ.sync-labels) 1)))))))
+            (if (= mode 5) (- (len SEQ.sync-labels) 1)
+              1)))))))
 
 (def seqv-param-slider-min (mode)
   (if (= mode 1) 0 (seqv-param-min mode)))
@@ -644,7 +646,8 @@
       (if (= mode 2) :aux-a
         (if (= mode 3) :transpose
           (if (= mode 4) :pan
-            :sync))))))
+            (if (= mode 5) :sync
+              :delay)))))))
 
 (def seqv-param-color (mode)
   (if (= mode 0) :blue
@@ -652,7 +655,8 @@
       (if (= mode 2) :magenta
         (if (= mode 3) :yellow
           (if (= mode 4) :red
-            :green))))))
+            (if (= mode 5) :green
+              :cyan)))))))
 
 (def seqv-param-name (mode)
   (if (= mode 0) "Velocity"
@@ -660,7 +664,8 @@
       (if (= mode 2) "Aux A"
         (if (= mode 3) "Transpose"
           (if (= mode 4) "Pan"
-            "Sync"))))))
+            (if (= mode 5) "Sync"
+              "Delay")))))))
 
 (def seqv-param-origin (mode)
   (if (= mode 3) 0
@@ -884,6 +889,7 @@
         (seqv-param-tab track track-id 3 "xpose")
         (seqv-param-tab track track-id 4 "pan")
         (seqv-param-tab track track-id 5 "syn")
+        (seqv-param-tab track track-id 6 "dly")
         (h-stack :align :center :gap 0.35
           (dropdown :value (seqv-track-timebase track)
             :key (str "seqv-expanded-timebase-" track-id)

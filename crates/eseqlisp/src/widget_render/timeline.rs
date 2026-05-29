@@ -14,6 +14,8 @@ use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32,
 use crate::theme;
 use crate::vm::Value;
 
+const ALIGNMENT_HELPER_BACKWARD_SNAP_PROXIMITY: f64 = 0.25;
+
 pub struct TimelineWidget;
 
 pub static TIMELINE_WIDGET: TimelineWidget = TimelineWidget;
@@ -75,6 +77,7 @@ struct TimelineView {
     content_length_max: f64,
     time_ruler: Option<TimeRuler>,
     playhead_time: Option<f64>,
+    cursor_time: Option<f64>,
     item_color: crate::backend::Color,
     loop_color: crate::backend::Color,
     sidebar_style: SidebarStyle,
@@ -85,6 +88,10 @@ struct TimelineView {
     resize_snap_to_grid: bool,
     snap_floor: bool,
     resize_snap_floor: bool,
+    min_duration: Option<f64>,
+    create_duration: Option<f64>,
+    move_alignment_helper: bool,
+    resize_alignment_helper: bool,
     smooth_scroll: bool,
     tool: TimelineTool,
     lanes: Vec<TimelineLane>,
@@ -180,7 +187,7 @@ impl WidgetDefinition for TimelineWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["playhead-time"]
+        &["playhead-time", "cursor-time"]
     }
 
     fn measure(
@@ -303,6 +310,20 @@ impl WidgetDefinition for TimelineWidget {
             for row_offset in 0..(content.height.round() as u16) {
                 let row = content.row.round() as u16 + row_offset;
                 buf.set(row, playhead_col, styled_cell('|', theme::YELLOW(), None));
+            }
+        }
+
+        if let Some(cursor_col) = view.cursor_col() {
+            if view.header_height > 0.0 && rect.row < rect.row + rect.height {
+                buf.set(
+                    rect.row.round() as u16,
+                    cursor_col,
+                    styled_cell('|', theme::CURSOR(), Some(theme::STATUS_BG())),
+                );
+            }
+            for row_offset in 0..(content.height.round() as u16) {
+                let row = content.row.round() as u16 + row_offset;
+                buf.set(row, cursor_col, styled_cell('|', theme::CURSOR(), None));
             }
         }
 
@@ -770,6 +791,25 @@ fn build_metal_primitives(
         }));
     }
 
+    if let Some(cursor_x) = view.metal_cursor_x() {
+        if view.header_height > 0.0 {
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: cursor_x - 0.0625,
+                y: rect.row,
+                width: 0.125,
+                height: view.header_height,
+                color: theme::CURSOR(),
+            }));
+        }
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x: cursor_x - 0.0625,
+            y: content.row,
+            width: 0.125,
+            height: content.height,
+            color: theme::CURSOR(),
+        }));
+    }
+
     if let Some((x, y, width, height)) = view.unavailable_rect() {
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x,
@@ -977,6 +1017,7 @@ impl TimelineView {
                 .and_then(get_map)
                 .and_then(|map| get_time_ruler(&map)),
             playhead_time: props.get("playhead-time").and_then(as_number),
+            cursor_time: props.get("cursor-time").and_then(as_number),
             item_color: resolve_named_color(props, "item-color", theme::BLUE()),
             loop_color: resolve_named_color(props, "loop-color", theme::BLUE()),
             sidebar_style: get_sidebar_style(props),
@@ -1003,6 +1044,22 @@ impl TimelineView {
                     )
                 },
                 |mode| matches!(mode, Value::Keyword(mode) | Value::String(mode) if mode == "floor"),
+            ),
+            min_duration: props
+                .get("min-duration")
+                .and_then(as_number)
+                .map(|duration| duration.max(0.0001)),
+            create_duration: props
+                .get("create-duration")
+                .and_then(as_number)
+                .map(|duration| duration.max(0.0001)),
+            move_alignment_helper: matches!(
+                props.get("move-snap-mode"),
+                Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "alignment-helper"
+            ),
+            resize_alignment_helper: matches!(
+                props.get("resize-snap-mode"),
+                Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "alignment-helper"
             ),
             smooth_scroll: matches!(
                 props.get("scroll-mode"),
@@ -1061,7 +1118,15 @@ impl TimelineView {
     }
 
     fn minimum_duration(&self) -> f64 {
-        self.effective_resize_snap().max(0.0001)
+        self.min_duration
+            .unwrap_or_else(|| self.effective_resize_snap())
+            .max(0.0001)
+    }
+
+    fn default_create_duration(&self) -> f64 {
+        self.create_duration
+            .unwrap_or_else(|| self.minimum_duration())
+            .max(self.minimum_duration())
     }
 
     fn minimum_end_for(&self, item: &TimelineItem) -> f64 {
@@ -1156,6 +1221,107 @@ impl TimelineView {
         self.snap_value(time, self.effective_resize_snap(), true)
     }
 
+    fn alignment_helper_grid_step(&self) -> f64 {
+        self.time_viewport()
+            .grid_step(self.time_ruler.as_ref())
+            .max(0.0001)
+    }
+
+    fn alignment_helper_snapped_time(
+        &self,
+        raw_time: f64,
+        anchor_cell_start: f64,
+        previous_cell_snap_start: f64,
+        anchor_has_delay: bool,
+        grid: f64,
+    ) -> f64 {
+        if anchor_has_delay && raw_time < anchor_cell_start && raw_time > previous_cell_snap_start {
+            anchor_cell_start
+        } else {
+            (raw_time / grid).floor() * grid
+        }
+    }
+
+    fn alignment_helper_time_for_drag(
+        &self,
+        raw_time: f64,
+        anchor_time: f64,
+        gesture_value: &Value,
+    ) -> f64 {
+        let grid = self.alignment_helper_grid_step();
+        let anchor_cell_start = (anchor_time / grid).floor() * grid;
+        let anchor_cell_end = anchor_cell_start + grid;
+        let previous_cell_snap_start =
+            anchor_cell_start - grid * (1.0 - ALIGNMENT_HELPER_BACKWARD_SNAP_PROXIMITY);
+        let anchor_has_delay = anchor_time > anchor_cell_start + f64::EPSILON;
+        let has_snapped = map_bool(gesture_value, "alignment-helper-snapped");
+
+        if has_snapped {
+            return self.alignment_helper_snapped_time(
+                raw_time,
+                anchor_cell_start,
+                previous_cell_snap_start,
+                anchor_has_delay,
+                grid,
+            );
+        }
+
+        if raw_time >= anchor_cell_end
+            || (raw_time < anchor_cell_start && anchor_has_delay)
+            || raw_time <= previous_cell_snap_start
+        {
+            set_map_bool(gesture_value, "alignment-helper-snapped", true);
+            self.alignment_helper_snapped_time(
+                raw_time,
+                anchor_cell_start,
+                previous_cell_snap_start,
+                anchor_has_delay,
+                grid,
+            )
+        } else {
+            raw_time
+        }
+    }
+
+    fn move_start_for_drag(
+        &self,
+        raw_time: f64,
+        snapped_time: f64,
+        gesture_value: &Value,
+        gesture: &HashMap<String, Value>,
+        anchor_start: f64,
+    ) -> Option<f64> {
+        if !self.move_alignment_helper {
+            let time_offset = as_number(gesture.get("time-offset")?)?;
+            return Some(self.snap_time(snapped_time - time_offset));
+        }
+
+        let raw_time_offset = as_number(
+            gesture
+                .get("raw-time-offset")
+                .or_else(|| gesture.get("time-offset"))?,
+        )?;
+        let raw_start = raw_time - raw_time_offset;
+        Some(self.alignment_helper_time_for_drag(raw_start, anchor_start, gesture_value))
+    }
+
+    fn resize_end_for_drag(
+        &self,
+        raw_time: f64,
+        snapped_resize_time: f64,
+        gesture_value: &Value,
+        gesture: &HashMap<String, Value>,
+        anchor_end: f64,
+    ) -> Option<f64> {
+        if !self.resize_alignment_helper {
+            return Some(snapped_resize_time);
+        }
+
+        let raw_time_offset = as_number(gesture.get("raw-time-offset")?)?;
+        let raw_end = raw_time - raw_time_offset;
+        Some(self.alignment_helper_time_for_drag(raw_end, anchor_end, gesture_value))
+    }
+
     fn effective_resize_snap(&self) -> f64 {
         if self.resize_snap_to_grid {
             self.time_viewport().grid_step(self.time_ruler.as_ref())
@@ -1197,6 +1363,19 @@ impl TimelineView {
 
     fn metal_playhead_x(&self) -> Option<f32> {
         self.time_viewport().metal_playhead_x(self.playhead_time)
+    }
+
+    fn cursor_col(&self) -> Option<u16> {
+        self.time_viewport().playhead_col(self.cursor_time)
+    }
+
+    fn metal_cursor_x(&self) -> Option<f32> {
+        self.time_viewport().metal_playhead_x(self.cursor_time)
+    }
+
+    fn cursor_snap_time(&self, time: f64) -> f64 {
+        let grid = self.alignment_helper_grid_step();
+        (time / grid).round() * grid
     }
 
     fn metal_lane_rect(&self, lane_index: usize) -> Option<(f32, f32)> {
@@ -1333,7 +1512,7 @@ impl TimelineView {
             }
         }
         Some(HitRegion::Background {
-            time: self.snap_time(self.time_at_col(local_col)),
+            time: self.time_at_col(local_col),
         })
     }
 
@@ -1350,11 +1529,15 @@ impl TimelineView {
                     } else {
                         vec![item.id.clone()]
                     };
+                    let raw_time = self.time_at_col(local_col);
                     Some(map_value(vec![
                         ("kind", keyword(":move")),
                         ("ids", list_value(ids)),
                         ("anchor-id", item.id),
+                        ("anchor-start", Value::Number(item.start)),
                         ("time-offset", Value::Number(current_time - item.start)),
+                        ("raw-time-offset", Value::Number(raw_time - item.start)),
+                        ("alignment-helper-snapped", Value::Bool(false)),
                         (
                             "lane-offset",
                             Value::Number(current_lane as f64 - item.lane as f64),
@@ -1367,10 +1550,14 @@ impl TimelineView {
                     } else {
                         vec![item.id.clone()]
                     };
+                    let raw_time = self.time_at_col(local_col);
                     Some(map_value(vec![
                         ("kind", keyword(":resize-end")),
                         ("id", item.id),
                         ("ids", list_value(ids)),
+                        ("anchor-end", Value::Number(item.end)),
+                        ("raw-time-offset", Value::Number(raw_time - item.end)),
+                        ("alignment-helper-snapped", Value::Bool(false)),
                     ]))
                 }
                 HitRegion::ContentLengthEnd => {
@@ -1416,18 +1603,22 @@ impl TimelineView {
                         ("type", keyword(":select")),
                         ("ids", list_value(vec![item.id])),
                         ("mode", keyword(":replace")),
+                        (
+                            "time",
+                            Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
+                        ),
                     ]))
                 }
                 HitRegion::ContentLengthEnd => None,
                 HitRegion::Background { time, .. } => Some(action_map(vec![
                     ("type", keyword(":clear-selection")),
-                    ("time", Value::Number(time)),
+                    ("time", Value::Number(self.cursor_snap_time(time))),
                 ])),
                 HitRegion::Header => Some(action_map(vec![
                     ("type", keyword(":set-cursor")),
                     (
                         "time",
-                        Value::Number(self.snap_time(self.time_at_col(local_col))),
+                        Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
                     ),
                 ])),
                 HitRegion::Sidebar { lane } => Some(action_map(vec![
@@ -1461,8 +1652,10 @@ impl TimelineView {
         }
         match self.hit_test(local_col, local_row)? {
             HitRegion::Background { .. } => {
-                let start = self.snap_edit_time(self.time_at_col(local_col));
-                let default_duration = self.minimum_duration();
+                let start = self
+                    .cursor_time
+                    .unwrap_or_else(|| self.cursor_snap_time(self.time_at_col(local_col)));
+                let default_duration = self.default_create_duration();
                 Some(action_map(vec![
                     ("type", keyword(":finish-create-item")),
                     ("lane", Value::Number(self.lane_at_row(local_row) as f64)),
@@ -1486,18 +1679,28 @@ impl TimelineView {
         let current_resize_time = self.snap_resize_time(raw_time);
         let current_marquee_time = raw_time;
         let current_lane = self.lane_at_row(local_row);
-        let gesture = get_map(gesture?)?;
+        let gesture_value = gesture?;
+        let gesture = get_map(gesture_value)?;
         match gesture.get("kind") {
             Some(Value::Keyword(kind)) if kind == "move" => {
                 let anchor_id = gesture.get("anchor-id")?.clone();
-                let unclamped_start =
-                    self.snap_time(current_time - as_number(gesture.get("time-offset")?)?);
                 let anchor_start = self
                     .items
                     .iter()
                     .find(|item| item.id == anchor_id)
                     .map(|item| item.start)
                     .unwrap_or(0.0);
+                let anchor_start = gesture
+                    .get("anchor-start")
+                    .and_then(as_number)
+                    .unwrap_or(anchor_start);
+                let unclamped_start = self.move_start_for_drag(
+                    raw_time,
+                    current_time,
+                    gesture_value,
+                    &gesture,
+                    anchor_start,
+                )?;
                 let min_start = self
                     .min_selected_start_from_value(gesture.get("ids")?)
                     .unwrap_or(anchor_start);
@@ -1527,13 +1730,26 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "resize-end" => {
                 let id = gesture.get("id")?.clone();
                 let item = self.items.iter().find(|item| item.id == id)?;
-                let next_time = current_resize_time.max(self.minimum_end_for(item));
+                let anchor_end = gesture
+                    .get("anchor-end")
+                    .and_then(as_number)
+                    .unwrap_or(item.end);
+                let next_time = self
+                    .resize_end_for_drag(
+                        raw_time,
+                        current_resize_time,
+                        gesture_value,
+                        &gesture,
+                        anchor_end,
+                    )?
+                    .max(self.minimum_end_for(item));
                 Some(action_map(vec![
                     ("type", keyword(":resize-item-absolute")),
                     ("id", id.clone()),
                     ("ids", gesture.get("ids")?.clone()),
                     ("edge", keyword(":end")),
                     ("time", Value::Number(next_time)),
+                    ("duration", Value::Number(next_time - item.start)),
                     ("duration-delta", Value::Number(next_time - item.end)),
                 ]))
             }
@@ -1797,7 +2013,11 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "draw" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)?;
-                let (start, end) = self.bounded_span(start_time, current_resize_time);
+                let (start, end) = if (start_time - current_resize_time).abs() < f64::EPSILON {
+                    (start_time, start_time + self.default_create_duration())
+                } else {
+                    self.bounded_span(start_time, current_resize_time)
+                };
                 Some(action_map(vec![
                     ("type", keyword(":finish-create-item")),
                     ("lane", Value::Number(start_lane)),
@@ -1853,6 +2073,30 @@ impl TimelineView {
             1.0
         };
         match key.code {
+            KeyCode::Char('c') | KeyCode::Char('C')
+                if !selected_ids.is_empty()
+                    && key
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
+            {
+                Some(action_map(vec![
+                    ("type", keyword(":copy-items")),
+                    ("ids", list_value(selected_ids)),
+                ]))
+            }
+            KeyCode::Char('v') | KeyCode::Char('V')
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
+            {
+                Some(action_map(vec![
+                    ("type", keyword(":paste-items")),
+                    (
+                        "time",
+                        Value::Number(self.cursor_time.unwrap_or(self.view_start)),
+                    ),
+                ]))
+            }
             KeyCode::Char('a') | KeyCode::Char('A')
                 if key
                     .modifiers
@@ -2123,6 +2367,24 @@ fn as_bool(value: &Value) -> Option<bool> {
     }
 }
 
+fn map_bool(value: &Value, key: &str) -> bool {
+    let Value::Map(map) = value else {
+        return false;
+    };
+    map.get(key)
+        .and_then(|value| as_bool(&value.borrow()))
+        .unwrap_or(false)
+}
+
+fn set_map_bool(value: &Value, key: &str, next: bool) {
+    let Value::Map(map) = value else {
+        return;
+    };
+    if let Some(value) = map.get(key) {
+        *value.borrow_mut() = Value::Bool(next);
+    }
+}
+
 fn as_usize(value: &Value) -> Option<usize> {
     as_number(value).map(|n| n.max(0.0) as usize)
 }
@@ -2294,6 +2556,459 @@ mod tests {
         assert!(
             view.handle_pointer_drag(10.2, 2.1, Some(&gesture))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn alignment_helper_move_edits_fractional_start_until_next_grid_line() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.25)),
+                    ("end", number_value(5.25)),
+                    ("selected", bool_value(false)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            (
+                "move-snap-mode".to_string(),
+                keyword_value("alignment-helper"),
+            ),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        let gesture = view.begin_gesture(8.2, 2.0).expect("gesture");
+        let action = view
+            .handle_pointer_drag(8.95, 2.0, Some(&gesture))
+            .expect("fractional move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        let Some(Value::Number(start)) = map.get("start").map(|value| value.borrow().clone())
+        else {
+            panic!("expected fractional start");
+        };
+        assert!((start - 4.625).abs() < 0.0001, "start was {start}");
+
+        let action = view
+            .handle_pointer_drag(9.7, 2.0, Some(&gesture))
+            .expect("grid move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(5.0))
+        );
+
+        let action = view
+            .handle_pointer_drag(8.95, 2.0, Some(&gesture))
+            .expect("latched grid move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+    }
+
+    #[test]
+    fn alignment_helper_move_allows_backwards_fractional_start_before_previous_grid_line() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(5.0)),
+                    ("selected", bool_value(false)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            (
+                "move-snap-mode".to_string(),
+                keyword_value("alignment-helper"),
+            ),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        let gesture = view.begin_gesture(8.2, 2.0).expect("gesture");
+        let action = view
+            .handle_pointer_drag(7.2, 2.0, Some(&gesture))
+            .expect("backwards fractional move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        let Some(Value::Number(start)) = map.get("start").map(|value| value.borrow().clone())
+        else {
+            panic!("expected backwards fractional start");
+        };
+        assert!((start - 3.5).abs() < 0.0001, "start was {start}");
+
+        let action = view
+            .handle_pointer_drag(6.6, 2.0, Some(&gesture))
+            .expect("backwards snapped move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+
+        let action = view
+            .handle_pointer_drag(7.2, 2.0, Some(&gesture))
+            .expect("latched backwards snapped move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+    }
+
+    #[test]
+    fn alignment_helper_move_sticks_to_current_grid_when_delayed_note_moves_backwards() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.25)),
+                    ("end", number_value(5.25)),
+                    ("selected", bool_value(false)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            (
+                "move-snap-mode".to_string(),
+                keyword_value("alignment-helper"),
+            ),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        let gesture = view.begin_gesture(8.6, 2.0).expect("gesture");
+        let action = view
+            .handle_pointer_drag(8.3, 2.0, Some(&gesture))
+            .expect("fractional move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        let Some(Value::Number(start)) = map.get("start").map(|value| value.borrow().clone())
+        else {
+            panic!("expected fractional start");
+        };
+        assert!((start - 4.1).abs() < 0.0001, "start was {start}");
+
+        let action = view
+            .handle_pointer_drag(7.9, 2.0, Some(&gesture))
+            .expect("current-grid snapped move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+
+        let action = view
+            .handle_pointer_drag(7.1, 2.0, Some(&gesture))
+            .expect("current-grid sticky move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+
+        let action = view
+            .handle_pointer_drag(6.5, 2.0, Some(&gesture))
+            .expect("previous-grid snapped move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+    }
+
+    #[test]
+    fn alignment_helper_move_uses_zoomed_ruler_grid_step() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.25)),
+                    ("end", number_value(5.25)),
+                    ("selected", bool_value(false)),
+                ])]),
+            ),
+            (
+                "time-ruler".to_string(),
+                map_value_raw(vec![
+                    ("mode", keyword_value("bars-beats")),
+                    ("beats-per-bar", number_value(4.0)),
+                ]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(8.0)),
+            ("snap".to_string(), number_value(1.0)),
+            (
+                "move-snap-mode".to_string(),
+                keyword_value("alignment-helper"),
+            ),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 192.0,
+                height: 8.0,
+            },
+        );
+        assert_eq!(view.alignment_helper_grid_step(), 0.5);
+
+        let gesture = view.begin_gesture(102.0, 2.0).expect("gesture");
+        let action = view
+            .handle_pointer_drag(108.0, 2.0, Some(&gesture))
+            .expect("zoomed grid move action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.5))
+        );
+    }
+
+    #[test]
+    fn pointer_click_sets_cursor_time_to_zoomed_grid() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "time-ruler".to_string(),
+                map_value_raw(vec![
+                    ("mode", keyword_value("bars-beats")),
+                    ("beats-per-bar", number_value(4.0)),
+                ]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(8.0)),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 192.0,
+                height: 8.0,
+            },
+        );
+
+        let action = view.handle_pointer_down(107.0, 2.0).expect("clear action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("clear-selection".to_string()))
+        );
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.5))
+        );
+    }
+
+    #[test]
+    fn item_click_sets_cursor_time_to_zoomed_grid() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "time-ruler".to_string(),
+                map_value_raw(vec![
+                    ("mode", keyword_value("bars-beats")),
+                    ("beats-per-bar", number_value(4.0)),
+                ]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(5.0)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(8.0)),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 192.0,
+                height: 8.0,
+            },
+        );
+
+        let action = view.handle_pointer_down(107.0, 2.0).expect("select action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("select".to_string()))
+        );
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.5))
+        );
+    }
+
+    #[test]
+    fn timeline_copy_and_paste_keys_emit_item_clipboard_actions() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(5.0)),
+                    ("selected", bool_value(true)),
+                ])]),
+            ),
+            (
+                "selection".to_string(),
+                list_value_raw(vec![number_value(10.0)]),
+            ),
+            ("cursor-time".to_string(), number_value(6.5)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        let action = view
+            .handle_key(WidgetKeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::SUPER,
+            })
+            .expect("copy action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("copy-items".to_string()))
+        );
+
+        let action = view
+            .handle_key(WidgetKeyEvent {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::SUPER,
+            })
+            .expect("paste action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("paste-items".to_string()))
+        );
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(6.5))
         );
     }
 
@@ -2504,6 +3219,10 @@ mod tests {
                 .map(|value| value.borrow().clone()),
             Some(Value::Number(1.0))
         );
+        assert_eq!(
+            map.get("duration").map(|value| value.borrow().clone()),
+            Some(Value::Number(5.0))
+        );
         let ids = map.get("ids").expect("ids");
         let Value::List(ids) = &*ids.borrow() else {
             panic!("expected ids list");
@@ -2574,6 +3293,167 @@ mod tests {
     }
 
     #[test]
+    fn resize_alignment_helper_edits_fractional_end_until_next_grid_line() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(5.0)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("resize-snap".to_string(), number_value(1.0)),
+            (
+                "resize-snap-mode".to_string(),
+                keyword_value("alignment-helper"),
+            ),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        let gesture = view.begin_gesture(10.0, 2.0).expect("gesture");
+        let action = view
+            .handle_pointer_drag(10.8, 2.0, Some(&gesture))
+            .expect("fractional resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        let Some(Value::Number(time)) = map.get("time").map(|value| value.borrow().clone()) else {
+            panic!("expected fractional resize time");
+        };
+        assert!((time - 5.4).abs() < 0.0001, "time was {time}");
+
+        let action = view
+            .handle_pointer_drag(12.2, 2.0, Some(&gesture))
+            .expect("snapped resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(6.0))
+        );
+
+        let action = view
+            .handle_pointer_drag(10.8, 2.0, Some(&gesture))
+            .expect("latched snapped resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(5.0))
+        );
+    }
+
+    #[test]
+    fn resize_alignment_helper_sticks_to_current_grid_when_delayed_end_moves_backwards() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(3.0)),
+                    ("end", number_value(5.25)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("resize-snap".to_string(), number_value(1.0)),
+            (
+                "resize-snap-mode".to_string(),
+                keyword_value("alignment-helper"),
+            ),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        let gesture = view.begin_gesture(10.0, 2.0).expect("gesture");
+        let action = view
+            .handle_pointer_drag(9.7, 2.0, Some(&gesture))
+            .expect("fractional resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        let Some(Value::Number(time)) = map.get("time").map(|value| value.borrow().clone()) else {
+            panic!("expected fractional resize time");
+        };
+        assert!((time - 5.1).abs() < 0.0001, "time was {time}");
+
+        let action = view
+            .handle_pointer_drag(9.4, 2.0, Some(&gesture))
+            .expect("current-grid snapped resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(5.0))
+        );
+
+        let action = view
+            .handle_pointer_drag(8.6, 2.0, Some(&gesture))
+            .expect("current-grid sticky resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(5.0))
+        );
+
+        let action = view
+            .handle_pointer_drag(7.8, 2.0, Some(&gesture))
+            .expect("previous-grid snapped resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+    }
+
+    #[test]
     fn draw_create_clamps_to_minimum_snap_duration() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("draw")),
@@ -2616,6 +3496,89 @@ mod tests {
         assert_eq!(
             map.get("end").map(|value| value.borrow().clone()),
             Some(Value::Number(4.25))
+        );
+    }
+
+    #[test]
+    fn double_click_create_uses_configured_create_duration() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("resize-snap".to_string(), number_value(0.25)),
+            ("create-duration".to_string(), number_value(2.5)),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let action = view.handle_double_click(8.0, 2.0).expect("create action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+        assert_eq!(
+            map.get("end").map(|value| value.borrow().clone()),
+            Some(Value::Number(6.5))
+        );
+    }
+
+    #[test]
+    fn draw_click_create_uses_configured_create_duration() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("draw")),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("resize-snap".to_string(), number_value(0.25)),
+            ("create-duration".to_string(), number_value(2.5)),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let gesture = map_value_raw(vec![
+            ("kind", keyword_value("draw")),
+            ("time", number_value(4.0)),
+            ("lane", number_value(0.0)),
+        ]);
+        let action = view
+            .handle_pointer_up(8.0, 2.0, Some(&gesture))
+            .expect("finish action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("end").map(|value| value.borrow().clone()),
+            Some(Value::Number(6.5))
         );
     }
 
@@ -2667,7 +3630,7 @@ mod tests {
     }
 
     #[test]
-    fn double_click_create_floors_to_zoomed_grid_snap() {
+    fn double_click_create_uses_nearest_zoomed_cursor_grid_snap() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
             (
@@ -2708,11 +3671,11 @@ mod tests {
         };
         assert_eq!(
             map.get("start").map(|value| value.borrow().clone()),
-            Some(Value::Number(2.0))
+            Some(Value::Number(2.5))
         );
         assert_eq!(
             map.get("end").map(|value| value.borrow().clone()),
-            Some(Value::Number(2.5))
+            Some(Value::Number(3.0))
         );
     }
 

@@ -242,13 +242,6 @@ impl Editor {
         let Some(node) = self.focused_widget_node() else {
             return false;
         };
-        if key.code == KeyCode::Tab
-            && key.modifiers == KeyModifiers::NONE
-            && node.widget_type == "patcher"
-            && !crate::widget_render::patcher::patcher_has_text_edit(&node)
-        {
-            return self.switch_focused_patcher_to_emitted_source_buffer(&node);
-        }
         // Space bar should only be consumed by text-entry widgets (for typing).
         // All other widgets let space fall through to keybindings.
         let is_text_input = node.widget_type == "text-input"

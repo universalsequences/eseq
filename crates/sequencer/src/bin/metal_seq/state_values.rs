@@ -233,6 +233,7 @@ fn expanded_step_param_for_mode(mode: usize) -> StepParam {
         3 => StepParam::Transpose,
         4 => StepParam::Pan,
         5 => StepParam::Sync,
+        6 => StepParam::Delay,
         _ => StepParam::Velocity,
     }
 }
@@ -282,7 +283,7 @@ pub(crate) fn sync_all_track_step_binding_fields(
                 &track_step_selected_field(track, step),
                 Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
             );
-            for mode in 0..6 {
+            for mode in 0..7 {
                 let param = expanded_step_param_for_mode(mode);
                 let value = if visible {
                     state.pattern.step_data[track].get(step, param)
@@ -1015,6 +1016,11 @@ pub(crate) fn sync_all_track_sequencer_state(
         "track-syncs",
         build_all_track_param_lists_value(state, app, StepParam::Sync),
     );
+    rt.set_reactive(
+        "SEQ",
+        "track-delays",
+        build_all_track_param_lists_value(state, app, StepParam::Delay),
+    );
     sync_all_track_step_binding_fields(rt, state, app, current_track_idx, selected_steps);
     sync_all_track_playhead_fields(rt, state, app);
 }
@@ -1067,6 +1073,11 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
     );
     rt.set_reactive(
         "SEQ",
+        "delays",
+        build_param_list(state, track, StepParam::Delay),
+    );
+    rt.set_reactive(
+        "SEQ",
         "track-velocities",
         build_all_active_track_param_lists_value(state, StepParam::Velocity),
     );
@@ -1094,6 +1105,11 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
         "SEQ",
         "track-syncs",
         build_all_active_track_param_lists_value(state, StepParam::Sync),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-delays",
+        build_all_active_track_param_lists_value(state, StepParam::Delay),
     );
 }
 
@@ -2134,6 +2150,7 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "auxas", Value::List(vec![]));
         rt.set_reactive("SEQ", "pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
+        rt.set_reactive("SEQ", "delays", Value::List(vec![]));
         sync_track_mixer_state(rt, app, state);
         sync_bus_mixer_state(rt, app);
         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
@@ -2152,6 +2169,7 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-transposes", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-delays", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         return;
     }
@@ -19504,6 +19522,70 @@ mod tests {
             Some(&expected_track_color),
             "piano roll loop selector should use the current track color"
         );
+        assert_eq!(
+            layout.props.get("snap"),
+            Some(&Value::Number(1.0)),
+            "piano roll move snapping should use step grid lines"
+        );
+        assert_eq!(
+            layout.props.get("move-snap-mode"),
+            Some(&Value::Keyword("alignment-helper".to_string())),
+            "piano roll should preserve sub-step drag offsets until the next grid line"
+        );
+        assert_eq!(
+            layout.props.get("resize-snap-mode"),
+            Some(&Value::Keyword("alignment-helper".to_string())),
+            "piano roll duration resize should use the same alignment helper as note moves"
+        );
+        assert_eq!(
+            layout.props.get("min-duration"),
+            Some(&Value::Number(0.03125)),
+            "piano roll duration resize should not be clamped to the visible grid"
+        );
+        assert_eq!(
+            layout.props.get("create-duration"),
+            Some(&Value::Number(1.0)),
+            "piano roll should default new notes to one step"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(piano-roll-action (dict :type :finish-create-item :start 2 :end 4.5))")
+            .expect("record created duration");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("piano roll should still have a widget layout");
+        assert_eq!(
+            layout.props.get("create-duration"),
+            Some(&Value::Number(2.5)),
+            "piano roll should reuse the last created note duration"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(piano-roll-action (dict :type :resize-item-absolute :duration 3.25))")
+            .expect("record resized duration");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("piano roll should still have a widget layout");
+        assert_eq!(
+            layout.props.get("create-duration"),
+            Some(&Value::Number(3.25)),
+            "piano roll should reuse the last edited note duration"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(piano-roll-action (dict :type :clear-selection :time 4.5))")
+            .expect("record cursor time");
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("piano roll should still have a widget layout");
+        assert_eq!(
+            layout.props.get("cursor-time"),
+            Some(&Value::Number(4.5)),
+            "piano roll should expose the last clicked cursor time to the timeline"
+        );
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
         editor
             .runtime_mut()
@@ -19616,7 +19698,7 @@ mod tests {
     }
 
     #[test]
-    fn piano_roll_create_floors_fractional_start_to_visible_step() {
+    fn piano_roll_create_preserves_fractional_start_as_delay() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let selection = Arc::new(Mutex::new(HashSet::new()));
         let move_state = Arc::new(Mutex::new(None));
@@ -19638,6 +19720,221 @@ mod tests {
             state.pattern.step_data[track].get(2, StepParam::Duration),
             1.0
         );
+        assert_eq!(state.pattern.chord_data[track].count(2), 1);
+        assert_eq!(state.pattern.chord_data[track].get_delay(2, 0), 0.5);
+        assert_eq!(state.pattern.step_data[track].get(2, StepParam::Delay), 0.0);
+
+        let items = build_piano_roll_items_value(&state, track, &selection);
+        let Value::List(items) = items else {
+            panic!("expected item list");
+        };
+        let Value::Map(item) = items[0].borrow().clone() else {
+            panic!("expected item map");
+        };
+        assert_eq!(
+            item.get("label").map(|value| value.borrow().clone()),
+            Some(Value::String("C4 +0.50".to_string()))
+        );
+    }
+
+    #[test]
+    fn piano_roll_move_absolute_preserves_fractional_start_as_delay() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+
+        state.pattern.patterns[track].set_step_active(2, true);
+        state.pattern.step_data[track].set(2, StepParam::Duration, 1.0);
+        state.pattern.step_data[track].set(2, StepParam::Transpose, 0.0);
+
+        let action = map_value([
+            ("type", Value::Keyword("move-items-absolute".to_string())),
+            (
+                "ids",
+                list_value(vec![Value::Number(piano_roll_item_id(2, 0) as f64)]),
+            ),
+            ("anchor-id", Value::Number(piano_roll_item_id(2, 0) as f64)),
+            ("start", Value::Number(4.375)),
+            ("lane", Value::Number(48.0)),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            .expect("move action");
+
+        assert!(!state.pattern.patterns[track].is_active(2));
+        assert!(state.pattern.patterns[track].is_active(4));
+        assert_eq!(
+            state.pattern.step_data[track].get(4, StepParam::Duration),
+            1.0
+        );
+        assert_eq!(state.pattern.chord_data[track].count(4), 1);
+        assert_eq!(state.pattern.chord_data[track].get_delay(4, 0), 0.375);
+        assert_eq!(state.pattern.step_data[track].get(4, StepParam::Delay), 0.0);
+    }
+
+    #[test]
+    fn piano_roll_allows_strummed_notes_on_one_step() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+
+        for (lane, start) in [(48.0, 3.0), (44.0, 3.125), (41.0, 3.25)] {
+            let action = map_value([
+                ("type", Value::Keyword("finish-create-item".to_string())),
+                ("lane", Value::Number(lane)),
+                ("start", Value::Number(start)),
+                ("end", Value::Number(start + 1.0)),
+            ]);
+            apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+                .expect("create action");
+        }
+
+        assert_eq!(state.pattern.chord_data[track].count(3), 3);
+        assert_eq!(state.pattern.chord_data[track].get_delay(3, 0), 0.0);
+        assert_eq!(state.pattern.chord_data[track].get_delay(3, 1), 0.125);
+        assert_eq!(state.pattern.chord_data[track].get_delay(3, 2), 0.25);
+    }
+
+    #[test]
+    fn piano_roll_copy_paste_preserves_fractional_offsets_at_cursor() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let clipboard = new_piano_roll_clipboard();
+        let track = 0;
+        let step = 2;
+
+        state.pattern.chord_data[track].add_note_with_timing(step, 0.0, 1.0, 0.0);
+        state.pattern.chord_data[track].add_note_with_timing(step, 4.0, 1.5, 0.25);
+        state.pattern.patterns[track].set_step_active(step, true);
+        state.pattern.step_data[track].set(step, StepParam::Duration, 1.5);
+
+        let copy = map_value([
+            ("type", Value::Keyword("copy-items".to_string())),
+            (
+                "ids",
+                list_value(vec![
+                    Value::Number(piano_roll_item_id(step, 0) as f64),
+                    Value::Number(piano_roll_item_id(step, 1) as f64),
+                ]),
+            ),
+        ]);
+        apply_piano_roll_action_with_clipboard(
+            &state,
+            track,
+            &selection,
+            &move_state,
+            &clipboard,
+            &copy,
+        )
+        .expect("copy action");
+
+        let paste = map_value([
+            ("type", Value::Keyword("paste-items".to_string())),
+            ("time", Value::Number(4.5)),
+        ]);
+        apply_piano_roll_action_with_clipboard(
+            &state,
+            track,
+            &selection,
+            &move_state,
+            &clipboard,
+            &paste,
+        )
+        .expect("paste action");
+
+        assert!(state.pattern.patterns[track].is_active(step));
+        assert!(state.pattern.patterns[track].is_active(4));
+        assert_eq!(state.pattern.chord_data[track].count(4), 2);
+        assert_eq!(state.pattern.chord_data[track].get_delay(4, 0), 0.5);
+        assert_eq!(state.pattern.chord_data[track].get_delay(4, 1), 0.75);
+        assert_eq!(state.pattern.chord_data[track].get_duration(4, 0), 1.0);
+        assert_eq!(state.pattern.chord_data[track].get_duration(4, 1), 1.5);
+
+        let selected = selection.lock().unwrap();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.contains(&piano_roll_item_id(4, 0)));
+        assert!(selected.contains(&piano_roll_item_id(4, 1)));
+    }
+
+    #[test]
+    fn piano_roll_nudge_selected_chord_moves_all_selected_notes() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+        let step = 2;
+
+        state.pattern.chord_data[track].add_note_with_duration(step, 0.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 4.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 7.0, 1.0);
+        state.pattern.patterns[track].set_step_active(step, true);
+
+        let action = map_value([
+            ("type", Value::Keyword("nudge-selection".to_string())),
+            (
+                "ids",
+                list_value(vec![
+                    Value::Number(piano_roll_item_id(step, 0) as f64),
+                    Value::Number(piano_roll_item_id(step, 1) as f64),
+                    Value::Number(piano_roll_item_id(step, 2) as f64),
+                ]),
+            ),
+            ("delta-time", Value::Number(1.0)),
+            ("delta-lane", Value::Number(0.0)),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            .expect("nudge action");
+
+        assert!(!state.pattern.patterns[track].is_active(step));
+        assert_eq!(state.pattern.chord_data[track].count(step), 0);
+        assert!(state.pattern.patterns[track].is_active(step + 1));
+        let mut transposes = (0..state.pattern.chord_data[track].count(step + 1))
+            .map(|idx| state.pattern.chord_data[track].get(step + 1, idx))
+            .collect::<Vec<_>>();
+        transposes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(transposes, vec![0.0, 4.0, 7.0]);
+    }
+
+    #[test]
+    fn piano_roll_nudge_selected_chord_subset_leaves_unselected_notes() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+        let step = 2;
+
+        state.pattern.chord_data[track].add_note_with_duration(step, 0.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 4.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 7.0, 1.0);
+        state.pattern.patterns[track].set_step_active(step, true);
+
+        let action = map_value([
+            ("type", Value::Keyword("nudge-selection".to_string())),
+            (
+                "ids",
+                list_value(vec![
+                    Value::Number(piano_roll_item_id(step, 0) as f64),
+                    Value::Number(piano_roll_item_id(step, 2) as f64),
+                ]),
+            ),
+            ("delta-time", Value::Number(1.0)),
+            ("delta-lane", Value::Number(0.0)),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            .expect("nudge action");
+
+        assert_eq!(state.pattern.chord_data[track].count(step), 1);
+        assert_eq!(state.pattern.chord_data[track].get(step, 0), 4.0);
+        let mut transposes = (0..state.pattern.chord_data[track].count(step + 1))
+            .map(|idx| state.pattern.chord_data[track].get(step + 1, idx))
+            .collect::<Vec<_>>();
+        transposes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(transposes, vec![0.0, 7.0]);
     }
 
     #[test]
@@ -19769,12 +20066,9 @@ mod tests {
         apply_piano_roll_action(&state, track, &selection, &move_state, &action)
             .expect("delete action");
 
-        assert_eq!(state.pattern.chord_data[track].count(step), 0);
+        assert_eq!(state.pattern.chord_data[track].count(step), 1);
         assert!(state.pattern.patterns[track].is_active(step));
-        assert_eq!(
-            state.pattern.step_data[track].get(step, StepParam::Transpose),
-            7.0
-        );
+        assert_eq!(state.pattern.chord_data[track].get(step, 0), 7.0);
     }
 
     #[test]
