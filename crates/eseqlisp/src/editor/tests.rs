@@ -33,6 +33,61 @@ fn ctrl_c_ctrl_c_binding_enqueues_host_command() {
 }
 
 #[test]
+fn focused_text_input_survives_on_change_rerender() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def query (state ""))
+            (effect
+              (box :width 24 :height 3
+                (text-input
+                  :key "search-input"
+                  :width 20
+                  :value query
+                  :on-change |v| (set! query v))))
+            "#,
+        )
+        .expect("build text input");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+
+    let layout = editor.widget_layout().expect("layout");
+    let input =
+        super::find_layout_node_by_stable_key(layout.as_ref(), "search-input").expect("search input");
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            input.rect.col as u16,
+            input.rect.row as u16,
+        ),
+        0,
+        0,
+        30,
+        8,
+        input.rect.col + 1.0,
+        input.rect.row + 0.5,
+    );
+    let focused_before = editor.focused_widget_id().expect("input should focus");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    editor.runtime.current_layout = None;
+    editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+    assert_eq!(
+        editor.runtime_mut().eval_str("query"),
+        Ok(Some(Value::String("pi".to_string())))
+    );
+    assert_eq!(
+        editor.focused_widget_id(),
+        Some(focused_before),
+        "text input focus should survive the on-change widget-tree refresh"
+    );
+}
+
+#[test]
 fn default_window_split_bindings_survive_runtime_sync() {
     let runtime = Runtime::with_init_source("(bind-key \"C-c C-c\" \"ignore\")");
     let mut editor = Editor::new(runtime, EditorConfig::default());

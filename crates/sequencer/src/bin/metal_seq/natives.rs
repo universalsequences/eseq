@@ -2495,11 +2495,10 @@ pub(crate) fn init_runtime(
             _ => "",
         };
         let rows = sample_db_for_search
-            .query_samples_for_browser(&[], (!query.is_empty()).then_some(query))
+            .query_samples_for_browser_limited(&[], (!query.is_empty()).then_some(query), 100)
             .map_err(|error| format!("failed to search samples.db: {error}"))?;
         Ok(Value::List(
             rows.into_iter()
-                .take(100)
                 .map(|row| {
                     let name = row
                         .title

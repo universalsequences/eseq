@@ -12,6 +12,8 @@ use sequencer::ui;
 use super::current_custom_instrument_name;
 use super::values::{build_flat_tree_items, list_value, map_value};
 
+pub(crate) const SAMPLE_BROWSER_MAX_RESULTS: usize = 200;
+
 #[derive(Clone)]
 pub(crate) struct SampleTreeNode {
     label: String,
@@ -150,8 +152,11 @@ pub(crate) fn build_sample_browser_value_from_db(
         default_sample_tag_facets(db, 16)?
     };
     let items = if has_active_filter {
-        let rows =
-            db.query_samples_for_browser(selected_tags, (!query.is_empty()).then_some(query))?;
+        let rows = db.query_samples_for_browser_limited(
+            selected_tags,
+            (!query.is_empty()).then_some(query),
+            SAMPLE_BROWSER_MAX_RESULTS,
+        )?;
         sample_tree_nodes_to_value(&sample_rows_to_tree_nodes(rows, false))
     } else {
         Value::List(vec![])
@@ -893,9 +898,7 @@ mod tests {
         let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(1));
         let start = Instant::now();
 
-        browser
-            .query_at("", &[], start)
-            .expect("initial browser");
+        browser.query_at("", &[], start).expect("initial browser");
         let pending = browser
             .query_at("ki", &[], start + Duration::from_millis(1))
             .expect("pending query");
@@ -930,5 +933,26 @@ mod tests {
             sample_browser_item_labels(&tagged),
             vec!["Kick 808".to_string(), "Kick 909".to_string()]
         );
+    }
+
+    #[test]
+    fn db_sample_browser_caps_materialized_results() {
+        let db = Rc::new(SampleDb::open_in_memory().expect("open db"));
+        for idx in 0..(SAMPLE_BROWSER_MAX_RESULTS + 25) {
+            let hash = format!("sample{idx:03}");
+            let title = format!("Kick {idx:03}");
+            db.connection()
+                .execute(
+                    "INSERT INTO samples(hash, title) VALUES (?, ?)",
+                    rusqlite::params![hash, title],
+                )
+                .expect("sample");
+            db.add_tag(&hash, "kick").expect("tag");
+        }
+
+        let labels = sample_browser_item_labels(
+            &build_sample_browser_value_from_db(&db, "", &["kick"]).expect("browser"),
+        );
+        assert_eq!(labels.len(), SAMPLE_BROWSER_MAX_RESULTS);
     }
 }

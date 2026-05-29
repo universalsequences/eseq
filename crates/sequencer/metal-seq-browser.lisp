@@ -371,6 +371,7 @@
   (box :key "browser-header" :width :fill :height 2.0 :padding 0.25
     (h-stack :width :fill :gap 0.5 :align :center
       (text-input
+        :key "sbrowser-search-input"
         :width :fill
         :value sbrowser-filter
         :placeholder (sbrowser-search-placeholder)

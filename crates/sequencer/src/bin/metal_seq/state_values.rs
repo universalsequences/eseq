@@ -6794,6 +6794,228 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_browser_search_keeps_focus_for_consecutive_typing() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(72, 60);
+
+        let layout = editor.widget_layout().expect("browser layout");
+        let input = find_layout_node_by_stable_key(&layout, "sbrowser-search-input")
+            .expect("browser search input");
+        let click_col = input.rect.col + 1.0;
+        let click_row = input.rect.row + input.rect.height * 0.5;
+        editor.handle_mouse_precise(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: click_col as u16,
+                row: click_row as u16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            0,
+            0,
+            72,
+            60,
+            click_col,
+            click_row,
+        );
+        editor.handle_mouse_precise(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                column: click_col as u16,
+                row: click_row as u16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            0,
+            0,
+            72,
+            60,
+            click_col,
+            click_row,
+        );
+        let focused_before = editor
+            .focused_widget_id()
+            .expect("browser search input should focus");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        assert!(
+            focused_widget_captures_text_input(&editor),
+            "browser search input should capture text after click"
+        );
+
+        let p_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('p'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &p_key,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "plain text input key should not be handled as a global shortcut"
+        );
+        editor.handle_key(p_key);
+        assert!(
+            focused_widget_captures_text_input(&editor),
+            "browser search input should still capture text after first edit before the next frame"
+        );
+        let i_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('i'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &i_key,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "second plain text input key should not be handled as a global shortcut"
+        );
+        editor.handle_key(i_key);
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 72, 60);
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("pi".to_string()))),
+            "browser search should accept consecutive keypresses"
+        );
+        assert_eq!(
+            editor.focused_widget_id(),
+            Some(focused_before),
+            "browser search should keep focus while typing"
+        );
+
+        refresh_sample_browser_buffer(&mut editor).expect("delayed sample browser refresh");
+        assert!(
+            focused_widget_captures_text_input(&editor),
+            "browser search input should still capture text after delayed results refresh"
+        );
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("pia".to_string()))),
+            "browser search should keep accepting text after delayed refresh"
+        );
+    }
+
+    #[test]
+    fn metal_seq_tiled_browser_search_keeps_focus_for_consecutive_typing() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor.refresh_runtime_side_effects();
+
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let samples_tile = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*samples*")
+            .expect("full grid should show samples tile");
+        let samples_layout = samples_tile
+            .frame
+            .widget_layout
+            .as_deref()
+            .expect("samples tile widget layout");
+        let input = find_layout_node_by_stable_key(samples_layout, "sbrowser-search-input")
+            .expect("browser search input");
+        let click_col = samples_tile.rect.col + input.rect.col + 1.0;
+        let click_row = samples_tile.rect.row + input.rect.row + input.rect.height * 0.5;
+
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_tiled_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: click_col as u16,
+                    row: click_row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                click_col,
+                click_row,
+                0,
+            );
+        }
+
+        assert_eq!(
+            editor.active_buffer().name,
+            "*samples*",
+            "clicking browser search should make the samples tile active"
+        );
+        let focused_before = editor
+            .focused_widget_id()
+            .expect("browser search input should focus");
+        assert!(
+            focused_widget_captures_text_input(&editor),
+            "browser search input should capture text after tiled click"
+        );
+
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('p'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            editor.active_buffer().name,
+            "*samples*",
+            "typing in browser search should keep the samples tile active before the next frame"
+        );
+        assert!(
+            focused_widget_captures_text_input(&editor),
+            "browser search input should still capture text after the first tiled edit before the next frame"
+        );
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('i'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("pi".to_string()))),
+            "tiled browser search should accept consecutive keypresses"
+        );
+        assert_eq!(
+            editor.focused_widget_id(),
+            Some(focused_before),
+            "tiled browser search should keep focus while typing"
+        );
+
+        refresh_sample_browser_buffer(&mut editor).expect("delayed sample browser refresh");
+        assert!(
+            focused_widget_captures_text_input(&editor),
+            "tiled browser search input should still capture text after delayed results refresh"
+        );
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("pia".to_string()))),
+            "tiled browser search should keep accepting text after delayed refresh"
+        );
+    }
+
+    #[test]
     fn metal_seq_browser_new_project_button_queues_host_command() {
         let mut editor = browser_editor_on_instrument_tab();
         editor

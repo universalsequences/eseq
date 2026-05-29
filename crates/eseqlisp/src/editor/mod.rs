@@ -5768,6 +5768,7 @@ impl Editor {
             self.minibuffer = None;
         }
         self.refresh_runtime_side_effects();
+        self.remap_focused_widget_after_layout_change();
         self.completion = None;
         self.mark_needs_redraw();
         true

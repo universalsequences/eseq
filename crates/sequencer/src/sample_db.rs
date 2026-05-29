@@ -231,6 +231,24 @@ impl SampleDb {
         include_tags: &[&str],
         text: Option<&str>,
     ) -> Result<Vec<SampleRow>> {
+        self.query_samples_for_browser_with_limit(include_tags, text, None)
+    }
+
+    pub fn query_samples_for_browser_limited(
+        &self,
+        include_tags: &[&str],
+        text: Option<&str>,
+        max_samples: usize,
+    ) -> Result<Vec<SampleRow>> {
+        self.query_samples_for_browser_with_limit(include_tags, text, Some(max_samples))
+    }
+
+    fn query_samples_for_browser_with_limit(
+        &self,
+        include_tags: &[&str],
+        text: Option<&str>,
+        max_samples: Option<usize>,
+    ) -> Result<Vec<SampleRow>> {
         let mut sql = String::from(
             "SELECT s.id, s.hash, s.title, s.favorited \
              FROM samples s WHERE 1 = 1",
@@ -238,6 +256,10 @@ impl SampleDb {
         let mut values = Vec::new();
         append_browser_sample_filter(&mut sql, &mut values, include_tags, text);
         sql.push_str(" ORDER BY LOWER(COALESCE(NULLIF(s.title, ''), s.hash)), s.hash");
+        if let Some(max_samples) = max_samples {
+            sql.push_str(" LIMIT ");
+            sql.push_str(&max_samples.to_string());
+        }
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
