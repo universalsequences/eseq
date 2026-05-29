@@ -9,4 +9,5 @@
 (load "metal-seq-fx/builtin/dynamics.lisp")
 (load "metal-seq-fx/builtin/tape.lisp")
 (load "metal-seq-fx/builtin/dj-mixer.lisp")
+(load "metal-seq-fx/builtin/convolution-reverb.lisp")
 (load "metal-seq-fx/builtin/audio-fx.lisp")

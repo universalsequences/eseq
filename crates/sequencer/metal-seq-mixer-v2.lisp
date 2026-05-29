@@ -22,6 +22,9 @@
     (bind-seq (str "track-selected-" i))
     0))
 
+(def mixer-v2-track-delete-target-binding (i)
+  (bind-seq (str "mixer-track-delete-target-" i)))
+
 (def mixer-v2-track-color (i)
   (if (< i (len SEQ.track-colors))
     (nth SEQ.track-colors i)
@@ -136,11 +139,6 @@
 
 (def mixer-v2-clear-delete-target ()
   (seq-clear-delete-target))
-
-(def mixer-v2-delete-target-track? (track)
-  (do
-    SEQ.delete-target-version
-    (seq-delete-target? :mixer-track (dict :track track))))
 
 (def mixer-v2-delete-target-mod-route? (source dest input)
   (do
@@ -483,17 +481,26 @@
             :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
             :color (if (nth SEQ.record-armed i) :black :dim)
             :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))
-        (button (substring (nth SEQ.track-names i) 0 10)
-          :width 9.8 :height 1.0 :padding 0 :font-size 10
-          :background-color (if (mixer-v2-delete-target-track? i)
-            :fx-panel-header-selected-bg
-            (rgba
-              (mixer-v2-track-color-r i muted)
-              (mixer-v2-track-color-g i muted)
-              (mixer-v2-track-color-b i muted)
-              1.0))
-          :color (if (mixer-v2-delete-target-track? i) :white (if muted :dim :black))
-          :on-click (lambda (event) (mixer-v2-select-track i)))))))
+        (box
+          :key (str "mixer-v2-track-label-" i)
+          :width 9.8 :height 1.0
+          :padding 0
+          :selected (mixer-v2-track-delete-target-binding i)
+          :background-color (rgba
+            (mixer-v2-track-color-r i muted)
+            (mixer-v2-track-color-g i muted)
+            (mixer-v2-track-color-b i muted)
+            1.0)
+          :selected-background-color :fx-panel-header-selected-bg
+          :on-click (lambda (event) (mixer-v2-select-track i))
+          (label (substring (nth SEQ.track-names i) 0 10)
+            :width 9.8
+            :font-size 10
+            :h-align :center
+            :color (if muted :dim :black)
+            :active (mixer-v2-track-delete-target-binding i)
+            :active-color :white
+            :bg :transparent))))))
 
 (def mixer-v2-bus-label (i)
   (if (= i 0) "Main" (nth SEQ.bus-names i)))

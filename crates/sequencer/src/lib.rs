@@ -49,6 +49,7 @@ pub mod audio;
 pub mod audiograph;
 #[allow(dead_code)]
 mod compressor;
+pub mod conv_reverb;
 pub mod crash;
 #[allow(dead_code)]
 mod delay;

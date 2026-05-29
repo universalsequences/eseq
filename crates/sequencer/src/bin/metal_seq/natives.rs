@@ -4,6 +4,7 @@ pub(crate) struct RuntimeInit {
     pub(crate) runtime: Runtime,
     pub(crate) accumulator_names: Arc<Mutex<Vec<String>>>,
     pub(crate) midi_fx_names: Arc<Mutex<Vec<String>>>,
+    pub(crate) sample_browser: Rc<RefCell<DebouncedSampleBrowser>>,
 }
 
 fn value_number_field(value: &Value, field: &str) -> Option<usize> {
@@ -618,6 +619,10 @@ pub(crate) fn init_runtime(
                 fields.push((
                     Box::leak(track_selected_field(idx).into_boxed_str()),
                     Value::Bool(idx == 0),
+                ));
+                fields.push((
+                    Box::leak(mixer_track_delete_target_field(idx).into_boxed_str()),
+                    Value::Bool(false),
                 ));
                 fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
@@ -2513,7 +2518,11 @@ pub(crate) fn init_runtime(
         ))
     });
 
-    let sample_db_for_browser = sample_db.clone();
+    let sample_browser = Rc::new(RefCell::new(DebouncedSampleBrowser::new(
+        sample_db.clone(),
+        Duration::from_millis(150),
+    )));
+    let sample_browser_for_native = sample_browser.clone();
     runtime.register_native("seq-sample-browser", move |args, _ctx| {
         let query = match args.first() {
             Some(Value::String(s)) => s.as_str(),
@@ -2521,7 +2530,9 @@ pub(crate) fn init_runtime(
         };
         let selected_tags = value_string_list(args.get(1));
         let selected_tag_refs: Vec<&str> = selected_tags.iter().map(String::as_str).collect();
-        build_sample_browser_value_from_db(&sample_db_for_browser, query, &selected_tag_refs)
+        sample_browser_for_native
+            .borrow_mut()
+            .query(query, &selected_tag_refs)
             .map_err(|error| format!("failed to query samples.db browser state: {error}"))
     });
 
@@ -2603,6 +2614,7 @@ pub(crate) fn init_runtime(
         runtime,
         accumulator_names,
         midi_fx_names,
+        sample_browser,
     }
 }
 

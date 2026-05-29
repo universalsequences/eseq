@@ -175,7 +175,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     let new_np = desc.params.len();
     let has_legacy_fixed_voice_mod_params = slot.param_node_indices.iter().any(|&node_idx| {
         node_idx >= crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE
-            && node_idx < crate::voice_modulator::MOD_PARAM_BASE
+            && node_idx < crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE_END
     });
     let has_generated_mod_params = desc
         .params

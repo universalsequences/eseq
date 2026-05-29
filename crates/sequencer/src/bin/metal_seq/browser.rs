@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use eseqlisp::vm::Value;
 
@@ -159,6 +160,132 @@ pub(crate) fn build_sample_browser_value_from_db(
         ("tags", tag_facets_to_value(&tags)),
         ("items", items),
     ]))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SampleBrowserRequest {
+    query: String,
+    selected_tags: Vec<String>,
+}
+
+impl SampleBrowserRequest {
+    fn new(query: &str, selected_tags: &[&str]) -> Self {
+        Self {
+            query: query.trim().to_string(),
+            selected_tags: selected_tags
+                .iter()
+                .map(|tag| tag.trim().to_string())
+                .filter(|tag| !tag.is_empty())
+                .collect(),
+        }
+    }
+
+    fn selected_tag_refs(&self) -> Vec<&str> {
+        self.selected_tags.iter().map(String::as_str).collect()
+    }
+}
+
+pub(crate) struct DebouncedSampleBrowser {
+    db: Rc<SampleDb>,
+    debounce: Duration,
+    last_requested: Option<SampleBrowserRequest>,
+    last_request_at: Option<Instant>,
+    last_executed: Option<SampleBrowserRequest>,
+    cached_value: Option<Value>,
+    pending_text_query: bool,
+}
+
+impl DebouncedSampleBrowser {
+    pub(crate) fn new(db: Rc<SampleDb>, debounce: Duration) -> Self {
+        Self {
+            db,
+            debounce,
+            last_requested: None,
+            last_request_at: None,
+            last_executed: None,
+            cached_value: None,
+            pending_text_query: false,
+        }
+    }
+
+    pub(crate) fn query(&mut self, query: &str, selected_tags: &[&str]) -> rusqlite::Result<Value> {
+        self.query_at(query, selected_tags, Instant::now())
+    }
+
+    pub(crate) fn poll_ready(&mut self) -> rusqlite::Result<bool> {
+        let Some(request) = self.last_requested.clone() else {
+            return Ok(false);
+        };
+        if !self.pending_text_query || self.last_executed.as_ref() == Some(&request) {
+            return Ok(false);
+        }
+        let ready_at = self.last_request_at.unwrap_or_else(Instant::now) + self.debounce;
+        if Instant::now() < ready_at {
+            return Ok(false);
+        }
+        match self.execute_request(request) {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                self.pending_text_query = false;
+                Err(error)
+            }
+        }
+    }
+
+    fn query_at(
+        &mut self,
+        query: &str,
+        selected_tags: &[&str],
+        now: Instant,
+    ) -> rusqlite::Result<Value> {
+        let request = SampleBrowserRequest::new(query, selected_tags);
+        let previous_request = self.last_requested.as_ref();
+        let request_changed = previous_request != Some(&request);
+        let query_changed =
+            previous_request.is_some_and(|previous| previous.query != request.query);
+
+        if request_changed {
+            self.pending_text_query = query_changed && !request.query.is_empty();
+            self.last_requested = Some(request.clone());
+            self.last_request_at = Some(now);
+        }
+
+        if self.last_executed.as_ref() == Some(&request) {
+            if let Some(value) = &self.cached_value {
+                return Ok(value.deep_clone());
+            }
+        }
+
+        if self.pending_text_query {
+            let ready_at = self.last_request_at.unwrap_or(now) + self.debounce;
+            if now < ready_at {
+                return Ok(self
+                    .cached_value
+                    .as_ref()
+                    .map(Value::deep_clone)
+                    .unwrap_or_else(empty_sample_browser_value));
+            }
+        }
+
+        self.execute_request(request)
+    }
+
+    fn execute_request(&mut self, request: SampleBrowserRequest) -> rusqlite::Result<Value> {
+        let selected_tag_refs = request.selected_tag_refs();
+        let value =
+            build_sample_browser_value_from_db(&self.db, &request.query, &selected_tag_refs)?;
+        self.last_executed = Some(request);
+        self.cached_value = Some(value.deep_clone());
+        self.pending_text_query = false;
+        Ok(value)
+    }
+}
+
+fn empty_sample_browser_value() -> Value {
+    map_value([
+        ("tags", Value::List(vec![])),
+        ("items", Value::List(vec![])),
+    ])
 }
 
 fn default_sample_tag_facets(db: &SampleDb, max_tags: usize) -> rusqlite::Result<Vec<TagFacet>> {
@@ -520,16 +647,17 @@ fn filter_effect_names(names: Vec<String>, query_lower: &str) -> Vec<String> {
 
 pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
     let query_lower = query.trim().to_lowercase();
-    let builtin: Vec<Value> = filter_effect_names(
+    let mut builtin_names: Vec<String> =
         sequencer::effects::EffectDescriptor::builtin_insert_names()
             .iter()
             .map(|name| (*name).to_string())
-            .collect(),
-        &query_lower,
-    )
-    .into_iter()
-    .map(|name| effect_leaf(name, "builtin-audio-effect"))
-    .collect();
+            .collect();
+    // dgenlisp-backed builtins (DSP body is dgenlisp, but added via the builtin path)
+    builtin_names.push(sequencer::conv_reverb::NAME.to_string());
+    let builtin: Vec<Value> = filter_effect_names(builtin_names, &query_lower)
+        .into_iter()
+        .map(|name| effect_leaf(name, "builtin-audio-effect"))
+        .collect();
 
     let custom: Vec<Value> =
         filter_effect_names(sequencer::lisp_effect::list_saved_effects(), &query_lower)
@@ -588,6 +716,34 @@ pub(crate) fn visible_preset_items_for_track(app: &ui::App, track: usize) -> Vec
 mod tests {
     use super::*;
 
+    fn sample_browser_db() -> Rc<SampleDb> {
+        let db = Rc::new(SampleDb::open_in_memory().expect("open db"));
+        db.connection()
+            .execute(
+                "INSERT INTO samples(hash, title) VALUES ('aaa111', 'Kick 808')",
+                [],
+            )
+            .expect("sample");
+        db.connection()
+            .execute(
+                "INSERT INTO samples(hash, title) VALUES ('bbb222', 'Kick 909')",
+                [],
+            )
+            .expect("sample");
+        db.connection()
+            .execute(
+                "INSERT INTO samples(hash, title) VALUES ('ccc333', 'Snare')",
+                [],
+            )
+            .expect("sample");
+        db.add_tag("aaa111", "kick").expect("tag");
+        db.add_tag("aaa111", "808").expect("tag");
+        db.add_tag("bbb222", "kick").expect("tag");
+        db.add_tag("bbb222", "909").expect("tag");
+        db.add_tag("ccc333", "snare").expect("tag");
+        db
+    }
+
     fn sample(hash: &str, title: Option<&str>, tags: &[&str]) -> SampleRow {
         SampleRow {
             hash: hash.to_string(),
@@ -595,6 +751,29 @@ mod tests {
             favorited: false,
             tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
         }
+    }
+
+    fn sample_browser_item_labels(value: &Value) -> Vec<String> {
+        let Value::Map(result) = value else {
+            panic!("browser result should be a map");
+        };
+        let items = result.get("items").expect("items").borrow();
+        let Value::List(items) = &*items else {
+            panic!("items should be a list");
+        };
+        items
+            .iter()
+            .filter_map(|item| {
+                let item = item.borrow();
+                let Value::Map(map) = &*item else {
+                    return None;
+                };
+                map.get("label").and_then(|label| match &*label.borrow() {
+                    Value::String(label) => Some(label.clone()),
+                    _ => None,
+                })
+            })
+            .collect()
     }
 
     #[test]
@@ -639,30 +818,7 @@ mod tests {
 
     #[test]
     fn db_sample_browser_returns_flat_items_and_adjacent_tag_chips() {
-        let db = SampleDb::open_in_memory().expect("open db");
-        db.connection()
-            .execute(
-                "INSERT INTO samples(hash, title) VALUES ('aaa111', 'Kick 808')",
-                [],
-            )
-            .expect("sample");
-        db.connection()
-            .execute(
-                "INSERT INTO samples(hash, title) VALUES ('bbb222', 'Kick 909')",
-                [],
-            )
-            .expect("sample");
-        db.connection()
-            .execute(
-                "INSERT INTO samples(hash, title) VALUES ('ccc333', 'Snare')",
-                [],
-            )
-            .expect("sample");
-        db.add_tag("aaa111", "kick").expect("tag");
-        db.add_tag("aaa111", "808").expect("tag");
-        db.add_tag("bbb222", "kick").expect("tag");
-        db.add_tag("bbb222", "909").expect("tag");
-        db.add_tag("ccc333", "snare").expect("tag");
+        let db = sample_browser_db();
 
         let Value::Map(result) =
             build_sample_browser_value_from_db(&db, "", &["kick"]).expect("browser")
@@ -695,5 +851,84 @@ mod tests {
             panic!("items should be a list");
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn debounced_sample_browser_waits_for_stable_text_query() {
+        let db = sample_browser_db();
+        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(100));
+        let start = Instant::now();
+
+        let initial = browser.query_at("", &[], start).expect("initial browser");
+        assert!(sample_browser_item_labels(&initial).is_empty());
+
+        let pending_first_char = browser
+            .query_at("k", &[], start + Duration::from_millis(10))
+            .expect("pending first char");
+        assert!(
+            sample_browser_item_labels(&pending_first_char).is_empty(),
+            "first text change should return cached browser state before querying"
+        );
+
+        let pending_second_char = browser
+            .query_at("ki", &[], start + Duration::from_millis(50))
+            .expect("pending second char");
+        assert!(
+            sample_browser_item_labels(&pending_second_char).is_empty(),
+            "new text should restart the debounce window"
+        );
+
+        let ready = browser
+            .query_at("ki", &[], start + Duration::from_millis(151))
+            .expect("debounced query");
+        assert_eq!(
+            sample_browser_item_labels(&ready),
+            vec!["Kick 808".to_string(), "Kick 909".to_string()]
+        );
+    }
+
+    #[test]
+    fn debounced_sample_browser_poll_ready_executes_pending_query() {
+        let db = sample_browser_db();
+        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(1));
+        let start = Instant::now();
+
+        browser
+            .query_at("", &[], start)
+            .expect("initial browser");
+        let pending = browser
+            .query_at("ki", &[], start + Duration::from_millis(1))
+            .expect("pending query");
+        assert!(sample_browser_item_labels(&pending).is_empty());
+
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(
+            browser.poll_ready().expect("poll pending query"),
+            "poll_ready should execute a matured pending text query"
+        );
+        let cached = browser
+            .query_at("ki", &[], start + Duration::from_millis(2))
+            .expect("cached debounced query");
+        assert_eq!(
+            sample_browser_item_labels(&cached),
+            vec!["Kick 808".to_string(), "Kick 909".to_string()]
+        );
+    }
+
+    #[test]
+    fn debounced_sample_browser_applies_tag_changes_immediately() {
+        let db = sample_browser_db();
+        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(100));
+        let start = Instant::now();
+
+        browser.query_at("", &[], start).expect("initial browser");
+        let tagged = browser
+            .query_at("", &["kick"], start + Duration::from_millis(1))
+            .expect("tagged browser");
+
+        assert_eq!(
+            sample_browser_item_labels(&tagged),
+            vec!["Kick 808".to_string(), "Kick 909".to_string()]
+        );
     }
 }

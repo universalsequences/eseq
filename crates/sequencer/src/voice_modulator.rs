@@ -10,11 +10,19 @@ pub const NUM_OUTPUTS: usize = SLOT_COUNT;
 pub const INPUT_COUNT: usize = 8;
 pub const EXT_INPUT_COUNT: usize = 4;
 
-/// Deliberately versioned away from the old fixed-source layout at 1_000_000.
-/// Old project/preset cells must not collide with the new configurable slot
-/// params and be silently interpreted as different modulation controls.
-pub const MOD_PARAM_BASE: u32 = 1_100_000;
+/// Sentinel base for modulation-source param indices: any `node_param_idx`
+/// at or above this is a modulation param routed to the modulator node, not a
+/// real effect cell. It must sit ABOVE the largest real effect `node_param_idx`
+/// (HEADER_SLOTS + cellId). Spectral effects like the Convolution Reverb need
+/// millions of state slots, so this is set far above any plausible real index
+/// (1e9 ≈ 4 GB of state — unreachable) rather than the old 1.1M.
+pub const MOD_PARAM_BASE: u32 = 1_000_000_000;
+/// Start of the frozen legacy window [1_000_000, 1_100_000) used by the very
+/// first fixed-source layout. Only consulted when migrating old projects.
 pub const LEGACY_FIXED_MOD_PARAM_BASE: u32 = 1_000_000;
+/// End (exclusive) of that frozen legacy window. Pinned to the old MOD_PARAM_BASE
+/// value so raising MOD_PARAM_BASE doesn't widen the legacy-detection range.
+pub const LEGACY_FIXED_MOD_PARAM_BASE_END: u32 = 1_100_000;
 
 const SLOT_STATE_STRIDE: usize = 8;
 const IDX_SLOT_STATE_BASE: usize = 0;

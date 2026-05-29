@@ -218,6 +218,27 @@ unsafe extern "C" fn dgenlisp_init(
     std::ptr::copy_nonoverlapping(mem as *const f32, write_mem, total_memory_slots);
 }
 
+/// Queue a bulk write of `data` into a live dgenlisp effect node's state at the
+/// given tensor `cell_offset` (from the manifest's `tensors[]`). The write lands
+/// in the read-state buffer (`HEADER_SLOTS + cell_offset`) — the same region
+/// params are written to and the buffer the DSP reads constant inputs from. The
+/// engine applies it on the audio thread at a block boundary and copies the data
+/// internally, so `data` may be freed immediately after this returns.
+pub unsafe fn queue_tensor_write(
+    lg: *mut LiveGraph,
+    node_id: i32,
+    cell_offset: usize,
+    data: &[f32],
+) -> bool {
+    audiograph::write_node_state(
+        lg,
+        node_id,
+        HEADER_SLOTS + cell_offset,
+        data.as_ptr(),
+        data.len(),
+    )
+}
+
 fn dgenlisp_vtable() -> NodeVTable {
     NodeVTable {
         process: Some(dgenlisp_wrapper_process),

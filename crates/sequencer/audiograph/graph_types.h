@@ -114,7 +114,9 @@ typedef enum {
   GE_REMOVE_WATCH,
 
   GE_CREATE_BUFFER,
-  GE_HOTSWAP_BUFFER
+  GE_HOTSWAP_BUFFER,
+
+  GE_WRITE_NODE_STATE // bulk-write a float block into a node's state memory
 
 } GraphEditOp;
 
@@ -159,6 +161,13 @@ typedef struct {
 } GEHotSwapBuffer;
 
 typedef struct {
+  int node_id;          // target node whose state to write
+  size_t dest_offset;   // destination offset into node state, in floats
+  float *source_data;   // floats to copy (caller-owned, freed after apply)
+  size_t source_count;  // number of floats in source_data
+} GEWriteNodeState;
+
+typedef struct {
   GraphEditOp op;
   uint64_t batch_serial;
   union {
@@ -191,6 +200,7 @@ typedef struct {
     } remove_watch;
     GECreateBuffer create_buffer;
     GEHotSwapBuffer hotswap_buffer;
+    GEWriteNodeState write_node_state;
   } u;
 } GraphEditCmd;
 

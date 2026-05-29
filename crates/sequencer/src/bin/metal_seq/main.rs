@@ -400,6 +400,17 @@ fn preserve_sample_browser_context_for_loaded_sample(editor: &mut Editor, path: 
     }
 }
 
+fn refresh_sample_browser_buffer(editor: &mut Editor) -> Result<(), String> {
+    editor
+        .runtime_mut()
+        .eval_str("(sbrowser-refresh-buffer)")
+        .map_err(|error| format!("{error:?}"))?;
+    editor.refresh_runtime_side_effects();
+    editor.refresh_visible_layouts_for_buffer_named("*samples*");
+    editor.mark_needs_redraw();
+    Ok(())
+}
+
 impl ActiveDeleteTarget {
     fn buffer_name(&self) -> &'static str {
         match self {
@@ -2026,15 +2037,6 @@ mod tests {
             .find_map(|child| find_layout_node_by_stable_key(child, key))
     }
 
-    fn find_track_badge_button(
-        node: &eseqlisp::layout::LayoutNode,
-    ) -> Option<&eseqlisp::layout::LayoutNode> {
-        if node.widget_type == "button" && node.rect.width >= 9.0 && node.rect.height <= 1.25 {
-            return Some(node);
-        }
-        node.children.iter().find_map(find_track_badge_button)
-    }
-
     fn visible_layout_revisions(editor: &eseqlisp::Editor) -> Vec<(String, u64)> {
         let mut revisions = editor
             .tile_root
@@ -2134,6 +2136,7 @@ mod tests {
             runtime,
             accumulator_names,
             midi_fx_names: _,
+            sample_browser: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -2245,6 +2248,11 @@ mod tests {
             sync_bus_peak_fields(rt, &cached_bus_peak_levels);
             sync_modulator_phase_fields(rt, &cached_modulator_phases);
             sync_modulator_level_fields(rt, &cached_modulator_levels);
+            sync_mixer_track_delete_target_binding_fields(
+                rt,
+                app.tracks.len(),
+                active_delete_target.lock().unwrap().as_ref(),
+            );
             rt.set_reactive(
                 "SEQ",
                 "delete-target-version",
@@ -2270,12 +2278,11 @@ mod tests {
         editor.switch_active_tile(mixer_tile_id);
         let mixer_layout = editor.widget_layout().expect("mixer active layout");
         let target_track = 1usize;
-        let target_strip = find_layout_node_by_stable_key(
+        let target_badge = find_layout_node_by_stable_key(
             &mixer_layout,
-            &format!("mixer-v2-track-{target_track}"),
+            &format!("mixer-v2-track-label-{target_track}"),
         )
-        .expect("target mixer track strip");
-        let target_badge = find_track_badge_button(target_strip).expect("target track badge");
+        .expect("target mixer track badge");
         let click_col = target_badge.rect.col + target_badge.rect.width * 0.5;
         let click_row = target_badge.rect.row + target_badge.rect.height * 0.5;
         let content_width = mixer_layout.rect.width.ceil().max(1.0) as u16;
@@ -2354,6 +2361,11 @@ mod tests {
                 "SEQ",
                 "bus-effects",
                 build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
+            );
+            sync_mixer_track_delete_target_binding_fields(
+                rt,
+                app.tracks.len(),
+                active_delete_target.lock().unwrap().as_ref(),
             );
             rt.set_reactive(
                 "SEQ",
@@ -2444,8 +2456,12 @@ mod tests {
             "sequencer should reveal the selected track from its cached layout without relayout"
         );
         assert!(
-            trace.affected_buffers.iter().any(|name| name == "*mixer*"),
-            "mixer widget tree should be affected after selecting a mixer track badge"
+            !trace.affected_buffers.iter().any(|name| name == "*mixer*"),
+            "mixer track badge selection should use widget bindings instead of rerunning the mixer widget tree"
+        );
+        assert_eq!(
+            trace.subtree_reruns, 0,
+            "track switch should not rerun mixer/sequencer subtree work for badge styling"
         );
         assert!(
             trace.widget_tree_flushes > 0,
@@ -2519,6 +2535,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime,
         accumulator_names,
         midi_fx_names: _,
+        sample_browser,
     } = init_runtime(
         &app,
         state.clone(),
@@ -2609,6 +2626,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ui_loop_stats = UiLoopStats::new();
 
     loop {
+        let sample_browser_ready = { sample_browser.borrow_mut().poll_ready() };
+        match sample_browser_ready {
+            Ok(true) => {
+                if let Err(error) = refresh_sample_browser_buffer(&mut editor) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to refresh sample browser search: {error}"
+                    )));
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to query samples.db browser state: {error}"
+                )));
+            }
+        }
         if let Some(watcher) = lisp_hot_reload_watcher.as_mut() {
             let source_revision = editor.runtime().lisp_source_revision();
             if source_revision != lisp_hot_reload_source_revision {
@@ -3118,6 +3151,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "Error re-analyzing sample: {error}"
                                 )));
                             }
+                        }
+                    }
+                    "set-convolution-reverb-ir" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        match (track, slot, path_str) {
+                            (Some(track), Some(slot), Some(path_str)) => {
+                                let path = Path::new(&path_str);
+                                let reference = path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or(path_str.as_str())
+                                    .to_string();
+                                match app.set_conv_reverb_ir(track, slot, path, &reference) {
+                                    Ok(()) => {
+                                        // Refresh the effects view so the panel label updates.
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "effects",
+                                            build_effects_value(
+                                                &state,
+                                                track,
+                                                &app.graph.effect_descriptors,
+                                                &selected_steps,
+                                            ),
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Loaded IR: {reference}"
+                                        )));
+                                    }
+                                    Err(e) => editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error loading IR: {e}"
+                                    ))),
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "set-convolution-reverb-ir: need track, slot, path".to_string(),
+                            )),
                         }
                     }
                     "load-sample-into-track" => {
@@ -10529,6 +10602,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "SEQ",
                     "delete-target-version",
                     Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
+                );
+                sync_mixer_track_delete_target_binding_fields(
+                    rt,
+                    app.tracks.len(),
+                    active_delete_target.lock().unwrap().as_ref(),
                 );
                 let armed = record_armed.lock().unwrap();
                 let record_armed_changed = armed.len() != app.graph.record_armed.len()

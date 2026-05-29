@@ -169,6 +169,27 @@ pub(crate) fn track_selected_field(track: usize) -> String {
     format!("track-selected-{track}")
 }
 
+pub(crate) fn mixer_track_delete_target_field(track: usize) -> String {
+    format!("mixer-track-delete-target-{track}")
+}
+
+pub(crate) fn sync_mixer_track_delete_target_binding_fields(
+    rt: &mut Runtime,
+    track_count: usize,
+    active_delete_target: Option<&ActiveDeleteTarget>,
+) {
+    for track in 0..track_count {
+        rt.set_reactive(
+            "SEQ",
+            &mixer_track_delete_target_field(track),
+            Value::Bool(matches!(
+                active_delete_target,
+                Some(ActiveDeleteTarget::MixerTrack { track: selected }) if *selected == track
+            )),
+        );
+    }
+}
+
 pub(crate) fn sync_track_selection_binding_fields(
     rt: &mut Runtime,
     track_count: usize,
@@ -2337,11 +2358,26 @@ pub(crate) fn build_effects_value(
             slot_map.insert(
                 "builtin".to_string(),
                 Rc::new(RefCell::new(Value::Bool(
-                    sequencer::effects::EffectDescriptor::builtin_insert(&desc.name).is_some(),
+                    sequencer::effects::EffectDescriptor::builtin_insert(&desc.name).is_some()
+                        || sequencer::conv_reverb::is_dgen_builtin(&desc.name),
                 ))),
             );
 
             let slot = chain.get(slot_idx);
+
+            // Convolution Reverb: surface the current IR's display name for the
+            // panel label (keyed by the live node id).
+            if sequencer::conv_reverb::is_dgen_builtin(&desc.name) {
+                let node_id = slot
+                    .map(|s| s.node_id.load(Ordering::Relaxed) as i32)
+                    .unwrap_or(0);
+                let ir_name = sequencer::conv_reverb::ir_name_for(node_id)
+                    .unwrap_or_else(|| "No IR".to_string());
+                slot_map.insert(
+                    "ir-name".to_string(),
+                    Rc::new(RefCell::new(Value::String(ir_name))),
+                );
+            }
             let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
             for target in desc
                 .instrument_modulation_targets
@@ -2787,9 +2823,24 @@ pub(crate) fn build_bus_effects_value_for_selection(
                         "builtin".to_string(),
                         Rc::new(RefCell::new(Value::Bool(
                             sequencer::effects::EffectDescriptor::builtin_insert(&desc.name)
-                                .is_some(),
+                                .is_some()
+                                || sequencer::conv_reverb::is_dgen_builtin(&desc.name),
                         ))),
                     );
+                    // Convolution Reverb: surface the current IR name for the label.
+                    if sequencer::conv_reverb::is_dgen_builtin(&desc.name) {
+                        let node_id = bus
+                            .effect_slots
+                            .get(slot_idx)
+                            .map(|s| s.node_id as i32)
+                            .unwrap_or(0);
+                        let ir_name = sequencer::conv_reverb::ir_name_for(node_id)
+                            .unwrap_or_else(|| "No IR".to_string());
+                        slot_map.insert(
+                            "ir-name".to_string(),
+                            Rc::new(RefCell::new(Value::String(ir_name))),
+                        );
+                    }
 
                     let params: Vec<Rc<RefCell<Value>>> = desc
                         .params
@@ -4111,11 +4162,15 @@ pub(crate) fn build_available_effects() -> Value {
 }
 
 pub(crate) fn build_available_builtin_effects() -> Value {
-    let items: Vec<Rc<RefCell<Value>>> =
+    let mut items: Vec<Rc<RefCell<Value>>> =
         sequencer::effects::EffectDescriptor::builtin_insert_names()
             .iter()
             .map(|name| Rc::new(RefCell::new(Value::String((*name).to_string()))))
             .collect();
+    // dgenlisp-backed builtins (added through the builtin path, DSP is dgenlisp)
+    items.push(Rc::new(RefCell::new(Value::String(
+        sequencer::conv_reverb::NAME.to_string(),
+    ))));
     Value::List(items)
 }
 
@@ -16848,9 +16903,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec![
-                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
-            ]
+            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
         );
     }
 
@@ -18319,6 +18372,8 @@ mod tests {
                 ("track-colors", test_track_colors()),
                 ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
+                ("track-selected-0", Value::Bool(true)),
+                ("track-selected-1", Value::Bool(false)),
                 ("delete-target-version", Value::Number(0.0)),
                 (
                     "record-armed",
@@ -18403,6 +18458,8 @@ mod tests {
                 ("track-0-bus-2-send", Value::Number(0.0)),
                 ("track-1-bus-1-send", Value::Number(0.0)),
                 ("track-1-bus-2-send", Value::Number(0.0)),
+                ("mixer-track-delete-target-0", Value::Bool(false)),
+                ("mixer-track-delete-target-1", Value::Bool(false)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("track-peak-1", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
@@ -18514,6 +18571,12 @@ mod tests {
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &track_selected_field(0), Value::Bool(false));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &track_selected_field(1), Value::Bool(true));
         editor
             .runtime_mut()
             .eval_str("(mixer-v2-select-next-channel)")
@@ -18824,13 +18887,10 @@ mod tests {
         editor
             .runtime_mut()
             .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(mixer-v2-delete-target-track? 0)")
-                .expect("query mixer delete target"),
-            Some(Value::Bool(true)),
-            "mixer delete target predicate should match selected track"
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &mixer_track_delete_target_field(0),
+            Value::Bool(true),
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -18869,7 +18929,8 @@ mod tests {
             Some(Value::Bool(false)),
             "track controls should clear active delete target instead of claiming track deletion"
         );
-        let track_label = find_button_by_text(&layout, "kick").expect("track label button");
+        let track_label =
+            find_node_by_stable_key(&layout, "mixer-v2-track-label-0").expect("track label box");
         let track_label_callback = track_label
             .props
             .get("on-click")
@@ -18895,19 +18956,30 @@ mod tests {
         editor
             .runtime_mut()
             .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &mixer_track_delete_target_field(0),
+            Value::Bool(true),
+        );
         editor.refresh_runtime_side_effects();
         let selected_layout = editor
             .widget_layout()
             .expect("selected mixer layout should be available");
         let selected_track_label =
-            find_button_by_text(&selected_layout, "kick").expect("selected track label button");
+            find_node_by_stable_key(&selected_layout, "mixer-v2-track-label-0")
+                .expect("selected track label box");
         assert!(
             selected_track_label.rect.width > 0.0 && selected_track_label.rect.height > 0.0,
             "active mixer delete-target badge should have a finite visible rect: {:?}",
             selected_track_label.rect
         );
         assert_eq!(
-            selected_track_label.props.get("background-color"),
+            layout_prop_bool(selected_track_label, "selected"),
+            Some(true),
+            "active mixer delete-target badge should use the bound selected state"
+        );
+        assert_eq!(
+            selected_track_label.props.get("selected-background-color"),
             Some(&Value::Keyword("fx-panel-header-selected-bg".to_string())),
             "active mixer delete-target badge should use the selected FX header color path"
         );

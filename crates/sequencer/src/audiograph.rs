@@ -115,6 +115,17 @@ extern "C" {
         source_data: *const f32,
     ) -> c_int;
 
+    // Bulk-write a block of floats into a node's state memory at dest_offset
+    // (in floats). Queued and applied on the audio thread at a block boundary;
+    // source_data is copied internally, so the caller may free it immediately.
+    pub fn write_node_state(
+        lg: *mut LiveGraph,
+        node_id: c_int,
+        dest_offset: usize,
+        source_data: *const f32,
+        count: usize,
+    ) -> bool;
+
     // Built-in node factories
     pub fn live_add_gain(lg: *mut LiveGraph, gain_value: f32, name: *const c_char) -> c_int;
 

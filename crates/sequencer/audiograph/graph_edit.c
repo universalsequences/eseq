@@ -550,6 +550,25 @@ bool apply_hotswap_buffer(LiveGraph *lg, int buffer_id, int new_size,
   return true;
 }
 
+// Bulk-write a float block into a node's state memory. Bounds-checked against
+// the node's allocated state size. Applied on the audio thread at a safe point.
+bool apply_write_node_state(LiveGraph *lg, int node_id, size_t dest_offset,
+                            const float *source_data, size_t count) {
+  if (node_id < 0 || node_id >= lg->node_capacity || !source_data) {
+    return false;
+  }
+  RTNode *node = &lg->nodes[node_id];
+  if (!node->state || node->state_size == 0) {
+    return false;
+  }
+  size_t cap_floats = node->state_size / sizeof(float);
+  if (dest_offset > cap_floats || count > cap_floats - dest_offset) {
+    return false; // out of bounds
+  }
+  memcpy((float *)node->state + dest_offset, source_data, count * sizeof(float));
+  return true;
+}
+
 // to be called from block-boundary (i.e. before each block is executed)
 bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
   GraphEditCmd cmd;
@@ -656,6 +675,16 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
       // Free the copied source data after apply
       if (cmd.u.hotswap_buffer.source_data) {
         free(cmd.u.hotswap_buffer.source_data);
+      }
+      break;
+    case GE_WRITE_NODE_STATE:
+      ok = apply_write_node_state(lg, cmd.u.write_node_state.node_id,
+                                  cmd.u.write_node_state.dest_offset,
+                                  cmd.u.write_node_state.source_data,
+                                  cmd.u.write_node_state.source_count);
+      // Free the copied source data after apply
+      if (cmd.u.write_node_state.source_data) {
+        free(cmd.u.write_node_state.source_data);
       }
       break;
     default: {

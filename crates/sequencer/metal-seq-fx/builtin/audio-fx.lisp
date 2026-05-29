@@ -15,4 +15,6 @@
               (builtin-fx-limiter-ui fx)
               (if (= (get fx :name) "Tape")
                 (builtin-fx-tape-ui fx)
-                false))))))))
+                (if (= (get fx :name) "Convolution Reverb")
+                  (builtin-fx-convolution-reverb-ui fx)
+                  false)))))))))
