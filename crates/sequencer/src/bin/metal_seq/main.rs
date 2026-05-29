@@ -3679,6 +3679,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         editor.handle_host_event(HostEvent::Status("New project".to_string()));
                     }
                     "save-project" => {
+                        let _ = current_track_for_app(&mut app, &current_track);
                         let requested_name = if let Value::Map(ref map) = payload {
                             map.get("name").and_then(|cell| match &*cell.borrow() {
                                 Value::String(name) => Some(name.clone()),
@@ -9461,7 +9462,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         track_names = app.tracks.clone();
-                        current_track.store(0, Ordering::Relaxed);
+                        let restored_track = if app.tracks.is_empty() {
+                            0
+                        } else {
+                            app.ui.cursor_track.min(app.tracks.len() - 1)
+                        };
+                        current_track.store(restored_track, Ordering::Relaxed);
+                        app.ui.cursor_track = restored_track;
                         {
                             let mut pan_ids = track_pan_ids.lock().unwrap();
                             *pan_ids = app

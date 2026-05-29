@@ -10,7 +10,9 @@ use crate::project::{
     ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
     ProjectScratchState, ProjectTrack,
 };
-use crate::sequencer::{BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS};
+use crate::sequencer::{
+    BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
+};
 
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
 
@@ -160,6 +162,74 @@ fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
             pattern.effect_slots[track_idx] = migrated_slots;
         }
     }
+}
+
+fn project_builtin_effect_name_for_save(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    crate::effects::EffectDescriptor::builtin_insert_project_name(trimmed).or_else(|| {
+        crate::conv_reverb::is_dgen_builtin(trimmed).then(|| {
+            format!(
+                "{}{}",
+                crate::effects::EffectDescriptor::BUILTIN_INSERT_PREFIX,
+                crate::conv_reverb::NAME
+            )
+        })
+    })
+}
+
+fn project_builtin_effect_name_for_load(name: &str) -> Option<String> {
+    if let Some(builtin_name) =
+        crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name)
+    {
+        return Some(builtin_name.to_string());
+    }
+    let stripped = name
+        .trim()
+        .strip_prefix(crate::effects::EffectDescriptor::BUILTIN_INSERT_PREFIX)?
+        .trim();
+    crate::conv_reverb::is_dgen_builtin(stripped).then(|| crate::conv_reverb::NAME.to_string())
+}
+
+fn migrate_dgen_builtin_effect_names(project: &mut ProjectFile) {
+    fn migrate_name(name: &mut Option<String>) {
+        let Some(raw_name) = name.as_deref() else {
+            return;
+        };
+        if crate::conv_reverb::is_dgen_builtin(raw_name.trim()) {
+            *name = project_builtin_effect_name_for_save(raw_name);
+        }
+    }
+
+    for track_effects in &mut project.custom_effects {
+        for name in track_effects {
+            migrate_name(name);
+        }
+    }
+    for bus in &mut project.buses {
+        for name in &mut bus.custom_effects {
+            migrate_name(name);
+        }
+    }
+}
+
+fn resolve_project_current_track(
+    saved_current_track: Option<usize>,
+    track_count: usize,
+    current_pattern_track_bits: Option<&[[u64; TRACK_PATTERN_WORDS]]>,
+) -> usize {
+    if track_count == 0 {
+        return 0;
+    }
+    saved_current_track
+        .or_else(|| {
+            current_pattern_track_bits.and_then(|track_bits| {
+                track_bits
+                    .iter()
+                    .position(|bits| bits.iter().any(|word| *word != 0))
+            })
+        })
+        .unwrap_or(0)
+        .min(track_count - 1)
 }
 
 fn project_custom_instrument_slot_into_synced_snapshot(
@@ -449,7 +519,15 @@ impl From<BusChannelState> for ProjectBusChannel {
             mute: value.mute,
             solo: value.solo,
             gate_sequence: project_bus_gate_sequence_from_ui(&value.gate_sequence),
-            custom_effects: value.custom_effect_names,
+            custom_effects: value
+                .custom_effect_names
+                .into_iter()
+                .map(|name| {
+                    name.and_then(|name| {
+                        project_builtin_effect_name_for_save(&name).or_else(|| Some(name))
+                    })
+                })
+                .collect(),
             effect_slots: value
                 .effect_slots
                 .iter()
@@ -687,6 +765,7 @@ impl App {
             return Err(format!("Unsupported project version {}", project.version));
         }
         migrate_legacy_default_track_effects(&mut project);
+        migrate_dgen_builtin_effect_names(&mut project);
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
             name: name.to_string(),
@@ -831,6 +910,11 @@ impl App {
     fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
         let num_tracks = self.tracks.len();
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_track = if num_tracks == 0 {
+            0
+        } else {
+            self.ui.cursor_track.min(num_tracks - 1)
+        };
 
         {
             let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
@@ -911,6 +995,7 @@ impl App {
                 self.state.transport.master_volume.load(Ordering::Relaxed),
             ),
             current_pattern,
+            current_track: Some(current_track),
             reverb: ProjectReverbState {
                 size: self.ui.reverb_size,
                 brightness: self.ui.reverb_brightness,
@@ -990,7 +1075,7 @@ impl App {
                             if name.is_empty() {
                                 None
                             } else if let Some(project_name) =
-                                crate::effects::EffectDescriptor::builtin_insert_project_name(&name)
+                                project_builtin_effect_name_for_save(&name)
                             {
                                 Some(project_name)
                             } else {
@@ -1196,14 +1281,12 @@ impl App {
                             effect_name
                         );
                         if let Some(builtin_name) =
-                            crate::effects::EffectDescriptor::strip_builtin_insert_project_name(
-                                effect_name,
-                            )
+                            project_builtin_effect_name_for_load(effect_name)
                         {
                             self.load_builtin_effect_to_slot_sync(
                                 track_idx,
                                 BUILTIN_SLOT_COUNT + offset,
-                                builtin_name,
+                                &builtin_name,
                             )?;
                         } else {
                             self.load_saved_effect_to_slot_sync(
@@ -1283,6 +1366,7 @@ impl App {
             bpm,
             master_volume,
             current_pattern: saved_current_pattern,
+            current_track: saved_current_track,
             reverb,
             buses,
             scratch,
@@ -1293,6 +1377,12 @@ impl App {
         let bank = pending.built_patterns;
         let mut bus_pattern_bank = pending.built_bus_patterns;
         let current_pattern = saved_current_pattern.min(bank.len().saturating_sub(1));
+        let current_track = resolve_project_current_track(
+            saved_current_track,
+            self.tracks.len(),
+            bank.get(current_pattern)
+                .map(|snapshot| snapshot.track_bits.as_slice()),
+        );
         self.normalize_track_colors();
 
         {
@@ -1360,10 +1450,8 @@ impl App {
                 .collect();
         for (bus_idx, slot_idx, name, saved_slot) in saved_bus_effects {
             let saved_ir = saved_slot.ir.clone();
-            if let Some(builtin_name) =
-                crate::effects::EffectDescriptor::strip_builtin_insert_project_name(&name)
-            {
-                self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, builtin_name)?;
+            if let Some(builtin_name) = project_builtin_effect_name_for_load(&name) {
+                self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, &builtin_name)?;
             } else {
                 self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, &name)?;
             }
@@ -1427,7 +1515,7 @@ impl App {
         }
         self.publish_bus_gate_runtime();
 
-        self.ui.cursor_track = 0;
+        self.ui.cursor_track = current_track;
         self.ui.cursor_step = 0;
         self.ui.pattern_page = current_pattern / 10;
         self.ui.focused_region = if self.tracks.is_empty() {
@@ -1899,6 +1987,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn missing_project_current_track_uses_first_non_empty_track() {
+        let mut track_bits = vec![[0; TRACK_PATTERN_WORDS]; 3];
+        track_bits[2][0] = 1;
+
+        assert_eq!(resolve_project_current_track(None, 3, Some(&track_bits)), 2);
+        assert_eq!(
+            resolve_project_current_track(Some(1), 3, Some(&track_bits)),
+            1
+        );
+        assert_eq!(
+            resolve_project_current_track(Some(99), 3, Some(&track_bits)),
+            2
+        );
+        assert_eq!(resolve_project_current_track(None, 3, None), 0);
+        assert_eq!(resolve_project_current_track(None, 0, Some(&track_bits)), 0);
+    }
+
+    #[test]
+    fn convolution_reverb_project_names_are_treated_as_builtin() {
+        let project_name = format!(
+            "{}{}",
+            EffectDescriptor::BUILTIN_INSERT_PREFIX,
+            crate::conv_reverb::NAME
+        );
+        assert_eq!(
+            project_builtin_effect_name_for_save(crate::conv_reverb::NAME),
+            Some(project_name.clone())
+        );
+        assert_eq!(
+            project_builtin_effect_name_for_load(&project_name),
+            Some(crate::conv_reverb::NAME.to_string())
+        );
+
+        let mut project = minimal_project_with_effect_slots(
+            vec![Some(crate::conv_reverb::NAME.to_string())],
+            Vec::new(),
+        );
+        project.buses = project::default_project_buses();
+        project.buses[1].custom_effects.resize(1, None);
+        project.buses[1].custom_effects[0] = Some(crate::conv_reverb::NAME.to_string());
+        migrate_dgen_builtin_effect_names(&mut project);
+
+        assert_eq!(project.custom_effects[0][0], Some(project_name.clone()));
+        assert_eq!(project.buses[1].custom_effects[0], Some(project_name));
+    }
+
     fn minimal_project_with_effect_slots(
         custom_effects: Vec<Option<String>>,
         effect_slots: Vec<project::ProjectEffectSlot>,
@@ -1909,6 +2044,7 @@ mod tests {
             bpm: 120,
             master_volume: 1.0,
             current_pattern: 0,
+            current_track: Some(0),
             reverb: ProjectReverbState {
                 size: 0.2,
                 brightness: 0.8,

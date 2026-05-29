@@ -21,6 +21,8 @@ pub struct ProjectFile {
     #[serde(default = "default_master_volume")]
     pub master_volume: f32,
     pub current_pattern: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_track: Option<usize>,
     pub reverb: ProjectReverbState,
     #[serde(default = "default_project_buses")]
     pub buses: Vec<ProjectBusChannel>,
@@ -1175,7 +1177,8 @@ mod tests {
             name: "roundtrip".to_string(),
             bpm: 120,
             master_volume: 1.0,
-            current_pattern: 1,
+            current_pattern: 0,
+            current_track: Some(1),
             reverb: ProjectReverbState {
                 size: 0.2,
                 brightness: 0.8,
@@ -1289,9 +1292,21 @@ mod tests {
                         dirty: true,
                     },
                 ],
-                chord_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
-                chord_duration_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
-                chord_delay_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
+                chord_snapshots: {
+                    let mut snapshots = vec![vec![Vec::new(); 256], vec![Vec::new(); 256]];
+                    snapshots[1][3] = vec![60.0, 64.0, 67.0];
+                    snapshots
+                },
+                chord_duration_snapshots: {
+                    let mut snapshots = vec![vec![Vec::new(); 256], vec![Vec::new(); 256]];
+                    snapshots[1][3] = vec![1.0, 0.75, 0.5];
+                    snapshots
+                },
+                chord_delay_snapshots: {
+                    let mut snapshots = vec![vec![Vec::new(); 256], vec![Vec::new(); 256]];
+                    snapshots[1][3] = vec![0.0, 0.25, 0.5];
+                    snapshots
+                },
                 timebase_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_resolution_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
@@ -1319,6 +1334,8 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize current project");
 
         assert_eq!(restored.name, project.name);
+        assert_eq!(restored.current_pattern, project.current_pattern);
+        assert_eq!(restored.current_track, project.current_track);
         assert_eq!(restored.scratch.buffer, project.scratch.buffer);
         assert_eq!(restored.scratch.cursor_row, project.scratch.cursor_row);
         assert_eq!(restored.scratch.cursor_col, project.scratch.cursor_col);
@@ -1334,6 +1351,18 @@ mod tests {
         assert_eq!(restored.patterns[0].track_bits[0], [0b1011, 0, 0, 0]);
         assert_eq!(restored.patterns[0].track_bits[1], [0b0101, 1, 0, 0]);
         assert_eq!(restored.patterns[0].step_data[0].len(), 256);
+        assert_eq!(
+            restored.patterns[0].chord_snapshots[1][3],
+            vec![60.0, 64.0, 67.0]
+        );
+        assert_eq!(
+            restored.patterns[0].chord_duration_snapshots[1][3],
+            vec![1.0, 0.75, 0.5]
+        );
+        assert_eq!(
+            restored.patterns[0].chord_delay_snapshots[1][3],
+            vec![0.0, 0.25, 0.5]
+        );
         assert_eq!(restored.patterns[0].timebase_plock_snapshots[0].len(), 256);
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);
@@ -1358,6 +1387,34 @@ mod tests {
             restored.patterns[0].track_params[0].sends[0].destination,
             crate::sequencer::DEFAULT_BUS_B_ID
         );
+    }
+
+    #[test]
+    fn current_pattern_current_track_and_note_delays_roundtrip() {
+        let mut project = sample_project();
+        let current_pattern = project.patterns[0].clone();
+        let mut previous_pattern = current_pattern.clone();
+        previous_pattern.track_bits =
+            vec![[0; TRACK_PATTERN_WORDS]; previous_pattern.track_bits.len()];
+        previous_pattern.chord_snapshots =
+            vec![vec![Vec::new(); MAX_STEPS]; previous_pattern.chord_snapshots.len()];
+        previous_pattern.chord_duration_snapshots =
+            vec![vec![Vec::new(); MAX_STEPS]; previous_pattern.chord_duration_snapshots.len()];
+        previous_pattern.chord_delay_snapshots =
+            vec![vec![Vec::new(); MAX_STEPS]; previous_pattern.chord_delay_snapshots.len()];
+
+        project.patterns = vec![previous_pattern, current_pattern];
+        project.current_pattern = 1;
+        project.current_track = Some(1);
+
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let current = &restored.patterns[restored.current_pattern];
+
+        assert_eq!(restored.current_track, Some(1));
+        assert_eq!(current.track_bits[1], [0b0101, 1, 0, 0]);
+        assert_eq!(current.chord_snapshots[1][3], vec![60.0, 64.0, 67.0]);
+        assert_eq!(current.chord_delay_snapshots[1][3], vec![0.0, 0.25, 0.5]);
     }
 
     #[test]
@@ -1405,6 +1462,7 @@ mod tests {
 
         let project: ProjectFile = serde_json::from_str(json).expect("deserialize legacy project");
         let step = project.patterns[0].step_data[0][0];
+        assert_eq!(project.current_track, None);
         assert_eq!(step[crate::sequencer::StepParam::Transpose.index()], 7.0);
         assert_eq!(step[crate::sequencer::StepParam::Pan.index()], 0.0);
         assert_eq!(step[crate::sequencer::StepParam::Chop.index()], 1.0);

@@ -432,6 +432,13 @@ pub struct MetalQuadPrimitive {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub struct MetalTrianglePrimitive {
+    pub points: [[f32; 2]; 3],
+    pub color: Color,
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct MetalGlyphRunPrimitive {
     pub row: f32,
@@ -551,6 +558,7 @@ pub enum MetalPrimitive {
     /// cables or other canvas geometry.
     ForegroundRect(MetalRectPrimitive),
     Quad(MetalQuadPrimitive),
+    Triangle(MetalTrianglePrimitive),
     GlyphRun(MetalGlyphRunPrimitive),
     ProportionalText(MetalProportionalTextPrimitive),
     PatchCable(MetalPatchCablePrimitive),
@@ -2019,6 +2027,11 @@ fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetVi
         MetalPrimitive::Rect(r) => r.rect.row += dy,
         MetalPrimitive::ForegroundRect(r) => r.rect.row += dy,
         MetalPrimitive::Quad(q) => q.y += dy,
+        MetalPrimitive::Triangle(t) => {
+            for point in &mut t.points {
+                point[1] += dy;
+            }
+        }
         MetalPrimitive::GlyphRun(g) => g.row += dy,
         MetalPrimitive::ProportionalText(t) => t.row += dy,
         MetalPrimitive::PatchCable(c) => {
@@ -2264,6 +2277,17 @@ mod tests {
                 quad.width.to_bits(),
                 quad.height.to_bits(),
                 color_token(quad.color)
+            ),
+            MetalPrimitive::Triangle(triangle) => format!(
+                "tri:{}:{}",
+                triangle
+                    .points
+                    .iter()
+                    .flat_map(|point| point.iter())
+                    .map(|value| format!("{:08x}", value.to_bits()))
+                    .collect::<Vec<_>>()
+                    .join(":"),
+                color_token(triangle.color)
             ),
             MetalPrimitive::GlyphRun(run) => format!(
                 "glyph:{:08x}:{}:{}:{}:{}",

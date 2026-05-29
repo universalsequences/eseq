@@ -6,8 +6,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive,
-    MetalRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetInstance,
-    WidgetKeyEvent, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
+    MetalRectPrimitive, MetalTrianglePrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
+    WidgetInstance, WidgetKeyEvent, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
     time_view::{TimeRuler, TimeRulerMode, TimeViewport},
 };
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
@@ -314,14 +314,15 @@ impl WidgetDefinition for TimelineWidget {
         }
 
         if let Some(cursor_col) = view.cursor_col() {
-            if view.header_height > 0.0 && rect.row < rect.row + rect.height {
+            if content.height > 0.0 {
+                let marker_row = content.row.round() as u16;
                 buf.set(
-                    rect.row.round() as u16,
+                    marker_row,
                     cursor_col,
-                    styled_cell('|', theme::CURSOR(), Some(theme::STATUS_BG())),
+                    styled_cell('▼', theme::CURSOR(), None),
                 );
             }
-            for row_offset in 0..(content.height.round() as u16) {
+            for row_offset in 1..(content.height.round() as u16) {
                 let row = content.row.round() as u16 + row_offset;
                 buf.set(row, cursor_col, styled_cell('|', theme::CURSOR(), None));
             }
@@ -792,22 +793,30 @@ fn build_metal_primitives(
     }
 
     if let Some(cursor_x) = view.metal_cursor_x() {
-        if view.header_height > 0.0 {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                x: cursor_x - 0.0625,
-                y: rect.row,
-                width: 0.125,
-                height: view.header_height,
+        let line_width = (1.0 / viewport.cell_w).max(0.08);
+        let marker_width = (8.0 / viewport.cell_w).max(line_width * 4.0);
+        let marker_height = (5.0 / viewport.cell_h).max(0.28).min(content.height);
+        if marker_height > 0.0 {
+            primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+                points: [
+                    [cursor_x - marker_width * 0.5, content.row],
+                    [cursor_x + marker_width * 0.5, content.row],
+                    [cursor_x, content.row + marker_height],
+                ],
                 color: theme::CURSOR(),
             }));
         }
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x: cursor_x - 0.0625,
-            y: content.row,
-            width: 0.125,
-            height: content.height,
-            color: theme::CURSOR(),
-        }));
+        let line_y = content.row + marker_height;
+        let line_height = (content.row + content.height - line_y).max(0.0);
+        if line_height > 0.0 {
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: cursor_x - line_width * 0.5,
+                y: line_y,
+                width: line_width,
+                height: line_height,
+                color: theme::CURSOR(),
+            }));
+        }
     }
 
     if let Some((x, y, width, height)) = view.unavailable_rect() {
@@ -2943,6 +2952,79 @@ mod tests {
         assert_eq!(
             map.get("time").map(|value| value.borrow().clone()),
             Some(Value::Number(4.5))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_cursor_marker_starts_below_ruler_with_triangle_marker() {
+        let props = HashMap::from([
+            ("cursor-time".to_string(), number_value(4.0)),
+            ("header-height".to_string(), number_value(2.0)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(8.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 192.0,
+            height: 12.0,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "timeline".to_string(),
+            rect,
+            props,
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        let primitives = build_metal_primitives(&node, viewport);
+        let triangle = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                MetalPrimitive::Triangle(triangle) if triangle.color == theme::CURSOR() => {
+                    Some(*triangle)
+                }
+                _ => None,
+            })
+            .expect("cursor triangle");
+        assert_eq!(triangle.points[0][1], 2.0);
+        assert_eq!(triangle.points[1][1], 2.0);
+
+        let line = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                MetalPrimitive::Quad(quad)
+                    if ((quad.x + quad.width * 0.5) - triangle.points[2][0]).abs() < 0.001
+                        && (quad.y - triangle.points[2][1]).abs() < 0.001 =>
+                {
+                    Some(*quad)
+                }
+                _ => None,
+            })
+            .expect("cursor line");
+        assert!(line.y > 2.0, "line should start below marker tip");
+        assert!(
+            line.height < rect.height - 2.0,
+            "line should not extend into the ruler"
         );
     }
 
