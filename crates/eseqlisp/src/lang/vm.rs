@@ -2808,6 +2808,61 @@ impl VM {
         }
     }
 
+    pub fn update_reactive_global_list_index(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        index: usize,
+        value: Value,
+    ) {
+        let idx = self.ensure_global(namespace);
+        if idx >= self.globals.len() {
+            self.globals.resize(idx + 1, None);
+        }
+
+        let set_index = |map: &mut HashMap<String, Rc<RefCell<Value>>>| {
+            let slot = map
+                .entry(field.to_string())
+                .or_insert_with(|| Rc::new(RefCell::new(Value::List(Vec::new()))));
+            let mut borrowed = slot.borrow_mut();
+            match &mut *borrowed {
+                Value::List(items) => {
+                    while items.len() <= index {
+                        items.push(Rc::new(RefCell::new(Value::Nil)));
+                    }
+                    *items[index].borrow_mut() = value.clone();
+                }
+                other => {
+                    let mut items = Vec::with_capacity(index + 1);
+                    for _ in 0..index {
+                        items.push(Rc::new(RefCell::new(Value::Nil)));
+                    }
+                    items.push(Rc::new(RefCell::new(value.clone())));
+                    *other = Value::List(items);
+                }
+            }
+        };
+
+        match self.globals.get_mut(idx) {
+            Some(Some(existing)) => {
+                let mut borrowed = existing.borrow_mut();
+                if let Value::Map(map) = &mut *borrowed {
+                    set_index(map);
+                } else {
+                    let mut map = HashMap::new();
+                    set_index(&mut map);
+                    *borrowed = Value::Map(map);
+                }
+            }
+            Some(slot @ None) => {
+                let mut map = HashMap::new();
+                set_index(&mut map);
+                *slot = Some(Rc::new(RefCell::new(Value::Map(map))));
+            }
+            None => {}
+        }
+    }
+
     fn current_reactive_value(&self, namespace: &str, field: &str) -> Value {
         self.global_value(namespace)
             .and_then(|value| match value {
@@ -2823,7 +2878,7 @@ impl VM {
         }
 
         let id = self.dag.alloc_id();
-        let value = self.current_reactive_value(namespace, field);
+        let value = self.current_reactive_value(namespace, field).deep_clone();
         let source = ReactiveSource::NamespaceField {
             namespace: namespace.to_string(),
             field: field.to_string(),
@@ -2882,7 +2937,7 @@ impl VM {
             if *current_value == value {
                 return;
             }
-            *current_value = value;
+            *current_value = value.deep_clone();
             let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
             for dependent in dependents {
                 self.dag.mark_dirty(dependent);

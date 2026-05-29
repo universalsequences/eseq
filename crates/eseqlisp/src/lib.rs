@@ -3038,4 +3038,95 @@ mod tests {
             .unwrap();
         assert_eq!(result, Value::Number(42.0));
     }
+
+    #[test]
+    fn set_reactive_list_index_updates_only_target_slot_value() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive(
+            "APP",
+            vec![(
+                "values",
+                Value::List(vec![
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                    Rc::new(RefCell::new(Value::Number(2.0))),
+                    Rc::new(RefCell::new(Value::Number(3.0))),
+                ]),
+            )],
+            true,
+        );
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (h-stack
+                    (mixer-meter
+                      :level-l (bind-nth "APP" "values" 0)
+                      :level-r 0.0
+                      :width 2.22 :height 4.24)
+                    (mixer-meter
+                      :level-l (bind-nth "APP" "values" 1)
+                      :level-r 0.0
+                      :width 2.22 :height 4.24)))
+                "#,
+            )
+            .expect("install indexed binding effect");
+        let layout = runtime.current_layout.as_ref().expect("bound meter layout");
+        let second_meter_id = layout.children[1].widget_id;
+        let _ = runtime.take_dirty_widget_ids();
+        let _ = runtime.drain_rendered_layouts();
+
+        runtime.set_reactive_list_index("APP", "values", 1, Value::Number(0.75));
+        assert_eq!(runtime.take_dirty_widget_ids(), vec![second_meter_id]);
+        runtime.run_reactive_cycle();
+
+        let result = runtime.eval_str("APP.values").unwrap().unwrap();
+        let Value::List(items) = result else {
+            panic!("expected APP.values to remain a list, got {result:?}");
+        };
+        assert_eq!(items[0].borrow().clone(), Value::Number(1.0));
+        assert_eq!(items[1].borrow().clone(), Value::Number(0.75));
+        assert_eq!(items[2].borrow().clone(), Value::Number(3.0));
+        assert!(
+            runtime.drain_rendered_layouts().is_empty(),
+            "indexed binding-only partial writes must not rerun effects"
+        );
+    }
+
+    #[test]
+    fn set_reactive_list_index_invalidates_direct_bus_solo_read_effects() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![(
+                "bus-solos",
+                Value::List(vec![
+                    Rc::new(RefCell::new(Value::Bool(false))),
+                    Rc::new(RefCell::new(Value::Bool(false))),
+                ]),
+            )],
+            false,
+        );
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*mixer*"
+                  (v-stack
+                    (subtree :key "bus-0"
+                      (label (fmt "bus0:{}" (nth SEQ.bus-solos 0))))
+                    (subtree :key "bus-1"
+                      (label (fmt "bus1:{}" (nth SEQ.bus-solos 1))))))
+                "#,
+            )
+            .expect("install direct bus solo read effect");
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        runtime.set_reactive_list_index("SEQ", "bus-solos", 1, Value::Bool(true));
+        runtime.run_reactive_cycle();
+
+        assert!(
+            !runtime.take_pending_buffer_widget_trees().is_empty(),
+            "partial bus solo writes must dirty effects that read SEQ.bus-solos directly"
+        );
+    }
 }

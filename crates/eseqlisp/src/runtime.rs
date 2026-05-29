@@ -1980,6 +1980,37 @@ impl Runtime {
         }
     }
 
+    pub fn set_reactive_list_index(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        index: usize,
+        value: Value,
+    ) -> ReactiveSetResult {
+        let enqueue_effect_dirty = self.vm.has_reactive_subscribers(namespace, field);
+        let value_for_vm = value.clone();
+        let outcome = self.reactive_registry.set_list_index(
+            namespace,
+            field,
+            index,
+            value,
+            enqueue_effect_dirty,
+        );
+        self.vm
+            .update_reactive_global_list_index(namespace, field, index, value_for_vm);
+        let widget_ids = outcome.widget_ids;
+        let widgets_dirty = !widget_ids.is_empty();
+        for widget_id in widget_ids {
+            if !self.dirty_widget_ids.contains(&widget_id) {
+                self.dirty_widget_ids.push(widget_id);
+            }
+        }
+        ReactiveSetResult {
+            effects_dirty: outcome.effect_dirty,
+            widgets_dirty,
+        }
+    }
+
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
         self.set_layout_viewport_exact(cols as f32, rows as f32);
     }

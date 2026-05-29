@@ -21,6 +21,7 @@ mod piano_roll;
 mod profile;
 mod sampler_monitor;
 mod state_values;
+mod ui_invalidation;
 mod values;
 
 use browser::*;
@@ -35,6 +36,7 @@ use piano_roll::*;
 use profile::*;
 use sampler_monitor::*;
 use state_values::*;
+use ui_invalidation::*;
 use values::*;
 
 use std::cell::RefCell;
@@ -857,6 +859,642 @@ fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     ] {
         editor.refresh_visible_layouts_for_buffer_named(buffer_name);
     }
+}
+
+fn step_param_fields(param: StepParam) -> Option<(&'static str, &'static str, usize)> {
+    match param {
+        StepParam::Velocity => Some(("velocities", "track-velocities", 0)),
+        StepParam::Duration => Some(("durations", "track-durations", 1)),
+        StepParam::AuxA => Some(("auxas", "track-auxas", 2)),
+        StepParam::Transpose => Some(("transposes", "track-transposes", 3)),
+        StepParam::Pan => Some(("pans", "track-pans", 4)),
+        StepParam::Sync => Some(("syncs", "track-syncs", 5)),
+        StepParam::Delay => Some(("delays", "track-delays", 6)),
+        _ => None,
+    }
+}
+
+fn step_param_slider_value(param: StepParam, value: f32) -> f64 {
+    if param == StepParam::Duration {
+        param.normalize(value) as f64
+    } else {
+        value as f64
+    }
+}
+
+fn sync_single_step_param_binding(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    step: usize,
+    param: StepParam,
+    current_track_idx: usize,
+) -> bool {
+    let Some((current_field, all_track_field, mode)) = step_param_fields(param) else {
+        return false;
+    };
+    let value = state.pattern.step_data[track].get(step, param);
+    let mut dirty = false;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &track_step_param_slider_field(track, mode, step),
+            Value::Number(step_param_slider_value(param, value)),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &track_step_param_haptic_field(track, mode, step),
+            Value::Number(value as f64),
+        )
+        .effects_dirty;
+    if track == current_track_idx {
+        dirty |= rt
+            .set_reactive_list_index("SEQ", current_field, step, Value::Number(value as f64))
+            .effects_dirty;
+    }
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            all_track_field,
+            build_all_active_track_param_lists_value(state, param),
+        )
+        .effects_dirty;
+    dirty
+}
+
+fn sync_single_step_structural_bindings(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    track: usize,
+    step: usize,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> bool {
+    if track >= app.tracks.len() || step >= MAX_STEPS {
+        return false;
+    }
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let visible = step < num_steps;
+    let selected = selected_steps.lock().unwrap();
+    let mut dirty = false;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &track_step_active_field(track, step),
+            Value::Bool(visible && state.pattern.patterns[track].is_active(step)),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &track_step_duration_field(track, step),
+            Value::Bool(visible && track_step_duration_covered(state, track, step)),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &track_step_plocked_field(track, step),
+            Value::Bool(
+                visible && track_step_has_plock(state, track, &app.graph.effect_descriptors, step),
+            ),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &track_step_selected_field(track, step),
+            Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
+        )
+        .effects_dirty;
+    dirty
+}
+
+fn sync_step_selection_bindings(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> bool {
+    let selected = selected_steps.lock().unwrap();
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let selection_value = build_selection_value_from_set(&selected);
+    let mut dirty = false;
+    for step in 0..MAX_STEPS {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_selected_field(track, step),
+                Value::Bool(step < num_steps && selected.contains(&step)),
+            )
+            .effects_dirty;
+    }
+    dirty |= rt
+        .set_reactive("SEQ", "selected-steps", selection_value)
+        .effects_dirty;
+    dirty
+}
+
+struct UiInvalidationApplyCtx<'a> {
+    app: &'a mut ui::App,
+    editor: &'a mut Editor,
+    state: &'a Arc<SequencerState>,
+    bus_state: &'a Arc<Mutex<Vec<ui::BusChannelState>>>,
+    current_track_idx: usize,
+    selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
+    piano_roll_selection: &'a Arc<Mutex<HashSet<u64>>>,
+    accumulator_names: &'a Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &'a [f64],
+    cached_bus_peak_levels: &'a [f64],
+    record_armed: &'a Arc<Mutex<Vec<bool>>>,
+    active_delete_target: &'a Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: &'a Arc<AtomicUsize>,
+    fx_visible: bool,
+    sequencer_visible: bool,
+    mixer_visible: bool,
+}
+
+fn apply_ui_invalidations(
+    invalidations: Vec<UiInvalidation>,
+    ctx: UiInvalidationApplyCtx<'_>,
+) -> bool {
+    if invalidations.is_empty() {
+        return false;
+    }
+
+    let UiInvalidationApplyCtx {
+        app,
+        editor,
+        state,
+        bus_state,
+        current_track_idx,
+        selected_steps,
+        piano_roll_selection,
+        accumulator_names,
+        cached_track_peak_levels,
+        cached_bus_peak_levels,
+        record_armed,
+        active_delete_target,
+        active_delete_target_version,
+        fx_visible,
+        sequencer_visible,
+        mixer_visible,
+    } = ctx;
+
+    let mut needs_reactive_cycle = true;
+    let mut bus_state_pulled = false;
+    let active_track_count = state.active_track_count().min(app.tracks.len());
+    let rt = editor.runtime_mut();
+
+    for invalidation in invalidations {
+        let track_domain = match &invalidation {
+            UiInvalidation::CurrentTrack { current, .. } => Some(*current),
+            UiInvalidation::TrackTopology(TrackTopologyInvalidation::InstrumentType { track }) => {
+                Some(*track)
+            }
+            UiInvalidation::Pattern(PatternInvalidation::WholeTrack { track })
+            | UiInvalidation::Pattern(PatternInvalidation::TrackLength { track })
+            | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { track })
+            | UiInvalidation::Step { track, .. }
+            | UiInvalidation::StepSelection { track }
+            | UiInvalidation::TrackMixer { track, .. }
+            | UiInvalidation::TrackBusSend { track, .. }
+            | UiInvalidation::TrackRoute { track }
+            | UiInvalidation::TrackParam { track, .. }
+            | UiInvalidation::TrackParamPanel { track }
+            | UiInvalidation::Instrument { track, .. }
+            | UiInvalidation::TrackFx { track, .. }
+            | UiInvalidation::MidiFx { track, .. }
+            | UiInvalidation::PianoRoll { track, .. }
+            | UiInvalidation::Sidebar { track, .. } => Some(*track),
+            _ => None,
+        };
+        if track_domain.is_some_and(|track| track >= active_track_count) {
+            continue;
+        }
+        if matches!(&invalidation, UiInvalidation::Step { step, .. } if *step >= MAX_STEPS) {
+            continue;
+        }
+        let bus_domain = match &invalidation {
+            UiInvalidation::BusMixer { bus, .. }
+            | UiInvalidation::BusFx { bus, .. }
+            | UiInvalidation::TrackBusSend { bus, .. } => Some(*bus),
+            _ => None,
+        };
+        if bus_domain.is_some_and(|bus| bus >= app.buses.len()) {
+            continue;
+        }
+
+        match invalidation {
+            UiInvalidation::Full(_)
+            | UiInvalidation::TrackTopology(_)
+            | UiInvalidation::BusTopology
+            | UiInvalidation::ProjectState
+            | UiInvalidation::CurrentTrack { .. } => {
+                needs_reactive_cycle = true;
+            }
+            UiInvalidation::Pattern(PatternInvalidation::WholeTrack { track }) => {
+                if track == current_track_idx {
+                    needs_reactive_cycle |= rt
+                        .set_reactive("SEQ", "steps", build_steps_value(state, track))
+                        .effects_dirty;
+                    sync_step_param_lists(rt, state, track);
+                }
+                if sequencer_visible {
+                    sync_all_track_sequencer_state(
+                        rt,
+                        state,
+                        app,
+                        current_track_idx,
+                        selected_steps,
+                    );
+                    needs_reactive_cycle = true;
+                }
+            }
+            UiInvalidation::Pattern(PatternInvalidation::TrackLength { track }) => {
+                if track == current_track_idx {
+                    needs_reactive_cycle |= rt
+                        .set_reactive(
+                            "SEQ",
+                            "tp-num-steps",
+                            Value::Number(state.pattern.track_params[track].get_num_steps() as f64),
+                        )
+                        .effects_dirty;
+                }
+                needs_reactive_cycle |= rt
+                    .set_reactive_list_index(
+                        "SEQ",
+                        "track-num-steps",
+                        track,
+                        Value::Number(state.pattern.track_params[track].get_num_steps() as f64),
+                    )
+                    .effects_dirty;
+            }
+            UiInvalidation::Pattern(PatternInvalidation::AllTracks)
+            | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { .. }) => {
+                sync_pattern_state(rt, state);
+                needs_reactive_cycle = true;
+            }
+            UiInvalidation::Step {
+                track,
+                step,
+                change,
+            } => match change {
+                StepInvalidation::Param(param) => {
+                    needs_reactive_cycle |= sync_single_step_param_binding(
+                        rt,
+                        state,
+                        track,
+                        step,
+                        param.to_step_param(),
+                        current_track_idx,
+                    );
+                }
+                StepInvalidation::DurationSpan => {
+                    needs_reactive_cycle |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_step_duration_field(track, step),
+                            Value::Bool(track_step_duration_covered(state, track, step)),
+                        )
+                        .effects_dirty;
+                }
+                StepInvalidation::Active
+                | StepInvalidation::Payload
+                | StepInvalidation::PlockPresence
+                | StepInvalidation::Selected => {
+                    needs_reactive_cycle |= sync_single_step_structural_bindings(
+                        rt,
+                        state,
+                        app,
+                        track,
+                        step,
+                        current_track_idx,
+                        selected_steps,
+                    );
+                }
+            },
+            UiInvalidation::StepSelection { track } => {
+                needs_reactive_cycle |=
+                    sync_step_selection_bindings(rt, state, track, selected_steps);
+                if fx_visible && track == current_track_idx {
+                    sync_track_params(rt, app, state, track, selected_steps);
+                    sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
+                    needs_reactive_cycle = true;
+                }
+            }
+            UiInvalidation::TrackMixer { track, change } => match change {
+                TrackMixerInvalidation::Volume => {
+                    sync_track_volume_binding_field(rt, state, track);
+                    needs_reactive_cycle |= rt
+                        .set_reactive_list_index(
+                            "SEQ",
+                            "track-volumes",
+                            track,
+                            Value::Number(state.pattern.track_params[track].get_volume() as f64),
+                        )
+                        .effects_dirty;
+                }
+                TrackMixerInvalidation::Pan => {
+                    sync_track_pan_binding_field(rt, state, track);
+                    needs_reactive_cycle |= rt
+                        .set_reactive_list_index(
+                            "SEQ",
+                            "track-mixer-pans",
+                            track,
+                            Value::Number(state.pattern.track_params[track].get_pan() as f64),
+                        )
+                        .effects_dirty;
+                }
+                TrackMixerInvalidation::Mute => {
+                    needs_reactive_cycle |= rt
+                        .set_reactive_list_index(
+                            "SEQ",
+                            "track-mutes",
+                            track,
+                            Value::Bool(state.pattern.track_params[track].is_muted()),
+                        )
+                        .effects_dirty;
+                }
+                TrackMixerInvalidation::Solo => {
+                    needs_reactive_cycle |= rt
+                        .set_reactive_list_index(
+                            "SEQ",
+                            "track-solos",
+                            track,
+                            Value::Bool(state.pattern.track_params[track].is_solo()),
+                        )
+                        .effects_dirty;
+                }
+                TrackMixerInvalidation::MutedBySolo => {
+                    needs_reactive_cycle |= rt
+                        .set_reactive(
+                            "SEQ",
+                            "track-muted-by-solo",
+                            build_track_muted_by_solo(state),
+                        )
+                        .effects_dirty;
+                }
+                TrackMixerInvalidation::RecordArm => {
+                    needs_reactive_cycle |= rt
+                        .set_reactive(
+                            "SEQ",
+                            "record-armed",
+                            build_record_armed_value(&record_armed.lock().unwrap()),
+                        )
+                        .effects_dirty;
+                }
+                TrackMixerInvalidation::Output => {
+                    needs_reactive_cycle |= rt
+                        .set_reactive("SEQ", "track-outputs", build_track_outputs(app, state))
+                        .effects_dirty;
+                }
+            },
+            UiInvalidation::BusMixer { bus, change } => {
+                if !bus_state_pulled {
+                    pull_shared_bus_state(app, bus_state);
+                    bus_state_pulled = true;
+                }
+                if app.buses.get(bus).is_some() {
+                    match change {
+                        BusMixerInvalidation::Volume => {
+                            sync_bus_mixer_control_state(rt, app);
+                            needs_reactive_cycle = true;
+                        }
+                        BusMixerInvalidation::Mute => {
+                            sync_bus_mixer_control_state(rt, app);
+                            needs_reactive_cycle = true;
+                        }
+                        BusMixerInvalidation::Solo => {
+                            sync_bus_mixer_control_state(rt, app);
+                            needs_reactive_cycle = true;
+                        }
+                        BusMixerInvalidation::Steps | BusMixerInvalidation::Timing => {
+                            sync_bus_mixer_state(rt, app);
+                            needs_reactive_cycle = true;
+                        }
+                    }
+                }
+            }
+            UiInvalidation::TrackBusSend { track, bus } => {
+                sync_track_bus_send_binding_field(rt, app, state, track, bus);
+                if track == current_track_idx {
+                    sync_current_track_bus_send_binding_field(rt, app, state, track, bus);
+                }
+                needs_reactive_cycle |= rt
+                    .set_reactive(
+                        "SEQ",
+                        "track-bus-sends",
+                        build_all_track_bus_sends(app, state),
+                    )
+                    .effects_dirty;
+            }
+            UiInvalidation::TrackRoute { .. } => {
+                sync_track_mixer_state(rt, app, state);
+                needs_reactive_cycle = true;
+            }
+            UiInvalidation::ModRoutes => {
+                needs_reactive_cycle |= rt
+                    .set_reactive("SEQ", "mod-routes", build_mod_routes(state))
+                    .effects_dirty;
+            }
+            UiInvalidation::TrackParam { track, change } => {
+                if change == TrackParamInvalidation::NumSteps {
+                    needs_reactive_cycle |= rt
+                        .set_reactive_list_index(
+                            "SEQ",
+                            "track-num-steps",
+                            track,
+                            Value::Number(state.pattern.track_params[track].get_num_steps() as f64),
+                        )
+                        .effects_dirty;
+                }
+                if track == current_track_idx {
+                    sync_track_params(rt, app, state, track, selected_steps);
+                    needs_reactive_cycle = true;
+                }
+            }
+            UiInvalidation::TrackParamPanel { track } => {
+                if track == current_track_idx {
+                    sync_track_params(rt, app, state, track, selected_steps);
+                    needs_reactive_cycle = true;
+                }
+            }
+            UiInvalidation::Instrument { track, change } => {
+                let display_step =
+                    displayed_plock_step(state, track, selected_plock_step(selected_steps));
+                match change {
+                    InstrumentInvalidation::Param { param } => {
+                        sync_instrument_param_value_field(rt, app, track, param, display_step);
+                    }
+                    InstrumentInvalidation::BaseNote => {
+                        sync_instrument_base_note_value_field(rt, app, track);
+                    }
+                    InstrumentInvalidation::SamplerSelectionTime => {
+                        sync_sampler_selection_time_fields(rt, app, track, display_step);
+                    }
+                    InstrumentInvalidation::PanelTopology | InstrumentInvalidation::Analysis => {
+                        if fx_visible && track == current_track_idx {
+                            rt.set_reactive(
+                                "SEQ",
+                                "instrument-panel",
+                                build_instrument_panel_value(app, track, selected_steps),
+                            );
+                            needs_reactive_cycle = true;
+                        }
+                    }
+                    InstrumentInvalidation::Playhead => {
+                        if app.is_sampler_track(track) {
+                            let ph = read_sampler_playhead_seconds(app, track);
+                            if ph > 0.0 {
+                                needs_reactive_cycle |= rt
+                                    .set_reactive("SEQ", "sampler-playhead", Value::Number(ph))
+                                    .effects_dirty;
+                            }
+                        }
+                    }
+                }
+            }
+            UiInvalidation::TrackFx { track, change } => match change {
+                TrackFxInvalidation::Param { slot, param }
+                | TrackFxInvalidation::Plock { slot, param } => {
+                    let display_step =
+                        displayed_plock_step(state, track, selected_plock_step(selected_steps));
+                    sync_track_effect_param_value_field(
+                        rt,
+                        state,
+                        &app.graph.effect_descriptors,
+                        track,
+                        slot,
+                        param,
+                        display_step,
+                    );
+                    if track == current_track_idx {
+                        needs_reactive_cycle |= rt
+                            .set_reactive(
+                                "SEQ",
+                                "step-has-plocks",
+                                build_step_has_plocks(state, track, &app.graph.effect_descriptors),
+                            )
+                            .effects_dirty;
+                    }
+                }
+                TrackFxInvalidation::Topology | TrackFxInvalidation::PanelTree => {
+                    if fx_visible && track == current_track_idx {
+                        rt.set_reactive(
+                            "SEQ",
+                            "effects",
+                            build_effects_value(
+                                state,
+                                track,
+                                &app.graph.effect_descriptors,
+                                selected_steps,
+                            ),
+                        );
+                        needs_reactive_cycle = true;
+                    }
+                }
+            },
+            UiInvalidation::MidiFx { track, change } => match change {
+                MidiFxInvalidation::Param { slot, param } => {
+                    let display_step =
+                        displayed_plock_step(state, track, selected_plock_step(selected_steps));
+                    sync_midi_fx_param_value_field(rt, state, track, slot, param, display_step);
+                }
+                MidiFxInvalidation::Topology => {
+                    if fx_visible && track == current_track_idx {
+                        rt.set_reactive(
+                            "SEQ",
+                            "midi-effects",
+                            build_midi_effects_value(state, track, selected_steps),
+                        );
+                        needs_reactive_cycle = true;
+                    }
+                }
+            },
+            UiInvalidation::BusFx { bus, change } => match change {
+                BusFxInvalidation::Param { slot, param } => {
+                    sync_bus_effect_param_value_field(rt, app, bus, slot, param);
+                }
+                BusFxInvalidation::Topology => {
+                    if mixer_visible || fx_visible {
+                        sync_bus_mixer_state(rt, app);
+                        needs_reactive_cycle = true;
+                    }
+                }
+            },
+            UiInvalidation::PianoRoll { track, .. } => {
+                if track == current_track_idx {
+                    sync_piano_roll_state(rt, state, track, piano_roll_selection);
+                    needs_reactive_cycle = true;
+                }
+            }
+            UiInvalidation::Transport(_) => {
+                needs_reactive_cycle = true;
+            }
+            UiInvalidation::Recording(change) => match change {
+                RecordingInvalidation::RecordingEnabled => {
+                    needs_reactive_cycle |= rt
+                        .set_reactive(
+                            "SEQ",
+                            "recording",
+                            Value::Bool(
+                                app.ui.recording
+                                    || record_armed.lock().unwrap().iter().any(|armed| *armed),
+                            ),
+                        )
+                        .effects_dirty;
+                }
+                RecordingInvalidation::ArmedTracks => {
+                    needs_reactive_cycle |= rt
+                        .set_reactive(
+                            "SEQ",
+                            "record-armed",
+                            build_record_armed_value(&record_armed.lock().unwrap()),
+                        )
+                        .effects_dirty;
+                }
+            },
+            UiInvalidation::DeleteTarget => {
+                needs_reactive_cycle |= rt
+                    .set_reactive(
+                        "SEQ",
+                        "delete-target-version",
+                        Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
+                    )
+                    .effects_dirty;
+                sync_mixer_track_delete_target_binding_fields(
+                    rt,
+                    app.tracks.len(),
+                    active_delete_target.lock().unwrap().as_ref(),
+                );
+            }
+            UiInvalidation::AutoFollow => {
+                needs_reactive_cycle = true;
+            }
+            UiInvalidation::Sidebar { track, .. } => {
+                sync_sidebar_browser(rt, app, track);
+                needs_reactive_cycle = true;
+            }
+            UiInvalidation::Browser(_) => {
+                needs_reactive_cycle = true;
+            }
+        }
+    }
+
+    if needs_reactive_cycle {
+        *accumulator_names.lock().unwrap() = build_accumulator_names(app);
+        sync_track_peak_fields(rt, cached_track_peak_levels);
+        sync_bus_peak_fields(rt, cached_bus_peak_levels);
+    }
+    needs_reactive_cycle
 }
 
 fn reset_sampler_waveform_view(editor: &mut Editor) {
@@ -1736,6 +2374,33 @@ mod tests {
     }
 
     #[test]
+    fn step_selection_sync_updates_selected_steps_without_deadlocking() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
+        state.pattern.track_params[0].set_num_steps(8);
+        let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
+            [2_usize, 3, 4]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+        ));
+        let mut runtime = Runtime::new();
+
+        super::sync_step_selection_bindings(&mut runtime, &state, 0, &selected_steps);
+
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.selected-steps 1)")
+                .expect("read unselected step"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.selected-steps 3)")
+                .expect("read selected step"),
+            Some(Value::Bool(true))
+        );
+    }
+
+    #[test]
     fn sequencer_reveal_is_limited_to_navigation_keys() {
         assert!(key_should_reveal_sequencer_track(&KeyEvent::new(
             KeyCode::Tab,
@@ -2126,6 +2791,7 @@ mod tests {
         let piano_roll_move_state = Arc::new(Mutex::new(None));
         let ui_epoch = Arc::new(AtomicUsize::new(0));
         let fx_epoch = Arc::new(AtomicUsize::new(0));
+        let ui_invalidations = Arc::new(UiInvalidationQueue::new());
         let recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
         let active_delete_target = Arc::new(Mutex::new(None));
@@ -2152,6 +2818,7 @@ mod tests {
             record_armed.clone(),
             ui_epoch.clone(),
             fx_epoch.clone(),
+            ui_invalidations.clone(),
             active_delete_target.clone(),
             active_delete_target_version.clone(),
             auto_follow_override_until.clone(),
@@ -2516,6 +3183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // FX/instrument panel refresh counter for changes that affect *fx* but
     // should not force *fx* to rerun on unrelated step-grid edits.
     let fx_epoch = Arc::new(AtomicUsize::new(0));
+    let ui_invalidations = Arc::new(UiInvalidationQueue::new());
     let active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>> = Arc::new(Mutex::new(None));
     let active_delete_target_version = Arc::new(AtomicUsize::new(0));
     // When set, pagination stays on the user-selected page until the cooldown expires.
@@ -2551,6 +3219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         record_armed.clone(),
         ui_epoch.clone(),
         fx_epoch.clone(),
+        ui_invalidations.clone(),
         active_delete_target.clone(),
         active_delete_target_version.clone(),
         auto_follow_override_until.clone(),
@@ -3723,6 +4392,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         eprintln!("metal_seq: host load-project name={project_name}");
+                        ui_invalidations.clear();
                         match app.queue_project_load_named(&project_name) {
                             Ok(()) => {
                                 eprintln!("metal_seq: queued project load name={project_name}");
@@ -9619,6 +10289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                        ui_invalidations.clear();
 
                         prev_current_track = ct;
                         prev_playhead = playhead;
@@ -10480,6 +11151,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut profile_pattern_reactive_cycle = false;
             let mut refresh_visible_sequencer_after_cycle = false;
             let mut refresh_visible_mixer_after_cycle = false;
+            let typed_invalidations = ui_invalidations.drain();
+            if apply_ui_invalidations(
+                typed_invalidations,
+                UiInvalidationApplyCtx {
+                    app: &mut app,
+                    editor: &mut editor,
+                    state: &state,
+                    bus_state: &bus_state,
+                    current_track_idx: ct,
+                    selected_steps: &selected_steps,
+                    piano_roll_selection: &piano_roll_selection,
+                    accumulator_names: &accumulator_names,
+                    cached_track_peak_levels: &cached_track_peak_levels,
+                    cached_bus_peak_levels: &cached_bus_peak_levels,
+                    record_armed: &record_armed,
+                    active_delete_target: &active_delete_target,
+                    active_delete_target_version: &active_delete_target_version,
+                    fx_visible,
+                    sequencer_visible,
+                    mixer_visible,
+                },
+            ) {
+                needs_reactive_cycle = true;
+            }
             if epoch != prev_pattern_epoch && !app.tracks.is_empty() {
                 let profile_switch = pattern_switch_profile_enabled();
                 let profile_total_started = Instant::now();

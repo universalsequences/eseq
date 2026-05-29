@@ -18,9 +18,7 @@
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
 
 (def mixer-v2-track-selected-binding (i)
-  (if (< selected-bus 0)
-    (bind-seq (str "track-selected-" i))
-    0))
+  (bind-seq (str "track-selected-" i)))
 
 (def mixer-v2-track-delete-target-binding (i)
   (bind-seq (str "mixer-track-delete-target-" i)))

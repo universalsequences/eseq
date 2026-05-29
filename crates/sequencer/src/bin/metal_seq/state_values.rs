@@ -387,11 +387,11 @@ pub(crate) fn track_active_playhead_step(state: &Arc<SequencerState>, track: usi
     playhead.min(num_steps.saturating_sub(1))
 }
 
-fn selected_plock_step(selected_steps: &Arc<Mutex<HashSet<usize>>>) -> Option<usize> {
+pub(crate) fn selected_plock_step(selected_steps: &Arc<Mutex<HashSet<usize>>>) -> Option<usize> {
     selected_steps.lock().unwrap().iter().copied().min()
 }
 
-fn displayed_plock_step(
+pub(crate) fn displayed_plock_step(
     state: &Arc<SequencerState>,
     track: usize,
     selected_step: Option<usize>,
@@ -1535,7 +1535,7 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
     );
 }
 
-pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
+pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &ui::App) {
     let names: Vec<String> = app.buses.iter().map(|bus| bus.name.clone()).collect();
     let volumes: Vec<Rc<RefCell<Value>>> = app
         .buses
@@ -1556,6 +1556,10 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
     rt.set_reactive("SEQ", "bus-volumes", Value::List(volumes));
     rt.set_reactive("SEQ", "bus-mutes", Value::List(mutes));
     rt.set_reactive("SEQ", "bus-solos", Value::List(solos));
+}
+
+pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
+    sync_bus_mixer_control_state(rt, app);
     rt.set_reactive("SEQ", "bus-effects", build_bus_effects_value(app));
     rt.set_reactive("SEQ", "bus-steps", build_bus_steps_value(app));
     rt.set_reactive(
@@ -4163,6 +4167,11 @@ pub(crate) fn build_instrument_panel_value(
 /// Build a Lisp Value::List of bools indicating which steps are selected.
 pub(crate) fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Value {
     let set = selected.lock().unwrap();
+    build_selection_value_from_set(&set)
+}
+
+/// Build a Lisp Value::List of bools from an already-held selection snapshot.
+pub(crate) fn build_selection_value_from_set(set: &HashSet<usize>) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|s| Rc::new(RefCell::new(Value::Bool(set.contains(&s)))))
         .collect();
@@ -19363,8 +19372,80 @@ mod tests {
         let bus_a_strip =
             find_node_by_stable_key(&layout, "mixer-v2-bus-1").expect("Bus A mixer strip");
         find_descendant_button_by_text(bus_a_strip, "A").expect("Bus A mute button");
-        find_descendant_button_by_text(bus_a_strip, "S").expect("Bus A solo button");
-        find_descendant_button_by_text(bus_a_strip, "Bus A").expect("Bus A label button");
+        let bus_a_solo =
+            find_descendant_button_by_text(bus_a_strip, "S").expect("Bus A solo button");
+        let bus_a_label =
+            find_descendant_button_by_text(bus_a_strip, "Bus A").expect("Bus A label button");
+
+        calls.lock().unwrap().clear();
+        let bus_label_callback = bus_a_label
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("Bus A label on-click");
+        editor
+            .runtime_mut()
+            .invoke(bus_label_callback, vec![Value::Bool(true)])
+            .expect("invoke Bus A label click");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("selected-bus")
+                .expect("read selected bus after Bus A label click"),
+            Some(Value::Number(1.0)),
+            "Bus A label click should select Bus A"
+        );
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "bus selection should not queue a host command"
+        );
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-clear-selection:[]"),
+            "bus selection should clear step selection without selecting a track"
+        );
+        let bus_selected_layout = editor
+            .widget_layout()
+            .expect("mixer layout should be available after bus selection");
+        let track_strip_after_bus_select =
+            find_node_by_stable_key(&bus_selected_layout, "mixer-v2-track-0")
+                .expect("track strip after bus selection");
+        assert!(
+            matches!(
+                track_strip_after_bus_select.props.get("selected"),
+                Some(Value::ReactiveRef { namespace, field, .. })
+                    if namespace == "SEQ" && field == &track_selected_field(0)
+            ),
+            "selecting a bus should not replace track selected bindings with literals"
+        );
+
+        calls.lock().unwrap().clear();
+        let bus_solo_callback = bus_a_solo
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("Bus A solo on-click");
+        editor
+            .runtime_mut()
+            .invoke(bus_solo_callback, vec![Value::Bool(true)])
+            .expect("invoke Bus A solo click");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("selected-bus")
+                .expect("read selected bus after Bus A solo click"),
+            Some(Value::Number(1.0)),
+            "Bus A solo click should keep Bus A selected"
+        );
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-toggle-bus-solo:[1]"),
+            "Bus A solo button should only toggle Bus A solo after selecting the bus"
+        );
 
         #[cfg(target_os = "macos")]
         {

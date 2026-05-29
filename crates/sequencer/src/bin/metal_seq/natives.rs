@@ -223,6 +223,7 @@ pub(crate) fn init_runtime(
     record_armed: Arc<Mutex<Vec<bool>>>,
     ui_epoch: Arc<AtomicUsize>,
     fx_epoch: Arc<AtomicUsize>,
+    ui_invalidations: Arc<UiInvalidationQueue>,
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
     auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
@@ -938,8 +939,8 @@ pub(crate) fn init_runtime(
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-toggle-step", move |args, _ctx| {
         let Some(Value::Number(step)) = args.first() else {
             return Err("seq-toggle-step: expected step number".into());
@@ -958,7 +959,21 @@ pub(crate) fn init_runtime(
             }
         }
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::Active,
+        });
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::Payload,
+        });
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::PlockPresence,
+        });
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
     });
 
@@ -966,8 +981,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let sel = selected_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-toggle-track-step", move |args, _ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(step))) = (args.first(), args.get(1))
         else {
@@ -990,7 +1005,21 @@ pub(crate) fn init_runtime(
             }
         }
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::Active,
+        });
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::Payload,
+        });
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::PlockPresence,
+        });
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
     });
 
@@ -1013,8 +1042,8 @@ pub(crate) fn init_runtime(
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
-    let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-step-param", move |args, _ctx| {
         let (Some(Value::Number(step)), Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -1048,7 +1077,18 @@ pub(crate) fn init_runtime(
         st.pattern.step_data[track].set(step, param, val);
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::Step {
+            track,
+            step,
+            change: StepInvalidation::Param(param.into()),
+        });
+        if param == StepParam::Duration {
+            ui_inv.push(UiInvalidation::Step {
+                track,
+                step,
+                change: StepInvalidation::DurationSpan,
+            });
+        }
         Ok(Value::Number(val as f64))
     });
 
@@ -1058,7 +1098,7 @@ pub(crate) fn init_runtime(
     let piano_move = piano_roll_move_state.clone();
     let piano_clipboard = new_piano_roll_clipboard();
     let auto_follow_override = auto_follow_override_until.clone();
-    let ui_ep = ui_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-piano-roll-action", move |args, ctx| {
         let Some(action) = args.first() else {
             return Err("seq-piano-roll-action: expected action map".into());
@@ -1076,7 +1116,10 @@ pub(crate) fn init_runtime(
             st.publish_scheduler_snapshot();
             *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         }
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::PianoRoll {
+            track,
+            change: PianoRollInvalidation::Items,
+        });
         ctx.set_status(status.clone());
         Ok(Value::String(status))
     });
@@ -1088,6 +1131,7 @@ pub(crate) fn init_runtime(
     let piano_sel = piano_roll_selection.clone();
     let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-set-track: expected track number".into());
@@ -1101,12 +1145,15 @@ pub(crate) fn init_runtime(
         if previous != track {
             sel.lock().unwrap().clear();
             piano_sel.lock().unwrap().clear();
-            let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+            ui_inv.push(UiInvalidation::CurrentTrack {
+                previous,
+                current: track,
+            });
             let next_fx_epoch = fx_ep.fetch_add(1, Ordering::Relaxed) + 1;
             if trace_ui_enabled() {
                 eprintln!(
-                    "[ui-trace][native] seq-set-track previous={} next={} ui_epoch={} fx_epoch={}",
-                    previous, track, next_ui_epoch, next_fx_epoch
+                    "[ui-trace][native] seq-set-track previous={} next={} fx_epoch={}",
+                    previous, track, next_fx_epoch
                 );
             }
         } else if trace_ui_enabled() {
@@ -1122,7 +1169,7 @@ pub(crate) fn init_runtime(
     // seq-set-track-volume — (seq-set-track-volume track-idx volume)
     let st = state.clone();
     let pan_ids = track_pan_ids.clone();
-    let ui_ep = ui_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-volume", move |args, _ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(vol))) = (args.first(), args.get(1))
         else {
@@ -1134,7 +1181,10 @@ pub(crate) fn init_runtime(
         }
         let vol = (*vol as f32).clamp(0.0, 1.0);
         st.pattern.track_params[track].set_volume(vol);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Volume,
+        });
         // Push volume to audiograph's stereo panner node
         let pan_ids_lock = pan_ids.lock().unwrap();
         if let Some(&pan_id) = pan_ids_lock.get(track) {
@@ -1155,7 +1205,7 @@ pub(crate) fn init_runtime(
     // seq-set-track-pan — (seq-set-track-pan track-idx pan)
     let st = state.clone();
     let pan_ids = track_pan_ids.clone();
-    let ui_ep = ui_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-pan", move |args, _ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(pan))) = (args.first(), args.get(1))
         else {
@@ -1167,7 +1217,10 @@ pub(crate) fn init_runtime(
         }
         let pan = (*pan as f32).clamp(-1.0, 1.0);
         st.pattern.track_params[track].set_pan(pan);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Pan,
+        });
         let pan_ids_lock = pan_ids.lock().unwrap();
         if let Some(&pan_id) = pan_ids_lock.get(track) {
             unsafe {
@@ -1187,7 +1240,7 @@ pub(crate) fn init_runtime(
     // seq-toggle-track-mute — (seq-toggle-track-mute track-idx)
     let st = state.clone();
     let pan_ids = track_pan_ids.clone();
-    let ui_ep = ui_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-toggle-track-mute", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-toggle-track-mute: expected track".into());
@@ -1197,11 +1250,14 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-toggle-track-mute: track {track} out of range").into());
         }
         let muted = st.pattern.track_params[track].toggle_mute();
-        let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+        ui_inv.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Mute,
+        });
         if trace_ui_enabled() {
             eprintln!(
-                "[ui-trace][native] seq-toggle-track-mute track={} muted={} ui_epoch={}",
-                track, muted, next_ui_epoch
+                "[ui-trace][native] seq-toggle-track-mute track={} muted={}",
+                track, muted
             );
         }
         let pan_ids_lock = pan_ids.lock().unwrap();
@@ -1219,7 +1275,7 @@ pub(crate) fn init_runtime(
     // seq-toggle-track-solo — (seq-toggle-track-solo track-idx)
     let st = state.clone();
     let pan_ids = track_pan_ids.clone();
-    let ui_ep = ui_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-toggle-track-solo", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-toggle-track-solo: expected track".into());
@@ -1229,11 +1285,20 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-toggle-track-solo: track {track} out of range").into());
         }
         let solo = st.pattern.track_params[track].toggle_solo();
-        let next_ui_epoch = ui_ep.fetch_add(1, Ordering::Relaxed) + 1;
+        ui_inv.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Solo,
+        });
+        for affected_track in 0..st.active_track_count() {
+            ui_inv.push(UiInvalidation::TrackMixer {
+                track: affected_track,
+                change: TrackMixerInvalidation::MutedBySolo,
+            });
+        }
         if trace_ui_enabled() {
             eprintln!(
-                "[ui-trace][native] seq-toggle-track-solo track={} solo={} ui_epoch={}",
-                track, solo, next_ui_epoch
+                "[ui-trace][native] seq-toggle-track-solo track={} solo={}",
+                track, solo
             );
         }
         let pan_ids_lock = pan_ids.lock().unwrap();
@@ -1243,7 +1308,7 @@ pub(crate) fn init_runtime(
 
     let bus_state = buses.clone();
     let bus_nodes = bus_node_ids.clone();
-    let ui_ep = ui_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-bus-volume", move |args, _ctx| {
         let (Some(Value::Number(bus_idx)), Some(Value::Number(vol))) = (args.first(), args.get(1))
         else {
@@ -1270,13 +1335,16 @@ pub(crate) fn init_runtime(
                 );
             }
         }
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::BusMixer {
+            bus: bus_idx,
+            change: BusMixerInvalidation::Volume,
+        });
         Ok(Value::Number(vol as f64))
     });
 
     let bus_state = buses.clone();
     let bus_nodes = bus_node_ids.clone();
-    let ui_ep = ui_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-toggle-bus-mute", move |args, _ctx| {
         let Some(Value::Number(bus_idx)) = args.first() else {
             return Err("seq-toggle-bus-mute: expected bus".into());
@@ -1310,12 +1378,15 @@ pub(crate) fn init_runtime(
                 );
             }
         }
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::BusMixer {
+            bus: bus_idx,
+            change: BusMixerInvalidation::Mute,
+        });
         Ok(Value::Bool(muted))
     });
 
     let bus_state = buses.clone();
-    let ui_ep = ui_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-toggle-bus-solo", move |args, _ctx| {
         let Some(Value::Number(bus_idx)) = args.first() else {
             return Err("seq-toggle-bus-solo: expected bus".into());
@@ -1329,7 +1400,10 @@ pub(crate) fn init_runtime(
             bus.solo = !bus.solo;
             bus.solo
         };
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::BusMixer {
+            bus: bus_idx,
+            change: BusMixerInvalidation::Solo,
+        });
         Ok(Value::Bool(solo))
     });
 
@@ -1337,9 +1411,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let descs = effect_descriptors.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-effect-param", move |args, _ctx| {
         let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -1392,8 +1465,13 @@ pub(crate) fn init_runtime(
         // (otherwise it re-applies the old value on next step trigger)
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::TrackFx {
+            track,
+            change: TrackFxInvalidation::Param {
+                slot: slot_idx,
+                param: param_idx,
+            },
+        });
         Ok(Value::Number(clamped as f64))
     });
 
@@ -1401,9 +1479,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let descs = effect_descriptors.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-effect-param-pair", move |args, _ctx| {
         let (
             Some(Value::Number(slot)),
@@ -1479,12 +1556,17 @@ pub(crate) fn init_runtime(
                 );
             }
             clamped_values.push(Value::Number(clamped as f64));
+            ui_inv.push(UiInvalidation::TrackFx {
+                track,
+                change: TrackFxInvalidation::Param {
+                    slot: slot_idx,
+                    param: param_idx,
+                },
+            });
         }
 
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::List(
             clamped_values
                 .into_iter()
@@ -1591,8 +1673,8 @@ pub(crate) fn init_runtime(
 
     // seq-select-step — toggle step in/out of selection
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
+    let ct = current_track.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-select-step", move |args, _ctx| {
         let Some(Value::Number(step)) = args.first() else {
             return Err("seq-select-step: expected step number".into());
@@ -1603,8 +1685,9 @@ pub(crate) fn init_runtime(
         if was_selected {
             set.remove(&step);
         }
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::StepSelection {
+            track: ct.load(Ordering::Relaxed),
+        });
         Ok(Value::Bool(!was_selected))
     });
 
@@ -1612,8 +1695,7 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-select-step-range", move |args, _ctx| {
         let (Some(Value::Number(a)), Some(Value::Number(b))) = (args.first(), args.get(1)) else {
             return Err("seq-select-step-range: expected start and end steps".into());
@@ -1627,22 +1709,31 @@ pub(crate) fn init_runtime(
         let b = (*b as usize).min(num_steps - 1);
         let lo = a.min(b);
         let hi = a.max(b);
+        let len = hi - lo + 1;
         let mut set = sel.lock().unwrap();
+        if set.len() == len && (lo..=hi).all(|step| set.contains(&step)) {
+            return Ok(Value::Number(len as f64));
+        }
         set.clear();
         set.extend(lo..=hi);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
-        Ok(Value::Number((hi - lo + 1) as f64))
+        ui_inv.push(UiInvalidation::StepSelection { track });
+        Ok(Value::Number(len as f64))
     });
 
     // seq-clear-selection
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
+    let ct = current_track.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-clear-selection", move |_args, _ctx| {
-        sel.lock().unwrap().clear();
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
+        let mut selected = sel.lock().unwrap();
+        if selected.is_empty() {
+            return Ok(Value::Nil);
+        }
+        selected.clear();
+        drop(selected);
+        ui_inv.push(UiInvalidation::StepSelection {
+            track: ct.load(Ordering::Relaxed),
+        });
         Ok(Value::Nil)
     });
 
@@ -1656,16 +1747,14 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-select-all-steps", move |_args, _ctx| {
         let track = ct.load(Ordering::Relaxed);
         let num_steps = st.pattern.track_params[track].get_num_steps();
         let mut set = sel.lock().unwrap();
         set.clear();
         set.extend(0..num_steps);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::StepSelection { track });
         Ok(Value::Number(num_steps as f64))
     });
 
@@ -1673,9 +1762,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-delete-selected-steps", move |_args, _ctx| {
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
@@ -1690,8 +1778,10 @@ pub(crate) fn init_runtime(
         }
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+            track,
+        }));
+        ui_inv.push(UiInvalidation::StepSelection { track });
         Ok(Value::Number(steps.len() as f64))
     });
 
@@ -1699,9 +1789,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-move-step-drag", move |args, _ctx| {
         let (Some(Value::Number(start)), Some(Value::Number(target))) = (args.first(), args.get(1))
         else {
@@ -1765,8 +1854,10 @@ pub(crate) fn init_runtime(
         }
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+            track,
+        }));
+        ui_inv.push(UiInvalidation::StepSelection { track });
         Ok(Value::Bool(true))
     });
 
@@ -1774,9 +1865,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-shift-selected-steps", move |args, _ctx| {
         let Some(Value::Number(direction)) = args.first() else {
             return Err("seq-shift-selected-steps: expected direction".into());
@@ -1827,8 +1917,10 @@ pub(crate) fn init_runtime(
         }
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::Pattern(PatternInvalidation::WholeTrack {
+            track,
+        }));
+        ui_inv.push(UiInvalidation::StepSelection { track });
         Ok(Value::Bool(true))
     });
 
@@ -1836,9 +1928,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-effect-plock", move |args, _ctx| {
         let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -1856,11 +1947,21 @@ pub(crate) fn init_runtime(
         let steps = sel.lock().unwrap();
         for &step in steps.iter() {
             slot_state.plocks.set(step, param_idx, val);
+            ui_inv.push(UiInvalidation::Step {
+                track,
+                step,
+                change: StepInvalidation::PlockPresence,
+            });
         }
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
+        ui_inv.push(UiInvalidation::TrackFx {
+            track,
+            change: TrackFxInvalidation::Plock {
+                slot: slot_idx,
+                param: param_idx,
+            },
+        });
         Ok(Value::Number(val as f64))
     });
 
@@ -1868,9 +1969,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-effect-plock-pair", move |args, _ctx| {
         let (
             Some(Value::Number(slot)),
@@ -1904,12 +2004,22 @@ pub(crate) fn init_runtime(
         for &step in steps.iter() {
             for (param_idx, val) in updates {
                 slot_state.plocks.set(step, param_idx, val);
+                ui_inv.push(UiInvalidation::TrackFx {
+                    track,
+                    change: TrackFxInvalidation::Plock {
+                        slot: slot_idx,
+                        param: param_idx,
+                    },
+                });
             }
+            ui_inv.push(UiInvalidation::Step {
+                track,
+                step,
+                change: StepInvalidation::PlockPresence,
+            });
         }
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(true))
     });
 
@@ -1917,8 +2027,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-step-param-plock", move |args, _ctx| {
         let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1))
@@ -1941,10 +2051,21 @@ pub(crate) fn init_runtime(
         let steps = sel.lock().unwrap();
         for &step in steps.iter() {
             st.pattern.step_data[track].set(step, param, val);
+            ui_inv.push(UiInvalidation::Step {
+                track,
+                step,
+                change: StepInvalidation::Param(param.into()),
+            });
+            if param == StepParam::Duration {
+                ui_inv.push(UiInvalidation::Step {
+                    track,
+                    step,
+                    change: StepInvalidation::DurationSpan,
+                });
+            }
         }
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(val as f64))
     });
 
@@ -1969,8 +2090,8 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
-    let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
+    let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-param", move |args, _ctx| {
         let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1))
@@ -1979,16 +2100,16 @@ pub(crate) fn init_runtime(
         };
         let track = ct.load(Ordering::Relaxed);
         let tp = &st.pattern.track_params[track];
-        match param_name.as_str() {
+        let invalidation = match param_name.as_str() {
             "attack" => {
                 let v = (*val as f32).clamp(0.0, 500.0);
                 tp.set_attack_ms(v);
-                Ok(Value::Number(v as f64))
+                (TrackParamInvalidation::Attack, Ok(Value::Number(v as f64)))
             }
             "release" => {
                 let v = (*val as f32).clamp(0.0, 2000.0);
                 tp.set_release_ms(v);
-                Ok(Value::Number(v as f64))
+                (TrackParamInvalidation::Release, Ok(Value::Number(v as f64)))
             }
             "swing" => {
                 let v = (*val as f32).clamp(50.0, 75.0);
@@ -2000,42 +2121,58 @@ pub(crate) fn init_runtime(
                         st.pattern.swing_plocks[track].set(step, v);
                     }
                 }
-                Ok(Value::Number(v as f64))
+                (TrackParamInvalidation::Swing, Ok(Value::Number(v as f64)))
             }
             "num-steps" => {
                 let v = (*val as usize).clamp(1, MAX_STEPS);
                 tp.set_num_steps(v);
-                Ok(Value::Number(v as f64))
+                (
+                    TrackParamInvalidation::NumSteps,
+                    Ok(Value::Number(v as f64)),
+                )
             }
             "send" => {
                 let v = (*val as f32).clamp(0.0, 1.0);
                 tp.set_send(v);
-                Ok(Value::Number(v as f64))
+                (TrackParamInvalidation::Send, Ok(Value::Number(v as f64)))
             }
             "gate" => {
                 let want_on = *val != 0.0;
                 if want_on != tp.is_gate_on() {
                     tp.toggle_gate();
                 }
-                Ok(Value::Bool(tp.is_gate_on()))
+                (
+                    TrackParamInvalidation::Gate,
+                    Ok(Value::Bool(tp.is_gate_on())),
+                )
             }
             "poly" => {
                 let want_on = *val != 0.0;
                 if want_on != tp.is_polyphonic() {
                     tp.toggle_polyphonic();
                 }
-                Ok(Value::Bool(tp.is_polyphonic()))
+                (
+                    TrackParamInvalidation::Poly,
+                    Ok(Value::Bool(tp.is_polyphonic())),
+                )
             }
             "max-poly" | "max-polyphony" | "voices" => {
                 tp.set_max_polyphony((*val).round().max(1.0) as usize);
-                Ok(Value::Number(tp.get_max_polyphony() as f64))
+                (
+                    TrackParamInvalidation::MaxPolyphony,
+                    Ok(Value::Number(tp.get_max_polyphony() as f64)),
+                )
             }
             other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),
-        }
-        .inspect(|_| {
+        };
+        let result = invalidation.1;
+        result.inspect(|_| {
             st.publish_scheduler_snapshot();
             *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-            ui_ep.fetch_add(1, Ordering::Relaxed);
+            ui_inv.push(UiInvalidation::TrackParam {
+                track,
+                change: invalidation.0,
+            });
         })
     });
 
