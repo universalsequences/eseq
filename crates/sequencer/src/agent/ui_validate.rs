@@ -586,6 +586,7 @@ mod tests {
             envelopes: Vec::new(),
             inputs: Vec::new(),
             modulators: Vec::new(),
+            mod_outputs: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 1,

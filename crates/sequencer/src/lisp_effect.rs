@@ -21,7 +21,7 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
-use crate::sequencer::{StepParam, StepSnapshot, Timebase};
+use crate::sequencer::{CustomInstrumentRunMode, StepParam, StepSnapshot, Timebase};
 
 /// Monotonic counter so each compile produces a unique dylib filename,
 /// preventing dlopen from returning a stale cached handle.
@@ -265,6 +265,7 @@ pub struct DGenManifest {
     pub envelopes: Vec<DGenEnvelope>,
     pub inputs: Vec<DGenInput>,
     pub modulators: Vec<DGenModulator>,
+    pub mod_outputs: Vec<DGenModOutput>,
     pub mod_destinations: Vec<DGenModDestination>,
     pub n_inputs: usize,
     pub n_outputs: usize,
@@ -336,6 +337,14 @@ pub struct DGenModulator {
     pub slot: usize,
     pub input_channel: usize,
     pub name: String,
+}
+
+#[derive(Clone)]
+pub struct DGenModOutput {
+    pub slot: usize,
+    pub channel: usize,
+    pub name: String,
+    pub range: String,
 }
 
 #[derive(Clone)]
@@ -733,6 +742,20 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
         })
         .unwrap_or_default();
 
+    let mod_outputs = v["modOutputs"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|m| DGenModOutput {
+                    slot: m["slot"].as_u64().unwrap_or(0) as usize,
+                    channel: m["channel"].as_u64().unwrap_or(0) as usize,
+                    name: m["name"].as_str().unwrap_or("").to_string(),
+                    range: m["range"].as_str().unwrap_or("unipolar").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mod_destinations = v["modDestinations"]
         .as_array()
         .map(|arr| {
@@ -816,6 +839,7 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
         envelopes,
         inputs,
         modulators,
+        mod_outputs,
         mod_destinations,
         n_inputs,
         n_outputs,
@@ -1548,6 +1572,12 @@ pub struct InstrumentPreset {
 }
 
 #[derive(Serialize, Deserialize)]
+struct InstrumentMetadataFile {
+    version: u32,
+    run_mode: String,
+}
+
+#[derive(Serialize, Deserialize)]
 struct InstrumentPresetBank {
     version: u32,
     engine_name: String,
@@ -1663,6 +1693,74 @@ fn resolve_instrument_folder_path(name: &str) -> io::Result<PathBuf> {
 
 pub fn instrument_source_path(name: &str) -> io::Result<PathBuf> {
     resolve_instrument_storage_path(name, "lisp")
+}
+
+fn instrument_metadata_path_for_source_path(source: &Path) -> io::Result<PathBuf> {
+    if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        source
+            .parent()
+            .map(|parent| parent.join("instrument.json"))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Resolved folder-style instrument source '{}' has no parent directory",
+                        source.display()
+                    ),
+                )
+            })
+    } else {
+        Ok(source.with_extension("instrument.json"))
+    }
+}
+
+pub fn instrument_metadata_path(name: &str) -> io::Result<PathBuf> {
+    let source = instrument_source_path(name)?;
+    instrument_metadata_path_for_source_path(&source)
+}
+
+pub fn load_instrument_run_mode(name: &str) -> io::Result<CustomInstrumentRunMode> {
+    let path = instrument_metadata_path(name)?;
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(CustomInstrumentRunMode::Instrument);
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata: InstrumentMetadataFile = serde_json::from_str(&source).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to parse instrument metadata '{}': {error}",
+                path.display()
+            ),
+        )
+    })?;
+    CustomInstrumentRunMode::parse(&metadata.run_mode).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid instrument run_mode '{}'", metadata.run_mode),
+        )
+    })
+}
+
+pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -> io::Result<()> {
+    let path = instrument_metadata_path(name)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let metadata = InstrumentMetadataFile {
+        version: 1,
+        run_mode: run_mode.as_str().to_string(),
+    };
+    let json = serde_json::to_string_pretty(&metadata).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to encode instrument metadata: {error}"),
+        )
+    })?;
+    std::fs::write(path, format!("{json}\n"))
 }
 
 fn instrument_name_from_source_path(path: &Path) -> Option<String> {
@@ -7592,7 +7690,7 @@ pub fn run_instrument_editor_flow(
 #[cfg(test)]
 mod tests {
     use super::{
-        compile_instrument_with_asset_base, fallback_effect_descriptors,
+        compile_instrument, compile_instrument_with_asset_base, fallback_effect_descriptors,
         fallback_instrument_descriptors, new_eval_context, parse_manifest,
         read_eseqlisp_init_source, register_sequencer_natives, scratch_runtime_with_fallbacks,
         shared_native_metadata, AccumulatorNoteSpan, DGenParam, ScratchControlRuntime,
@@ -7770,6 +7868,7 @@ mod tests {
             envelopes: Vec::new(),
             inputs: Vec::new(),
             modulators: Vec::new(),
+            mod_outputs: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 2,
@@ -7834,6 +7933,55 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, 21), (2, 22)]
         );
+    }
+
+    #[test]
+    fn parse_manifest_reads_modulation_outputs() {
+        let json = r#"
+        {
+          "totalMemorySlots": 128,
+          "inputs": [],
+          "outputs": [{ "channel": 0, "name": "audio" }],
+          "modOutputs": [
+            { "slot": 1, "channel": 2, "name": "macro-a", "range": "unipolar" },
+            { "slot": 2, "channel": 3, "name": "macro-b", "range": "unipolar" }
+          ],
+          "tensors": [],
+          "tensorInitData": []
+        }
+        "#;
+
+        let manifest = parse_manifest(json).expect("manifest parses");
+        assert_eq!(manifest.n_outputs, 1);
+        assert_eq!(manifest.mod_outputs.len(), 2);
+        assert_eq!(
+            manifest
+                .mod_outputs
+                .iter()
+                .map(|output| (
+                    output.slot,
+                    output.channel,
+                    output.name.as_str(),
+                    output.range.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![(1, 2, "macro-a", "unipolar"), (2, 3, "macro-b", "unipolar")]
+        );
+    }
+
+    #[test]
+    fn parse_manifest_defaults_missing_modulation_outputs_to_empty() {
+        let manifest = parse_manifest(
+            r#"{
+                "totalMemorySlots": 16,
+                "inputs": [],
+                "outputs": [{ "channel": 0, "name": "audio" }]
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert!(manifest.mod_outputs.is_empty());
+        assert_eq!(manifest.n_outputs, 1);
     }
 
     #[test]
@@ -9588,6 +9736,24 @@ mod tests {
     }
 
     #[test]
+    fn compile_instrument_manifest_includes_modulation_outputs_from_out_forms() {
+        let source = r#"
+            (out (phasor 0.25) 2 @name macro-a @modulator 1)
+            (out (phasor 50.0) 1 @name audio)
+        "#;
+
+        let json = compile_instrument(source, 44_100).expect("instrument compiles");
+        let manifest = parse_manifest(&json).expect("manifest parses");
+
+        assert_eq!(manifest.mod_outputs.len(), 1);
+        let output = &manifest.mod_outputs[0];
+        assert_eq!(output.slot, 1);
+        assert_eq!(output.channel, 1);
+        assert_eq!(output.name, "macro-a");
+        assert_eq!(output.range, "unipolar");
+    }
+
+    #[test]
     fn patcher_writeback_for_real_instrument_compiles() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("instruments/bass/bad-subbass1/dsp.lisp");
@@ -9691,6 +9857,100 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_file(&legacy_file);
+    }
+
+    #[test]
+    fn missing_instrument_metadata_defaults_to_instrument_run_mode() {
+        let name = format!("__test-run-mode-missing-{}/", std::process::id());
+        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let _ = std::fs::remove_dir_all(&folder);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+
+        assert_eq!(
+            super::load_instrument_run_mode(&name).unwrap(),
+            super::CustomInstrumentRunMode::Instrument
+        );
+        assert!(!folder.join("instrument.json").exists());
+
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn folder_instrument_run_mode_roundtrips_to_instrument_json() {
+        let name = format!("__test-run-mode-folder-{}/", std::process::id());
+        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let _ = std::fs::remove_dir_all(&folder);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+        super::save_instrument_run_mode(&name, super::CustomInstrumentRunMode::FreePatch).unwrap();
+
+        let metadata_path = folder.join("instrument.json");
+        assert_eq!(
+            super::instrument_metadata_path(&name).unwrap(),
+            metadata_path
+        );
+        assert!(metadata_path.exists());
+        assert_eq!(
+            super::load_instrument_run_mode(&name).unwrap(),
+            super::CustomInstrumentRunMode::FreePatch
+        );
+        super::save_instrument_run_mode(&name, super::CustomInstrumentRunMode::Instrument).unwrap();
+        assert_eq!(
+            super::load_instrument_run_mode(&name).unwrap(),
+            super::CustomInstrumentRunMode::Instrument
+        );
+
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn legacy_file_instrument_run_mode_roundtrips_to_sidecar_json() {
+        let name = format!("__test-run-mode-legacy-{}", std::process::id());
+        let root = std::path::Path::new(super::INSTRUMENTS_DIR);
+        let source_path = root.join(format!("{name}.lisp"));
+        let metadata_path = root.join(format!("{name}.instrument.json"));
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&metadata_path);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+        super::save_instrument_run_mode(&name, super::CustomInstrumentRunMode::FreePatch).unwrap();
+
+        assert_eq!(
+            super::instrument_metadata_path(&name).unwrap(),
+            metadata_path
+        );
+        assert!(metadata_path.exists());
+        assert_eq!(
+            super::load_instrument_run_mode(&name).unwrap(),
+            super::CustomInstrumentRunMode::FreePatch
+        );
+
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&metadata_path);
+    }
+
+    #[test]
+    fn invalid_instrument_run_mode_reports_error() {
+        let name = format!("__test-run-mode-invalid-{}/", std::process::id());
+        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let _ = std::fs::remove_dir_all(&folder);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+        std::fs::write(
+            folder.join("instrument.json"),
+            r#"{ "version": 1, "run_mode": "forever_note" }"#,
+        )
+        .unwrap();
+
+        let error = super::load_instrument_run_mode(&name).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("invalid instrument run_mode"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

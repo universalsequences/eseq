@@ -11,7 +11,8 @@ use crate::project::{
     ProjectScratchState, ProjectTrack,
 };
 use crate::sequencer::{
-    BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
+    BusId, CustomInstrumentRunMode, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS,
+    TRACK_PATTERN_WORDS,
 };
 
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
@@ -1694,6 +1695,7 @@ impl App {
             bus_patterns,
             mod_connections,
             instrument_types: _,
+            instrument_run_modes,
             sample_paths: _,
             sample_names: _,
         } = pattern;
@@ -1890,6 +1892,10 @@ impl App {
                 })
                 .collect(),
             instrument_types: self.graph.track_instrument_types.clone(),
+            instrument_run_modes: instrument_run_modes
+                .into_iter()
+                .map(CustomInstrumentRunMode::from)
+                .collect(),
             mod_connections: mod_connections.into_iter().map(Into::into).collect(),
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
@@ -2065,6 +2071,7 @@ mod tests {
                 midi_fx_slots: Vec::new(),
                 instrument_slots: Vec::new(),
                 instrument_base_note_offsets: Vec::new(),
+                instrument_run_modes: Vec::new(),
                 track_sound_states: Vec::new(),
                 chord_snapshots: Vec::new(),
                 chord_duration_snapshots: Vec::new(),
