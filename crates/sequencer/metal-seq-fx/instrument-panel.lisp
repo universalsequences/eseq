@@ -5,12 +5,12 @@
     (if (= (get inst :type) "modulator")
       (modulator-panel inst)
       (box
-        (v-stack :debug-name "instrument-panel-vstack" :gap 0
-          (box :debug-name "instrument-header-box" :height 0.75 :padding 0 :v-align :center :h-align :start :width :fill
+        (v-stack :debug-name "instrument-panel-vstack" :gap 0 :height :fill
+          (box :debug-name "instrument-header-box" :height fx-panel-header-height :padding 0 :v-align :center :h-align :start :width :fill
             (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center :width :fill
               (fx-panel-header-leading-spacer)
               (fx-enabled-toggle (enabled-param (get inst :synth)) false "instrument-enabled")
-              (h-stack :v-align :center :height 0.75 :gap 2 :padding 0.1
+              (h-stack :v-align :center :height fx-panel-header-height :gap 2 :padding 0.1
                 (label (substring (get inst :display-name) 0 12)
                   :font-size 11  :color :white :bg :transparent)
                 (instrument-synth-button)

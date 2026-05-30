@@ -1635,6 +1635,85 @@ mod tests {
     }
 
     #[test]
+    fn reactive_set_updates_bindable_float_slots() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive("APP", vec![("active", Value::Bool(false))], true);
+        runtime
+            .eval_str(
+                r#"
+                (def active-ref (bind "APP" "active"))
+                (effect (label "cursor" :active active-ref :active-color :yellow))
+                "#,
+            )
+            .expect("create reactive binding and bound widget");
+        let widget_id = runtime
+            .current_layout
+            .as_ref()
+            .expect("bound label layout")
+            .widget_id;
+        let _ = runtime.take_dirty_widget_ids();
+
+        assert_eq!(
+            runtime.eval_str("(reactive-value active-ref)").unwrap(),
+            Some(Value::Number(0.0))
+        );
+        runtime
+            .eval_str(r#"(reactive-set "APP" "active" true)"#)
+            .expect("set active through lisp reactive-set");
+        assert_eq!(
+            runtime.eval_str("(reactive-value active-ref)").unwrap(),
+            Some(Value::Number(1.0)),
+            "Lisp reactive-set should update the slot read by bind/reactive-value"
+        );
+        assert_eq!(
+            runtime.take_dirty_widget_ids(),
+            vec![widget_id],
+            "Lisp reactive-set should dirty widgets bound through bind"
+        );
+    }
+
+    #[test]
+    fn box_accepts_selected_and_muted_reactive_bindings() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "APP",
+            vec![
+                ("selected", Value::Bool(true)),
+                ("muted", Value::Bool(false)),
+            ],
+            true,
+        );
+
+        let value = runtime
+            .eval_str(
+                r#"(box
+                    :selected (bind "APP" "selected")
+                    :muted (bind "APP" "muted")
+                    :background-color :black
+                    :selected-background-color :blue
+                    :muted-background-color :gray
+                    :border-color :dim
+                    :selected-border-color :white
+                    :muted-border-color :dark-gray)"#,
+            )
+            .expect("evaluate box state bindings")
+            .expect("box should return a widget");
+
+        let Value::Map(map) = value else {
+            panic!("box should return a widget map, got {value:?}");
+        };
+        assert!(matches!(
+            map.get("selected").map(|value| value.borrow().clone()),
+            Some(Value::ReactiveRef { .. })
+        ));
+        assert!(matches!(
+            map.get("muted").map(|value| value.borrow().clone()),
+            Some(Value::ReactiveRef { .. })
+        ));
+    }
+
+    #[test]
     fn removed_bound_subtree_stops_receiving_binding_dirty_marks() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);
@@ -2958,5 +3037,96 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn set_reactive_list_index_updates_only_target_slot_value() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive(
+            "APP",
+            vec![(
+                "values",
+                Value::List(vec![
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                    Rc::new(RefCell::new(Value::Number(2.0))),
+                    Rc::new(RefCell::new(Value::Number(3.0))),
+                ]),
+            )],
+            true,
+        );
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (h-stack
+                    (mixer-meter
+                      :level-l (bind-nth "APP" "values" 0)
+                      :level-r 0.0
+                      :width 2.22 :height 4.24)
+                    (mixer-meter
+                      :level-l (bind-nth "APP" "values" 1)
+                      :level-r 0.0
+                      :width 2.22 :height 4.24)))
+                "#,
+            )
+            .expect("install indexed binding effect");
+        let layout = runtime.current_layout.as_ref().expect("bound meter layout");
+        let second_meter_id = layout.children[1].widget_id;
+        let _ = runtime.take_dirty_widget_ids();
+        let _ = runtime.drain_rendered_layouts();
+
+        runtime.set_reactive_list_index("APP", "values", 1, Value::Number(0.75));
+        assert_eq!(runtime.take_dirty_widget_ids(), vec![second_meter_id]);
+        runtime.run_reactive_cycle();
+
+        let result = runtime.eval_str("APP.values").unwrap().unwrap();
+        let Value::List(items) = result else {
+            panic!("expected APP.values to remain a list, got {result:?}");
+        };
+        assert_eq!(items[0].borrow().clone(), Value::Number(1.0));
+        assert_eq!(items[1].borrow().clone(), Value::Number(0.75));
+        assert_eq!(items[2].borrow().clone(), Value::Number(3.0));
+        assert!(
+            runtime.drain_rendered_layouts().is_empty(),
+            "indexed binding-only partial writes must not rerun effects"
+        );
+    }
+
+    #[test]
+    fn set_reactive_list_index_invalidates_direct_bus_solo_read_effects() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![(
+                "bus-solos",
+                Value::List(vec![
+                    Rc::new(RefCell::new(Value::Bool(false))),
+                    Rc::new(RefCell::new(Value::Bool(false))),
+                ]),
+            )],
+            false,
+        );
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*mixer*"
+                  (v-stack
+                    (subtree :key "bus-0"
+                      (label (fmt "bus0:{}" (nth SEQ.bus-solos 0))))
+                    (subtree :key "bus-1"
+                      (label (fmt "bus1:{}" (nth SEQ.bus-solos 1))))))
+                "#,
+            )
+            .expect("install direct bus solo read effect");
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        runtime.set_reactive_list_index("SEQ", "bus-solos", 1, Value::Bool(true));
+        runtime.run_reactive_cycle();
+
+        assert!(
+            !runtime.take_pending_buffer_widget_trees().is_empty(),
+            "partial bus solo writes must dirty effects that read SEQ.bus-solos directly"
+        );
     }
 }

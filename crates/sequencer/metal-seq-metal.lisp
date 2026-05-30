@@ -55,6 +55,7 @@
 (defwidget metal-track-tick
   :width 1.5 :height 1.5
   :state (active plocked selected track-r track-g track-b)
+  :bindable (active plocked selected track-r track-g track-b)
   :shader
   (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
     (sdf/translate 0 sel-y
@@ -107,6 +108,8 @@
               (bus-plocks (bus-seq-list SEQ.bus-step-has-plocks)))
           (box :padding 0.25
             :background (if visible (if (= (bus-current-step) step) "cursor-highlight" nil) nil)
+            :active true
+            :selected true
             :on-click (lambda (evt)
               (if visible
                 (do
@@ -289,11 +292,13 @@
         (let ((step (step-index i))
               (visible (step-visible? i)))
           (box :padding 0.25 :background (if visible (if (= (current-step) step) "cursor-highlight" nil) nil)
+            :active true
+            :selected true
             :on-click (lambda (evt)
               (if visible
                 (do
                   (cool-off-follow)
-                  (set! cursor-step step)
+                  (set-track-cursor-step step)
                   (if (selection-click? evt)
                     (step-select-drag-start step evt)
                     (seq-clear-selection)))
@@ -326,7 +331,7 @@
                       (if visible
                         (do
                           (cool-off-follow)
-                          (set! cursor-step step)
+                          (set-track-cursor-step step)
                           (let ((value (step-slider-param-value v)))
                           (seq-set-step-param-from-step step (param-keyword) value)))
                         nil)))
@@ -351,7 +356,7 @@
                       (if visible
                         (do
                           (cool-off-follow)
-                          (set! cursor-step step)
+                          (set-track-cursor-step step)
                           (let ((value (step-slider-param-value v)))
                           (seq-set-step-param-from-step step (param-keyword) value)))
                         nil)))))

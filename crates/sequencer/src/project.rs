@@ -21,6 +21,8 @@ pub struct ProjectFile {
     #[serde(default = "default_master_volume")]
     pub master_volume: f32,
     pub current_pattern: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_track: Option<usize>,
     pub reverb: ProjectReverbState,
     #[serde(default = "default_project_buses")]
     pub buses: Vec<ProjectBusChannel>,
@@ -213,6 +215,12 @@ pub struct ProjectPattern {
     )]
     pub chord_duration_snapshots: Vec<Vec<Vec<f32>>>,
     #[serde(
+        default,
+        serialize_with = "serialize_chord_snapshots",
+        deserialize_with = "deserialize_chord_snapshots"
+    )]
+    pub chord_delay_snapshots: Vec<Vec<Vec<f32>>>,
+    #[serde(
         serialize_with = "serialize_timebase_plock_snapshots",
         deserialize_with = "deserialize_timebase_plock_snapshots"
     )]
@@ -315,6 +323,9 @@ pub struct ProjectEffectSlot {
     pub plocks: Vec<Vec<Option<f32>>>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
+    /// Effect-specific instance data that isn't a numeric param. Currently just
+    /// the Convolution Reverb's impulse-response reference (sample hash/stem).
+    pub ir: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -398,6 +409,11 @@ impl ProjectPattern {
                 .chord_snapshots
                 .iter()
                 .map(|snap| snap.durations.clone())
+                .collect(),
+            chord_delay_snapshots: snapshot
+                .chord_snapshots
+                .iter()
+                .map(|snap| snap.delays.clone())
                 .collect(),
             timebase_plock_snapshots: snapshot
                 .timebase_plock_snapshots
@@ -565,6 +581,7 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             plocks: value.plocks.clone(),
             param_node_indices: value.param_node_indices.clone(),
             param_node_spans: value.param_node_spans.clone(),
+            ir: value.ir.clone(),
         }
     }
 }
@@ -579,6 +596,7 @@ impl ProjectEffectSlot {
             plocks: self.plocks,
             param_node_indices: self.param_node_indices,
             param_node_spans: self.param_node_spans,
+            ir: self.ir,
         }
     }
 }
@@ -910,6 +928,10 @@ fn step_values_from_vec(values: Vec<f32>) -> [f32; NUM_PARAMS] {
     let mut params = default_step_values();
     if values.len() == NUM_PARAMS - 1 {
         for (idx, value) in values.into_iter().enumerate() {
+            params[idx] = value;
+        }
+    } else if values.len() == NUM_PARAMS - 2 {
+        for (idx, value) in values.into_iter().enumerate() {
             let target_idx = if idx >= crate::sequencer::StepParam::Pan.index() {
                 idx + 1
             } else {
@@ -999,6 +1021,8 @@ struct SparseProjectEffectSlot {
     param_node_indices: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     param_node_spans: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ir: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1009,6 +1033,8 @@ struct DenseProjectEffectSlot {
     param_node_indices: Vec<u32>,
     #[serde(default)]
     param_node_spans: Vec<u32>,
+    #[serde(default)]
+    ir: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1039,6 +1065,7 @@ impl Serialize for ProjectEffectSlot {
             && self.defaults.is_empty()
             && self.param_node_indices.is_empty()
             && plocks_sparse.is_empty()
+            && self.ir.is_none()
         {
             return Option::<()>::None.serialize(serializer);
         }
@@ -1049,6 +1076,7 @@ impl Serialize for ProjectEffectSlot {
             plocks_sparse,
             param_node_indices: self.param_node_indices.clone(),
             param_node_spans: self.param_node_spans.clone(),
+            ir: self.ir.clone(),
         }
         .serialize(serializer)
     }
@@ -1074,6 +1102,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                     plocks,
                     param_node_indices: slot.param_node_indices,
                     param_node_spans: slot.param_node_spans,
+                    ir: slot.ir,
                 }
             }
             ProjectEffectSlotRepr::Dense(slot) => Self {
@@ -1082,6 +1111,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 plocks: slot.plocks,
                 param_node_indices: slot.param_node_indices,
                 param_node_spans: slot.param_node_spans,
+                ir: slot.ir,
             },
             ProjectEffectSlotRepr::Empty(_) => Self {
                 num_params: 0,
@@ -1089,6 +1119,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 plocks: vec![Vec::new(); MAX_STEPS],
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
+                ir: None,
             },
         })
     }
@@ -1096,18 +1127,44 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
 
 pub fn chord_snapshot_from_steps(steps: Vec<Vec<f32>>) -> ChordSnapshot {
     let durations = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
-    ChordSnapshot { steps, durations }
+    let delays = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
+    ChordSnapshot {
+        steps,
+        durations,
+        delays,
+    }
+}
+
+pub fn chord_snapshot_from_steps_durations_and_delays(
+    steps: Vec<Vec<f32>>,
+    mut durations: Vec<Vec<f32>>,
+    mut delays: Vec<Vec<f32>>,
+) -> ChordSnapshot {
+    durations.resize_with(steps.len(), Vec::new);
+    delays.resize_with(steps.len(), Vec::new);
+    for (idx, notes) in steps.iter().enumerate() {
+        durations[idx].resize(notes.len(), 0.0);
+        delays[idx].resize(notes.len(), 0.0);
+        for delay in &mut delays[idx] {
+            *delay = delay.clamp(
+                crate::sequencer::StepParam::Delay.min(),
+                crate::sequencer::StepParam::Delay.max(),
+            );
+        }
+    }
+    ChordSnapshot {
+        steps,
+        durations,
+        delays,
+    }
 }
 
 pub fn chord_snapshot_from_steps_and_durations(
     steps: Vec<Vec<f32>>,
-    mut durations: Vec<Vec<f32>>,
+    durations: Vec<Vec<f32>>,
 ) -> ChordSnapshot {
-    durations.resize_with(steps.len(), Vec::new);
-    for (idx, notes) in steps.iter().enumerate() {
-        durations[idx].resize(notes.len(), 0.0);
-    }
-    ChordSnapshot { steps, durations }
+    let delays = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
+    chord_snapshot_from_steps_durations_and_delays(steps, durations, delays)
 }
 
 #[cfg(test)]
@@ -1120,7 +1177,8 @@ mod tests {
             name: "roundtrip".to_string(),
             bpm: 120,
             master_volume: 1.0,
-            current_pattern: 1,
+            current_pattern: 0,
+            current_track: Some(1),
             reverb: ProjectReverbState {
                 size: 0.2,
                 brightness: 0.8,
@@ -1145,7 +1203,7 @@ mod tests {
             },
             patterns: vec![ProjectPattern {
                 track_bits: vec![[0b1011, 0, 0, 0], [0b0101, 1, 0, 0]],
-                step_data: vec![vec![[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]; 256]; 2],
+                step_data: vec![vec![default_step_values(); 256]; 2],
                 track_params: vec![
                     ProjectTrackParams {
                         gate: true,
@@ -1212,6 +1270,7 @@ mod tests {
                         plocks: vec![vec![None, Some(0.8)]; 256],
                         param_node_indices: vec![0, 1],
                         param_node_spans: vec![1, 1],
+                        ir: None,
                     },
                     ProjectEffectSlot {
                         num_params: 0,
@@ -1219,6 +1278,7 @@ mod tests {
                         plocks: vec![vec![]; 256],
                         param_node_indices: vec![],
                         param_node_spans: vec![],
+                        ir: None,
                     },
                 ],
                 instrument_base_note_offsets: vec![0.0, 12.0],
@@ -1232,8 +1292,21 @@ mod tests {
                         dirty: true,
                     },
                 ],
-                chord_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
-                chord_duration_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
+                chord_snapshots: {
+                    let mut snapshots = vec![vec![Vec::new(); 256], vec![Vec::new(); 256]];
+                    snapshots[1][3] = vec![60.0, 64.0, 67.0];
+                    snapshots
+                },
+                chord_duration_snapshots: {
+                    let mut snapshots = vec![vec![Vec::new(); 256], vec![Vec::new(); 256]];
+                    snapshots[1][3] = vec![1.0, 0.75, 0.5];
+                    snapshots
+                },
+                chord_delay_snapshots: {
+                    let mut snapshots = vec![vec![Vec::new(); 256], vec![Vec::new(); 256]];
+                    snapshots[1][3] = vec![0.0, 0.25, 0.5];
+                    snapshots
+                },
                 timebase_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_resolution_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
@@ -1261,6 +1334,8 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize current project");
 
         assert_eq!(restored.name, project.name);
+        assert_eq!(restored.current_pattern, project.current_pattern);
+        assert_eq!(restored.current_track, project.current_track);
         assert_eq!(restored.scratch.buffer, project.scratch.buffer);
         assert_eq!(restored.scratch.cursor_row, project.scratch.cursor_row);
         assert_eq!(restored.scratch.cursor_col, project.scratch.cursor_col);
@@ -1276,6 +1351,18 @@ mod tests {
         assert_eq!(restored.patterns[0].track_bits[0], [0b1011, 0, 0, 0]);
         assert_eq!(restored.patterns[0].track_bits[1], [0b0101, 1, 0, 0]);
         assert_eq!(restored.patterns[0].step_data[0].len(), 256);
+        assert_eq!(
+            restored.patterns[0].chord_snapshots[1][3],
+            vec![60.0, 64.0, 67.0]
+        );
+        assert_eq!(
+            restored.patterns[0].chord_duration_snapshots[1][3],
+            vec![1.0, 0.75, 0.5]
+        );
+        assert_eq!(
+            restored.patterns[0].chord_delay_snapshots[1][3],
+            vec![0.0, 0.25, 0.5]
+        );
         assert_eq!(restored.patterns[0].timebase_plock_snapshots[0].len(), 256);
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);
@@ -1300,6 +1387,34 @@ mod tests {
             restored.patterns[0].track_params[0].sends[0].destination,
             crate::sequencer::DEFAULT_BUS_B_ID
         );
+    }
+
+    #[test]
+    fn current_pattern_current_track_and_note_delays_roundtrip() {
+        let mut project = sample_project();
+        let current_pattern = project.patterns[0].clone();
+        let mut previous_pattern = current_pattern.clone();
+        previous_pattern.track_bits =
+            vec![[0; TRACK_PATTERN_WORDS]; previous_pattern.track_bits.len()];
+        previous_pattern.chord_snapshots =
+            vec![vec![Vec::new(); MAX_STEPS]; previous_pattern.chord_snapshots.len()];
+        previous_pattern.chord_duration_snapshots =
+            vec![vec![Vec::new(); MAX_STEPS]; previous_pattern.chord_duration_snapshots.len()];
+        previous_pattern.chord_delay_snapshots =
+            vec![vec![Vec::new(); MAX_STEPS]; previous_pattern.chord_delay_snapshots.len()];
+
+        project.patterns = vec![previous_pattern, current_pattern];
+        project.current_pattern = 1;
+        project.current_track = Some(1);
+
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let current = &restored.patterns[restored.current_pattern];
+
+        assert_eq!(restored.current_track, Some(1));
+        assert_eq!(current.track_bits[1], [0b0101, 1, 0, 0]);
+        assert_eq!(current.chord_snapshots[1][3], vec![60.0, 64.0, 67.0]);
+        assert_eq!(current.chord_delay_snapshots[1][3], vec![0.0, 0.25, 0.5]);
     }
 
     #[test]
@@ -1347,9 +1462,11 @@ mod tests {
 
         let project: ProjectFile = serde_json::from_str(json).expect("deserialize legacy project");
         let step = project.patterns[0].step_data[0][0];
+        assert_eq!(project.current_track, None);
         assert_eq!(step[crate::sequencer::StepParam::Transpose.index()], 7.0);
         assert_eq!(step[crate::sequencer::StepParam::Pan.index()], 0.0);
         assert_eq!(step[crate::sequencer::StepParam::Chop.index()], 1.0);
+        assert_eq!(step[crate::sequencer::StepParam::Delay.index()], 0.0);
     }
 
     #[test]
@@ -1389,5 +1506,23 @@ mod tests {
         assert_eq!(slot.defaults, vec![0.1, 0.2]);
         assert_eq!(slot.plocks[3][1], Some(0.8));
         assert_eq!(slot.plocks[0][1], None);
+        // Slots saved before the IR field deserialize with ir = None.
+        assert_eq!(slot.ir, None);
+    }
+
+    #[test]
+    fn effect_slot_persists_ir_reference() {
+        let slot = ProjectEffectSlot {
+            num_params: 2,
+            defaults: vec![0.35, 1.0],
+            plocks: vec![Vec::new(); MAX_STEPS],
+            param_node_indices: vec![10, 11],
+            param_node_spans: vec![1, 1],
+            ir: Some("lexicon-300-rich-plate".to_string()),
+        };
+        let json = serde_json::to_string(&slot).expect("serialize slot with ir");
+        assert!(json.contains("\"ir\":\"lexicon-300-rich-plate\""), "{json}");
+        let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip slot with ir");
+        assert_eq!(back.ir.as_deref(), Some("lexicon-300-rich-plate"));
     }
 }

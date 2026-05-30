@@ -17,6 +17,12 @@
 (def mixer-v2-muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
 
+(def mixer-v2-track-selected-binding (i)
+  (bind-seq (str "track-selected-" i)))
+
+(def mixer-v2-track-delete-target-binding (i)
+  (bind-seq (str "mixer-track-delete-target-" i)))
+
 (def mixer-v2-track-color (i)
   (if (< i (len SEQ.track-colors))
     (nth SEQ.track-colors i)
@@ -66,7 +72,13 @@
   (do
     (set! selected-bus -1)
     (seq-set-track i)
+    (host-command "reveal-sequencer-track" (dict :track i))
     (seq-set-delete-target :mixer-track (dict :track i))))
+
+(def mixer-v2-activate-track-control (i)
+  (do
+    (set! selected-bus -1)
+    (mixer-v2-clear-delete-target)))
 
 (def mixer-v2-select-bus (i)
   (do
@@ -82,7 +94,7 @@
       (do
         (mixer-v2-clear-delete-target)
         (if path
-          (host-command "load-sample-into-track" (dict :track track :path path))
+          (host-command "load-sample-into-track" (dict :track track :path path :preserve-browser-context true))
           (status "Drop a sample file, not a folder"))))))
 
 (def mixer-v2-drop-sample-new-track (event)
@@ -91,7 +103,7 @@
       (do
         (mixer-v2-clear-delete-target)
         (if path
-          (host-command "add-track-sample" (dict :path path))
+          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
           (status "Drop a sample file, not a folder"))))))
 
 (def mixer-v2-drop-effect-on-track (event)
@@ -125,11 +137,6 @@
 
 (def mixer-v2-clear-delete-target ()
   (seq-clear-delete-target))
-
-(def mixer-v2-delete-target-track? (track)
-  (do
-    SEQ.delete-target-version
-    (seq-delete-target? :mixer-track (dict :track track))))
 
 (def mixer-v2-delete-target-mod-route? (source dest input)
   (do
@@ -410,14 +417,19 @@
           (dict :track track :bus (get send :bus-idx) :amount v))))))
 
 (def mixer-v2-track-strip (i)
-  (let ((selected (and (< selected-bus 0) (= SEQ.current-track i)))
-      (muted (mixer-v2-muted? i))
+  (let ((muted (mixer-v2-muted? i))
       (sends (nth SEQ.track-bus-sends i)))
     (box :width 10.9 :height 12.15
-      :background-color (mixer-v2-strip-bg selected muted)
+      :selected (mixer-v2-track-selected-binding i)
+      :muted muted
+      :background-color :mixer-strip-bg
+      :selected-background-color :mixer-strip-selected-bg
+      :muted-background-color :mixer-strip-muted-bg
       :border-width 2
       :corner-radius 10
-      :border-color (mixer-v2-strip-border selected)
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
+      :muted-border-color :mixer-strip-border
       :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
       :drop-types (list "sample" "audio-effect" "midi-effect")
@@ -456,28 +468,37 @@
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
             :color (if muted :dim :black)
-            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-track-mute i))))
+            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.track-solos i))
             :color (if (nth SEQ.track-solos i) :black :dim)
-            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-track-solo i))))
+            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-solo i))))
           (button "R"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
             :color (if (nth SEQ.record-armed i) :black :dim)
-            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-record-arm i)))))
-        (button (substring (nth SEQ.track-names i) 0 10)
-          :width 9.8 :height 1.0 :padding 0 :font-size 10
-          :background-color (if (mixer-v2-delete-target-track? i)
-            :fx-panel-header-selected-bg
-            (rgba
-              (mixer-v2-track-color-r i muted)
-              (mixer-v2-track-color-g i muted)
-              (mixer-v2-track-color-b i muted)
-              1.0))
-          :color (if (mixer-v2-delete-target-track? i) :white (if muted :dim :black))
-          :on-click (lambda (event) (mixer-v2-select-track i)))))))
+            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))
+        (box
+          :key (str "mixer-v2-track-label-" i)
+          :width 9.8 :height 1.0
+          :padding 0
+          :selected (mixer-v2-track-delete-target-binding i)
+          :background-color (rgba
+            (mixer-v2-track-color-r i muted)
+            (mixer-v2-track-color-g i muted)
+            (mixer-v2-track-color-b i muted)
+            1.0)
+          :selected-background-color :fx-panel-header-selected-bg
+          :on-click (lambda (event) (mixer-v2-select-track i))
+          (label (substring (nth SEQ.track-names i) 0 10)
+            :width 9.8
+            :font-size 10
+            :h-align :center
+            :color (if muted :dim :black)
+            :active (mixer-v2-track-delete-target-binding i)
+            :active-color :white
+            :bg :transparent))))))
 
 (def mixer-v2-bus-label (i)
   (if (= i 0) "Main" (nth SEQ.bus-names i)))
@@ -508,7 +529,12 @@
 (def mixer-v2-current-channel-index ()
   (if (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names)))
     (+ SEQ.num-tracks (mixer-v2-bus-display-index selected-bus))
-    (min (max SEQ.current-track 0) (- (max SEQ.num-tracks 1) 1))))
+    (let ((selected (filter
+            (lambda (i) (> (reactive-value (bind-seq (str "track-selected-" i))) 0.5))
+            (range 0 SEQ.num-tracks))))
+      (if (> (len selected) 0)
+        (nth selected 0)
+        0))))
 
 (def mixer-v2-select-channel-index (idx)
   (let ((clamped (min (max idx 0) (- (max (mixer-v2-channel-count) 1) 1))))

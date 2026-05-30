@@ -1535,6 +1535,7 @@ fragment float4 waveform_frag(
                     widget_render::MetalPrimitive::Rect(_)
                         | widget_render::MetalPrimitive::ForegroundRect(_)
                         | widget_render::MetalPrimitive::Quad(_)
+                        | widget_render::MetalPrimitive::Triangle(_)
                         | widget_render::MetalPrimitive::GlyphRun(_)
                         | widget_render::MetalPrimitive::ProportionalText(_)
                         | widget_render::MetalPrimitive::Circle(_)
@@ -1630,8 +1631,15 @@ fragment float4 waveform_frag(
                 hash_f32(quad.height, hasher);
                 hash_color(quad.color, hasher);
             }
-            widget_render::MetalPrimitive::GlyphRun(run) => {
+            widget_render::MetalPrimitive::Triangle(triangle) => {
                 4u8.hash(hasher);
+                for point in triangle.points {
+                    hash_f32_array(point, hasher);
+                }
+                hash_color(triangle.color, hasher);
+            }
+            widget_render::MetalPrimitive::GlyphRun(run) => {
+                5u8.hash(hasher);
                 hash_f32(run.row, hasher);
                 run.col.hash(hasher);
                 run.text.hash(hasher);
@@ -1639,7 +1647,7 @@ fragment float4 waveform_frag(
                 hash_color(run.bg, hasher);
             }
             widget_render::MetalPrimitive::ProportionalText(run) => {
-                5u8.hash(hasher);
+                6u8.hash(hasher);
                 hash_f32(run.row, hasher);
                 hash_f32(run.col, hasher);
                 hash_f32(run.align_width, hasher);
@@ -1651,7 +1659,7 @@ fragment float4 waveform_frag(
                 hash_color(run.bg, hasher);
             }
             widget_render::MetalPrimitive::Circle(circle) => {
-                6u8.hash(hasher);
+                7u8.hash(hasher);
                 hash_f32_array(circle.center, hasher);
                 hash_f32(circle.radius_px, hasher);
                 hash_color(circle.color, hasher);
@@ -1662,7 +1670,7 @@ fragment float4 waveform_frag(
                 instance,
                 is_background,
             } => {
-                7u8.hash(hasher);
+                8u8.hash(hasher);
                 widget_type.hash(hasher);
                 is_background.hash(hasher);
                 hash_widget_instance(widget_type, instance, hasher);
@@ -6395,6 +6403,9 @@ fragment float4 waveform_frag(
                 widget_render::MetalPrimitive::Quad(quad) => {
                     push_solid_quad_vertices(*quad, cell_w, cell_h, vp_w, vp_h, &mut verts);
                 }
+                widget_render::MetalPrimitive::Triangle(triangle) => {
+                    push_solid_triangle_vertices(*triangle, cell_w, cell_h, vp_w, vp_h, &mut verts);
+                }
                 widget_render::MetalPrimitive::GlyphRun(run) => {
                     for (idx, ch) in run.text.chars().enumerate() {
                         if ch == ' ' {
@@ -7223,6 +7234,30 @@ fragment float4 waveform_frag(
         ]);
     }
 
+    fn push_solid_triangle_vertices(
+        triangle: widget_render::MetalTrianglePrimitive,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+        verts: &mut Vec<Vertex>,
+    ) {
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let rgba = triangle.color.to_rgba();
+        let v = |point: [f32; 2]| Vertex {
+            position: [ndc_x(point[0] * cell_w), ndc_y(point[1] * cell_h)],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        };
+        verts.extend_from_slice(&[
+            v(triangle.points[0]),
+            v(triangle.points[1]),
+            v(triangle.points[2]),
+        ]);
+    }
+
     fn push_rect_px(
         verts: &mut Vec<Vertex>,
         x: f32,
@@ -7960,6 +7995,14 @@ fragment float4 waveform_frag(
                 }
                 widget_render::MetalPrimitive::Quad(q)
             }
+            widget_render::MetalPrimitive::Triangle(mut t) => {
+                for point in &mut t.points {
+                    if reaches_right(point[0]) {
+                        point[0] += extra_cols;
+                    }
+                }
+                widget_render::MetalPrimitive::Triangle(t)
+            }
             widget_render::MetalPrimitive::ProportionalText(mut p) => {
                 if p.align_width > 0.0 && reaches_right(p.col + p.align_width) {
                     p.align_width += extra_cols;
@@ -8057,6 +8100,13 @@ fragment float4 waveform_frag(
                 q.x += col_off;
                 q.y += row_off;
                 widget_render::MetalPrimitive::Quad(q)
+            }
+            widget_render::MetalPrimitive::Triangle(mut t) => {
+                for point in &mut t.points {
+                    point[0] += col_off;
+                    point[1] += row_off;
+                }
+                widget_render::MetalPrimitive::Triangle(t)
             }
             widget_render::MetalPrimitive::GlyphRun(mut g) => {
                 g.col += col_off.round() as i32;

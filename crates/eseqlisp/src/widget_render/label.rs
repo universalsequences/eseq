@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::{
     CellBuffer, MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive,
-    WidgetDefinition, resolve_named_color, styled_cell,
+    WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
 use crate::layout::{
@@ -21,6 +21,11 @@ fn resolve_color(props: &HashMap<String, Value>, hovered: bool) -> Color {
         if let Some(value) = props.get("hover-color") {
             return crate::theme::parse_color_value(value).unwrap_or(theme::WIDGET_LABEL_FG());
         }
+    }
+    if get_f32_prop(props, "active", 0.0) != 0.0
+        && let Some(value) = props.get("active-color")
+    {
+        return crate::theme::parse_color_value(value).unwrap_or(theme::WIDGET_LABEL_FG());
     }
     resolve_named_color(props, "color", theme::WIDGET_LABEL_FG())
 }
@@ -199,6 +204,23 @@ mod tests {
 
         assert!((label_text_row(&props, rect) - 1.91).abs() < 0.0001);
     }
+
+    #[test]
+    fn active_color_overrides_base_color_when_active() {
+        let mut props = HashMap::from([
+            ("color".to_string(), Value::Keyword("dim".to_string())),
+            (
+                "active-color".to_string(),
+                Value::Keyword("yellow".to_string()),
+            ),
+        ]);
+
+        assert_eq!(resolve_color(&props, false), theme::DIM());
+
+        props.insert("active".to_string(), Value::Number(1.0));
+
+        assert_eq!(resolve_color(&props, false), theme::YELLOW());
+    }
 }
 
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -257,6 +279,10 @@ impl WidgetDefinition for LabelWidget {
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["text", "width", "height", "font-size", "wrap"]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["active"]
     }
 
     fn measure(

@@ -188,7 +188,12 @@ impl ReactiveRegistry {
         }
 
         if enqueue_effect_dirty {
-            let dirty = (namespace.to_string(), field.to_string(), value);
+            let dirty_value = namespace_entry
+                .fields
+                .get(field)
+                .cloned()
+                .unwrap_or(Value::Nil);
+            let dirty = (namespace.to_string(), field.to_string(), dirty_value);
             if self.batching {
                 self.batched.push(dirty);
             } else {
@@ -207,6 +212,117 @@ impl ReactiveRegistry {
             {
                 widgets.extend(index_widgets.iter().copied());
             }
+        }
+        widgets.sort_unstable();
+        widgets.dedup();
+        ReactiveSetOutcome {
+            effect_dirty: enqueue_effect_dirty,
+            widget_ids: widgets,
+        }
+    }
+
+    pub fn set_list_index(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        index: usize,
+        value: Value,
+        enqueue_effect_dirty: bool,
+    ) -> ReactiveSetOutcome {
+        let Some(namespace_entry) = self.namespaces.get_mut(namespace) else {
+            return ReactiveSetOutcome::default();
+        };
+
+        let previous_item = namespace_entry
+            .fields
+            .get(field)
+            .and_then(|stored| match stored {
+                Value::List(items) => items.get(index).map(|item| item.borrow().clone()),
+                _ => None,
+            });
+        if previous_item
+            .as_ref()
+            .is_some_and(|previous| *previous == value)
+        {
+            return ReactiveSetOutcome::default();
+        }
+
+        if let Some(number) = numeric_value(&value) {
+            store_float_slot(
+                &reactive_indexed_float_slot(namespace, field, index),
+                number,
+            );
+        }
+
+        let stored = namespace_entry
+            .fields
+            .entry(field.to_string())
+            .or_insert_with(|| Value::List(Vec::new()));
+        match stored {
+            Value::List(items) => {
+                while items.len() <= index {
+                    items.push(Rc::new(RefCell::new(Value::Nil)));
+                }
+                *items[index].borrow_mut() = value.clone();
+            }
+            other => {
+                let mut items = Vec::with_capacity(index + 1);
+                for _ in 0..index {
+                    items.push(Rc::new(RefCell::new(Value::Nil)));
+                }
+                items.push(Rc::new(RefCell::new(value.clone())));
+                *other = Value::List(items);
+            }
+        }
+
+        let map_slot = namespace_entry
+            .map
+            .entry(field.to_string())
+            .or_insert_with(|| Rc::new(RefCell::new(Value::List(Vec::new()))));
+        {
+            let mut borrowed = map_slot.borrow_mut();
+            match &mut *borrowed {
+                Value::List(items) => {
+                    while items.len() <= index {
+                        items.push(Rc::new(RefCell::new(Value::Nil)));
+                    }
+                    *items[index].borrow_mut() = value.clone();
+                }
+                other => {
+                    let mut items = Vec::with_capacity(index + 1);
+                    for _ in 0..index {
+                        items.push(Rc::new(RefCell::new(Value::Nil)));
+                    }
+                    items.push(Rc::new(RefCell::new(value.clone())));
+                    *other = Value::List(items);
+                }
+            }
+        }
+
+        if enqueue_effect_dirty {
+            let dirty_value = namespace_entry
+                .fields
+                .get(field)
+                .cloned()
+                .unwrap_or(Value::Nil);
+            let dirty = (namespace.to_string(), field.to_string(), dirty_value);
+            if self.batching {
+                self.batched.push(dirty);
+            } else {
+                self.dirty.push(dirty);
+            }
+        }
+
+        let mut widgets: Vec<u64> = self
+            .field_to_widgets
+            .get(&ReactiveBindingKey::field(namespace, field))
+            .map(|widgets| widgets.iter().copied().collect())
+            .unwrap_or_default();
+        if let Some(index_widgets) = self
+            .field_to_widgets
+            .get(&ReactiveBindingKey::indexed(namespace, field, index))
+        {
+            widgets.extend(index_widgets.iter().copied());
         }
         widgets.sort_unstable();
         widgets.dedup();

@@ -21,6 +21,25 @@ pub struct Engine {
     pub _stream: Stream,
 }
 
+pub struct HeadlessEngine {
+    pub state: Arc<SequencerState>,
+    pub lg_ptr: LiveGraphPtr,
+    pub buses: AudioBuses,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub master_recorder: Arc<MasterRecorder>,
+    pub keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+}
+
+impl HeadlessEngine {
+    /// Clean up audiograph resources for a graph created without a CPAL stream.
+    pub unsafe fn destroy(&self) {
+        audiograph::clear_os_workgroup();
+        audiograph::engine_stop_workers();
+        audiograph::destroy_live_graph(self.lg_ptr.0);
+    }
+}
+
 impl Engine {
     /// Clean up audiograph resources. Call after dropping the stream.
     pub unsafe fn destroy(&self) {
@@ -49,9 +68,68 @@ fn recommended_worker_count() -> i32 {
     4
 }
 
+struct EngineParts {
+    state: Arc<SequencerState>,
+    lg_ptr: LiveGraphPtr,
+    buses: AudioBuses,
+    sample_rate: u32,
+    channels: u16,
+    block_size: usize,
+    master_recorder: Arc<MasterRecorder>,
+    keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
+}
+
 pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
-    // Query audio device
     let (sample_rate, channels) = audio::query_device_config()?;
+    let parts = init_engine_parts(sample_rate, channels, recommended_worker_count())?;
+
+    let stream = audio::build_output_stream(
+        parts.lg_ptr.0,
+        Arc::clone(&parts.state),
+        parts.sample_rate,
+        parts.channels as usize,
+        parts.block_size,
+        Arc::clone(&parts.master_recorder),
+        parts.keyboard_rx,
+        Arc::clone(&parts.buses.bus_gate_runtime),
+        Arc::clone(&parts.buses.bus_gate_playheads),
+    )?;
+
+    Ok(Engine {
+        state: parts.state,
+        lg_ptr: parts.lg_ptr,
+        buses: parts.buses,
+        sample_rate: parts.sample_rate,
+        channels: parts.channels,
+        master_recorder: parts.master_recorder,
+        keyboard_tx: parts.keyboard_tx,
+        _stream: stream,
+    })
+}
+
+pub fn init_headless_engine(
+    sample_rate: u32,
+    channels: u16,
+) -> Result<HeadlessEngine, Box<dyn std::error::Error>> {
+    let parts = init_engine_parts(sample_rate, channels, 1)?;
+    drop(parts.keyboard_rx);
+    Ok(HeadlessEngine {
+        state: parts.state,
+        lg_ptr: parts.lg_ptr,
+        buses: parts.buses,
+        sample_rate: parts.sample_rate,
+        channels: parts.channels,
+        master_recorder: parts.master_recorder,
+        keyboard_tx: parts.keyboard_tx,
+    })
+}
+
+fn init_engine_parts(
+    sample_rate: u32,
+    channels: u16,
+    worker_count: i32,
+) -> Result<EngineParts, Box<dyn std::error::Error>> {
     let block_size: usize = 512;
 
     // Initialize audiograph engine
@@ -253,7 +331,7 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
     }
 
     let workers = env_i32("TINYSEQ_AUDIOGRAPH_WORKERS")
-        .unwrap_or_else(recommended_worker_count)
+        .unwrap_or(worker_count)
         .max(0);
     let mach_rt_default = cfg!(target_os = "macos") && workers > 0;
     let mach_rt = env_flag("TINYSEQ_AUDIOGRAPH_MACH_RT", mach_rt_default);
@@ -279,19 +357,6 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
     // Create channel for keyboard triggers
     let (keyboard_tx, keyboard_rx) = std::sync::mpsc::channel();
 
-    // Build cpal audio stream
-    let stream = audio::build_output_stream(
-        lg,
-        Arc::clone(&state),
-        sample_rate,
-        channels as usize,
-        block_size,
-        Arc::clone(&master_recorder),
-        keyboard_rx,
-        Arc::clone(&bus_gate_runtime),
-        Arc::clone(&bus_gate_playheads),
-    )?;
-
     let lg_ptr = LiveGraphPtr(lg);
     let buses = AudioBuses {
         bus_l_id,
@@ -303,14 +368,15 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
         reverb_node_id,
     };
 
-    Ok(Engine {
+    Ok(EngineParts {
         state,
         lg_ptr,
         buses,
         sample_rate,
         channels,
+        block_size,
         master_recorder,
         keyboard_tx,
-        _stream: stream,
+        keyboard_rx,
     })
 }

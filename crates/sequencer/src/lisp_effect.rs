@@ -218,6 +218,27 @@ unsafe extern "C" fn dgenlisp_init(
     std::ptr::copy_nonoverlapping(mem as *const f32, write_mem, total_memory_slots);
 }
 
+/// Queue a bulk write of `data` into a live dgenlisp effect node's state at the
+/// given tensor `cell_offset` (from the manifest's `tensors[]`). The write lands
+/// in the read-state buffer (`HEADER_SLOTS + cell_offset`) — the same region
+/// params are written to and the buffer the DSP reads constant inputs from. The
+/// engine applies it on the audio thread at a block boundary and copies the data
+/// internally, so `data` may be freed immediately after this returns.
+pub unsafe fn queue_tensor_write(
+    lg: *mut LiveGraph,
+    node_id: i32,
+    cell_offset: usize,
+    data: &[f32],
+) -> bool {
+    audiograph::write_node_state(
+        lg,
+        node_id,
+        HEADER_SLOTS + cell_offset,
+        data.as_ptr(),
+        data.len(),
+    )
+}
+
 fn dgenlisp_vtable() -> NodeVTable {
     NodeVTable {
         process: Some(dgenlisp_wrapper_process),
@@ -383,6 +404,10 @@ pub struct InstrumentRenderReport {
     pub mean_abs: f32,
     pub nonzero_frames: usize,
     pub first_nonzero_frame: Option<usize>,
+    pub non_finite_samples: usize,
+    pub first_non_finite_frame: Option<usize>,
+    pub non_finite_state_slots: usize,
+    pub first_non_finite_state_slot: Option<usize>,
     pub first_samples: Vec<f32>,
 }
 
@@ -2487,7 +2512,16 @@ pub fn render_loaded_instrument_for_test(
     let mut sum_abs = 0.0f64;
     let mut nonzero_frames = 0usize;
     let mut first_nonzero_frame = None;
+    let mut non_finite_samples = 0usize;
+    let mut first_non_finite_frame = None;
     for (idx, sample) in rendered.iter().enumerate() {
+        if !sample.is_finite() {
+            non_finite_samples += 1;
+            if first_non_finite_frame.is_none() {
+                first_non_finite_frame = Some(idx);
+            }
+            continue;
+        }
         let abs = sample.abs();
         peak = peak.max(abs);
         sum_sq += (*sample as f64) * (*sample as f64);
@@ -2502,6 +2536,16 @@ pub fn render_loaded_instrument_for_test(
     let frames = rendered.len().max(1);
     let rms = (sum_sq / frames as f64).sqrt() as f32;
     let mean_abs = (sum_abs / frames as f64) as f32;
+    let mut non_finite_state_slots = 0usize;
+    let mut first_non_finite_state_slot = None;
+    for idx in 0..total_slots {
+        if !memory_read[idx].is_finite() || !memory_write[idx].is_finite() {
+            non_finite_state_slots += 1;
+            if first_non_finite_state_slot.is_none() {
+                first_non_finite_state_slot = Some(idx);
+            }
+        }
+    }
 
     Ok(InstrumentRenderReport {
         frames: rendered.len(),
@@ -2510,6 +2554,10 @@ pub fn render_loaded_instrument_for_test(
         mean_abs,
         nonzero_frames,
         first_nonzero_frame,
+        non_finite_samples,
+        first_non_finite_frame,
+        non_finite_state_slots,
+        first_non_finite_state_slot,
         first_samples: rendered.into_iter().take(32).collect(),
     })
 }
@@ -5977,7 +6025,7 @@ fn apply_step_param_set(resolved: &mut ResolvedStep, param: StepParam, value: f3
         StepParam::Duration => resolved.duration = value.max(0.0),
         StepParam::Velocity => resolved.velocity = value.clamp(0.0, 1.0),
         StepParam::Speed => resolved.speed = value.max(0.0),
-        StepParam::AuxA | StepParam::AuxB | StepParam::Sync => {}
+        StepParam::AuxA | StepParam::AuxB | StepParam::Sync | StepParam::Delay => {}
         StepParam::Transpose => resolved.transpose = value,
         StepParam::Pan => resolved.pan = value.clamp(-1.0, 1.0),
         StepParam::Chop => resolved.chop = value.max(1.0),
@@ -5989,7 +6037,7 @@ fn apply_step_param_add(resolved: &mut ResolvedStep, param: StepParam, delta: f3
         StepParam::Duration => resolved.duration = (resolved.duration + delta).max(0.0),
         StepParam::Velocity => resolved.velocity = (resolved.velocity + delta).clamp(0.0, 1.0),
         StepParam::Speed => resolved.speed = (resolved.speed + delta).max(0.0),
-        StepParam::AuxA | StepParam::AuxB | StepParam::Sync => {}
+        StepParam::AuxA | StepParam::AuxB | StepParam::Sync | StepParam::Delay => {}
         StepParam::Transpose => resolved.transpose += delta,
         StepParam::Pan => resolved.pan = (resolved.pan + delta).clamp(-1.0, 1.0),
         StepParam::Chop => resolved.chop = (resolved.chop + delta).max(1.0),
@@ -6001,7 +6049,7 @@ fn apply_step_param_scale(resolved: &mut ResolvedStep, param: StepParam, factor:
         StepParam::Duration => resolved.duration = (resolved.duration * factor).max(0.0),
         StepParam::Velocity => resolved.velocity = (resolved.velocity * factor).clamp(0.0, 1.0),
         StepParam::Speed => resolved.speed = (resolved.speed * factor).max(0.0),
-        StepParam::AuxA | StepParam::AuxB | StepParam::Sync => {}
+        StepParam::AuxA | StepParam::AuxB | StepParam::Sync | StepParam::Delay => {}
         StepParam::Transpose => resolved.transpose *= factor,
         StepParam::Pan => resolved.pan = (resolved.pan * factor).clamp(-1.0, 1.0),
         StepParam::Chop => resolved.chop = (resolved.chop * factor).max(1.0),
@@ -6372,6 +6420,7 @@ fn parse_step_param_arg(args: &[EValue], idx: usize) -> Result<StepParam, String
                 "pan" => Ok(StepParam::Pan),
                 "chop" | "chp" => Ok(StepParam::Chop),
                 "sync" | "syn" => Ok(StepParam::Sync),
+                "delay" | "dly" => Ok(StepParam::Delay),
                 _ => Err("unknown step param".to_string()),
             }
         }
@@ -6604,12 +6653,36 @@ fn step_snapshot_to_value(step: usize, snapshot: StepSnapshot) -> EValue {
         lisp_number(snapshot.params[StepParam::Pan.index()] as f64),
     );
     map.insert(
+        "delay".to_string(),
+        lisp_number(snapshot.params[StepParam::Delay.index()] as f64),
+    );
+    map.insert(
         "chord".to_string(),
         lisp_value(lisp_list(
             snapshot
                 .chord
                 .into_iter()
                 .map(|note| EValue::Number(note as f64))
+                .collect(),
+        )),
+    );
+    map.insert(
+        "chord-durations".to_string(),
+        lisp_value(lisp_list(
+            snapshot
+                .chord_durations
+                .into_iter()
+                .map(|duration| EValue::Number(duration as f64))
+                .collect(),
+        )),
+    );
+    map.insert(
+        "chord-delays".to_string(),
+        lisp_value(lisp_list(
+            snapshot
+                .chord_delays
+                .into_iter()
+                .map(|delay| EValue::Number(delay as f64))
                 .collect(),
         )),
     );
@@ -9788,6 +9861,67 @@ mod tests {
         assert!(
             report.rms > 0.001,
             "expected audible rms, got report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn digitone_bellington_high_note_remains_finite() {
+        let name = "emulations/digitone/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let compile = super::compile_and_load_instrument_with_asset_base(
+            &source,
+            44_100,
+            asset_base.as_deref(),
+        )
+        .unwrap();
+        let preset = super::load_instrument_presets(name)
+            .unwrap()
+            .into_iter()
+            .find(|preset| preset.name == "bellington")
+            .expect("bellington preset should exist");
+        let param_overrides = compile
+            .manifest
+            .params
+            .iter()
+            .filter_map(|param| {
+                preset
+                    .params
+                    .get(&param.name)
+                    .map(|value| (param.name.clone(), value.clamp(param.min, param.max)))
+            })
+            .collect();
+        let report = super::render_loaded_instrument_for_test(
+            &compile.manifest,
+            &compile.lib,
+            &super::InstrumentRenderOptions {
+                sample_rate: 44_100,
+                block_size: 128,
+                frames: 44_100,
+                midi_note: 153.0 + preset.base_note_offset,
+                velocity: 1.0,
+                gate_frames: 44_100,
+                voice_index: 0,
+                param_overrides,
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.non_finite_samples, 0,
+            "expected finite output samples, got report: {report:?}"
+        );
+        assert_eq!(
+            report.non_finite_state_slots, 0,
+            "expected finite instrument state, got report: {report:?}"
+        );
+        assert!(
+            report.peak.is_finite() && report.rms.is_finite() && report.mean_abs.is_finite(),
+            "expected finite signal stats, got report: {report:?}"
         );
     }
 

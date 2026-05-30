@@ -29,6 +29,7 @@ pub(super) fn param_color(param: StepParam) -> Color {
         StepParam::Transpose => Color::Rgb(160, 100, 220), // violet
         StepParam::Pan => Color::Rgb(90, 180, 210),      // cyan
         StepParam::Sync => Color::Rgb(60, 190, 150),     // teal
+        StepParam::Delay => Color::Rgb(240, 120, 70),    // coral
         _ => Color::White,
     }
 }

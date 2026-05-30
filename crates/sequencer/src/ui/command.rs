@@ -727,6 +727,8 @@ mod tests {
             active: true,
             params,
             chord: vec![0.0, 7.0],
+            chord_durations: vec![1.0, 1.0],
+            chord_delays: vec![0.0, 0.25],
             timebase: Some(Timebase::Eighth),
             swing: Some(62.0),
             swing_resolution: Some(SwingResolution::Eighth),
@@ -743,6 +745,8 @@ mod tests {
         assert!(sanitized.active);
         assert_eq!(sanitized.params, params);
         assert_eq!(sanitized.chord, vec![0.0, 7.0]);
+        assert_eq!(sanitized.chord_durations, vec![1.0, 1.0]);
+        assert_eq!(sanitized.chord_delays, vec![0.0, 0.25]);
         assert_eq!(sanitized.timebase, Some(Timebase::Eighth));
         assert_eq!(sanitized.swing, Some(62.0));
         assert_eq!(sanitized.swing_resolution, Some(SwingResolution::Eighth));
@@ -764,6 +768,8 @@ mod tests {
             active: true,
             params: [0.0; NUM_PARAMS],
             chord: vec![],
+            chord_durations: vec![],
+            chord_delays: vec![],
             timebase: None,
             swing: None,
             swing_resolution: None,

@@ -49,6 +49,7 @@ pub mod audio;
 pub mod audiograph;
 #[allow(dead_code)]
 mod compressor;
+pub mod conv_reverb;
 pub mod crash;
 #[allow(dead_code)]
 mod delay;
@@ -72,6 +73,7 @@ pub mod project;
 pub mod recorder;
 #[allow(dead_code)]
 pub mod reverb;
+pub mod sample_db;
 pub mod sampler;
 mod scale;
 mod scheduled_event;
@@ -82,6 +84,8 @@ pub mod sequencer;
 pub mod stereo_panner;
 #[allow(dead_code)]
 mod str8_delay;
+#[allow(dead_code)]
+mod tape;
 pub mod track_color;
 #[allow(dead_code)]
 pub mod track_modulator;

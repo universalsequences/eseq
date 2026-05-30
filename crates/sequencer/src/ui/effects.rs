@@ -1111,6 +1111,10 @@ impl App {
                 crate::limiter::limiter_vtable(),
                 crate::limiter::LIMITER_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Tape" => (
+                crate::tape::tape_vtable(),
+                crate::tape::TAPE_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             other => return Err(format!("Unknown built-in effect '{other}'")),
         };
         let name = CString::new(format!(
@@ -1378,6 +1382,11 @@ impl App {
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
+        // Convolution Reverb is a builtin whose DSP body is dgenlisp: route it
+        // through the compile/apply path instead of a native vtable.
+        if crate::conv_reverb::is_dgen_builtin(name) {
+            return self.load_dgen_builtin_to_slot_sync(track, slot_idx, name);
+        }
         let desc = EffectDescriptor::builtin_insert(name)
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
@@ -1428,6 +1437,115 @@ impl App {
         self.ui.effect_param_cursor = 0;
         self.ui.effect_scroll_offset = 0;
         Ok(())
+    }
+
+    /// Load a dgenlisp-backed builtin (e.g. Convolution Reverb) onto a track
+    /// slot: compile the bundled source fresh, apply it through the dgenlisp
+    /// path, and record the instance's IR tensor offsets for the IR loader.
+    pub(super) fn load_dgen_builtin_to_slot_sync(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        let source = if crate::conv_reverb::is_dgen_builtin(name) {
+            crate::conv_reverb::dsp_source()
+        } else {
+            return Err(format!("Unknown dgenlisp builtin '{name}'"));
+        };
+        let result =
+            lisp_effect::compile_and_load_with_asset_base(source, self.graph.sample_rate, None)?;
+        // Capture IR tensor offsets before `result` is consumed by apply.
+        let slots = crate::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+        self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
+        let node_id = self.state.pattern.effect_chains[track][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed) as i32;
+        match slots {
+            Some(slots) => crate::conv_reverb::record_ir_slots(node_id, slots),
+            None => return Err(format!("'{name}' compiled without the expected IR tensors")),
+        }
+        // Auto-load the bundled default IR so a fresh instance is audible.
+        // Non-fatal: if the asset is missing the effect still works (silent).
+        if let Some(path) = crate::conv_reverb::default_ir_path() {
+            if let Err(e) =
+                self.set_conv_reverb_ir(track, slot_idx, &path, crate::conv_reverb::DEFAULT_IR_REF)
+            {
+                self.editor.status_message = Some((
+                    format!("Convolution Reverb: default IR not loaded ({e})"),
+                    Instant::now(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Load an impulse response into a live Convolution Reverb instance on a
+    /// track slot. `abs_path` is the WAV to load; `reference` is the persisted
+    /// id (sample hash/stem). Runs the IR prep (decode/resample/partition-FFT)
+    /// synchronously — fine for a user action, never call from the audio thread.
+    /// Core IR load shared by track and bus: prep the WAV and bulk-write it into
+    /// the live node. Runs the IR prep (decode/resample/partition-FFT)
+    /// synchronously — fine for a user action, never call from the audio thread.
+    fn apply_conv_reverb_ir_to_node(
+        &self,
+        node_id: i32,
+        abs_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        if node_id == 0 {
+            return Err("Convolution Reverb node not live".to_string());
+        }
+        let slots = crate::conv_reverb::ir_slots_for(node_id)
+            .ok_or_else(|| "slot is not a Convolution Reverb".to_string())?;
+        let ir = crate::conv_reverb::prepare_ir(abs_path, self.graph.sample_rate)?;
+        unsafe {
+            crate::conv_reverb::apply_ir_to_node(self.graph.lg.0, node_id, &slots, &ir)?;
+        }
+        // Friendly label: the bundled default has a fixed title; user samples
+        // resolve their display title from the DB, falling back to the stem.
+        let display = if reference == crate::conv_reverb::DEFAULT_IR_REF {
+            "Lexicon 300 Rich Plate".to_string()
+        } else {
+            crate::sample_db::display_title_for_sample_path(abs_path)
+                .unwrap_or_else(|| reference.to_string())
+        };
+        crate::conv_reverb::record_ir(node_id, reference, &display);
+        Ok(())
+    }
+
+    /// Load an impulse response into a live Convolution Reverb on a track slot.
+    pub fn set_conv_reverb_ir(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        abs_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let node_id = self.state.pattern.effect_chains[track][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed) as i32;
+        self.apply_conv_reverb_ir_to_node(node_id, abs_path, reference)
+    }
+
+    /// Load an impulse response into a live Convolution Reverb on a bus slot.
+    pub fn set_conv_reverb_ir_bus(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        abs_path: &std::path::Path,
+        reference: &str,
+    ) -> Result<(), String> {
+        let node_id = self
+            .buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(slot_idx))
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| format!("Bus {} effect slot {} not found", bus_idx + 1, slot_idx + 1))?;
+        self.apply_conv_reverb_ir_to_node(node_id, abs_path, reference)
     }
 
     pub fn add_builtin_effect_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {
@@ -2273,12 +2391,58 @@ impl App {
         Ok(target_offset)
     }
 
+    /// Bus counterpart of `load_dgen_builtin_to_slot_sync`.
+    pub(super) fn load_dgen_builtin_bus_to_slot_sync(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        let source = if crate::conv_reverb::is_dgen_builtin(name) {
+            crate::conv_reverb::dsp_source()
+        } else {
+            return Err(format!("Unknown dgenlisp builtin '{name}'"));
+        };
+        let result =
+            lisp_effect::compile_and_load_with_asset_base(source, self.graph.sample_rate, None)?;
+        let slots = crate::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
+        self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)?;
+        let node_id = self
+            .buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(slot_idx))
+            .map(|slot| slot.node_id as i32)
+            .unwrap_or(0);
+        match slots {
+            Some(slots) => crate::conv_reverb::record_ir_slots(node_id, slots),
+            None => return Err(format!("'{name}' compiled without the expected IR tensors")),
+        }
+        // Auto-load the bundled default IR so a fresh instance is audible.
+        if let Some(path) = crate::conv_reverb::default_ir_path() {
+            if let Err(e) = self.set_conv_reverb_ir_bus(
+                bus_idx,
+                slot_idx,
+                &path,
+                crate::conv_reverb::DEFAULT_IR_REF,
+            ) {
+                self.editor.status_message = Some((
+                    format!("Convolution Reverb: default IR not loaded ({e})"),
+                    Instant::now(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn load_builtin_bus_effect_to_slot_sync(
         &mut self,
         bus_idx: usize,
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
+        if crate::conv_reverb::is_dgen_builtin(name) {
+            return self.load_dgen_builtin_bus_to_slot_sync(bus_idx, slot_idx, name);
+        }
         let desc = EffectDescriptor::builtin_insert(name)
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =

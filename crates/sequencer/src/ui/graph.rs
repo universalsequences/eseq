@@ -671,7 +671,8 @@ impl GraphController<'_> {
         self.app.submit_sample_analysis(&loaded);
         let buffer_id = loaded.buffer_id;
         let sample_rate = loaded.sample_rate;
-        let track_name = loaded.name;
+        let track_name =
+            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
         let shell = self.create_track_shell(idx, &track_name)?;
         let voices = self.build_sampler_voices(
             idx,
@@ -702,6 +703,7 @@ impl GraphController<'_> {
             .register_loaded_sample_path(&sample_name, buffer_id, sample_path);
         self.app.reset_sampler_bpm_for_analysis(idx);
         self.app.publish_sampler_analysis_runtime(idx);
+        self.debug_assert_track_vectors_aligned();
         Ok(idx)
     }
 
@@ -739,6 +741,7 @@ impl GraphController<'_> {
             },
         });
         self.app.sampler_paths.push(None);
+        self.debug_assert_track_vectors_aligned();
         Ok(idx)
     }
 
@@ -759,6 +762,7 @@ impl GraphController<'_> {
             instrument: InstrumentRegistration::Modulator,
         });
         self.app.sampler_paths.push(None);
+        self.debug_assert_track_vectors_aligned();
         Ok(idx)
     }
 
@@ -797,6 +801,7 @@ impl GraphController<'_> {
             },
         });
         self.app.sampler_paths.push(None);
+        self.debug_assert_track_vectors_aligned();
         Ok(idx)
     }
 
@@ -2872,7 +2877,6 @@ impl GraphController<'_> {
         }
         drop(bank);
         self.app.refresh_effect_sidechain_labels();
-        self.debug_assert_track_vectors_aligned();
 
         self.app
             .state

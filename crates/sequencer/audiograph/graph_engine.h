@@ -254,6 +254,13 @@ int create_buffer(LiveGraph *lg, int size, int channel_count,
 int hot_swap_buffer(LiveGraph *lg, int buffer_id, const float *source_data,
                     int size, int channel_count);
 
+// Bulk-write a block of floats into a node's state memory at dest_offset
+// (in floats). The write is queued and applied on the audio thread at a safe
+// point, like other graph edits. source_data is copied (caller may free it).
+// Returns true if the command was enqueued.
+bool write_node_state(LiveGraph *lg, int node_id, size_t dest_offset,
+                      const float *source_data, size_t count);
+
 // ===================== VTable Creation Functions =====================
 
 // ===================== Global Engine Instance =====================

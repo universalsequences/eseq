@@ -844,7 +844,8 @@ impl App {
                         self.submit_sample_analysis(&loaded);
                         let new_buffer_id = loaded.buffer_id;
                         let sample_rate = loaded.sample_rate;
-                        let new_name = loaded.name;
+                        let new_name = crate::sample_db::display_title_for_sample_path(path)
+                            .unwrap_or(loaded.name);
                         let track = self.ui.cursor_track;
                         self.graph_controller().send_sample_to_all_voices(
                             track,

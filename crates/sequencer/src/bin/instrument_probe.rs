@@ -11,6 +11,7 @@ fn usage() {
            --block-size N      Process block size (default: 128)\n\
            --sample-rate N     Sample rate (default: 44100)\n\
            --midi-note N       MIDI note to render (default: 69)\n\
+           --preset NAME       Load an instrument preset by name or id\n\
            --velocity V        Velocity 0..1 (default: 1)\n\
            --gate-frames N     Gate duration in frames (default: frames)\n\
            --param name=value  Override an instrument parameter; repeatable\n\
@@ -66,6 +67,7 @@ fn main() {
     let mut block_size = 128usize;
     let mut sample_rate = 44_100u32;
     let mut midi_note = 69.0f32;
+    let mut preset_name: Option<String> = None;
     let mut velocity = 1.0f32;
     let mut gate_frames: Option<usize> = None;
     let mut param_overrides = Vec::new();
@@ -81,6 +83,12 @@ fn main() {
             "--block-size" => parse_value("--block-size", args.next()).map(|v| block_size = v),
             "--sample-rate" => parse_value("--sample-rate", args.next()).map(|v| sample_rate = v),
             "--midi-note" => parse_value("--midi-note", args.next()).map(|v| midi_note = v),
+            "--preset" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--preset requires a preset name or id".to_string());
+                value.map(|value| preset_name = Some(value))
+            }
             "--velocity" => parse_value("--velocity", args.next()).map(|v| velocity = v),
             "--gate-frames" => {
                 parse_value("--gate-frames", args.next()).map(|v| gate_frames = Some(v))
@@ -166,22 +174,61 @@ fn main() {
         }
     };
 
+    let result = match lisp_effect::compile_and_load_instrument_with_asset_base(
+        &source,
+        sample_rate,
+        asset_base.as_deref(),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut effective_midi_note = midi_note;
+    let mut merged_param_overrides = Vec::new();
+    if let Some(name) = preset_name.as_deref() {
+        let presets = match lisp_effect::load_instrument_presets(&label) {
+            Ok(presets) => presets,
+            Err(error) => {
+                eprintln!("Error: failed to load presets for '{label}': {error}");
+                std::process::exit(1);
+            }
+        };
+        let Some(preset) = presets
+            .iter()
+            .find(|preset| preset.name == name || preset.id == name)
+        else {
+            eprintln!("Error: preset '{name}' not found for '{label}'");
+            std::process::exit(1);
+        };
+        effective_midi_note += preset.base_note_offset;
+        for param in &result.manifest.params {
+            if let Some(value) = preset.params.get(&param.name) {
+                merged_param_overrides
+                    .push((param.name.clone(), value.clamp(param.min, param.max)));
+            }
+        }
+    }
+    merged_param_overrides.extend(param_overrides);
+
     let options = InstrumentRenderOptions {
         sample_rate,
         block_size,
         frames,
-        midi_note,
+        midi_note: effective_midi_note,
         velocity,
         gate_frames: gate_frames.unwrap_or(frames),
         voice_index: 0,
-        param_overrides,
+        param_overrides: merged_param_overrides,
         param_events,
         input_overrides,
     };
 
-    let report = match lisp_effect::render_instrument_source_for_test(
-        &source,
-        asset_base.as_deref(),
+    let report = match lisp_effect::render_loaded_instrument_for_test(
+        &result.manifest,
+        &result.lib,
         &options,
     ) {
         Ok(report) => report,
@@ -202,27 +249,53 @@ fn main() {
             failed = true;
         }
     }
+    if report.non_finite_samples > 0 || report.non_finite_state_slots > 0 {
+        failed = true;
+    }
 
     if json {
         println!(
-            "{{\"instrument\":{:?},\"frames\":{},\"peak\":{},\"rms\":{},\"mean_abs\":{},\"nonzero_frames\":{},\"first_nonzero_frame\":{:?},\"first_samples\":{:?}}}",
-            label,
-            report.frames,
-            report.peak,
-            report.rms,
-            report.mean_abs,
-            report.nonzero_frames,
-            report.first_nonzero_frame,
-            report.first_samples
+            "{}",
+            serde_json::json!({
+                "instrument": label,
+                "preset": preset_name,
+                "midi_note": midi_note,
+                "effective_midi_note": effective_midi_note,
+                "frames": report.frames,
+                "peak": report.peak,
+                "rms": report.rms,
+                "mean_abs": report.mean_abs,
+                "nonzero_frames": report.nonzero_frames,
+                "first_nonzero_frame": report.first_nonzero_frame,
+                "non_finite_samples": report.non_finite_samples,
+                "first_non_finite_frame": report.first_non_finite_frame,
+                "non_finite_state_slots": report.non_finite_state_slots,
+                "first_non_finite_state_slot": report.first_non_finite_state_slot,
+                "first_samples": report.first_samples,
+            })
         );
     } else {
         println!("instrument: {label}");
+        if let Some(name) = preset_name.as_deref() {
+            println!("preset: {name}");
+            println!("effective_midi_note: {:.3}", effective_midi_note);
+        }
         println!("frames: {}", report.frames);
         println!("peak: {:.8}", report.peak);
         println!("rms: {:.8}", report.rms);
         println!("mean_abs: {:.8}", report.mean_abs);
         println!("nonzero_frames: {}", report.nonzero_frames);
         println!("first_nonzero_frame: {:?}", report.first_nonzero_frame);
+        println!("non_finite_samples: {}", report.non_finite_samples);
+        println!(
+            "first_non_finite_frame: {:?}",
+            report.first_non_finite_frame
+        );
+        println!("non_finite_state_slots: {}", report.non_finite_state_slots);
+        println!(
+            "first_non_finite_state_slot: {:?}",
+            report.first_non_finite_state_slot
+        );
         println!("first_samples: {:?}", report.first_samples);
     }
 

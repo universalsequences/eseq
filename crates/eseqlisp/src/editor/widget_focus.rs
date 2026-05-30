@@ -19,6 +19,24 @@ impl Editor {
         leaf.focused_widget_node = None;
     }
 
+    pub fn focused_widget_node(&self) -> Option<LayoutNode> {
+        let focused_id = self.active_leaf().focused_widget_id?;
+        if let Some(layout) = self.active_leaf().cached_layout.as_ref()
+            && let Some(node) = find_node_by_id_ref(layout, focused_id)
+        {
+            return Some(node.clone());
+        }
+        if let Some(layout) = self.runtime.current_layout.as_ref()
+            && let Some(node) = find_node_by_id_ref(layout, focused_id)
+        {
+            return Some(node.clone());
+        }
+        self.active_leaf()
+            .focused_widget_node
+            .clone()
+            .filter(|node| node.widget_id == focused_id)
+    }
+
     pub(super) fn remap_focused_widget_after_layout_change(&mut self) {
         let Some(previous) = self.active_leaf().focused_widget_node.clone() else {
             return;
@@ -30,6 +48,15 @@ impl Editor {
         let remapped = previous
             .stable_widget_id
             .and_then(|stable_id| find_focusable_node_by_stable_widget_id(&layout, stable_id))
+            .or_else(|| {
+                previous.stable_key.as_deref().and_then(|stable_key| {
+                    find_focusable_node_by_stable_key_and_type(
+                        &layout,
+                        stable_key,
+                        &previous.widget_type,
+                    )
+                })
+            })
             .or_else(|| {
                 previous.subtree_root_id.and_then(|subtree_root_id| {
                     find_focusable_node_by_subtree_root_and_type(
@@ -212,22 +239,9 @@ impl Editor {
     }
 
     pub(super) fn handle_focused_widget_key(&mut self, key: KeyEvent) -> bool {
-        let Some(focused_id) = self.active_leaf().focused_widget_id else {
+        let Some(node) = self.focused_widget_node() else {
             return false;
         };
-        let Some(layout) = self.runtime.current_layout.clone() else {
-            return false;
-        };
-        let Some(node) = find_node_by_id(&layout, focused_id) else {
-            return false;
-        };
-        if key.code == KeyCode::Tab
-            && key.modifiers == KeyModifiers::NONE
-            && node.widget_type == "patcher"
-            && !crate::widget_render::patcher::patcher_has_text_edit(&node)
-        {
-            return self.switch_focused_patcher_to_emitted_source_buffer(&node);
-        }
         // Space bar should only be consumed by text-entry widgets (for typing).
         // All other widgets let space fall through to keybindings.
         let is_text_input = node.widget_type == "text-input"
@@ -320,13 +334,8 @@ impl Editor {
     }
 
     fn focused_widget_captures_text_input(&self) -> bool {
-        let Some(focused_id) = self.active_leaf().focused_widget_id else {
-            return false;
-        };
-        let Some(layout) = self.runtime.current_layout.as_ref() else {
-            return false;
-        };
-        find_node_by_id_ref(layout, focused_id).is_some_and(node_captures_text_input)
+        self.focused_widget_node()
+            .is_some_and(|node| node_captures_text_input(&node))
     }
 
     pub(super) fn navigate_focus(&mut self, direction: KeyCode) {
@@ -547,6 +556,7 @@ fn same_focus_identity(a: &LayoutNode, b: &LayoutNode) -> bool {
         && b.focusable
         && a.widget_type == b.widget_type
         && ((a.stable_widget_id.is_some() && a.stable_widget_id == b.stable_widget_id)
+            || (a.stable_key.is_some() && a.stable_key == b.stable_key)
             || (a.subtree_root_id.is_some() && a.subtree_root_id == b.subtree_root_id))
 }
 
@@ -559,6 +569,27 @@ fn find_focusable_node_by_stable_widget_id(
     }
     for child in &node.children {
         if let Some(found) = find_focusable_node_by_stable_widget_id(child, stable_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_focusable_node_by_stable_key_and_type(
+    node: &LayoutNode,
+    stable_key: &str,
+    widget_type: &str,
+) -> Option<LayoutNode> {
+    if node.focusable
+        && node.stable_key.as_deref() == Some(stable_key)
+        && node.widget_type == widget_type
+    {
+        return Some(node.clone());
+    }
+    for child in &node.children {
+        if let Some(found) =
+            find_focusable_node_by_stable_key_and_type(child, stable_key, widget_type)
+        {
             return Some(found);
         }
     }

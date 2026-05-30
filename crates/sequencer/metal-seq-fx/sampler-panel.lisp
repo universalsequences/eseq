@@ -51,7 +51,7 @@
     (let ((path (get payload :path))
         (track (get target :track)))
       (if path
-        (host-command "load-sample-into-track" (dict :track track :path path))
+        (host-command "load-sample-into-track" (dict :track track :path path :preserve-browser-context true))
         (status "Drop a sample file, not a folder")))))
 
 (def sampler-param-knob (p key)
@@ -181,9 +181,9 @@
     :drop-meta (dict :kind "sampler-panel" :track (get inst :track))
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (sampler-panel-drop-sample event))
-    (v-stack :gap 0
-      (box :height 0.75 :padding 0 :v-align :center :h-align :start
-        (h-stack :gap 0.5 :align :center
+    (v-stack :gap 0 :height :fill
+      (box :debug-name "sampler-header-box" :height fx-panel-header-height :padding 0 :v-align :center :h-align :start
+        (h-stack :gap 0.5 :align :center :width :fill
           (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param (get inst :synth)) false "sampler-enabled")
           (label "Sampler" :font-size 11 :color :white :bg :transparent)

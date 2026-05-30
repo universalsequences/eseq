@@ -857,6 +857,7 @@ pub struct VM {
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
     pub writable_reactive_namespaces: HashSet<String>,
+    pending_reactive_sets: Vec<(String, String, Value)>,
     pub derived_bindings: HashMap<String, NodeId>,
     pub state_bindings: HashMap<String, NodeId>,
     execution_depth: usize,
@@ -886,6 +887,7 @@ pub struct VmStateSnapshot {
     tracking_stack: Vec<NodeId>,
     reactive_namespaces: HashSet<String>,
     writable_reactive_namespaces: HashSet<String>,
+    pending_reactive_sets: Vec<(String, String, Value)>,
     derived_bindings: HashMap<String, NodeId>,
     state_bindings: HashMap<String, NodeId>,
     execution_depth: usize,
@@ -1023,7 +1025,15 @@ pub fn register_core_natives(vm: &mut VM) {
             return Value::Bool(false);
         }
         let value = value.clone();
+        match &value {
+            Value::Number(number) => crate::reactive::write_float_slot(namespace, field, *number),
+            Value::Bool(true) => crate::reactive::write_float_slot(namespace, field, 1.0),
+            Value::Bool(false) => crate::reactive::write_float_slot(namespace, field, 0.0),
+            _ => {}
+        }
         vm.update_reactive_global(namespace, field, value.clone());
+        vm.pending_reactive_sets
+            .push((namespace.clone(), field.clone(), value.clone()));
         let source_id = vm.get_or_create_source_node(namespace, field);
         vm.mark_source_dependents_dirty(source_id, value);
         Value::Bool(true)
@@ -2029,6 +2039,7 @@ impl VM {
             tracking_stack: Vec::new(),
             reactive_namespaces: HashSet::new(),
             writable_reactive_namespaces: HashSet::new(),
+            pending_reactive_sets: Vec::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
             execution_depth: 0,
@@ -2156,6 +2167,7 @@ impl VM {
             tracking_stack: self.tracking_stack.clone(),
             reactive_namespaces: self.reactive_namespaces.clone(),
             writable_reactive_namespaces: self.writable_reactive_namespaces.clone(),
+            pending_reactive_sets: self.pending_reactive_sets.clone(),
             derived_bindings: self.derived_bindings.clone(),
             state_bindings: self.state_bindings.clone(),
             execution_depth: self.execution_depth,
@@ -2186,6 +2198,7 @@ impl VM {
         self.tracking_stack = snapshot.tracking_stack;
         self.reactive_namespaces = snapshot.reactive_namespaces;
         self.writable_reactive_namespaces = snapshot.writable_reactive_namespaces;
+        self.pending_reactive_sets = snapshot.pending_reactive_sets;
         self.derived_bindings = snapshot.derived_bindings;
         self.state_bindings = snapshot.state_bindings;
         self.execution_depth = snapshot.execution_depth;
@@ -2203,6 +2216,10 @@ impl VM {
         self.source_manager = snapshot.source_manager;
         self.source_load_errors = snapshot.source_load_errors;
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
+    }
+
+    pub fn take_pending_reactive_sets(&mut self) -> Vec<(String, String, Value)> {
+        std::mem::take(&mut self.pending_reactive_sets)
     }
 
     #[cfg(test)]
@@ -2791,6 +2808,61 @@ impl VM {
         }
     }
 
+    pub fn update_reactive_global_list_index(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        index: usize,
+        value: Value,
+    ) {
+        let idx = self.ensure_global(namespace);
+        if idx >= self.globals.len() {
+            self.globals.resize(idx + 1, None);
+        }
+
+        let set_index = |map: &mut HashMap<String, Rc<RefCell<Value>>>| {
+            let slot = map
+                .entry(field.to_string())
+                .or_insert_with(|| Rc::new(RefCell::new(Value::List(Vec::new()))));
+            let mut borrowed = slot.borrow_mut();
+            match &mut *borrowed {
+                Value::List(items) => {
+                    while items.len() <= index {
+                        items.push(Rc::new(RefCell::new(Value::Nil)));
+                    }
+                    *items[index].borrow_mut() = value.clone();
+                }
+                other => {
+                    let mut items = Vec::with_capacity(index + 1);
+                    for _ in 0..index {
+                        items.push(Rc::new(RefCell::new(Value::Nil)));
+                    }
+                    items.push(Rc::new(RefCell::new(value.clone())));
+                    *other = Value::List(items);
+                }
+            }
+        };
+
+        match self.globals.get_mut(idx) {
+            Some(Some(existing)) => {
+                let mut borrowed = existing.borrow_mut();
+                if let Value::Map(map) = &mut *borrowed {
+                    set_index(map);
+                } else {
+                    let mut map = HashMap::new();
+                    set_index(&mut map);
+                    *borrowed = Value::Map(map);
+                }
+            }
+            Some(slot @ None) => {
+                let mut map = HashMap::new();
+                set_index(&mut map);
+                *slot = Some(Rc::new(RefCell::new(Value::Map(map))));
+            }
+            None => {}
+        }
+    }
+
     fn current_reactive_value(&self, namespace: &str, field: &str) -> Value {
         self.global_value(namespace)
             .and_then(|value| match value {
@@ -2806,7 +2878,7 @@ impl VM {
         }
 
         let id = self.dag.alloc_id();
-        let value = self.current_reactive_value(namespace, field);
+        let value = self.current_reactive_value(namespace, field).deep_clone();
         let source = ReactiveSource::NamespaceField {
             namespace: namespace.to_string(),
             field: field.to_string(),
@@ -2865,7 +2937,7 @@ impl VM {
             if *current_value == value {
                 return;
             }
-            *current_value = value;
+            *current_value = value.deep_clone();
             let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
             for dependent in dependents {
                 self.dag.mark_dirty(dependent);

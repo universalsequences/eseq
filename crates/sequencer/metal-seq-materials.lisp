@@ -5,9 +5,11 @@
 
 (defwidget cursor-highlight
   :width 1 :height 1
+  :state (active selected)
+  :bindable (active selected)
   :shader (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.3)
-      (material :color (rgba 0.18 0.25 0.35 0.9)))))
+      (material :color (rgba 0.18 0.25 0.35 (* 0.9 active selected))))))
 
 ;; ── Aqua material for sliders ──
 
@@ -113,6 +115,7 @@
   :width 4 :height 3
   :paint-margin 1
   :state (active plocked selected)
+  :bindable (active plocked selected)
   :shader
   (let ((sel-y (if (= selected 1) (* 0.03 (cos (* 3 itime))) 0)))
     (sdf/translate 0 sel-y

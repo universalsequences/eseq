@@ -33,6 +33,61 @@ fn ctrl_c_ctrl_c_binding_enqueues_host_command() {
 }
 
 #[test]
+fn focused_text_input_survives_on_change_rerender() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def query (state ""))
+            (effect
+              (box :width 24 :height 3
+                (text-input
+                  :key "search-input"
+                  :width 20
+                  :value query
+                  :on-change |v| (set! query v))))
+            "#,
+        )
+        .expect("build text input");
+    editor.refresh_runtime_side_effects();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+
+    let layout = editor.widget_layout().expect("layout");
+    let input =
+        super::find_layout_node_by_stable_key(layout.as_ref(), "search-input").expect("search input");
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            input.rect.col as u16,
+            input.rect.row as u16,
+        ),
+        0,
+        0,
+        30,
+        8,
+        input.rect.col + 1.0,
+        input.rect.row + 0.5,
+    );
+    let focused_before = editor.focused_widget_id().expect("input should focus");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    editor.runtime.current_layout = None;
+    editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+    assert_eq!(
+        editor.runtime_mut().eval_str("query"),
+        Ok(Some(Value::String("pi".to_string())))
+    );
+    assert_eq!(
+        editor.focused_widget_id(),
+        Some(focused_before),
+        "text input focus should survive the on-change widget-tree refresh"
+    );
+}
+
+#[test]
 fn default_window_split_bindings_survive_runtime_sync() {
     let runtime = Runtime::with_init_source("(bind-key \"C-c C-c\" \"ignore\")");
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -2353,10 +2408,12 @@ fn valid_patcher_payload_updates_read_only_emitted_source_buffer() {
 }
 
 #[test]
-fn tab_from_patcher_emitted_source_buffer_returns_to_matching_patcher_buffer() {
+fn tab_from_patcher_buffer_toggles_emitted_source_split() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
-    let path = "/tmp/eseq/example/dsp.lisp";
+    let path = temp_file_path("patcher-source-split-toggle");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let path = path.to_string_lossy().to_string();
     let patcher_id = editor.open_scratch_buffer("*patcher*", "");
     let patcher_tree = Value::Map(HashMap::from([
         (
@@ -2365,43 +2422,90 @@ fn tab_from_patcher_emitted_source_buffer_returns_to_matching_patcher_buffer() {
         ),
         (
             "path".to_string(),
-            Rc::new(RefCell::new(Value::String(path.to_string()))),
+            Rc::new(RefCell::new(Value::String(path.clone()))),
         ),
     ]));
     editor
         .active_buffer_mut()
         .set_widget_tree(Some(patcher_tree), Some(patcher_id));
     let emitted_id = editor.upsert_read_only_scratch_buffer_with_mode(
-        &crate::widget_render::patcher::emitted_source_buffer_name(path),
+        &crate::widget_render::patcher::emitted_source_buffer_name(&path),
         "(def out (out 1 0))",
         BufferMode::DGenLisp,
     );
-    editor.set_active_buffer(emitted_id);
+    assert_ne!(patcher_id, emitted_id);
+    editor.set_active_buffer(patcher_id);
+    assert_eq!(editor.active_buffer().id, patcher_id);
+    assert!(editor.patcher_source_tab_available());
 
     editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().id, patcher_id);
+    assert_eq!(editor.tile_root.leaf_count(), 2);
+    assert!(
+        editor.tile_root.leaf_ids().into_iter().any(|tile_id| {
+            editor
+                .tile_root
+                .find_leaf(tile_id)
+                .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
+                .is_some_and(|buffer| buffer.id == emitted_id)
+        }),
+        "source buffer should be visible in a sibling tile"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().id, patcher_id);
+    assert_eq!(editor.tile_root.leaf_count(), 1);
 }
 
 #[test]
-fn tab_from_patcher_emitted_source_buffer_uses_recorded_origin_without_widget_tree() {
+fn tab_from_split_patcher_source_tile_hides_source_and_returns_to_patcher() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
-    let path = "/tmp/eseq/instrument-drafts/dsp.lisp";
-    let patcher_id = editor.open_scratch_buffer("*instrument-patcher:new-instrument*", "");
-    let emitted_id = editor.upsert_read_only_scratch_buffer_with_mode(
-        &crate::widget_render::patcher::emitted_source_buffer_name(path),
-        "(def out (out 1 0))",
-        BufferMode::DGenLisp,
-    );
+    let path = temp_file_path("patcher-source-split-hide-from-source");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let path = path.to_string_lossy().to_string();
+    let patcher_id = editor.open_scratch_buffer("*patcher*", "");
+    editor.set_layout_viewport(40, 12);
     editor
-        .patcher_emitted_source_origins
-        .insert(path.to_string(), patcher_id);
-    editor.set_active_buffer(emitted_id);
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (patcher
+                    :height 10
+                    :intent :effect
+                    :path "{}"))
+                "#,
+            path
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(editor.tile_root.leaf_count(), 2);
+
+    let emitted_name = crate::widget_render::patcher::emitted_source_buffer_name(&path);
+    let source_tile = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| {
+            editor
+                .tile_root
+                .find_leaf(*tile_id)
+                .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
+                .is_some_and(|buffer| buffer.name == emitted_name)
+        })
+        .expect("source tile should be visible");
+    editor.switch_active_tile(source_tile);
+    assert_eq!(editor.active_buffer().name, emitted_name);
 
     editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().id, patcher_id);
+    assert_eq!(editor.tile_root.leaf_count(), 1);
 }
 
 #[test]
@@ -6581,6 +6685,65 @@ fn ui_only_widget_scrolls_when_content_is_taller_than_viewport() {
     assert!(
         editor.widget_scroll_top() > 0.0,
         "UI-only overflow content should allow vertical widget scrolling"
+    );
+}
+
+#[test]
+fn can_reveal_widget_in_visible_inactive_buffer_without_switching_focus() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect-buffer "*sequencer*"
+                  (v-stack :width :fill :gap 0
+                    (box :width :fill :height 18)
+                    (box :key "target-row" :width :fill :height 3)))
+                (split-window-right "*sequencer*")
+                "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 10);
+
+    let active_before = editor.active_tile;
+    let sequencer_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*sequencer*")
+        .expect("sequencer buffer");
+    let sequencer_scroll_before = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .filter_map(|tile_id| editor.tile_root.find_leaf(tile_id))
+        .find(|leaf| leaf.buffer_idx == sequencer_idx)
+        .expect("visible sequencer leaf")
+        .widget_scroll_top;
+    assert_eq!(sequencer_scroll_before, 0.0);
+
+    assert!(
+        editor.ensure_widget_stable_key_visible_in_buffer_named("*sequencer*", "target-row", 1.0),
+        "revealing a below-viewport row should update the inactive tile scroll"
+    );
+
+    assert_eq!(
+        editor.active_tile, active_before,
+        "revealing an inactive buffer must not steal tile focus"
+    );
+    let sequencer_scroll_after = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .filter_map(|tile_id| editor.tile_root.find_leaf(tile_id))
+        .find(|leaf| leaf.buffer_idx == sequencer_idx)
+        .expect("visible sequencer leaf")
+        .widget_scroll_top;
+    assert!(
+        sequencer_scroll_after > 0.0,
+        "inactive sequencer tile should scroll to reveal the target row"
     );
 }
 

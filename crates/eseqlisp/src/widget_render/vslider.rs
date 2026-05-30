@@ -28,6 +28,36 @@ fn dot_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "dot-color", theme::WIDGET_SLIDER_DOT())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hot_visual_props_are_bindable_but_not_size_affecting() {
+        assert_eq!(
+            VSLIDER_WIDGET.bindable_props(),
+            &[
+                "value",
+                "haptic-value",
+                "active",
+                "track-r",
+                "track-g",
+                "track-b",
+                "shader-state-active",
+                "shader-state-track-r",
+                "shader-state-track-g",
+                "shader-state-track-b",
+            ]
+        );
+        for prop in VSLIDER_WIDGET.bindable_props() {
+            assert!(
+                !VSLIDER_WIDGET.size_affecting_props().contains(prop),
+                "{prop} should not force vslider layout"
+            );
+        }
+    }
+}
+
 fn items(props: &HashMap<String, Value>) -> Vec<String> {
     match props.get("items") {
         Some(Value::List(list)) => list
@@ -194,6 +224,21 @@ impl WidgetDefinition for VerticalSliderWidget {
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["height"]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &[
+            "value",
+            "haptic-value",
+            "active",
+            "track-r",
+            "track-g",
+            "track-b",
+            "shader-state-active",
+            "shader-state-track-r",
+            "shader-state-track-g",
+            "shader-state-track-b",
+        ]
     }
 
     fn measure(

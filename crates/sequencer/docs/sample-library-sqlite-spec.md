@@ -21,7 +21,7 @@ This spec describes migrating to a SQLite-backed, tag-based sample library, impo
 
 - Tag-chip / tag-editing UI in the browser pane.
 - Favorites UI.
-- Provenance, cover art, YouTube, IPFS hashes-as-content-addressing-protocol, user attribution — all present in the old schema, all out of scope here.
+- Provenance browsing UI, cover-art UI, source-detail panels, and source editing.
 - Online sync between machines.
 
 ## Data Model
@@ -29,9 +29,11 @@ This spec describes migrating to a SQLite-backed, tag-based sample library, impo
 A new SQLite database at `crates/sequencer/samples.db` (gitignored).
 
 ```sql
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE samples (
     id        INTEGER PRIMARY KEY,
-    hash      TEXT NOT NULL UNIQUE,           -- content hash, matches samples/<hash>.wav
+    hash      TEXT NOT NULL UNIQUE,           -- sha256(WAV bytes), matches samples/<hash>.wav
     title     TEXT,                           -- display name (from old DB; nullable)
     favorited INTEGER NOT NULL DEFAULT 0,
     added_at  INTEGER NOT NULL DEFAULT (unixepoch())
@@ -49,9 +51,77 @@ CREATE TABLE sample_tags (
 );
 
 CREATE INDEX idx_sample_tags_tag ON sample_tags(tag_id);
+
+CREATE TABLE sources (
+    id            INTEGER PRIMARY KEY,
+    kind          TEXT NOT NULL,              -- youtube_video, discogs_release, vinyl_record, local_file, sample_pack, field_recording, legacy_import, unknown_media, unknown
+    title         TEXT,                       -- song/video/recording title if known
+    release_title TEXT,                       -- album/record/release title if known
+    notes         TEXT,
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE source_contributors (
+    id        INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    role      TEXT NOT NULL,                  -- artist, creator, uploader, producer, label, recordist
+    name      TEXT NOT NULL,
+    UNIQUE(source_id, role, name)
+);
+
+CREATE TABLE source_refs (
+    id        INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    provider  TEXT NOT NULL,                  -- youtube, discogs, musicbrainz, ipfs, legacy_ipfs, filesystem, url
+    ref_kind  TEXT NOT NULL,                  -- video, release, master, artist, payload, path, url
+    ref_value TEXT NOT NULL,
+    url       TEXT,
+    UNIQUE(provider, ref_kind, ref_value)
+);
+
+CREATE INDEX idx_source_refs_source ON source_refs(source_id);
+
+CREATE TABLE source_assets (
+    id        INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    kind      TEXT NOT NULL,                  -- cover_art, thumbnail, sleeve_scan, label_scan
+    hash      TEXT NOT NULL,                  -- sha256(asset bytes)
+    path      TEXT NOT NULL,                  -- assets/<hash>.<ext>
+    mime_type TEXT,
+    width     INTEGER,
+    height    INTEGER,
+    UNIQUE(source_id, kind, hash)
+);
+
+CREATE TABLE sample_origins (
+    id               INTEGER PRIMARY KEY,
+    dedupe_key       TEXT UNIQUE,             -- stable import key, e.g. legacy_ipfs:<hash>, for idempotent migration
+    sample_id        INTEGER NOT NULL REFERENCES samples(id) ON DELETE CASCADE,
+    source_id        INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+    parent_sample_id INTEGER REFERENCES samples(id) ON DELETE SET NULL,
+    method           TEXT NOT NULL,           -- youtube_sampler, vinyl_capture, import, legacy_migration, resample
+    source_start_ms  INTEGER,
+    source_end_ms    INTEGER,
+    captured_at      INTEGER,
+    notes            TEXT
+);
+
+CREATE INDEX idx_sample_origins_sample ON sample_origins(sample_id);
+CREATE INDEX idx_sample_origins_source ON sample_origins(source_id);
+
+CREATE TABLE source_metadata_guesses (
+    id         INTEGER PRIMARY KEY,
+    source_id  INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    field      TEXT NOT NULL,                 -- title, release_title, contributor:artist, contributor:creator
+    value      TEXT NOT NULL,
+    method     TEXT NOT NULL,                 -- filename_pattern, tag_pattern, discogs_ref, youtube_title_pattern
+    confidence REAL NOT NULL,
+    accepted   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(source_id, field, value, method)
+);
 ```
 
-Audio storage is flat and content-addressed: `crates/sequencer/samples/<hash>.wav`. The hash in the filename equals `samples.hash`.
+Audio storage is flat and content-addressed: `crates/sequencer/samples/<hash>.wav`. The hash in the filename equals `samples.hash`, and is always computed by this migration from the WAV file bytes. Legacy IPFS directory names are treated as provenance references, not as trusted content hashes.
 
 Rationale for content-addressed flat layout:
 
@@ -60,6 +130,14 @@ Rationale for content-addressed flat layout:
 - Project files reference samples by stable paths that never change due to renaming or re-tagging.
 - The human-readable name lives only in `samples.title`, surfaced in the browser UI.
 
+Rationale for provenance tables:
+
+- Sources model where audio came from without vendor-locking the schema to YouTube, Discogs, IPFS, or local files.
+- `source_refs` stores provider-specific identities as optional external references rather than making them sample identity.
+- `source_assets` stores imported local assets, such as record cover art or thumbnails, under our own asset hashes. Dead legacy cache keys are not preserved unless they resolve to readable local media.
+- `sample_origins` links the content-addressed sample back to a source or parent sample, including capture/extraction method and optional source time range.
+- Inferred artist/release/title values are stored as reviewable guesses instead of being silently promoted to canonical metadata.
+
 ## Migration Source
 
 Legacy project at `~/code/swift/samplemgmt/`:
@@ -67,6 +145,7 @@ Legacy project at `~/code/swift/samplemgmt/`:
 - `docker-compose.yml` boots Postgres on `localhost:5434` (user `sampleuser`, pass `samplepass`, db `samplesdb`).
 - Schema (`schema.sql`) has one `samples` table: `ipfs_hash PK, title, tags TEXT[], video_id, discogs_id, cover_art_hash, favorited, created_at`.
 - Audio files live at `~/code/swift/samplemgmt/ipfs/<hash>/<hash>` (~14,147 entries, not all guaranteed to be WAV).
+- Cover art may exist locally under `~/code/swift/samplemgmt/coverArt/`. The legacy `cover_art_hash` is only useful if it can be resolved to an actual readable image file.
 - `src/export-by-tag.ts` contains existing classification heuristics (DRUM_KEYWORDS, INSTRUMENT_KEYWORDS, MANUFACTURER_PREFIXES, PRODUCER_NAMES, GENRE_KEYWORDS, etc.) that we want to reuse for assigning a primary-category tag.
 
 ## Migration Script
@@ -86,6 +165,7 @@ bun run src/migrate-to-eseq.ts \
     [--ipfs-dir <path>]            # default: ./ipfs
     [--projects-dir <path>]        # default: <eseq-root>/crates/sequencer/projects
     [--samples-dir <path>]         # default: <eseq-root>/crates/sequencer/samples
+    [--assets-dir <path>]          # default: <eseq-root>/crates/sequencer/sample-assets
     [--db <path>]                  # default: <eseq-root>/crates/sequencer/samples.db
     [--dry-run]                    # print actions, write nothing
     [--skip-projects]              # migrate samples only, leave projects alone
@@ -102,13 +182,13 @@ Phase B — index IPFS payloads
 
 2. Walk `<ipfs-dir>/*/<same-name-as-dir>`. For each file:
    - Verify it begins with `RIFF` (WAV magic). Skip with warning if not.
-   - Compute SHA-256 of bytes. Note both the IPFS dirname and the content sha256 — they may or may not be equal depending on the legacy hashing convention. The DB key is the dirname; the join key with Phase A is the sha256.
+   - Compute SHA-256 of bytes. Note both the IPFS dirname and the content sha256 — they may or may not be equal depending on the legacy hashing convention. The DB sample key is the computed content sha256; the IPFS dirname is preserved as a source reference.
 
-3. Build `ipfsDirName -> contentSha256`.
+3. Build `ipfsDirName -> contentSha256` and `contentSha256 -> ipfsDirName[]`. If multiple legacy payloads have identical WAV bytes, they collapse to one `samples` row and contribute tags/provenance to the same sample.
 
 Phase C — load legacy metadata
 
-4. Connect to Postgres. `SELECT ipfs_hash, title, tags, favorited FROM samples`.
+4. Connect to Postgres. `SELECT ipfs_hash, title, tags, video_id, discogs_id, cover_art_hash, favorited, created_at FROM samples`.
 
 Phase D — write new sample library
 
@@ -118,15 +198,28 @@ Phase D — write new sample library
 8. For each row from Phase C:
    - Look up the file in Phase B's index by `ipfs_hash` (i.e. the dirname).
    - If missing or non-WAV: skip, count toward `missing_audio` summary.
-   - Copy IPFS file to `<samples-dir>/<ipfs_hash>.wav`.
+   - Copy IPFS file to `<samples-dir>/<contentSha256>.wav`.
    - `INSERT OR IGNORE INTO samples(hash, title, favorited)`.
+   - If the same `contentSha256` appears in multiple legacy rows, merge tags and keep the first non-empty title as the sample display title. If any duplicate row is favorited, the sample is favorited.
+   - Create or reuse a `sources` row for the best-known provenance record. Reuse is based on existing `source_refs`, checked in this order: YouTube video, Discogs release, legacy IPFS payload. This keeps the migration idempotent and allows multiple chops from the same external source to share one source row.
+     - `kind = 'youtube_video'` when `video_id` is present.
+     - `kind = 'discogs_release'` when `discogs_id` is present and no YouTube video is present.
+     - `kind = 'unknown_media'` when only title/tags/cover art are present.
+     - `kind = 'legacy_import'` when there is no better source signal.
+   - Add `source_refs`:
+     - `provider = 'legacy_ipfs', ref_kind = 'payload', ref_value = ipfs_hash`.
+     - `provider = 'youtube', ref_kind = 'video', ref_value = video_id` when present.
+     - `provider = 'discogs', ref_kind = 'release', ref_value = discogs_id` when present.
+   - Resolve `cover_art_hash` only if it points to a readable local cover-art file. If found, copy it to a new asset cache path using SHA-256 of the image bytes and insert a `source_assets(kind = 'cover_art')` row. If missing, skip it and count toward `missing_cover_art`.
+   - Insert a `sample_origins` row with `method = 'legacy_migration'`, `dedupe_key = 'legacy_ipfs:<ipfs_hash>'`, linking the sample to the source. Use `created_at` as `captured_at` if it can be converted to unix time.
    - For each tag in `tags`: upsert into `tags`, then insert into `sample_tags`.
    - Run categorization (`export-by-tag.ts` keyword logic) on `title` + existing tags; if it yields a primary category and that tag isn't already attached, add it. This gives every sample at least one top-level category tag, matching how the current folder layout works.
+   - Run conservative metadata inference on title/tags for artist/release/source title. Store outputs in `source_metadata_guesses` with method and confidence; do not overwrite canonical source fields unless the source value was imported directly from a trusted legacy field.
 
 Phase E — rewrite projects
 
 9. Skip if `--skip-projects`.
-10. Build `oldRelativePath -> newRelativePath` by joining Phase A and Phase B/D maps via content sha256. `newRelativePath` is `samples/<ipfs_hash>.wav`.
+10. Build `oldRelativePath -> newRelativePath` by joining Phase A and Phase B/D maps via content sha256. `newRelativePath` is `samples/<contentSha256>.wav`.
 11. For each `<projects-dir>/*.json`:
     - Parse JSON.
     - Recursively walk the value tree. For every string ending in `.wav` and starting with `samples/`:
@@ -138,8 +231,12 @@ Phase F — report
 
 12. Print summary:
     - DB samples inserted / skipped (already present).
-    - Audio files copied / skipped (missing / non-WAV / hash mismatch).
+    - Audio files copied / skipped (missing / non-WAV / duplicate content).
     - Tags created / reused.
+    - Sources created / reused.
+    - Source refs created / reused.
+    - Cover assets imported / missing / skipped.
+    - Metadata guesses created by method and confidence bucket.
     - Projects rewritten / unchanged.
     - Sample refs rewritten / orphaned (with per-project breakdown for orphans).
 
@@ -148,6 +245,8 @@ Phase F — report
 - Re-running is safe: `INSERT OR IGNORE` on `samples.hash` and `tags.name`. File copies overwrite (same content, same hash).
 - `--dry-run` performs Phases A–C and computes Phase D/E actions but writes nothing — used to eyeball the diff before committing.
 - Project rewrite only modifies strings that are both `samples/...wav` AND present in the lookup map. A string that happens to match the path prefix but isn't a known sample is left alone.
+- Legacy external IDs are preserved through `source_refs`; no legacy cache key is promoted to canonical sample identity.
+- Inferred artist/release/title metadata is written as guesses with confidence, not as silent truth.
 - Project backup is taken before any project file is touched.
 - The `samples/` wipe is gated behind explicit confirmation (or `--yes`).
 
@@ -210,7 +309,9 @@ Tag-chip and tag-editing UI are explicit follow-up work — this spec only deliv
 ## Open Risks
 
 - **Legacy Postgres availability.** The migration assumes the docker volume `postgres_data` from `~/code/swift/samplemgmt/docker-compose.yml` still has the data. If the volume is gone, the source is gone — there is no other copy of the tag data.
-- **IPFS dirname vs content hash.** We treat the dirname as the canonical key in our new DB, and use content sha256 only as the join key for project rewriting. We assume the dirname is stable. If a small number of IPFS entries are mis-named or duplicated, they will be visible in the Phase F report.
+- **IPFS dirname vs content hash.** IPFS identifiers are not assumed to equal SHA-256 of the WAV bytes. The migration computes SHA-256 itself and stores IPFS dirnames only as provenance references. Duplicate content across multiple legacy IPFS rows collapses to one sample and is reported.
+- **Provenance inference quality.** Artist/release/source-title inference from filenames and tags will be imperfect. Guesses are stored separately with confidence so they can be reviewed or ignored later.
+- **Cover art availability.** The legacy `cover_art_hash` is not preserved unless it resolves to a readable local image. Missing cover art is reported, not treated as fatal.
 - **Null / empty titles.** Some legacy rows may have no title. Browser falls back to displaying the hash. The hash is also always available as a tooltip / detail.
 - **Orphaned project refs.** Any sample in a project that wasn't part of the legacy library (or whose source file is missing) will not be rewritten. The migration reports these per project so they can be re-pointed manually before the project is opened.
 

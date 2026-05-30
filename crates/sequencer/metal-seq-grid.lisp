@@ -34,7 +34,7 @@
 (defstate remembered-step-panel-buffer "*sequencer*")
 (defstate lower-panel-buffer "*fx*")
 
-(def lower-fx-layout-height 11)
+(def lower-fx-layout-height 10.5)
 
 (def seq-step-buffer? (buffer)
   (or (= buffer "*metal*") (= buffer "*sequencer*")))
@@ -242,7 +242,7 @@
 (bind-key "Tab" "seq-toggle-current-track-expanded-main")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
-; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync
+; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
 (defstate param-mode 0)
 
 (def page-size 16)
@@ -305,7 +305,7 @@
     (do
       (cool-off-follow)
       (let ((num-steps (max 1 (cursor-num-steps))))
-        (set! cursor-step
+        (set-track-cursor-step
           (if (= (current-step) 0)
             (- num-steps 1)
             (- (current-step) 1)))))))
@@ -320,7 +320,7 @@
     (do
       (cool-off-follow)
       (let ((num-steps (max 1 (cursor-num-steps))))
-        (set! cursor-step
+        (set-track-cursor-step
           (if (>= (current-step) (- num-steps 1))
             0
             (+ (current-step) 1)))))))
@@ -339,6 +339,14 @@
     (get evt :meta)
     (get evt :ctrl)))
 
+(def sequencer-cursor-step-changed (track step)
+  nil)
+
+(def set-track-cursor-step (step)
+  (do
+    (set! cursor-step step)
+    (sequencer-cursor-step-changed SEQ.current-track step)))
+
 (defstate step-drag-anchor nil)
 (defstate step-click-pending nil)
 (defstate step-move-last nil)
@@ -350,12 +358,17 @@
 (def step-select-drag-start (step evt)
   (do
     (cool-off-follow)
-    (set! cursor-step step)
+    (set-track-cursor-step step)
     (set! step-click-pending nil)
     (set! step-drag-anchor step)
     (seq-select-step-range step step)))
 
-(def step-select-drag-over-for-track (track step evt)
+(def step-set-cursor-if (update-cursor step)
+  (if update-cursor
+    (set-track-cursor-step step)
+    nil))
+
+(def step-select-drag-over-for-track-with-cursor (track step evt update-cursor)
   (if (selection-click? evt)
     (do
       (set! step-click-pending nil)
@@ -363,13 +376,13 @@
       (set! step-toggle-drag-value nil)
       (cool-off-follow)
       (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
-      (set! cursor-step step)
+      (step-set-cursor-if update-cursor step)
       (seq-select-step-range step-drag-anchor step))
     (if (not (= step-toggle-drag-value nil))
       (do
         (set! step-click-pending nil)
         (cool-off-follow)
-        (set! cursor-step step)
+        (step-set-cursor-if update-cursor step)
         (if (= (seq-track-step-active? track step) step-toggle-drag-value)
           nil
           (seq-toggle-step step)))
@@ -382,7 +395,13 @@
             (cool-off-follow)
             (seq-move-step-drag step-move-last step)
             (set! step-move-last step)
-            (set! cursor-step step)))))))
+            (step-set-cursor-if update-cursor step)))))))
+
+(def step-select-drag-over-for-track (track step evt)
+  (step-select-drag-over-for-track-with-cursor track step evt true))
+
+(def step-select-drag-over-for-track-no-cursor (track step evt)
+  (step-select-drag-over-for-track-with-cursor track step evt false))
 
 (def step-select-drag-over (step evt)
   (step-select-drag-over-for-track SEQ.current-track step evt))
@@ -392,7 +411,7 @@
     (step-select-drag-start step evt)
     (do
       (cool-off-follow)
-      (set! cursor-step step)
+      (set-track-cursor-step step)
       (set! step-drag-anchor nil)
       (if (or (seq-track-step-active? track step) (and use-selection (step-selected? step)))
         (do
@@ -498,19 +517,19 @@
 (def goto-page (page)
   (do
     (cool-off-follow)
-    (set! cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (set-track-cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 (def double-track-pattern ()
   (do
     (cool-off-follow)
     (seq-double-track-pattern)
-    (set! cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (set-track-cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 (def halve-track-pattern ()
   (do
     (cool-off-follow)
     (seq-halve-track-pattern)
-    (set! cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+    (set-track-cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 ;; Cursor keys scoped to *metal* buffer via mode
 (define-mode "seq-grid-mode" :read-only true :on-key "seq-grid-handle-key")
@@ -534,6 +553,8 @@
 (mode-bind-key "seq-grid-mode" "p" "set-pan-mode")
 (def set-sync-mode () (set! param-mode 5))
 (mode-bind-key "seq-grid-mode" "s" "set-sync-mode")
+(def set-delay-mode () (set! param-mode 6))
+(mode-bind-key "seq-grid-mode" "l" "set-delay-mode")
 
 
 (def param-values ()
@@ -542,7 +563,8 @@
       (if (= param-mode 2) SEQ.auxas
         (if (= param-mode 3) SEQ.transposes
           (if (= param-mode 4) SEQ.pans
-            SEQ.syncs))))))
+            (if (= param-mode 5) SEQ.syncs
+              SEQ.delays)))))))
 
 (def param-min ()
   (if (= param-mode 0) 0
@@ -558,7 +580,8 @@
       (if (= param-mode 2) 16
         (if (= param-mode 3) 12
           (if (= param-mode 4) 1
-            (- (len SEQ.sync-labels) 1)))))))
+            (if (= param-mode 5) (- (len SEQ.sync-labels) 1)
+              1)))))))
 
 (def param-slider-min ()
   (if (= param-mode 1) 0 (param-min)))
@@ -586,7 +609,8 @@
       (if (= param-mode 2) :aux-a
         (if (= param-mode 3) :transpose
           (if (= param-mode 4) :pan
-            :sync))))))
+            (if (= param-mode 5) :sync
+              :delay)))))))
 
 (def param-color ()
   (if (= param-mode 0) :blue
@@ -594,7 +618,8 @@
       (if (= param-mode 2) :magenta
         (if (= param-mode 3) :yellow
           (if (= param-mode 4) :red
-            :green))))))
+            (if (= param-mode 5) :green
+              :cyan)))))))
 
 (def param-name ()
   (if (= param-mode 0) "Velocity"
@@ -602,7 +627,8 @@
       (if (= param-mode 2) "Aux A"
         (if (= param-mode 3) "Transpose"
           (if (= param-mode 4) "Pan"
-            "Sync"))))))
+            (if (= param-mode 5) "Sync"
+              "Delay")))))))
 
 (def param-origin ()
   (if (= param-mode 3) 0

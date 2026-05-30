@@ -133,6 +133,7 @@ fn migrate_slot(slot: &ProjectEffectSlot, desc: &EffectDescriptor) -> ProjectEff
             .iter()
             .map(|param| param.node_param_span.max(1))
             .collect(),
+        ir: slot.ir.clone(),
     };
     recompute_modulation_active_params(&mut migrated, desc);
     migrated

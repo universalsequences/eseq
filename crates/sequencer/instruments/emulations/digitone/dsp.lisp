@@ -132,8 +132,10 @@
 
 ; ── Feedback with onepole lowpass at operator pitch ──
 ; Only A (algos 1-3,5-8) and B2 (algo 4) ever have feedback
-(def fb_a  (biquad (* prev_a  (mod feedback)) a_freq  0.5 1 0))
-(def fb_b2 (biquad (* prev_b2 (mod feedback)) b2_freq 0.5 1 0))
+(def fb_a_cutoff  (clip a_freq  20 (* samplerate 0.45)))
+(def fb_b2_cutoff (clip b2_freq 20 (* samplerate 0.45)))
+(def fb_a  (biquad (* prev_a  (mod feedback)) fb_a_cutoff  0.5 1 0))
+(def fb_b2 (biquad (* prev_b2 (mod feedback)) fb_b2_cutoff 0.5 1 0))
 
 ; ── Per-operator harmonics (self-PM waveshaping) ──
 ; sin(phase + harm * sin(phase)) morphs from sine → triangle → saw → square territory

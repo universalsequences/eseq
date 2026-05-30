@@ -56,6 +56,12 @@ unsafe impl Sync for LiveGraphPtr {}
 #[derive(Copy, Clone)]
 pub struct LiveGraphPtr(pub *mut LiveGraph);
 
+impl LiveGraphPtr {
+    pub unsafe fn process_next_block(self, output_buffer: *mut f32, nframes: c_int) {
+        process_next_block(self.0, output_buffer, nframes);
+    }
+}
+
 extern "C" {
     // Engine lifecycle
     pub fn initialize_engine(block_size: c_int, sample_rate: c_int);
@@ -108,6 +114,17 @@ extern "C" {
         channel_count: c_int,
         source_data: *const f32,
     ) -> c_int;
+
+    // Bulk-write a block of floats into a node's state memory at dest_offset
+    // (in floats). Queued and applied on the audio thread at a block boundary;
+    // source_data is copied internally, so the caller may free it immediately.
+    pub fn write_node_state(
+        lg: *mut LiveGraph,
+        node_id: c_int,
+        dest_offset: usize,
+        source_data: *const f32,
+        count: usize,
+    ) -> bool;
 
     // Built-in node factories
     pub fn live_add_gain(lg: *mut LiveGraph, gain_value: f32, name: *const c_char) -> c_int;

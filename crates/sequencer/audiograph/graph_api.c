@@ -488,6 +488,34 @@ int hot_swap_buffer(LiveGraph *lg, int buffer_id, const float *source_data,
   return true;
 }
 
+bool write_node_state(LiveGraph *lg, int node_id, size_t dest_offset,
+                      const float *source_data, size_t count) {
+  if (!lg || node_id < 0 || !source_data || count == 0) {
+    return false;
+  }
+
+  // Copy source data (so caller can free their copy); freed after apply.
+  size_t source_bytes = count * sizeof(float);
+  float *source_copy = malloc(source_bytes);
+  if (!source_copy) {
+    return false;
+  }
+  memcpy(source_copy, source_data, source_bytes);
+
+  GraphEditCmd cmd = {.op = GE_WRITE_NODE_STATE,
+                      .batch_serial = current_batch_serial(lg),
+                      .u.write_node_state = {.node_id = node_id,
+                                             .dest_offset = dest_offset,
+                                             .source_data = source_copy,
+                                             .source_count = count}};
+
+  if (!geq_push(lg->graphEditQueue, &cmd)) {
+    free(source_copy);
+    return false;
+  }
+  return true;
+}
+
 bool is_failed_node(LiveGraph *lg, int logical_id) {
   // Check if this logical ID is in the failed list
   for (int i = 0; i < lg->failed_ids_count; i++) {

@@ -285,6 +285,23 @@ fn swing_delay_samples(
     ((swing_pct as f64 / 100.0) - 0.5) * 2.0 * resolution_samples
 }
 
+fn step_delay_samples(step_params: &[f32], samples_per_step: f32) -> u64 {
+    let delay = step_params
+        .get(StepParam::Delay.index())
+        .copied()
+        .unwrap_or_else(|| StepParam::Delay.default_value())
+        .clamp(StepParam::Delay.min(), StepParam::Delay.max());
+    (delay as f64 * samples_per_step.max(0.0) as f64).round() as u64
+}
+
+fn delayed_step_sample_time(
+    base_sample_time: u64,
+    step_params: &[f32],
+    samples_per_step: f32,
+) -> u64 {
+    base_sample_time.saturating_add(step_delay_samples(step_params, samples_per_step))
+}
+
 fn resolve_effect_params(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
@@ -522,6 +539,7 @@ fn instrument_sound_fingerprint(
 fn chord_data_from_parts(
     notes: &[f32],
     durations: &[f32],
+    delays: &[f32],
     fallback_duration: f32,
     step_transpose: f32,
 ) -> ScheduledChordData {
@@ -529,6 +547,7 @@ fn chord_data_from_parts(
         count: notes.len().min(MAX_VOICES),
         notes: [0.0; MAX_VOICES],
         durations: [0.0; MAX_VOICES],
+        delays: [0.0; MAX_VOICES],
         step_transpose,
     };
     for (idx, note) in notes.iter().take(MAX_VOICES).enumerate() {
@@ -538,6 +557,11 @@ fn chord_data_from_parts(
             .copied()
             .filter(|duration| *duration > 0.0)
             .unwrap_or(fallback_duration);
+        chord.delays[idx] = delays
+            .get(idx)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(StepParam::Delay.min(), StepParam::Delay.max());
     }
     chord
 }
@@ -551,6 +575,7 @@ fn step_chord_data(
     chord_data_from_parts(
         &step.chord,
         &step.chord_durations,
+        &step.chord_delays,
         step.params[StepParam::Duration.index()],
         step.params[StepParam::Transpose.index()],
     )
@@ -576,6 +601,46 @@ fn track_step_boundaries(track: &crate::sequencer::SequencerTrackSnapshot) -> Ve
     boundaries
 }
 
+fn delayed_step_start_beats(
+    track: &crate::sequencer::SequencerTrackSnapshot,
+    step: usize,
+    boundaries: &[f32],
+) -> f32 {
+    let step_beats = track.steps[step]
+        .timebase_override
+        .unwrap_or(track.params.timebase)
+        .step_beats(track.params.num_steps) as f32;
+    let delay = track.steps[step].params[StepParam::Delay.index()]
+        .clamp(StepParam::Delay.min(), StepParam::Delay.max());
+    boundaries[step] + delay * step_beats.max(0.0)
+}
+
+fn explicit_note_delay_beats(
+    step_snapshot: &crate::sequencer::SequencerStepSnapshot,
+    note_idx: usize,
+    step_beats: f32,
+) -> f32 {
+    step_snapshot
+        .chord_delays
+        .get(note_idx)
+        .copied()
+        .unwrap_or(0.0)
+        .clamp(StepParam::Delay.min(), StepParam::Delay.max())
+        * step_beats.max(0.0)
+}
+
+fn step_trigger_start_beats(
+    track: &crate::sequencer::SequencerTrackSnapshot,
+    step: usize,
+    boundaries: &[f32],
+) -> f32 {
+    if track.steps[step].chord.is_empty() {
+        delayed_step_start_beats(track, step, boundaries)
+    } else {
+        boundaries[step]
+    }
+}
+
 fn track_note_spans_for_trigger(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
@@ -590,7 +655,7 @@ fn track_note_spans_for_trigger(
         return Vec::new();
     }
     let boundaries = track_step_boundaries(track);
-    let trigger_start = boundaries[step_idx];
+    let trigger_start = step_trigger_start_beats(track, step_idx, &boundaries);
     let mut candidates = Vec::new();
 
     for step in 0..ns {
@@ -598,7 +663,6 @@ fn track_note_spans_for_trigger(
         if !step_snapshot.active {
             continue;
         }
-        let step_start = boundaries[step];
         let step_beats = step_snapshot
             .timebase_override
             .unwrap_or(track.params.timebase)
@@ -608,6 +672,7 @@ fn track_note_spans_for_trigger(
         }
         let fallback_duration = step_snapshot.params[StepParam::Duration.index()].max(0.0);
         if step_snapshot.chord.is_empty() {
+            let step_start = delayed_step_start_beats(track, step, &boundaries);
             candidates.push(AccumulatorNoteSpan {
                 transpose: step_snapshot.params[StepParam::Transpose.index()],
                 start_beats: step_start,
@@ -615,6 +680,8 @@ fn track_note_spans_for_trigger(
             });
         } else {
             for (idx, note) in step_snapshot.chord.iter().enumerate() {
+                let step_start =
+                    boundaries[step] + explicit_note_delay_beats(step_snapshot, idx, step_beats);
                 let duration = step_snapshot
                     .chord_durations
                     .get(idx)
@@ -637,19 +704,28 @@ fn track_note_spans_for_trigger(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let Some(group_anchor) = candidates
+        .iter()
+        .filter(|note| note.start_beats >= trigger_start - EPS)
+        .map(|note| note.start_beats)
+        .next()
+    else {
+        return Vec::new();
+    };
+
     if candidates
         .iter()
-        .any(|note| note.start_beats < trigger_start - EPS && note.end_beats > trigger_start + EPS)
+        .any(|note| note.start_beats < group_anchor - EPS && note.end_beats > group_anchor + EPS)
     {
         return Vec::new();
     }
 
     let mut group_end = candidates
         .iter()
-        .filter(|note| (note.start_beats - trigger_start).abs() <= EPS)
+        .filter(|note| (note.start_beats - group_anchor).abs() <= EPS)
         .map(|note| note.end_beats)
-        .fold(trigger_start, f32::max);
-    if group_end <= trigger_start + EPS {
+        .fold(group_anchor, f32::max);
+    if group_end <= group_anchor + EPS {
         return Vec::new();
     }
 
@@ -658,10 +734,10 @@ fn track_note_spans_for_trigger(
         if note.start_beats < trigger_start - EPS {
             continue;
         }
-        if note.start_beats > trigger_start + EPS && note.start_beats >= group_end - EPS {
+        if note.start_beats > group_anchor + EPS && note.start_beats >= group_end - EPS {
             break;
         }
-        if note.end_beats <= trigger_start + EPS {
+        if note.end_beats <= group_anchor + EPS {
             continue;
         }
         group_end = group_end.max(note.end_beats);
@@ -700,7 +776,6 @@ fn track_active_note_spans_at_beat(
             if !step_snapshot.active {
                 continue;
             }
-            let step_start = boundaries[step] + cycle_offset;
             let step_beats = step_snapshot
                 .timebase_override
                 .unwrap_or(track.params.timebase)
@@ -710,6 +785,7 @@ fn track_active_note_spans_at_beat(
             }
             let fallback_duration = step_snapshot.params[StepParam::Duration.index()].max(0.0);
             if step_snapshot.chord.is_empty() {
+                let step_start = delayed_step_start_beats(track, step, &boundaries) + cycle_offset;
                 let note_end = step_start + fallback_duration * step_beats;
                 if note_end > position + EPS && step_start < window_end - EPS {
                     spans.push(AccumulatorNoteSpan {
@@ -720,6 +796,9 @@ fn track_active_note_spans_at_beat(
                 }
             } else {
                 for (idx, note) in step_snapshot.chord.iter().enumerate() {
+                    let step_start = boundaries[step]
+                        + explicit_note_delay_beats(step_snapshot, idx, step_beats)
+                        + cycle_offset;
                     let duration = step_snapshot
                         .chord_durations
                         .get(idx)
@@ -746,8 +825,8 @@ fn track_active_note_spans_at_beat(
         .collect()
 }
 
-fn enqueue_resolved_trigger(
-    queue: &ScheduledEventQueue<4096>,
+fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
     pattern_epoch: u64,
     sample_time: u64,
@@ -761,6 +840,52 @@ fn enqueue_resolved_trigger(
 ) -> bool {
     let instrument_fingerprint =
         instrument_sound_fingerprint(snapshot, track_idx, &instrument_params);
+    if chord.count > 0 {
+        let max_delay = chord.delays[..chord.count]
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max);
+        if max_delay > 1e-6 {
+            let mut ok = true;
+            for note_idx in 0..chord.count {
+                let note_delay =
+                    chord.delays[note_idx].clamp(StepParam::Delay.min(), StepParam::Delay.max());
+                let mut note_chord = ScheduledChordData {
+                    count: 1,
+                    notes: [0.0; MAX_VOICES],
+                    durations: [0.0; MAX_VOICES],
+                    delays: [0.0; MAX_VOICES],
+                    step_transpose: chord.step_transpose,
+                };
+                note_chord.notes[0] = chord.notes[note_idx];
+                note_chord.durations[0] = chord.durations[note_idx];
+                let note_sample_time = sample_time.saturating_add(
+                    (note_delay as f64 * samples_per_step.max(0.0) as f64).round() as u64,
+                );
+                if queue
+                    .push(ScheduledEvent {
+                        pattern_epoch,
+                        sample_time: note_sample_time,
+                        kind: ScheduledEventKind::ResolvedTrigger {
+                            track: track_idx,
+                            step: step_idx,
+                            samples_per_step,
+                            resolved,
+                            chord: note_chord,
+                            effect_params: effect_params.clone(),
+                            instrument_params: instrument_params.clone(),
+                            instrument_fingerprint,
+                        },
+                    })
+                    .is_err()
+                {
+                    ok = false;
+                    break;
+                }
+            }
+            return ok;
+        }
+    }
     queue
         .push(ScheduledEvent {
             pattern_epoch,
@@ -789,6 +914,7 @@ struct MidiFxEvent {
     resolved: ResolvedStep,
     chord: Vec<f32>,
     chord_durations: Vec<f32>,
+    chord_delays: Vec<f32>,
     chord_step_transpose: f32,
     note_spans: Option<Vec<AccumulatorNoteSpan>>,
     arp_phase_beats: f32,
@@ -830,6 +956,7 @@ fn midi_fx_event_from_step(
         resolved,
         chord: step.chord.clone(),
         chord_durations: step.chord_durations.clone(),
+        chord_delays: step.chord_delays.clone(),
         chord_step_transpose: step.params[StepParam::Transpose.index()],
         note_spans: Some(track_note_spans_for_trigger(snapshot, track_idx, step_idx)),
         arp_phase_beats,
@@ -916,6 +1043,7 @@ fn midi_fx_window_events_from_step(
             step_beats: window_beats,
             resolved: window_resolved,
             chord_durations: vec![1.0; chord.len()],
+            chord_delays: vec![0.0; chord.len()],
             chord,
             chord_step_transpose: 0.0,
             note_spans: Some(window_spans),
@@ -1029,6 +1157,7 @@ fn run_midi_fx_chain_for_track(
                         if target_track >= snapshot.tracks.len() {
                             continue;
                         }
+                        let chord_len = emitted.chord.len();
                         let routed = MidiFxEvent {
                             offset_beats: event.offset_beats + emitted.offset_beats,
                             track: target_track,
@@ -1038,6 +1167,7 @@ fn run_midi_fx_chain_for_track(
                             resolved: emitted.resolved,
                             chord: emitted.chord,
                             chord_durations: emitted.chord_durations,
+                            chord_delays: vec![0.0; chord_len],
                             chord_step_transpose: emitted.chord_step_transpose,
                             note_spans: None,
                             arp_phase_beats: event.arp_phase_beats,
@@ -1080,8 +1210,8 @@ fn run_midi_fx_chain_for_track(
     current
 }
 
-fn enqueue_midi_fx_events(
-    queue: &ScheduledEventQueue<4096>,
+fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
     pattern_epoch: u64,
     base_sample_time: u64,
@@ -1095,6 +1225,7 @@ fn enqueue_midi_fx_events(
         let chord = chord_data_from_parts(
             &event.chord,
             &event.chord_durations,
+            &event.chord_delays,
             event.resolved.duration,
             event.chord_step_transpose,
         );
@@ -1284,6 +1415,7 @@ fn schedule_live_midi_fx(
                 break;
             }
             let chord_durations = vec![1.0; chord.len()];
+            let chord_delays = vec![0.0; chord.len()];
             let first_transpose = chord[0];
             let resolved = ResolvedStep {
                 duration: 1.0,
@@ -1304,6 +1436,7 @@ fn schedule_live_midi_fx(
                 resolved,
                 chord,
                 chord_durations,
+                chord_delays,
                 chord_step_transpose: 0.0,
                 note_spans: Some(note_spans),
                 arp_phase_beats: (rendered_total_beats + tick_offset_beats) as f32,
@@ -1655,7 +1788,17 @@ pub fn spawn_scheduler_thread(
                         let swing_step =
                             swing_bucket_index(trigger.cycle_start_beats, swing_resolution);
                         let is_odd_step = swing_step % 2 == 1;
-                        let mut sample_time = scheduled_until_sample + trigger.offset as u64;
+                        let step_boundary_sample_time =
+                            scheduled_until_sample + trigger.offset as u64;
+                        let mut sample_time = if step_snapshot.chord.is_empty() {
+                            delayed_step_sample_time(
+                                step_boundary_sample_time,
+                                &step_snapshot.params,
+                                trigger.samples_per_step,
+                            )
+                        } else {
+                            step_boundary_sample_time
+                        };
                         if is_odd_step && swing_pct > 50.0 {
                             let swing_delay = swing_delay_samples(
                                 sample_rate as f64,
@@ -1808,6 +1951,7 @@ pub fn spawn_scheduler_thread(
                                                 resolved: output.resolved,
                                                 chord: step_snapshot.chord.clone(),
                                                 chord_durations: step_snapshot.chord_durations.clone(),
+                                                chord_delays: step_snapshot.chord_delays.clone(),
                                                 chord_step_transpose: step_snapshot.params
                                                     [StepParam::Transpose.index()],
                                                 note_spans: Some(note_spans.clone()),
@@ -1824,6 +1968,7 @@ pub fn spawn_scheduler_thread(
                                             if target_track >= snapshot.tracks.len() {
                                                 continue;
                                             }
+                                            let chord_len = emitted.chord.len();
                                             accumulator_events.push(MidiFxEvent {
                                                 offset_beats: emitted.offset_beats,
                                                 track: target_track,
@@ -1833,6 +1978,7 @@ pub fn spawn_scheduler_thread(
                                                 resolved: emitted.resolved,
                                                 chord: emitted.chord,
                                                 chord_durations: emitted.chord_durations,
+                                                chord_delays: vec![0.0; chord_len],
                                                 chord_step_transpose: emitted.chord_step_transpose,
                                                 note_spans: None,
                                                 arp_phase_beats: trigger.absolute_beats as f32,
@@ -2039,15 +2185,15 @@ pub fn spawn_scheduler_thread(
 #[cfg(test)]
 mod tests {
     use super::{
-        midi_fx_window_events_from_step, quantized_live_tick_sample, resolve_effect_params,
-        resolve_instrument_plocks, track_active_note_spans_at_beat, track_note_spans_for_trigger,
-        SnapshotSequencerClock,
+        delayed_step_sample_time, enqueue_resolved_trigger, midi_fx_window_events_from_step,
+        quantized_live_tick_sample, resolve_effect_params, resolve_instrument_plocks,
+        track_active_note_spans_at_beat, track_note_spans_for_trigger, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
     use crate::scheduled_event::{
-        ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
-        ScheduledInstrumentParams,
+        ScheduledChordData, ScheduledEffectParam, ScheduledEventQueue, ScheduledInstrumentParam,
+        ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
     };
     use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
 
@@ -2063,6 +2209,60 @@ mod tests {
         assert!(!triggers.is_empty());
         assert_eq!(triggers[0].track, 0);
         assert_eq!(triggers[0].step, 0);
+    }
+
+    #[test]
+    fn delayed_step_sample_time_offsets_by_fraction_of_step() {
+        let mut params = [0.0; crate::sequencer::NUM_PARAMS];
+        params[StepParam::Delay.index()] = 0.5;
+
+        assert_eq!(delayed_step_sample_time(1_000, &params, 6_000.0), 4_000);
+    }
+
+    #[test]
+    fn enqueue_resolved_trigger_splits_note_delays() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<8>::new();
+        let resolved = ResolvedStep {
+            duration: 1.0,
+            velocity: 1.0,
+            speed: 1.0,
+            aux_a: 0.0,
+            aux_b: 0.0,
+            transpose: 0.0,
+            pan: 0.0,
+            chop: 1.0,
+        };
+        let mut chord = ScheduledChordData {
+            count: 2,
+            notes: [0.0; crate::voice::MAX_VOICES],
+            durations: [1.0; crate::voice::MAX_VOICES],
+            delays: [0.0; crate::voice::MAX_VOICES],
+            step_transpose: 0.0,
+        };
+        chord.notes[1] = 7.0;
+        chord.delays[1] = 0.5;
+
+        assert!(enqueue_resolved_trigger(
+            &queue,
+            &snapshot,
+            0,
+            1_000,
+            0,
+            0,
+            6_000.0,
+            resolved,
+            chord,
+            Vec::new(),
+            ScheduledInstrumentParams::new(),
+        ));
+
+        let first = queue.pop().expect("first note event");
+        let second = queue.pop().expect("second note event");
+        assert_eq!(first.sample_time, 1_000);
+        assert_eq!(second.sample_time, 4_000);
+        assert!(queue.pop().is_none());
     }
 
     #[test]
@@ -2267,6 +2467,72 @@ mod tests {
 
         let later_group = track_note_spans_for_trigger(&snapshot, track, 4);
         assert!(later_group.is_empty());
+    }
+
+    #[test]
+    fn track_note_spans_include_step_delay_in_start_time() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+
+        state.pattern.patterns[track].set_step_active(0, true);
+        state.pattern.step_data[track].set(0, StepParam::Delay, 0.5);
+        state.pattern.step_data[track].set(0, StepParam::Duration, 0.5);
+
+        state.pattern.patterns[track].set_step_active(1, true);
+        state.pattern.step_data[track].set(1, StepParam::Transpose, 7.0);
+        state.pattern.step_data[track].set(1, StepParam::Delay, 0.25);
+        state.pattern.step_data[track].set(1, StepParam::Duration, 1.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let first_group = track_note_spans_for_trigger(&snapshot, track, 0);
+        assert_eq!(first_group.len(), 1);
+        assert_eq!(first_group[0].start_beats, 0.0);
+        assert_eq!(first_group[0].end_beats, 0.125);
+
+        let later_group = track_note_spans_for_trigger(&snapshot, track, 1);
+        assert_eq!(later_group.len(), 1);
+        assert_eq!(later_group[0].transpose, 7.0);
+        assert_eq!(later_group[0].start_beats, 0.0);
+        assert_eq!(later_group[0].end_beats, 0.25);
+    }
+
+    #[test]
+    fn track_note_spans_include_per_note_delays_for_strums() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+
+        state.pattern.patterns[track].set_step_active(0, true);
+        state.pattern.chord_data[track].add_note_with_timing(0, 0.0, 1.0, 0.0);
+        state.pattern.chord_data[track].add_note_with_timing(0, 4.0, 1.0, 0.25);
+        state.pattern.chord_data[track].add_note_with_timing(0, 7.0, 1.0, 0.5);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let spans = track_note_spans_for_trigger(&snapshot, track, 0);
+
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].transpose, 0.0);
+        assert_eq!(spans[0].start_beats, 0.0);
+        assert_eq!(spans[1].transpose, 4.0);
+        assert_eq!(spans[1].start_beats, 0.0625);
+        assert_eq!(spans[2].transpose, 7.0);
+        assert_eq!(spans[2].start_beats, 0.125);
+    }
+
+    #[test]
+    fn track_note_spans_include_strums_with_no_gridline_note() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+
+        state.pattern.patterns[track].set_step_active(0, true);
+        state.pattern.chord_data[track].add_note_with_timing(0, 0.0, 1.0, 0.25);
+        state.pattern.chord_data[track].add_note_with_timing(0, 4.0, 1.0, 0.5);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let spans = track_note_spans_for_trigger(&snapshot, track, 0);
+
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].start_beats, 0.0625);
+        assert_eq!(spans[1].start_beats, 0.125);
     }
 
     #[test]

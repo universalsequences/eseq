@@ -6,11 +6,13 @@ use crossterm::event::KeyCode;
 
 use crate::effects::{EffectDescriptor, BUILTIN_SLOT_COUNT};
 use crate::project::{
-    self, chord_snapshot_from_steps_and_durations, project_file_version, ProjectBusChannel,
+    self, chord_snapshot_from_steps_durations_and_delays, project_file_version, ProjectBusChannel,
     ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
     ProjectScratchState, ProjectTrack,
 };
-use crate::sequencer::{BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS};
+use crate::sequencer::{
+    BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
+};
 
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
 
@@ -40,6 +42,7 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
             .iter()
             .map(|param| param.node_param_span.max(1))
             .collect(),
+        ir: None,
     }
 }
 
@@ -161,6 +164,74 @@ fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
     }
 }
 
+fn project_builtin_effect_name_for_save(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    crate::effects::EffectDescriptor::builtin_insert_project_name(trimmed).or_else(|| {
+        crate::conv_reverb::is_dgen_builtin(trimmed).then(|| {
+            format!(
+                "{}{}",
+                crate::effects::EffectDescriptor::BUILTIN_INSERT_PREFIX,
+                crate::conv_reverb::NAME
+            )
+        })
+    })
+}
+
+fn project_builtin_effect_name_for_load(name: &str) -> Option<String> {
+    if let Some(builtin_name) =
+        crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name)
+    {
+        return Some(builtin_name.to_string());
+    }
+    let stripped = name
+        .trim()
+        .strip_prefix(crate::effects::EffectDescriptor::BUILTIN_INSERT_PREFIX)?
+        .trim();
+    crate::conv_reverb::is_dgen_builtin(stripped).then(|| crate::conv_reverb::NAME.to_string())
+}
+
+fn migrate_dgen_builtin_effect_names(project: &mut ProjectFile) {
+    fn migrate_name(name: &mut Option<String>) {
+        let Some(raw_name) = name.as_deref() else {
+            return;
+        };
+        if crate::conv_reverb::is_dgen_builtin(raw_name.trim()) {
+            *name = project_builtin_effect_name_for_save(raw_name);
+        }
+    }
+
+    for track_effects in &mut project.custom_effects {
+        for name in track_effects {
+            migrate_name(name);
+        }
+    }
+    for bus in &mut project.buses {
+        for name in &mut bus.custom_effects {
+            migrate_name(name);
+        }
+    }
+}
+
+fn resolve_project_current_track(
+    saved_current_track: Option<usize>,
+    track_count: usize,
+    current_pattern_track_bits: Option<&[[u64; TRACK_PATTERN_WORDS]]>,
+) -> usize {
+    if track_count == 0 {
+        return 0;
+    }
+    saved_current_track
+        .or_else(|| {
+            current_pattern_track_bits.and_then(|track_bits| {
+                track_bits
+                    .iter()
+                    .position(|bits| bits.iter().any(|word| *word != 0))
+            })
+        })
+        .unwrap_or(0)
+        .min(track_count - 1)
+}
+
 fn project_custom_instrument_slot_into_synced_snapshot(
     slot: project::ProjectEffectSlot,
     desc: &crate::effects::EffectDescriptor,
@@ -175,7 +246,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     let new_np = desc.params.len();
     let has_legacy_fixed_voice_mod_params = slot.param_node_indices.iter().any(|&node_idx| {
         node_idx >= crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE
-            && node_idx < crate::voice_modulator::MOD_PARAM_BASE
+            && node_idx < crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE_END
     });
     let has_generated_mod_params = desc
         .params
@@ -297,6 +368,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect(),
+        ir: slot.ir.clone(),
     };
     snapshot.recompute_modulation_active_params(desc);
     snapshot
@@ -418,6 +490,7 @@ fn project_bus_pattern_snapshot_from_ui(
                 plocks: plocks.clone(),
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
+                ir: None,
             })
             .collect(),
     }
@@ -446,7 +519,15 @@ impl From<BusChannelState> for ProjectBusChannel {
             mute: value.mute,
             solo: value.solo,
             gate_sequence: project_bus_gate_sequence_from_ui(&value.gate_sequence),
-            custom_effects: value.custom_effect_names,
+            custom_effects: value
+                .custom_effect_names
+                .into_iter()
+                .map(|name| {
+                    name.and_then(|name| {
+                        project_builtin_effect_name_for_save(&name).or_else(|| Some(name))
+                    })
+                })
+                .collect(),
             effect_slots: value
                 .effect_slots
                 .iter()
@@ -684,6 +765,7 @@ impl App {
             return Err(format!("Unsupported project version {}", project.version));
         }
         migrate_legacy_default_track_effects(&mut project);
+        migrate_dgen_builtin_effect_names(&mut project);
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
             name: name.to_string(),
@@ -828,6 +910,11 @@ impl App {
     fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
         let num_tracks = self.tracks.len();
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_track = if num_tracks == 0 {
+            0
+        } else {
+            self.ui.cursor_track.min(num_tracks - 1)
+        };
 
         {
             let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
@@ -908,6 +995,7 @@ impl App {
                 self.state.transport.master_volume.load(Ordering::Relaxed),
             ),
             current_pattern,
+            current_track: Some(current_track),
             reverb: ProjectReverbState {
                 size: self.ui.reverb_size,
                 brightness: self.ui.reverb_brightness,
@@ -987,7 +1075,7 @@ impl App {
                             if name.is_empty() {
                                 None
                             } else if let Some(project_name) =
-                                crate::effects::EffectDescriptor::builtin_insert_project_name(&name)
+                                project_builtin_effect_name_for_save(&name)
                             {
                                 Some(project_name)
                             } else {
@@ -1049,6 +1137,57 @@ impl App {
         }
 
         walk(Path::new("samples"), sample_name)
+    }
+
+    /// Resolve a saved Convolution Reverb IR reference to an absolute path: the
+    /// bundled default, otherwise a sample looked up by stem under `samples/`.
+    fn resolve_conv_reverb_ir_path(&self, ir_ref: &str) -> Option<PathBuf> {
+        if ir_ref == crate::conv_reverb::DEFAULT_IR_REF {
+            crate::conv_reverb::default_ir_path()
+        } else {
+            self.resolve_sample_path_by_name(ir_ref)
+        }
+    }
+
+    /// Re-apply a saved IR to a freshly-created track Convolution Reverb. The
+    /// default IR is loaded on create, so only a non-default reference needs work.
+    fn restore_conv_reverb_ir_track(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        ir_ref: Option<&str>,
+    ) {
+        let Some(ir_ref) = ir_ref else { return };
+        if ir_ref.is_empty() || ir_ref == crate::conv_reverb::DEFAULT_IR_REF {
+            return;
+        }
+        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
+            if let Err(e) = self.set_conv_reverb_ir(track, slot_idx, &path, ir_ref) {
+                eprintln!("project-load: conv reverb IR '{ir_ref}' not restored: {e}");
+            }
+        } else {
+            eprintln!("project-load: conv reverb IR '{ir_ref}' could not be resolved");
+        }
+    }
+
+    /// Bus counterpart of `restore_conv_reverb_ir_track`.
+    fn restore_conv_reverb_ir_bus(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        ir_ref: Option<&str>,
+    ) {
+        let Some(ir_ref) = ir_ref else { return };
+        if ir_ref.is_empty() || ir_ref == crate::conv_reverb::DEFAULT_IR_REF {
+            return;
+        }
+        if let Some(path) = self.resolve_conv_reverb_ir_path(ir_ref) {
+            if let Err(e) = self.set_conv_reverb_ir_bus(bus_idx, slot_idx, &path, ir_ref) {
+                eprintln!("project-load: conv reverb bus IR '{ir_ref}' not restored: {e}");
+            }
+        } else {
+            eprintln!("project-load: conv reverb bus IR '{ir_ref}' could not be resolved");
+        }
     }
 
     pub(super) fn advance_project_load(&mut self) -> Result<(), String> {
@@ -1142,14 +1281,12 @@ impl App {
                             effect_name
                         );
                         if let Some(builtin_name) =
-                            crate::effects::EffectDescriptor::strip_builtin_insert_project_name(
-                                effect_name,
-                            )
+                            project_builtin_effect_name_for_load(effect_name)
                         {
                             self.load_builtin_effect_to_slot_sync(
                                 track_idx,
                                 BUILTIN_SLOT_COUNT + offset,
-                                builtin_name,
+                                &builtin_name,
                             )?;
                         } else {
                             self.load_saved_effect_to_slot_sync(
@@ -1158,6 +1295,20 @@ impl App {
                                 effect_name,
                             )?;
                         }
+                        // Restore a saved Convolution Reverb IR for this slot. The
+                        // ref is the same across patterns (instance state), so take
+                        // the first pattern that recorded one.
+                        let saved_ir = pending.project.patterns.iter().find_map(|p| {
+                            p.effect_slots
+                                .get(track_idx)
+                                .and_then(|slots| slots.get(offset))
+                                .and_then(|slot| slot.ir.clone())
+                        });
+                        self.restore_conv_reverb_ir_track(
+                            track_idx,
+                            BUILTIN_SLOT_COUNT + offset,
+                            saved_ir.as_deref(),
+                        );
                     }
                     pending.phase = super::PendingProjectLoadPhase::AddEffect {
                         track_idx,
@@ -1215,6 +1366,7 @@ impl App {
             bpm,
             master_volume,
             current_pattern: saved_current_pattern,
+            current_track: saved_current_track,
             reverb,
             buses,
             scratch,
@@ -1225,6 +1377,12 @@ impl App {
         let bank = pending.built_patterns;
         let mut bus_pattern_bank = pending.built_bus_patterns;
         let current_pattern = saved_current_pattern.min(bank.len().saturating_sub(1));
+        let current_track = resolve_project_current_track(
+            saved_current_track,
+            self.tracks.len(),
+            bank.get(current_pattern)
+                .map(|snapshot| snapshot.track_bits.as_slice()),
+        );
         self.normalize_track_colors();
 
         {
@@ -1291,10 +1449,9 @@ impl App {
                 })
                 .collect();
         for (bus_idx, slot_idx, name, saved_slot) in saved_bus_effects {
-            if let Some(builtin_name) =
-                crate::effects::EffectDescriptor::strip_builtin_insert_project_name(&name)
-            {
-                self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, builtin_name)?;
+            let saved_ir = saved_slot.ir.clone();
+            if let Some(builtin_name) = project_builtin_effect_name_for_load(&name) {
+                self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, &builtin_name)?;
             } else {
                 self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, &name)?;
             }
@@ -1308,6 +1465,9 @@ impl App {
                 slot.node_id = live_node_id;
             }
             self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+            // Restore a saved Convolution Reverb IR (the default was auto-loaded
+            // on create, so only override for a non-default reference).
+            self.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref());
         }
         if bus_pattern_bank.is_empty() {
             bus_pattern_bank = (0..self.state.pattern.num_patterns.load(Ordering::Relaxed)
@@ -1355,7 +1515,7 @@ impl App {
         }
         self.publish_bus_gate_runtime();
 
-        self.ui.cursor_track = 0;
+        self.ui.cursor_track = current_track;
         self.ui.cursor_step = 0;
         self.ui.pattern_page = current_pattern / 10;
         self.ui.focused_region = if self.tracks.is_empty() {
@@ -1500,7 +1660,12 @@ impl App {
                 self.submit_sample_analysis(&loaded);
                 let buffer_id = loaded.buffer_id;
                 let sample_rate = loaded.sample_rate;
-                let sample_name = loaded.name;
+                let sample_name = crate::sample_db::display_title_for_sample_path(&path_buf)
+                    .or_else(|| {
+                        let saved_name = saved_name.trim();
+                        (!saved_name.is_empty()).then(|| saved_name.to_string())
+                    })
+                    .unwrap_or(loaded.name);
                 if saved_path.as_ref() != Some(&path_buf) {
                     fallback_count += 1;
                 }
@@ -1522,6 +1687,7 @@ impl App {
             track_sound_states,
             chord_snapshots,
             chord_duration_snapshots,
+            chord_delay_snapshots,
             timebase_plock_snapshots,
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
@@ -1597,6 +1763,7 @@ impl App {
                                     plocks: vec![Vec::new(); MAX_STEPS],
                                     param_node_indices: Vec::new(),
                                     param_node_spans: Vec::new(),
+                                    ir: None,
                                 }
                             });
                         if saved_slot.num_params >= 4 {
@@ -1632,6 +1799,7 @@ impl App {
                                     .iter()
                                     .map(|p| p.node_param_span.max(1))
                                     .collect(),
+                                ir: None,
                             }
                         }
                     } else {
@@ -1643,6 +1811,7 @@ impl App {
                                 plocks: vec![Vec::new(); MAX_STEPS],
                                 param_node_indices: Vec::new(),
                                 param_node_spans: Vec::new(),
+                                ir: None,
                             }
                         });
                         if slot.num_params == 0 {
@@ -1681,7 +1850,14 @@ impl App {
                         .into_iter()
                         .chain(std::iter::repeat_with(|| vec![Vec::new(); MAX_STEPS])),
                 )
-                .map(|(steps, durations)| chord_snapshot_from_steps_and_durations(steps, durations))
+                .zip(
+                    chord_delay_snapshots
+                        .into_iter()
+                        .chain(std::iter::repeat_with(|| vec![Vec::new(); MAX_STEPS])),
+                )
+                .map(|((steps, durations), delays)| {
+                    chord_snapshot_from_steps_durations_and_delays(steps, durations, delays)
+                })
                 .collect(),
             timebase_plock_snapshots: timebase_plock_snapshots
                 .into_iter()
@@ -1811,6 +1987,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn missing_project_current_track_uses_first_non_empty_track() {
+        let mut track_bits = vec![[0; TRACK_PATTERN_WORDS]; 3];
+        track_bits[2][0] = 1;
+
+        assert_eq!(resolve_project_current_track(None, 3, Some(&track_bits)), 2);
+        assert_eq!(
+            resolve_project_current_track(Some(1), 3, Some(&track_bits)),
+            1
+        );
+        assert_eq!(
+            resolve_project_current_track(Some(99), 3, Some(&track_bits)),
+            2
+        );
+        assert_eq!(resolve_project_current_track(None, 3, None), 0);
+        assert_eq!(resolve_project_current_track(None, 0, Some(&track_bits)), 0);
+    }
+
+    #[test]
+    fn convolution_reverb_project_names_are_treated_as_builtin() {
+        let project_name = format!(
+            "{}{}",
+            EffectDescriptor::BUILTIN_INSERT_PREFIX,
+            crate::conv_reverb::NAME
+        );
+        assert_eq!(
+            project_builtin_effect_name_for_save(crate::conv_reverb::NAME),
+            Some(project_name.clone())
+        );
+        assert_eq!(
+            project_builtin_effect_name_for_load(&project_name),
+            Some(crate::conv_reverb::NAME.to_string())
+        );
+
+        let mut project = minimal_project_with_effect_slots(
+            vec![Some(crate::conv_reverb::NAME.to_string())],
+            Vec::new(),
+        );
+        project.buses = project::default_project_buses();
+        project.buses[1].custom_effects.resize(1, None);
+        project.buses[1].custom_effects[0] = Some(crate::conv_reverb::NAME.to_string());
+        migrate_dgen_builtin_effect_names(&mut project);
+
+        assert_eq!(project.custom_effects[0][0], Some(project_name.clone()));
+        assert_eq!(project.buses[1].custom_effects[0], Some(project_name));
+    }
+
     fn minimal_project_with_effect_slots(
         custom_effects: Vec<Option<String>>,
         effect_slots: Vec<project::ProjectEffectSlot>,
@@ -1821,6 +2044,7 @@ mod tests {
             bpm: 120,
             master_volume: 1.0,
             current_pattern: 0,
+            current_track: Some(0),
             reverb: ProjectReverbState {
                 size: 0.2,
                 brightness: 0.8,
@@ -1844,6 +2068,7 @@ mod tests {
                 track_sound_states: Vec::new(),
                 chord_snapshots: Vec::new(),
                 chord_duration_snapshots: Vec::new(),
+                chord_delay_snapshots: Vec::new(),
                 timebase_plock_snapshots: Vec::new(),
                 swing_plock_snapshots: Vec::new(),
                 swing_resolution_plock_snapshots: Vec::new(),
@@ -1873,6 +2098,7 @@ mod tests {
             plocks: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![9],
             param_node_spans: vec![1],
+            ir: None,
         };
         let mut project = minimal_project_with_effect_slots(
             vec![Some("custom-fx".to_string())],
@@ -1909,6 +2135,7 @@ mod tests {
             plocks: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![11],
             param_node_spans: vec![1],
+            ir: None,
         };
         let mut project = minimal_project_with_effect_slots(
             vec![Some("custom-fx".to_string())],
@@ -1952,6 +2179,7 @@ mod tests {
                 crate::voice_modulator::MOD_PARAM_BASE + 1,
             ],
             param_node_spans: vec![1, 1, 1, 1],
+            ir: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -2011,6 +2239,7 @@ mod tests {
                 crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE + 1,
             ],
             param_node_spans: vec![1, 1, 1, 1],
+            ir: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -2058,6 +2287,7 @@ mod tests {
             plocks,
             param_node_indices: vec![10, 14, 18, 22],
             param_node_spans: vec![1, 1, 1, 1],
+            ir: None,
         };
 
         let desc = crate::effects::EffectDescriptor {
@@ -2128,6 +2358,7 @@ mod tests {
                 .iter()
                 .map(|param| param.node_param_span.max(1))
                 .collect(),
+            ir: None,
         };
 
         let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
@@ -2174,6 +2405,7 @@ mod tests {
                 .map(|param| param.node_param_idx)
                 .collect(),
             param_node_spans: vec![1, 4, 1, 1],
+            ir: None,
         };
 
         let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
@@ -2217,6 +2449,7 @@ mod tests {
                 .iter()
                 .map(|param| param.node_param_span.max(1))
                 .collect(),
+            ir: None,
         };
 
         let renamed_desc = crate::effects::EffectDescriptor {
