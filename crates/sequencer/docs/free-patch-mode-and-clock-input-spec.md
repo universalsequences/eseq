@@ -195,23 +195,25 @@ external modulation inputs from the mixer.
 
 ### Authoring Model
 
-V1 should add explicit modulation-output declarations. The exact DGenLisp
-surface syntax can be chosen during implementation, but it must be distinct
-from ordinary audio outputs in manifest metadata.
+V1 should use the existing `@modulator N` metadata token for explicit
+modulation-output declarations. Direction is determined by the operator:
 
-Acceptable source forms:
+- `@modulator N` on an `in` form declares a modulation input consumed from the
+  host
+- `@modulator N` on an `out` form declares a modulation output exposed back to
+  the host
 
-```lisp
-(out slow-ramp 2 @name macro-a @mod-output 1)
-(out stepped 3 @name macro-b @mod-output 2)
-```
-
-or, if adding a dedicated form is simpler and clearer:
+Source form:
 
 ```lisp
-(modout slow-ramp @name macro-a @slot 1)
-(modout stepped @name macro-b @slot 2)
+(out slow-ramp 2 @name macro-a @modulator 1)
+(out stepped 3 @name macro-b @modulator 2)
 ```
+
+This requires DGenLisp to extend `out` parsing so output-side `@modulator`
+metadata is reported as modulation-output manifest data. Existing input-side
+`@modulator` metadata on `in` forms must continue to populate
+`manifest.modulators`.
 
 Required metadata per modulation output:
 
@@ -225,8 +227,8 @@ Suggested manifest shape:
 ```json
 {
   "modOutputs": [
-    { "slot": 1, "channel": 1, "name": "macro-a", "range": "unipolar" },
-    { "slot": 2, "channel": 2, "name": "macro-b", "range": "unipolar" }
+    { "slot": 1, "channel": 2, "name": "macro-a", "range": "unipolar" },
+    { "slot": 2, "channel": 3, "name": "macro-b", "range": "unipolar" }
   ]
 }
 ```
@@ -250,8 +252,8 @@ modulator-track outputs appear.
 For example, a free-patch track declaring:
 
 ```lisp
-(modout lfo-a @name "A")
-(modout ramp-b @name "B")
+(out lfo-a 2 @name A @modulator 1)
+(out ramp-b 3 @name B @modulator 2)
 ```
 
 should expose two source circles on that track. The user can cable each source
@@ -451,7 +453,7 @@ Replace positional host-input wiring with a binding pass:
 
 ```text
 for each manifest input:
-  if input has @modulator metadata:
+  if input is listed in manifest.modulators:
     connect matching voice_modulator output
   else if normalized input.name matches a host signal:
     connect host signal output to input.channel
