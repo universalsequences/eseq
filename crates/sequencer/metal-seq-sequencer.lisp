@@ -104,7 +104,7 @@
     (reactive-set "SEQV" (seqv-expanded-track-field track-id) expanded)
     (if expanded
       (seqv-set-cursor-step track-id (seqv-cursor-step track-id))
-      nil)
+      (seqv-clear-expanded-step-slots track-id))
     (set! seqv-expanded-track-ids
       (if expanded
         (if (seqv-list-contains? seqv-expanded-track-ids track-id)
@@ -133,8 +133,13 @@
   (get (seqv-editor-state-for track-id) :param-mode))
 
 (def seqv-set-param-mode (track-id mode)
-  (seqv-upsert-editor-state track-id
-    (merge (seqv-editor-state-for track-id) :param-mode mode)))
+  (do
+    (seqv-upsert-editor-state track-id
+      (merge (seqv-editor-state-for track-id) :param-mode mode))
+    (let ((track (seqv-track-index-for-id track-id)))
+      (if (>= track 0)
+        (seqv-sync-expanded-step-slots-for track track-id)
+        nil))))
 
 (def seqv-cursor-step (track-id)
   (get (seqv-editor-state-for track-id) :cursor-step))
@@ -154,7 +159,10 @@
       (if (>= track 0)
         (do
           (reactive-set "SEQV" (seqv-cursor-highlight-field track old-step) false)
-          (reactive-set "SEQV" (seqv-cursor-highlight-field track step) true))
+          (reactive-set "SEQV" (seqv-cursor-highlight-field track step) true)
+          (if (seqv-track-expanded? track-id)
+            (seqv-sync-expanded-step-slots-for track track-id)
+            nil))
         nil))))
 
 (def sequencer-cursor-step-changed (track step)
@@ -588,7 +596,16 @@
     (+ (* (seqv-expanded-track-color-b track) 0.28) (* 0.30 0.72))
     0.55))
 
-(def seqv-param-values (track mode)
+(def seqv-current-param-values (mode)
+  (if (= mode 0) SEQ.velocities
+    (if (= mode 1) SEQ.durations
+      (if (= mode 2) SEQ.auxas
+        (if (= mode 3) SEQ.transposes
+          (if (= mode 4) SEQ.pans
+            (if (= mode 5) SEQ.syncs
+              SEQ.delays)))))))
+
+(def seqv-track-param-values (track mode)
   (if (= mode 0) (seqv-track-list SEQ.track-velocities track)
     (if (= mode 1) (seqv-track-list SEQ.track-durations track)
       (if (= mode 2) (seqv-track-list SEQ.track-auxas track)
@@ -596,6 +613,11 @@
           (if (= mode 4) (seqv-track-list SEQ.track-pans track)
             (if (= mode 5) (seqv-track-list SEQ.track-syncs track)
               (seqv-track-list SEQ.track-delays track))))))))
+
+(def seqv-param-values (track mode)
+  (if (= track SEQ.current-track)
+    (seqv-current-param-values mode)
+    (seqv-track-param-values track mode)))
 
 (def seqv-param-value-at (track mode step)
   (let ((values (seqv-param-values track mode)))
@@ -715,6 +737,62 @@
 (def seqv-expanded-step-visible? (track track-id i)
   (< (seqv-expanded-step-index track track-id i) (seqv-track-num-steps track)))
 
+(def seqv-sync-expanded-step-slots-for (track track-id)
+  (seqv-sync-expanded-step-slots
+    track
+    track-id
+    (seqv-visible-page track track-id)
+    (seqv-param-mode track-id)
+    (seqv-current-step track track-id)))
+
+(def seqv-slot-field (name track-id slot)
+  (str "seqv-slot-" name "-" track-id "-" slot))
+
+(def seqv-slot-param-field (kind track-id mode slot)
+  (str "seqv-slot-param-" kind "-" track-id "-" mode "-" slot))
+
+(def seqv-slot-page-active-field (track-id page)
+  (str "seqv-page-active-" track-id "-" page))
+
+(def seqv-slot-step-index-binding (track-id slot)
+  (bind-seq (seqv-slot-field "step-index" track-id slot)))
+
+(def seqv-slot-step-index-value (track-id slot)
+  (reactive-value (seqv-slot-step-index-binding track-id slot)))
+
+(def seqv-slot-visible-binding (track-id slot)
+  (bind-seq (seqv-slot-field "visible" track-id slot)))
+
+(def seqv-slot-visible? (track-id slot)
+  (> (reactive-value (seqv-slot-visible-binding track-id slot)) 0.5))
+
+(def seqv-slot-label-binding (track-id slot)
+  (bind-seq (seqv-slot-field "step-label" track-id slot)))
+
+(def seqv-slot-active-binding (track-id slot)
+  (bind-seq (seqv-slot-field "active" track-id slot)))
+
+(def seqv-slot-plocked-binding (track-id slot)
+  (bind-seq (seqv-slot-field "plocked" track-id slot)))
+
+(def seqv-slot-selected-binding (track-id slot)
+  (bind-seq (seqv-slot-field "selected" track-id slot)))
+
+(def seqv-slot-playhead-binding (track-id slot)
+  (bind-seq (seqv-slot-field "playhead-active" track-id slot)))
+
+(def seqv-slot-cursor-binding (track-id slot)
+  (bind-seq (seqv-slot-field "cursor-active" track-id slot)))
+
+(def seqv-slot-param-slider-binding (track-id mode slot)
+  (bind-seq (seqv-slot-param-field "slider" track-id mode slot)))
+
+(def seqv-slot-param-haptic-binding (track-id mode slot)
+  (bind-seq (seqv-slot-param-field "haptic" track-id mode slot)))
+
+(def seqv-page-active-binding (track-id page)
+  (bind-seq (seqv-slot-page-active-field track-id page)))
+
 (def seqv-step-active-binding (track step)
   (bind-seq (str "seq-track-step-active-" track "-" step)))
 
@@ -766,6 +844,36 @@
     (seqv-activate-track-for-edit track)
     (seqv-set-expanded-cursor track track-id step)
     (step-pointer-up step evt)))
+
+(def seqv-expanded-slot-click (track track-id slot evt)
+  (let ((step (seqv-slot-step-index-value track-id slot)))
+    (if (>= step 0)
+      (seqv-expanded-step-click track track-id step evt)
+      nil)))
+
+(def seqv-expanded-slot-drag (track track-id slot evt)
+  (let ((step (seqv-slot-step-index-value track-id slot)))
+    (if (>= step 0)
+      (seqv-expanded-step-drag track track-id step evt)
+      nil)))
+
+(def seqv-expanded-slot-pointer-down (track track-id slot evt)
+  (let ((step (seqv-slot-step-index-value track-id slot)))
+    (if (>= step 0)
+      (seqv-expanded-step-pointer-down track track-id step evt)
+      nil)))
+
+(def seqv-expanded-slot-pointer-up (track track-id slot evt)
+  (let ((step (seqv-slot-step-index-value track-id slot)))
+    (if (>= step 0)
+      (seqv-expanded-step-pointer-up track track-id step evt)
+      nil)))
+
+(def seqv-set-expanded-slot-param (track track-id slot mode slider-value)
+  (let ((step (seqv-slot-step-index-value track-id slot)))
+    (if (>= step 0)
+      (seqv-set-expanded-step-param track track-id step mode slider-value)
+      nil)))
 
 (def seqv-set-expanded-step-param (track track-id step mode slider-value)
   (do
@@ -870,13 +978,15 @@
               (box :width page-button-width :height 1.1
                 :key (str "seqv-expanded-page-" track-id "-" page)
                 :background "pattern-pill-bg"
-                :active (if (= page (seqv-visible-page track track-id)) 1 0)
+                :active (seqv-page-active-binding track-id page)
                 :style pattern-control-style
                 :on-click |x y r| (seqv-goto-page track track-id page)
                 (v-stack :align :center
                   (label (fmt " {} " (+ page 1))
                     :font-size 11
-                    :color (if (= page (seqv-visible-page track track-id)) :white :dim)
+                    :active (seqv-page-active-binding track-id page)
+                    :active-color :white
+                    :color :dim
                     :bg :transparent)))))))))))
 
 (def seqv-expanded-track-editor (track track-id)
@@ -899,21 +1009,19 @@
 
       (grid :cols 16 :col-width 4
         (each (range 0 page-size) |i|
-          (let ((step (seqv-expanded-step-index track track-id i))
-                (visible (seqv-expanded-step-visible? track track-id i)))
-            (box :padding 0.25
+          (box :padding 0.25
               :key (str "seqv-expanded-step-column-" track-id "-" i)
-              :background (if visible "cursor-highlight" nil)
-              :active (seqv-cursor-highlight-binding track step)
+              :background "cursor-highlight"
+              :active (seqv-slot-cursor-binding track-id i)
               :selected (seqv-track-selected-binding track)
               :on-click (lambda (evt)
-                (if visible (seqv-expanded-step-click track track-id step evt) nil))
+                (seqv-expanded-slot-click track track-id i evt))
               :on-drag (lambda (evt)
-                (if visible (seqv-expanded-step-drag track track-id step evt) nil))
+                (seqv-expanded-slot-drag track track-id i evt))
               (v-stack :align :center :gap 0.5
-                (let ((active-ref (seqv-step-active-binding track step))
-                      (plocked-ref (seqv-step-plocked-binding track step))
-                      (selected-ref (seqv-step-selected-binding track step))
+                (let ((active-ref (seqv-slot-active-binding track-id i))
+                      (plocked-ref (seqv-slot-plocked-binding track-id i))
+                      (selected-ref (seqv-slot-selected-binding track-id i))
                       (track-r (seqv-expanded-track-color-r track))
                       (track-g (seqv-expanded-track-color-g track))
                       (track-b (seqv-expanded-track-color-b track)))
@@ -923,8 +1031,8 @@
                       :width (if (= mode 5) 2 1)
                       :min (seqv-param-slider-min mode) :max (seqv-param-slider-max mode)
                       :origin (seqv-param-origin mode)
-                      :value (seqv-step-param-slider-binding track mode step)
-                      :haptic-value (seqv-step-param-haptic-binding track mode step)
+                      :value (seqv-slot-param-slider-binding track-id mode i)
+                      :haptic-value (seqv-slot-param-haptic-binding track-id mode i)
                       :haptic-min (seqv-param-min mode)
                       :haptic-max (seqv-param-max mode)
                       :haptic-pivot-position (seqv-param-haptic-pivot-position mode)
@@ -941,9 +1049,7 @@
                       :track-b track-b
                       :material (seqv-aqua-slider-track-material)
                       :on-change (lambda (v)
-                        (if visible
-                          (seqv-set-expanded-step-param track track-id step mode v)
-                          nil)))
+                        (seqv-set-expanded-slot-param track track-id i mode v)))
                     (box
                       :key (str "seqv-expanded-step-toggle-" track-id "-" i)
                       :active active-ref
@@ -952,17 +1058,11 @@
                       :background "aqua-button"
                       :align :center :width 3 :height 1.5
                       :on-mouse-down (lambda (evt)
-                        (if visible
-                          (seqv-expanded-step-pointer-down track track-id step evt)
-                          nil))
+                        (seqv-expanded-slot-pointer-down track track-id i evt))
                       :on-drag (lambda (evt)
-                        (if visible
-                          (seqv-expanded-step-drag track track-id step evt)
-                          nil))
+                        (seqv-expanded-slot-drag track track-id i evt))
                       :on-mouse-up (lambda (evt)
-                        (if visible
-                          (seqv-expanded-step-pointer-up track track-id step evt)
-                          nil))
+                        (seqv-expanded-slot-pointer-up track track-id i evt))
                       (metal-track-tick
                         :active active-ref
                         :plocked plocked-ref
@@ -970,17 +1070,19 @@
                         :track-r track-r
                         :track-g track-g
                         :track-b track-b))))
-                (label (if visible (str (+ step 1)) "")
+                (number-label
                   :key (str "seqv-expanded-step-label-" track-id "-" i)
+                  :value (seqv-slot-label-binding track-id i)
+                  :active (seqv-slot-selected-binding track-id i)
+                  :active-color :yellow
+                  :decimals 0
                   :width 2.8
                   :h-align :center
                   :font-size 10 :bg :transparent
-                  :active (seqv-step-selected-binding track step)
-                  :active-color :yellow
                   :color :dim)
                 (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                   (step-playhead-dot
-                    :active (bind-seq (str "track-playhead-active-" track "-" step))))))))))))
+                    :active (seqv-slot-playhead-binding track-id i))))))))))
 
 (def seqv-track-grid (track-idx)
   (let ((num-steps (nth SEQ.track-num-steps track-idx))

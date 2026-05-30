@@ -224,6 +224,7 @@ pub(crate) fn init_runtime(
     ui_epoch: Arc<AtomicUsize>,
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
+    expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
     auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
@@ -771,6 +772,74 @@ pub(crate) fn init_runtime(
     runtime.register_native("seq-active-delete-target-kind", move |_args, _ctx| {
         let guard = delete_target.lock().unwrap();
         Ok(active_delete_target_kind(guard.as_ref()))
+    });
+
+    let projection = expanded_step_projection.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seqv-sync-expanded-step-slots", move |args, _ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(track_id)),
+            Some(Value::Number(page)),
+            Some(Value::Number(mode)),
+            Some(Value::Number(cursor_step)),
+        ) = (
+            args.first(),
+            args.get(1),
+            args.get(2),
+            args.get(3),
+            args.get(4),
+        )
+        else {
+            return Err(
+                "seqv-sync-expanded-step-slots: expected (track track-id page mode cursor-step)"
+                    .into(),
+            );
+        };
+        if *track < 0.0
+            || *track_id < 0.0
+            || *page < 0.0
+            || *mode < 0.0
+            || *cursor_step < 0.0
+        {
+            return Err("seqv-sync-expanded-step-slots: numeric args must be non-negative".into());
+        }
+        let max_page = MAX_STEPS.saturating_sub(1) / PAGE_SIZE;
+        let viewport = ExpandedStepViewport {
+            track: (*track as usize).min(sequencer::sequencer::MAX_TRACKS.saturating_sub(1)),
+            track_id: *track_id as usize,
+            page: (*page as usize).min(max_page),
+            mode: (*mode as usize).min(6),
+            cursor_step: (*cursor_step as usize).min(MAX_STEPS.saturating_sub(1)),
+        };
+        if projection.set_viewport(viewport) {
+            ui_inv.push(UiInvalidation::ExpandedStepViewport {
+                track: viewport.track,
+                track_id: viewport.track_id,
+            });
+        }
+        Ok(Value::Bool(true))
+    });
+
+    let projection = expanded_step_projection.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seqv-clear-expanded-step-slots", move |args, _ctx| {
+        let Some(Value::Number(track_id)) = args.first() else {
+            return Err("seqv-clear-expanded-step-slots: expected track-id".into());
+        };
+        if *track_id < 0.0 {
+            return Err("seqv-clear-expanded-step-slots: track-id must be non-negative".into());
+        }
+        let track_id = *track_id as usize;
+        if let Some(viewport) = projection.viewport(track_id) {
+            if projection.remove_viewport(track_id) {
+                ui_inv.push(UiInvalidation::ExpandedStepViewport {
+                    track: viewport.track,
+                    track_id,
+                });
+            }
+        }
+        Ok(Value::Bool(true))
     });
 
     let st = state.clone();

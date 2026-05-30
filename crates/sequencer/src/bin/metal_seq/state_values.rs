@@ -225,6 +225,117 @@ pub(crate) fn track_step_param_haptic_field(track: usize, mode: usize, step: usi
     format!("seq-track-step-param-haptic-{track}-{mode}-{step}")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ExpandedStepViewport {
+    pub(crate) track: usize,
+    pub(crate) track_id: usize,
+    pub(crate) page: usize,
+    pub(crate) mode: usize,
+    pub(crate) cursor_step: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ExpandedStepProjectionRegistry {
+    viewports: Mutex<HashMap<usize, ExpandedStepViewport>>,
+}
+
+impl ExpandedStepProjectionRegistry {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn set_viewport(&self, viewport: ExpandedStepViewport) -> bool {
+        let mut viewports = self.viewports.lock().unwrap();
+        let changed = viewports.get(&viewport.track_id).copied() != Some(viewport);
+        viewports.insert(viewport.track_id, viewport);
+        changed
+    }
+
+    pub(crate) fn remove_viewport(&self, track_id: usize) -> bool {
+        self.viewports.lock().unwrap().remove(&track_id).is_some()
+    }
+
+    pub(crate) fn viewport(&self, track_id: usize) -> Option<ExpandedStepViewport> {
+        self.viewports.lock().unwrap().get(&track_id).copied()
+    }
+
+    pub(crate) fn viewports_for_track(&self, track: usize) -> Vec<ExpandedStepViewport> {
+        self.viewports
+            .lock()
+            .unwrap()
+            .values()
+            .copied()
+            .filter(|viewport| viewport.track == track)
+            .collect()
+    }
+
+    pub(crate) fn all_viewports(&self) -> Vec<ExpandedStepViewport> {
+        self.viewports.lock().unwrap().values().copied().collect()
+    }
+
+    pub(crate) fn clear(&self) {
+        self.viewports.lock().unwrap().clear();
+    }
+}
+
+pub(crate) fn expanded_step_slot_index_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-step-index-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_label_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-step-label-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_visible_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-visible-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_active_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-active-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_plocked_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-plocked-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_selected_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-selected-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_playhead_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-playhead-active-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_cursor_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-cursor-active-{track_id}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_param_slider_field(
+    track_id: usize,
+    mode: usize,
+    slot: usize,
+) -> String {
+    format!("seqv-slot-param-slider-{track_id}-{mode}-{slot}")
+}
+
+pub(crate) fn expanded_step_slot_param_haptic_field(
+    track_id: usize,
+    mode: usize,
+    slot: usize,
+) -> String {
+    format!("seqv-slot-param-haptic-{track_id}-{mode}-{slot}")
+}
+
+pub(crate) fn expanded_step_page_active_field(track_id: usize, page: usize) -> String {
+    format!("seqv-page-active-{track_id}-{page}")
+}
+
+pub(crate) fn visible_slot_for_step(viewport: ExpandedStepViewport, step: usize) -> Option<usize> {
+    let first_step = viewport.page.saturating_mul(PAGE_SIZE);
+    let slot = step.checked_sub(first_step)?;
+    (slot < PAGE_SIZE).then_some(slot)
+}
+
 fn expanded_step_param_for_mode(mode: usize) -> StepParam {
     match mode {
         0 => StepParam::Velocity,
@@ -244,6 +355,186 @@ fn expanded_step_param_slider_value(param: StepParam, value: f32) -> f32 {
     } else {
         value
     }
+}
+
+pub(crate) fn sync_expanded_step_param_slot(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    viewport: ExpandedStepViewport,
+    mode: usize,
+    slot: usize,
+) -> bool {
+    let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
+    let num_steps = state.pattern.track_params[viewport.track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let visible = step < num_steps;
+    let param = expanded_step_param_for_mode(mode);
+    let value = if visible {
+        state.pattern.step_data[viewport.track].get(step, param)
+    } else {
+        0.0
+    };
+    let mut dirty = false;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_param_slider_field(viewport.track_id, mode, slot),
+            Value::Number(expanded_step_param_slider_value(param, value) as f64),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_param_haptic_field(viewport.track_id, mode, slot),
+            Value::Number(value as f64),
+        )
+        .effects_dirty;
+    dirty
+}
+
+pub(crate) fn sync_expanded_step_slot(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    selected_steps: &HashSet<usize>,
+    current_track_idx: usize,
+    viewport: ExpandedStepViewport,
+    slot: usize,
+) -> bool {
+    let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
+    let num_steps = state.pattern.track_params[viewport.track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let visible = step < num_steps && step < MAX_STEPS && viewport.track < app.tracks.len();
+    let mut dirty = false;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_index_field(viewport.track_id, slot),
+            Value::Number(if visible { step as f64 } else { -1.0 }),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_label_field(viewport.track_id, slot),
+            Value::Number((step + 1) as f64),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_visible_field(viewport.track_id, slot),
+            Value::Bool(visible),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_active_field(viewport.track_id, slot),
+            Value::Bool(visible && state.pattern.patterns[viewport.track].is_active(step)),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_plocked_field(viewport.track_id, slot),
+            Value::Bool(
+                visible
+                    && track_step_has_plock(
+                        state,
+                        viewport.track,
+                        &app.graph.effect_descriptors,
+                        step,
+                    ),
+            ),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_selected_field(viewport.track_id, slot),
+            Value::Bool(
+                visible && viewport.track == current_track_idx && selected_steps.contains(&step),
+            ),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_playhead_field(viewport.track_id, slot),
+            Value::Bool(visible && step == track_active_playhead_step(state, viewport.track)),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            &expanded_step_slot_cursor_field(viewport.track_id, slot),
+            Value::Bool(visible && step == viewport.cursor_step),
+        )
+        .effects_dirty;
+    dirty |= sync_expanded_step_param_slot(rt, state, viewport, viewport.mode, slot);
+    dirty
+}
+
+pub(crate) fn sync_expanded_step_viewport(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    selected_steps: &HashSet<usize>,
+    current_track_idx: usize,
+    viewport: ExpandedStepViewport,
+) -> bool {
+    if viewport.track >= app.tracks.len() {
+        return false;
+    }
+    let mut dirty = false;
+    let page_count = track_playhead_row_count(state, viewport.track).max(1);
+    for page in 0..((MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE) {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &expanded_step_page_active_field(viewport.track_id, page),
+                Value::Bool(page == viewport.page && page < page_count),
+            )
+            .effects_dirty;
+    }
+    for slot in 0..PAGE_SIZE {
+        dirty |= sync_expanded_step_slot(
+            rt,
+            state,
+            app,
+            selected_steps,
+            current_track_idx,
+            viewport,
+            slot,
+        );
+    }
+    dirty
+}
+
+pub(crate) fn sync_expanded_step_viewport_playhead(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    viewport: ExpandedStepViewport,
+) -> bool {
+    let active_step = track_active_playhead_step(state, viewport.track);
+    let num_steps = state.pattern.track_params[viewport.track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let mut dirty = false;
+    for slot in 0..PAGE_SIZE {
+        let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &expanded_step_slot_playhead_field(viewport.track_id, slot),
+                Value::Bool(step < num_steps && step == active_step),
+            )
+            .effects_dirty;
+    }
+    dirty
 }
 
 pub(crate) fn sync_all_track_step_binding_fields(
@@ -6131,6 +6422,16 @@ mod tests {
         }
     }
 
+    fn layout_prop_number(node: &eseqlisp::layout::LayoutNode, prop: &str) -> Option<f64> {
+        match node.props.get(prop)? {
+            Value::Number(value) => Some(*value),
+            Value::ReactiveRef { slot, .. } => {
+                Some(eseqlisp::reactive::read_float_slot(slot) as f64)
+            }
+            _ => None,
+        }
+    }
+
     fn layout_tree_has_bool_prop(
         node: &eseqlisp::layout::LayoutNode,
         prop: &str,
@@ -6141,6 +6442,24 @@ mod tests {
                 .children
                 .iter()
                 .any(|child| layout_tree_has_bool_prop(child, prop, expected))
+    }
+
+    fn layout_tree_has_reactive_prop_field(
+        node: &eseqlisp::layout::LayoutNode,
+        prop: &str,
+        namespace: &str,
+        field: &str,
+    ) -> bool {
+        matches!(
+            node.props.get(prop),
+            Some(Value::ReactiveRef {
+                namespace: actual_namespace,
+                field: actual_field,
+                ..
+            }) if actual_namespace == namespace && actual_field == field
+        ) || node.children.iter().any(|child| {
+            layout_tree_has_reactive_prop_field(child, prop, namespace, field)
+        })
     }
 
     fn render_layout_cells(layout: &eseqlisp::layout::LayoutNode, cols: u16, rows: u16) -> String {
@@ -9282,6 +9601,16 @@ mod tests {
             });
         editor
             .runtime_mut()
+            .register_native("seqv-sync-expanded-step-slots", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seqv-clear-expanded-step-slots", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
             .register_native("seq-double-track-pattern", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
@@ -9514,6 +9843,7 @@ mod tests {
         editor
             .runtime_mut()
             .set_reactive("SEQ", &track_playhead_page_field(0), Value::Number(0.0));
+        set_test_expanded_step_slot_projection(&mut editor, 0, 0, 0, 0, 16, 0, 0);
         register_test_delete_target_natives(&mut editor, 1);
 
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
@@ -9702,6 +10032,96 @@ mod tests {
             }
             rt.set_reactive("SEQ", &track_playhead_page_field(track), Value::Number(0.0));
         }
+        for track in 0..track_count {
+            set_test_expanded_step_slot_projection(editor, track, track, 0, 0, step_count, 0, 0);
+        }
+    }
+
+    fn set_test_expanded_step_slot_projection(
+        editor: &mut eseqlisp::Editor,
+        track: usize,
+        track_id: usize,
+        page: usize,
+        mode: usize,
+        step_count: usize,
+        cursor_step: usize,
+        playhead_step: usize,
+    ) {
+        let rt = editor.runtime_mut();
+        let page_count = ((step_count + PAGE_SIZE - 1) / PAGE_SIZE).max(1);
+        for candidate in 0..((MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE) {
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_page_active_field(track_id, candidate),
+                Value::Bool(candidate == page && candidate < page_count),
+            );
+        }
+        for slot in 0..PAGE_SIZE {
+            let step = page.saturating_mul(PAGE_SIZE).saturating_add(slot);
+            let visible = step < step_count.min(MAX_STEPS);
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_slot_index_field(track_id, slot),
+                Value::Number(if visible { step as f64 } else { -1.0 }),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_slot_label_field(track_id, slot),
+                Value::Number((step + 1) as f64),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_slot_visible_field(track_id, slot),
+                Value::Bool(visible),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_slot_active_field(track_id, slot),
+                Value::Bool(visible && (step + track).is_multiple_of(2)),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_slot_plocked_field(track_id, slot),
+                Value::Bool(false),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_slot_selected_field(track_id, slot),
+                Value::Bool(false),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_slot_playhead_field(track_id, slot),
+                Value::Bool(visible && step == playhead_step),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_slot_cursor_field(track_id, slot),
+                Value::Bool(visible && step == cursor_step),
+            );
+            for candidate_mode in 0..=6 {
+                let value = if visible && candidate_mode == 0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                rt.set_reactive(
+                    "SEQ",
+                    &expanded_step_slot_param_slider_field(track_id, candidate_mode, slot),
+                    Value::Number(value),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &expanded_step_slot_param_haptic_field(track_id, candidate_mode, slot),
+                    Value::Number(value),
+                );
+            }
+        }
+        rt.set_reactive(
+            "SEQ",
+            &expanded_step_slot_param_slider_field(track_id, mode.min(6), 0),
+            Value::Number(1.0),
+        );
     }
 
     fn assert_finite_nonzero_rect(node: &eseqlisp::layout::LayoutNode, label: &str) {
@@ -11059,6 +11479,8 @@ mod tests {
                   (set! cursor-step 3))",
             )
             .expect("expand rows and seed cursors");
+        set_test_expanded_step_slot_projection(&mut editor, 0, 0, 0, 0, 16, 6, 0);
+        set_test_expanded_step_slot_projection(&mut editor, 1, 1, 0, 0, 16, 3, 0);
         editor.refresh_runtime_side_effects();
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
         let _ = editor.take_dirty_widget_ids();
@@ -11501,12 +11923,12 @@ mod tests {
 
         editor.runtime_mut().set_reactive(
             "SEQ",
-            &track_playhead_active_field(0, 0),
+            &expanded_step_slot_playhead_field(0, 0),
             Value::Bool(false),
         );
         editor.runtime_mut().set_reactive(
             "SEQ",
-            &track_playhead_active_field(0, 1),
+            &expanded_step_slot_playhead_field(0, 1),
             Value::Bool(true),
         );
         editor.refresh_runtime_side_effects();
@@ -11555,18 +11977,13 @@ mod tests {
         for track in 0..2 {
             editor.runtime_mut().set_reactive(
                 "SEQ",
-                &track_playhead_active_field(track, 0),
+                &expanded_step_slot_playhead_field(track, 0),
                 Value::Bool(false),
             );
             editor.runtime_mut().set_reactive(
                 "SEQ",
-                &track_playhead_active_field(track, 1),
+                &expanded_step_slot_playhead_field(track, 1),
                 Value::Bool(true),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &track_playhead_row_field(track, 0),
-                Value::Number(1.0),
             );
         }
         editor.runtime_mut().run_reactive_cycle();
@@ -11652,7 +12069,7 @@ mod tests {
 
         editor.runtime_mut().set_reactive(
             "SEQ",
-            &track_step_selected_field(0, 0),
+            &expanded_step_slot_selected_field(0, 0),
             Value::Bool(true),
         );
         editor.runtime_mut().run_reactive_cycle();
@@ -11731,7 +12148,7 @@ mod tests {
 
         editor.runtime_mut().set_reactive(
             "SEQ",
-            &track_step_selected_field(0, 0),
+            &expanded_step_slot_selected_field(0, 0),
             Value::Bool(true),
         );
         let selected_dirty = editor.take_dirty_widget_ids();
@@ -11753,7 +12170,7 @@ mod tests {
 
         editor.runtime_mut().set_reactive(
             "SEQ",
-            &track_step_param_slider_field(0, 0, 0),
+            &expanded_step_slot_param_slider_field(0, 0, 0),
             Value::Number(0.37),
         );
         let slider_dirty = editor.take_dirty_widget_ids();
@@ -11775,7 +12192,7 @@ mod tests {
 
         editor.runtime_mut().set_reactive(
             "SEQ",
-            &track_step_active_field(0, 0),
+            &expanded_step_slot_active_field(0, 0),
             Value::Bool(false),
         );
         let active_dirty = editor.take_dirty_widget_ids();
@@ -11865,7 +12282,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_sequencer_expanded_page_boundary_reuses_active_subtree_layout() {
+    fn metal_seq_sequencer_expanded_page_boundary_updates_stable_slots_without_rerendering_rows() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 32);
         editor.runtime_mut().run_reactive_cycle();
@@ -11895,8 +12312,8 @@ mod tests {
             .expect("expanded two-row sequencer layout should build");
         assert_eq!(
             find_layout_node_by_stable_key(&initial_layout, "seqv-expanded-step-label-0-0")
-                .and_then(|node| node.props.get("text")),
-            Some(&Value::String("1".to_string())),
+                .and_then(|node| layout_prop_number(node, "value")),
+            Some(1.0),
             "slot 0 should initially show absolute step 1"
         );
         assert_eq!(
@@ -11909,51 +12326,29 @@ mod tests {
         let before_revision = editor.widget_layout_revision();
 
         for track in 0..2 {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &track_playhead_page_field(track),
-                Value::Number(1.0),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &track_playhead_active_field(track, 0),
-                Value::Bool(false),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &track_playhead_active_field(track, 16),
-                Value::Bool(true),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &track_playhead_row_field(track, 0),
-                Value::Number(-1.0),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &track_playhead_row_field(track, 1),
-                Value::Number(0.0),
-            );
+            set_test_expanded_step_slot_projection(&mut editor, track, track, 1, 0, 32, 16, 16);
         }
         editor.runtime_mut().run_reactive_cycle();
 
-        let trace = editor
-            .runtime()
-            .last_ui_invalidation_trace()
-            .expect("page-boundary invalidation trace");
+        let pending = editor.runtime_mut().take_pending_buffer_widget_trees();
+        let sequencer_updates = pending
+            .iter()
+            .filter(|pending| {
+                matches!(
+                    pending.target(),
+                    eseqlisp::vm::EffectTarget::BufferName(name) if name == "*sequencer*"
+                )
+            })
+            .count();
         assert_eq!(
-            trace.relayout_mode.as_deref(),
-            Some("subtree-reuse"),
-            "page-boundary updates should reuse active subtree layout: {trace:?}"
+            sequencer_updates, 0,
+            "page-boundary projection should update bound slot props without rebuilding sequencer rows; got {} pending updates",
+            pending.len()
         );
-        assert_eq!(trace.relayout_failure_reason, None);
-        assert_eq!(trace.subtree_failure_reason, None);
-        assert_eq!(trace.full_buffer_reruns, 0);
-        assert_eq!(trace.subtree_reruns, 2);
         assert_eq!(
             editor.widget_layout_revision(),
             before_revision,
-            "page-boundary subtree reuse should not bump the active layout revision"
+            "page-boundary slot projection should not bump the active layout revision"
         );
 
         let paged_layout = editor
@@ -11964,16 +12359,29 @@ mod tests {
                 .expect("track 0 slot 0 label after page flip");
         assert_finite_nonzero_rect(slot_0_label, "track 0 slot 0 label after page flip");
         assert_eq!(
-            slot_0_label.props.get("text"),
-            Some(&Value::String("17".to_string())),
+            layout_prop_number(slot_0_label, "value"),
+            Some(17.0),
             "stable slot 0 should now display absolute step 17"
         );
         let slot_0_playhead =
             find_layout_node_by_stable_key(&paged_layout, "seqv-expanded-step-playhead-probe-0-0")
                 .expect("track 0 slot 0 playhead after page flip");
         assert!(
-            layout_tree_has_bool_prop(slot_0_playhead, "active", true),
-            "slot 0 playhead binding should retarget to absolute step 16"
+            layout_tree_has_reactive_prop_field(
+                slot_0_playhead,
+                "active",
+                "SEQ",
+                &expanded_step_slot_playhead_field(0, 0),
+            ),
+            "slot 0 playhead should keep the stable slot playhead binding"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(r#"(reactive-get "SEQ" "seqv-slot-playhead-active-0-0")"#)
+                .unwrap(),
+            Some(Value::Bool(true)),
+            "stable slot 0 playhead binding should reflect absolute step 16"
         );
     }
 

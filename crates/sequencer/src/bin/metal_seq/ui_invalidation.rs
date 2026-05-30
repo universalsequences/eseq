@@ -22,6 +22,10 @@ pub(crate) enum UiInvalidation {
     StepSelection {
         track: usize,
     },
+    ExpandedStepViewport {
+        track: usize,
+        track_id: usize,
+    },
     TrackMixer {
         track: usize,
         change: TrackMixerInvalidation,
@@ -325,19 +329,25 @@ fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bo
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackParamPanel { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Step { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepSelection { .. })
+        | (UiInvalidation::TrackTopology(_), UiInvalidation::ExpandedStepViewport { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Instrument { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackFx { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::MidiFx { .. }) => true,
         (
             UiInvalidation::Pattern(PatternInvalidation::AllTracks),
-            UiInvalidation::Step { .. } | UiInvalidation::StepSelection { .. },
+            UiInvalidation::Step { .. }
+            | UiInvalidation::StepSelection { .. }
+            | UiInvalidation::ExpandedStepViewport { .. },
         ) => true,
         (
             UiInvalidation::Pattern(PatternInvalidation::WholeTrack { track }),
             UiInvalidation::Step {
                 track: old_track, ..
             }
-            | UiInvalidation::StepSelection { track: old_track },
+            | UiInvalidation::StepSelection { track: old_track }
+            | UiInvalidation::ExpandedStepViewport {
+                track: old_track, ..
+            },
         ) => track == old_track,
         (
             UiInvalidation::TrackFx {

@@ -91,6 +91,7 @@
 (defwidget pattern-pill-bg
   :width 1 :height 1
   :state (active)
+  :bindable (active)
   :paint-margin 0.3
   :shader
   (sdf/layer

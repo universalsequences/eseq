@@ -50,6 +50,11 @@ fn resolve_v_align(props: &HashMap<String, Value>) -> f32 {
 }
 
 fn resolve_color(props: &HashMap<String, Value>) -> Color {
+    if get_f32_prop(props, "active", 0.0) != 0.0
+        && let Some(value) = props.get("active-color")
+    {
+        return crate::theme::parse_color_value(value).unwrap_or(theme::WIDGET_LABEL_FG());
+    }
     resolve_named_color(props, "color", theme::WIDGET_LABEL_FG())
 }
 
@@ -137,7 +142,7 @@ impl WidgetDefinition for NumberLabelWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["value"]
+        &["value", "active"]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -240,11 +245,33 @@ mod tests {
 
     #[test]
     fn value_is_bindable_but_not_size_affecting() {
-        assert_eq!(NUMBER_LABEL_WIDGET.bindable_props(), &["value"]);
+        assert_eq!(NUMBER_LABEL_WIDGET.bindable_props(), &["value", "active"]);
         assert!(
             !NUMBER_LABEL_WIDGET
                 .size_affecting_props()
                 .contains(&"value")
         );
+        assert!(
+            !NUMBER_LABEL_WIDGET
+                .size_affecting_props()
+                .contains(&"active")
+        );
+    }
+
+    #[test]
+    fn active_color_overrides_base_color_when_active() {
+        let mut props = HashMap::from([
+            ("color".to_string(), Value::Keyword("dim".to_string())),
+            (
+                "active-color".to_string(),
+                Value::Keyword("yellow".to_string()),
+            ),
+        ]);
+
+        assert_eq!(resolve_color(&props), theme::DIM());
+
+        props.insert("active".to_string(), Value::Number(1.0));
+
+        assert_eq!(resolve_color(&props), theme::YELLOW());
     }
 }

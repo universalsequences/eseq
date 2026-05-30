@@ -889,8 +889,9 @@ fn sync_single_step_param_binding(
     step: usize,
     param: StepParam,
     current_track_idx: usize,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
 ) -> bool {
-    let Some((current_field, all_track_field, mode)) = step_param_fields(param) else {
+    let Some((current_field, _, mode)) = step_param_fields(param) else {
         return false;
     };
     let value = state.pattern.step_data[track].get(step, param);
@@ -914,13 +915,11 @@ fn sync_single_step_param_binding(
             .set_reactive_list_index("SEQ", current_field, step, Value::Number(value as f64))
             .effects_dirty;
     }
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            all_track_field,
-            build_all_active_track_param_lists_value(state, param),
-        )
-        .effects_dirty;
+    for viewport in expanded_step_projection.viewports_for_track(track) {
+        if let Some(slot) = visible_slot_for_step(viewport, step) {
+            dirty |= sync_expanded_step_param_slot(rt, state, viewport, mode, slot);
+        }
+    }
     dirty
 }
 
@@ -932,6 +931,7 @@ fn sync_single_step_structural_bindings(
     step: usize,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
 ) -> bool {
     if track >= app.tracks.len() || step >= MAX_STEPS {
         return false;
@@ -972,14 +972,30 @@ fn sync_single_step_structural_bindings(
             Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
         )
         .effects_dirty;
+    for viewport in expanded_step_projection.viewports_for_track(track) {
+        if let Some(slot) = visible_slot_for_step(viewport, step) {
+            dirty |= sync_expanded_step_slot(
+                rt,
+                state,
+                app,
+                &selected,
+                current_track_idx,
+                viewport,
+                slot,
+            );
+        }
+    }
     dirty
 }
 
 fn sync_step_selection_bindings(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
+    app: Option<&ui::App>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    current_track_idx: usize,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
 ) -> bool {
     let selected = selected_steps.lock().unwrap();
     let num_steps = state.pattern.track_params[track]
@@ -999,6 +1015,21 @@ fn sync_step_selection_bindings(
     dirty |= rt
         .set_reactive("SEQ", "selected-steps", selection_value)
         .effects_dirty;
+    if let Some(app) = app {
+        for viewport in expanded_step_projection.viewports_for_track(track) {
+            for slot in 0..PAGE_SIZE {
+                dirty |= sync_expanded_step_slot(
+                    rt,
+                    state,
+                    app,
+                    &selected,
+                    current_track_idx,
+                    viewport,
+                    slot,
+                );
+            }
+        }
+    }
     dirty
 }
 
@@ -1016,6 +1047,7 @@ struct UiInvalidationApplyCtx<'a> {
     record_armed: &'a Arc<Mutex<Vec<bool>>>,
     active_delete_target: &'a Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: &'a Arc<AtomicUsize>,
+    expanded_step_projection: &'a Arc<ExpandedStepProjectionRegistry>,
     fx_visible: bool,
     sequencer_visible: bool,
     mixer_visible: bool,
@@ -1043,6 +1075,7 @@ fn apply_ui_invalidations(
         record_armed,
         active_delete_target,
         active_delete_target_version,
+        expanded_step_projection,
         fx_visible,
         sequencer_visible,
         mixer_visible,
@@ -1064,6 +1097,7 @@ fn apply_ui_invalidations(
             | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { track })
             | UiInvalidation::Step { track, .. }
             | UiInvalidation::StepSelection { track }
+            | UiInvalidation::ExpandedStepViewport { track, .. }
             | UiInvalidation::TrackMixer { track, .. }
             | UiInvalidation::TrackBusSend { track, .. }
             | UiInvalidation::TrackRoute { track }
@@ -1155,6 +1189,7 @@ fn apply_ui_invalidations(
                         step,
                         param.to_step_param(),
                         current_track_idx,
+                        expanded_step_projection,
                     );
                 }
                 StepInvalidation::DurationSpan => {
@@ -1178,16 +1213,37 @@ fn apply_ui_invalidations(
                         step,
                         current_track_idx,
                         selected_steps,
+                        expanded_step_projection,
                     );
                 }
             },
             UiInvalidation::StepSelection { track } => {
-                needs_reactive_cycle |=
-                    sync_step_selection_bindings(rt, state, track, selected_steps);
+                needs_reactive_cycle |= sync_step_selection_bindings(
+                    rt,
+                    state,
+                    Some(&*app),
+                    track,
+                    selected_steps,
+                    current_track_idx,
+                    expanded_step_projection,
+                );
                 if fx_visible && track == current_track_idx {
                     sync_track_params(rt, app, state, track, selected_steps);
                     sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
                     needs_reactive_cycle = true;
+                }
+            }
+            UiInvalidation::ExpandedStepViewport { track: _, track_id } => {
+                if let Some(viewport) = expanded_step_projection.viewport(track_id) {
+                    let selected = selected_steps.lock().unwrap();
+                    needs_reactive_cycle |= sync_expanded_step_viewport(
+                        rt,
+                        state,
+                        app,
+                        &selected,
+                        current_track_idx,
+                        viewport,
+                    );
                 }
             }
             UiInvalidation::TrackMixer { track, change } => match change {
@@ -2331,8 +2387,8 @@ mod tests {
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        ActiveDeleteTarget, FxDeleteChain, Runtime, Value, AGENT_INSTRUMENT_STUB_UI,
-        NEW_INSTRUMENT_STARTER_DSP,
+        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, Value,
+        AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -2384,7 +2440,16 @@ mod tests {
         ));
         let mut runtime = Runtime::new();
 
-        super::sync_step_selection_bindings(&mut runtime, &state, 0, &selected_steps);
+        let expanded_step_projection = std::sync::Arc::new(ExpandedStepProjectionRegistry::new());
+        super::sync_step_selection_bindings(
+            &mut runtime,
+            &state,
+            None,
+            0,
+            &selected_steps,
+            0,
+            &expanded_step_projection,
+        );
 
         assert_eq!(
             runtime
@@ -2792,6 +2857,7 @@ mod tests {
         let ui_epoch = Arc::new(AtomicUsize::new(0));
         let fx_epoch = Arc::new(AtomicUsize::new(0));
         let ui_invalidations = Arc::new(UiInvalidationQueue::new());
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
         let recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
         let active_delete_target = Arc::new(Mutex::new(None));
@@ -2819,6 +2885,7 @@ mod tests {
             ui_epoch.clone(),
             fx_epoch.clone(),
             ui_invalidations.clone(),
+            expanded_step_projection.clone(),
             active_delete_target.clone(),
             active_delete_target_version.clone(),
             auto_follow_override_until.clone(),
@@ -3184,6 +3251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // should not force *fx* to rerun on unrelated step-grid edits.
     let fx_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
+    let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
     let active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>> = Arc::new(Mutex::new(None));
     let active_delete_target_version = Arc::new(AtomicUsize::new(0));
     // When set, pagination stays on the user-selected page until the cooldown expires.
@@ -3220,6 +3288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_epoch.clone(),
         fx_epoch.clone(),
         ui_invalidations.clone(),
+        expanded_step_projection.clone(),
         active_delete_target.clone(),
         active_delete_target_version.clone(),
         auto_follow_override_until.clone(),
@@ -4393,6 +4462,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         eprintln!("metal_seq: host load-project name={project_name}");
                         ui_invalidations.clear();
+                        expanded_step_projection.clear();
                         match app.queue_project_load_named(&project_name) {
                             Ok(()) => {
                                 eprintln!("metal_seq: queued project load name={project_name}");
@@ -10290,6 +10360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
                         ui_invalidations.clear();
+                        expanded_step_projection.clear();
 
                         prev_current_track = ct;
                         prev_playhead = playhead;
@@ -11107,6 +11178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_bus_playheads = bus_playheads;
             }
             if sequencer_visible {
+                let previous_track_playheads = prev_track_playheads.clone();
                 if sync_track_playhead_field_delta(
                     editor.runtime_mut(),
                     &state,
@@ -11114,6 +11186,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut prev_track_playheads,
                 ) {
                     needs_reactive_cycle = true;
+                }
+                if previous_track_playheads != prev_track_playheads {
+                    let auto_follow_now = auto_follow_enabled(&auto_follow_override_until);
+                    let selection_empty = selected_steps.lock().unwrap().is_empty();
+                    let selected = selected_steps.lock().unwrap();
+                    let rt = editor.runtime_mut();
+                    for mut viewport in expanded_step_projection.all_viewports() {
+                        if viewport.track >= app.tracks.len() {
+                            continue;
+                        }
+                        let active_step = track_active_playhead_step(&state, viewport.track);
+                        let active_page = active_step / PAGE_SIZE;
+                        if playing && auto_follow_now && selection_empty {
+                            if viewport.page != active_page {
+                                viewport.page = active_page;
+                                viewport.cursor_step = active_step;
+                                expanded_step_projection.set_viewport(viewport);
+                                needs_reactive_cycle |= sync_expanded_step_viewport(
+                                    rt, &state, &app, &selected, ct, viewport,
+                                );
+                                continue;
+                            }
+                        }
+                        needs_reactive_cycle |=
+                            sync_expanded_step_viewport_playhead(rt, &state, viewport);
+                    }
                 }
             } else {
                 prev_track_playheads = track_playheads_snapshot(&state, &app);
@@ -11168,6 +11266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     record_armed: &record_armed,
                     active_delete_target: &active_delete_target,
                     active_delete_target_version: &active_delete_target_version,
+                    expanded_step_projection: &expanded_step_projection,
                     fx_visible,
                     sequencer_visible,
                     mixer_visible,
