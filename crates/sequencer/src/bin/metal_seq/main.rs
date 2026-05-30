@@ -988,6 +988,28 @@ fn sync_single_step_structural_bindings(
     dirty
 }
 
+fn sync_track_duration_span_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    start_step: usize,
+) -> bool {
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let mut dirty = false;
+    for step in start_step.min(MAX_STEPS)..MAX_STEPS {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_duration_field(track, step),
+                Value::Bool(step < num_steps && track_step_duration_covered(state, track, step)),
+            )
+            .effects_dirty;
+    }
+    dirty
+}
+
 fn sync_step_selection_bindings(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1029,6 +1051,39 @@ fn sync_step_selection_bindings(
                 );
             }
         }
+    }
+    dirty
+}
+
+fn sync_expanded_step_viewports_for_track(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    current_track_idx: usize,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    track: usize,
+) -> bool {
+    let selected = selected_steps.lock().unwrap();
+    let mut dirty = false;
+    for viewport in expanded_step_projection.viewports_for_track(track) {
+        dirty |= sync_expanded_step_viewport(rt, state, app, &selected, current_track_idx, viewport);
+    }
+    dirty
+}
+
+fn sync_all_expanded_step_viewports(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    current_track_idx: usize,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+) -> bool {
+    let selected = selected_steps.lock().unwrap();
+    let mut dirty = false;
+    for viewport in expanded_step_projection.all_viewports() {
+        dirty |= sync_expanded_step_viewport(rt, state, app, &selected, current_track_idx, viewport);
     }
     dirty
 }
@@ -1149,6 +1204,15 @@ fn apply_ui_invalidations(
                         current_track_idx,
                         selected_steps,
                     );
+                    let _ = sync_expanded_step_viewports_for_track(
+                        rt,
+                        state,
+                        app,
+                        selected_steps,
+                        current_track_idx,
+                        expanded_step_projection,
+                        track,
+                    );
                     needs_reactive_cycle = true;
                 }
             }
@@ -1170,10 +1234,31 @@ fn apply_ui_invalidations(
                         Value::Number(state.pattern.track_params[track].get_num_steps() as f64),
                     )
                     .effects_dirty;
+                if sequencer_visible {
+                    needs_reactive_cycle |= sync_expanded_step_viewports_for_track(
+                        rt,
+                        state,
+                        app,
+                        selected_steps,
+                        current_track_idx,
+                        expanded_step_projection,
+                        track,
+                    );
+                }
             }
             UiInvalidation::Pattern(PatternInvalidation::AllTracks)
             | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { .. }) => {
                 sync_pattern_state(rt, state);
+                if sequencer_visible {
+                    let _ = sync_all_expanded_step_viewports(
+                        rt,
+                        state,
+                        app,
+                        selected_steps,
+                        current_track_idx,
+                        expanded_step_projection,
+                    );
+                }
                 needs_reactive_cycle = true;
             }
             UiInvalidation::Step {
@@ -1193,13 +1278,8 @@ fn apply_ui_invalidations(
                     );
                 }
                 StepInvalidation::DurationSpan => {
-                    needs_reactive_cycle |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_step_duration_field(track, step),
-                            Value::Bool(track_step_duration_covered(state, track, step)),
-                        )
-                        .effects_dirty;
+                    needs_reactive_cycle |=
+                        sync_track_duration_span_binding_fields(rt, state, track, step);
                 }
                 StepInvalidation::Active
                 | StepInvalidation::Payload
@@ -2387,7 +2467,7 @@ mod tests {
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, Value,
+        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam, Value,
         AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -2462,6 +2542,32 @@ mod tests {
                 .eval_str("(nth SEQ.selected-steps 3)")
                 .expect("read selected step"),
             Some(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn duration_span_sync_updates_covered_steps_after_source_duration_change() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
+        state.pattern.track_params[0].set_num_steps(8);
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(2, StepParam::Duration, 3.0);
+        let mut runtime = Runtime::new();
+
+        super::sync_track_duration_span_binding_fields(&mut runtime, &state, 0, 2);
+
+        assert_eq!(
+            runtime
+                .eval_str(r#"(reactive-get "SEQ" "seq-track-step-duration-0-4")"#)
+                .expect("read covered step"),
+            Some(Value::Bool(true)),
+            "duration source at step 2 with length 3 should mark step 4 covered"
+        );
+        assert_eq!(
+            runtime
+                .eval_str(r#"(reactive-get "SEQ" "seq-track-step-duration-0-5")"#)
+                .expect("read uncovered step"),
+            Some(Value::Bool(false)),
+            "duration source at step 2 with length 3 should not cover step 5"
         );
     }
 
@@ -11407,6 +11513,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sync_step_param_lists(rt, &state, ct);
                     if metal_visible || sequencer_visible {
                         sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
+                    }
+                    if sequencer_visible {
+                        let _ = sync_all_expanded_step_viewports(
+                            rt,
+                            &state,
+                            &app,
+                            &selected_steps,
+                            ct,
+                            &expanded_step_projection,
+                        );
                     }
                     sync_track_mixer_state(rt, &app, &state);
                     sync_bus_mixer_state(rt, &app);
