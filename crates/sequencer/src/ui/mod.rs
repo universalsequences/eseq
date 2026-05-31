@@ -21,8 +21,8 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScali
 use crate::lisp_effect::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
-    BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, StepSnapshot,
-    SwingResolution, Timebase, MAX_STEPS, STEPS_PER_PAGE,
+    BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState, StepParam,
+    StepSnapshot, SwingResolution, Timebase, MAX_STEPS, STEPS_PER_PAGE,
 };
 use crate::track_color::TrackColor;
 
@@ -240,11 +240,13 @@ struct PendingProjectLoad {
     phase: PendingProjectLoadPhase,
 }
 
+#[derive(Clone)]
 pub struct EngineDescriptor {
     pub name: String,
     pub source: String,
     pub manifest: DGenManifest,
     pub lib_index: usize,
+    pub shared_runtime: bool,
 }
 
 #[derive(Default)]
@@ -256,7 +258,7 @@ impl EngineRegistry {
     pub fn find_by_name_and_source(&self, name: &str, source: &str) -> Option<usize> {
         self.engines
             .iter()
-            .position(|entry| entry.name == name && entry.source == source)
+            .position(|entry| entry.shared_runtime && entry.name == name && entry.source == source)
     }
 
     pub fn get(&self, engine_id: usize) -> Option<&EngineDescriptor> {
@@ -270,6 +272,10 @@ impl EngineRegistry {
     }
 
     pub fn upsert(&mut self, entry: EngineDescriptor) -> usize {
+        if !entry.shared_runtime {
+            self.engines.push(entry);
+            return self.engines.len() - 1;
+        }
         if let Some(existing_idx) = self.find_by_name_and_source(&entry.name, &entry.source) {
             self.engines[existing_idx] = entry;
             existing_idx
@@ -312,17 +318,45 @@ mod engine_registry_tests {
             source: "(out 0 1 @name audio)".to_string(),
             manifest: manifest(),
             lib_index: 0,
+            shared_runtime: true,
         });
         let second = registry.upsert(EngineDescriptor {
             name: "bass/".to_string(),
             source: "(out 0 1 @name audio)".to_string(),
             manifest: manifest(),
             lib_index: 1,
+            shared_runtime: true,
         });
 
         assert_eq!(first, second);
         assert_eq!(registry.engines.len(), 1);
         assert_eq!(registry.engines[first].lib_index, 1);
+    }
+
+    #[test]
+    fn dedicated_instrument_runtime_does_not_shadow_shared_cache() {
+        let mut registry = EngineRegistry::default();
+        let shared = registry.upsert(EngineDescriptor {
+            name: "free/".to_string(),
+            source: "(out 0 1 @name audio)".to_string(),
+            manifest: manifest(),
+            lib_index: 0,
+            shared_runtime: true,
+        });
+        let dedicated = registry.upsert(EngineDescriptor {
+            name: "free/".to_string(),
+            source: "(out 0 1 @name audio)".to_string(),
+            manifest: manifest(),
+            lib_index: 0,
+            shared_runtime: false,
+        });
+
+        assert_ne!(shared, dedicated);
+        assert_eq!(
+            registry.find_by_name_and_source("free/", "(out 0 1 @name audio)"),
+            Some(shared)
+        );
+        assert!(!registry.engines[dedicated].shared_runtime);
     }
 }
 
@@ -330,6 +364,8 @@ pub struct EngineNodeIds {
     pub synth_ids: Vec<i32>,
     pub synth_inputs: usize,
     pub synth_outputs: usize,
+    pub audio_output_channels: Vec<usize>,
+    pub mod_output_channels: Vec<usize>,
     pub gatepitch_ids: Vec<i32>,
     pub modulator_ids: Vec<i32>,
     pub route_gain_ids: Vec<Vec<[i32; 2]>>,
@@ -427,6 +463,7 @@ pub struct GraphState {
     pub track_sample_rates: Vec<u32>,
     pub track_voice_lids: Vec<Vec<u64>>,
     pub track_instrument_types: Vec<InstrumentType>,
+    pub track_instrument_run_modes: Vec<CustomInstrumentRunMode>,
     pub track_engine_ids: Vec<Option<usize>>,
     pub track_synth_node_ids: Vec<Vec<i32>>,
     pub track_gatepitch_node_ids: Vec<Vec<i32>>,
@@ -435,6 +472,23 @@ pub struct GraphState {
     pub instrument_descriptors: Vec<EffectDescriptor>,
     pub record_armed: Vec<bool>,
     pub keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+}
+
+impl GraphState {
+    pub fn track_exposes_mod_output(&self, track: usize) -> bool {
+        match self.track_instrument_types.get(track).copied() {
+            Some(InstrumentType::Modulator) => true,
+            Some(InstrumentType::Custom) => self
+                .track_engine_ids
+                .get(track)
+                .and_then(|engine_id| *engine_id)
+                .and_then(|engine_id| self.engine_node_ids.get(engine_id))
+                .and_then(|engine| engine.as_ref())
+                .map(|engine| !engine.mod_output_channels.is_empty())
+                .unwrap_or(false),
+            Some(InstrumentType::Sampler) | None => false,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -1165,6 +1219,7 @@ impl App {
                 track_sample_rates: Vec::new(),
                 track_voice_lids: Vec::new(),
                 track_instrument_types: Vec::new(),
+                track_instrument_run_modes: Vec::new(),
                 track_engine_ids: Vec::new(),
                 track_synth_node_ids: Vec::new(),
                 track_gatepitch_node_ids: Vec::new(),

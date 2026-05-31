@@ -14,7 +14,7 @@ use super::model::{
 use super::project::dgenlisp_operator_names;
 use super::render::*;
 use super::state::*;
-use super::writeback::{WriteBackError, emit_patch_writeback};
+use super::writeback::{WriteBackError, emit_patch_writeback, emit_patch_writeback_result};
 use super::*;
 use crate::editor::{Editor, EditorConfig};
 use crate::layout::{LayoutNode, MeasureCtx, Rect, TextMeasurer};
@@ -3982,6 +3982,33 @@ fn source_metadata_tracks_history_compound_ownership_and_connections() {
 }
 
 #[test]
+fn writeback_deletes_source_history_compound_owner_parts() {
+    let source = r#"
+        (make-history h)
+        (def sig (noise))
+        (def delta (- (read-history h) sig))
+        (write-history h sig)
+        (out delta 1)
+    "#;
+    let patch = parse(source);
+    let history = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::History)
+        .expect("history node");
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &history.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (noise))\n(def delta (- __patcher_missing_input__ sig))\n(out delta 1)"
+    );
+}
+
+#[test]
 fn unsupported_forms_become_code_islands() {
     let patch = parse("(if gate (out 1 1 @name audio) (out 0 1 @name audio))");
     assert!(
@@ -5061,6 +5088,81 @@ fn writeback_created_history_feedback_into_created_mix_emits_onepole() {
     compile_patch_source_with_dgenlisp(&emitted)
         .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
     assert!(!emitted.contains("created-"));
+}
+
+#[test]
+fn emitted_layout_maps_created_history_node_and_cables_to_saved_history_name() {
+    let source = r#"
+        (def sig (in 1))
+        (out sig 1)
+    "#;
+    let root_patch = parse(source);
+    let sig = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "sig")
+        .unwrap();
+    let out = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    let mix = allocate_created_text_node(&mut state, "root", "mix ? 0.99");
+    let history = allocate_created_text_node(&mut state, "root", "history");
+    let history_position = (101.25, 77.5);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &history))
+        .unwrap()
+        .position = history_position;
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+
+    connect_output_to_input(&mut state, "root", &sig.id, &mix, 0);
+    connect_output_to_input(&mut state, "root", &history, &mix, 1);
+    connect_output_to_input(&mut state, "root", &mix, &out.id, 0);
+    connect_output_to_input(&mut state, "root", &mix, &history, 0);
+
+    let result = emit_patch_writeback_result(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(result.source.contains("(make-history history1)"));
+    let mut emitted_patch = parse_patch_source(&result.source, PatcherIntent::Instrument).unwrap();
+    let layout_json: serde_json::Value = serde_json::from_str(
+        &sidecar::emitted_layout_json_with_node_map(
+            &mut emitted_patch,
+            &root_patch,
+            &state,
+            &result.generated_node_ids,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let history_layout = &layout_json["root"]["nodes"]["history1"];
+    assert!(
+        (history_layout["x"].as_f64().unwrap() - history_position.0 as f64).abs() < 0.0001
+            && (history_layout["y"].as_f64().unwrap() - history_position.1 as f64).abs() < 0.0001,
+        "emitted sidecar should preserve the created history node position under the emitted history name: layout={layout_json:#?}"
+    );
+    assert!(
+        layout_json["root"]["cables"]
+            .as_object()
+            .unwrap()
+            .is_empty(),
+        "visible unsegmented history cables should not be saved as auto-segmented emitted cables: layout={layout_json:#?}"
+    );
 }
 
 #[test]
@@ -8628,6 +8730,113 @@ fn display_labels_omit_def_names_and_show_in_out_channels() {
 }
 
 #[test]
+fn display_label_shows_out_modulator_metadata() {
+    let patch = parse(
+        r#"
+            (def signal (in 1 @name pitch))
+            (out signal 2 @name slow @modulator 1)
+            "#,
+    );
+    let output = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+
+    assert_eq!(node_display_label(output), "out 2 @modulator 1");
+}
+
+#[test]
+fn writeback_out_text_edit_preserves_and_updates_modulator_metadata() {
+    let source = r#"
+        (def signal (in 1 @name pitch))
+        (out signal 2 @name slow @modulator 1)
+    "#;
+    let patch = parse(source);
+    let output = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", output, node_display_label(output));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &output.id))
+        .unwrap()
+        .text = "out 3 @modulator 2".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(out signal 3 @modulator 2 @name slow)"),
+        "edited out node should preserve @name and keep the edited @modulator metadata:\n{emitted}"
+    );
+}
+
+#[test]
+fn writeback_out_text_edit_keeps_original_attributes_when_not_retyped() {
+    let source = r#"
+        (def signal (in 1 @name pitch))
+        (out signal 2 @name slow @modulator 1)
+    "#;
+    let patch = parse(source);
+    let output = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", output, node_display_label(output));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &output.id))
+        .unwrap()
+        .text = "out 3".to_string();
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(out signal 3 @name slow @modulator 1)"),
+        "channel-only edits should keep original out attributes:\n{emitted}"
+    );
+}
+
+#[test]
+fn writeback_created_modulator_out_can_consume_created_chain() {
+    let source = r#"
+        (def clock (in 5 @name clock))
+        (out 0 1 @name audio)
+    "#;
+    let mut state = PatcherInteractionState::default();
+    let multiply = allocate_created_text_node(&mut state, "root", "* 16");
+    let wrapped = allocate_created_text_node(&mut state, "root", "wrap 0 1");
+    let triangle = allocate_created_text_node(&mut state, "root", "triangle .0003");
+    let shaped = allocate_created_text_node(&mut state, "root", "pow 3");
+    let out = allocate_created_text_node(&mut state, "root", "out 2 @name m @modulator 1");
+
+    connect_output_to_input(&mut state, "root", "clock", &multiply, 0);
+    connect_output_to_input(&mut state, "root", &multiply, &wrapped, 0);
+    connect_output_to_input(&mut state, "root", &wrapped, &triangle, 0);
+    connect_output_to_input(&mut state, "root", &triangle, &shaped, 0);
+    connect_output_to_input(&mut state, "root", &shaped, &out, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("@modulator 1"),
+        "created modulation output should retain @modulator metadata:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(out "),
+        "created modulation output should be emitted:\n{emitted}"
+    );
+    assert!(
+        emitted.contains(" 2 "),
+        "created modulation output should keep channel 2:\n{emitted}"
+    );
+}
+
+#[test]
 fn macro_parameter_nodes_display_argument_names() {
     let patch = parse("(defmacro filter-bank (input cutoff gain) (* input gain))");
     let macro_patch = patch
@@ -8714,6 +8923,39 @@ fn instrument_signature_modulator_inputs_are_hidden_boilerplate() {
 }
 
 #[test]
+fn instrument_signature_modulator_inputs_after_clock_are_hidden_boilerplate() {
+    let patch = parse(
+        r#"
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (def clock (in 5 @name clock))
+            (def mod1 (in 6 @name mod1 @modulator 1))
+            (def mod2 (in 7 @name mod2 @modulator 2))
+            (def mod3 (in 8 @name mod3 @modulator 3))
+            (def mod4 (in 9 @name mod4 @modulator 4))
+            (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+            (out (* gate (mod gain)) 1 @name audio)
+            "#,
+    );
+
+    for name in ["gate", "pitch", "velocity", "trigger", "clock"] {
+        assert!(
+            patch.nodes.iter().any(|node| node.id == name),
+            "missing visible instrument input {name}"
+        );
+    }
+    for name in ["mod1", "mod2", "mod3", "mod4"] {
+        assert!(
+            !patch.nodes.iter().any(|node| node.id == name),
+            "boilerplate modulator input {name} should be hidden"
+        );
+    }
+    assert!(patch.nodes.iter().any(|node| node.op == "mod"));
+}
+
+#[test]
 fn writeback_preserves_integer_modulator_attribute_tokens() {
     let source = r#"
         (def gate (in 1 @name gate))
@@ -8741,6 +8983,45 @@ fn writeback_preserves_integer_modulator_attribute_tokens() {
     );
     assert!(!emitted.contains("(in 1.0"), "{emitted}");
     assert!(!emitted.contains(" 1.0 @name audio"), "{emitted}");
+}
+
+#[test]
+fn writeback_recognizes_clocked_host_modulator_inputs_before_created_mod_output() {
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (def pitch (in 2 @name pitch))
+        (def velocity (in 3 @name velocity))
+        (def trigger (in 4 @name trigger))
+        (def clock (in 5 @name clock))
+        (def mod1 (in 6 @name mod1 @modulator 1))
+        (def mod2 (in 7 @name mod2 @modulator 2))
+        (def mod3 (in 8 @name mod3 @modulator 3))
+        (def mod4 (in 9 @name mod4 @modulator 4))
+        (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+        (out (* gate (mod gain)) 1 @name audio)
+    "#;
+    let mut state = PatcherInteractionState::default();
+    let multiply = allocate_created_text_node(&mut state, "root", "* 16");
+    let wrapped = allocate_created_text_node(&mut state, "root", "wrap 0 1");
+    let triangle = allocate_created_text_node(&mut state, "root", "triangle .003");
+    let shaped = allocate_created_text_node(&mut state, "root", "pow 3");
+    let out = allocate_created_text_node(&mut state, "root", "out 2 @name mod1 @modulator 1");
+
+    connect_output_to_input(&mut state, "root", "clock", &multiply, 0);
+    connect_output_to_input(&mut state, "root", &multiply, &wrapped, 0);
+    connect_output_to_input(&mut state, "root", &wrapped, &triangle, 0);
+    connect_output_to_input(&mut state, "root", &triangle, &shaped, 0);
+    connect_output_to_input(&mut state, "root", &shaped, &out, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def mod1 (in 6 @name mod1 @modulator 1))"),
+        "existing clocked host modulator inputs should be recognized, not reinserted:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("@name mod1 @modulator 1"),
+        "created modulation output should keep requested name and slot:\n{emitted}"
+    );
 }
 
 #[test]

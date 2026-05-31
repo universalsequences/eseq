@@ -820,6 +820,15 @@ impl App {
                                 &self.graph.track_instrument_types,
                             ) {
                                 self.graph_controller().apply_sample_ids(&sample_ids);
+                                if let Err(error) = self
+                                    .graph_controller()
+                                    .sync_track_instrument_run_modes_from_live_state()
+                                {
+                                    self.editor.status_message = Some((
+                                        format!("Pattern switch failed: {error}"),
+                                        Instant::now(),
+                                    ));
+                                }
                                 self.graph_controller().sync_current_pattern_mod_routes();
                                 self.push_all_restored_defaults();
                             }
@@ -848,6 +857,15 @@ impl App {
                                 &self.graph.track_instrument_types,
                             ) {
                                 self.graph_controller().apply_sample_ids(&sample_ids);
+                                if let Err(error) = self
+                                    .graph_controller()
+                                    .sync_track_instrument_run_modes_from_live_state()
+                                {
+                                    self.editor.status_message = Some((
+                                        format!("Pattern delete failed: {error}"),
+                                        Instant::now(),
+                                    ));
+                                }
                                 self.graph_controller().sync_current_pattern_mod_routes();
                                 self.push_all_restored_defaults();
                             }

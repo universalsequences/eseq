@@ -156,7 +156,7 @@ pub(super) fn connection_kind_for_op(op: &str) -> ConnectionKind {
 pub(super) fn node_label(op: &str, items: &[Expression], def_name: Option<&str>) -> String {
     match op {
         "in" => in_label(items),
-        "out" => attribute_value(items, "@name").unwrap_or_else(|| "out".to_string()),
+        "out" => out_label(items),
         "param" => param_label(items),
         "history" | "make-history" => "history".to_string(),
         _ => def_name
@@ -176,6 +176,29 @@ fn in_label(items: &[Expression]) -> String {
         label.push_str(name);
     }
     label
+}
+
+fn out_label(items: &[Expression]) -> String {
+    let Some(modulator) = attribute_patch_literal_value(items, "@modulator") else {
+        return attribute_value(items, "@name").unwrap_or_else(|| "out".to_string());
+    };
+    let mut label = String::from("out");
+    if let Some(channel) = positional_args(items, 1).get(1) {
+        label.push(' ');
+        label.push_str(&format_patch_literal(channel));
+    }
+    label.push_str(" @modulator ");
+    label.push_str(&modulator);
+    label
+}
+
+fn attribute_patch_literal_value(items: &[Expression], attr: &str) -> Option<String> {
+    items
+        .windows(2)
+        .find_map(|pair| match (&pair[0], &pair[1]) {
+            (Expression::Symbol(key), value) if key == attr => Some(format_patch_literal(value)),
+            _ => None,
+        })
 }
 
 fn param_label(items: &[Expression]) -> String {

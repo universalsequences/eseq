@@ -1540,6 +1540,10 @@ impl App {
             bank[current_pattern].restore(&self.state);
             bank[current_pattern].sample_ids.clone()
         };
+        {
+            let mut graph = self.graph_controller();
+            graph.sync_track_instrument_run_modes_from_live_state()?;
+        }
         eprintln!(
             "project-load: restored current_pattern={} sample_ids={} graph_tracks={}",
             current_pattern,
@@ -1586,6 +1590,7 @@ impl App {
             self.editor.status_message =
                 Some((format!("Scratch eval error: {error}"), Instant::now()));
         }
+        let repaired_sidechains = self.repair_stale_sidechain_effect_slots()?;
         let status = if pending.fallback_samples > 0 {
             format!(
                 "Opened project '{}' with {} fallback sample{}",
@@ -1599,6 +1604,11 @@ impl App {
             )
         } else {
             format!("Opened project '{}'", pending.name)
+        };
+        let status = if repaired_sidechains > 0 {
+            format!("{status}; repaired {repaired_sidechains} sidechain effect route")
+        } else {
+            status
         };
         eprintln!("project-load: finish complete status={status}");
         self.editor.status_message = Some((status, Instant::now()));

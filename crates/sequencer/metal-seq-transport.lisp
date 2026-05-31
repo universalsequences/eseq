@@ -303,29 +303,10 @@
 (effect-buffer "*transport*"
   (h-stack :gap 0.5 :padding 0.5 :align :center
     
-    (box :background "transport-btn-bg" 
-      :active (if (sbrowser-create-mode?) 1 0)
-      :padding 0.015 :height 1.4 :width 2.9
-      (add-track-icon
-        :on-click |x y r| (sbrowser-toggle-create-track-mode)
-        :active (if (sbrowser-create-mode?) 1 0)))
-    
-    
     (save-icon 
       :on-click |x y r| (sbrowser-open-project-save)
       :style transport-icon-style
       :active (if (sbrowser-project-save-mode?) 1 0))
-    
-    (box :width 5.0 :height 1.40 :padding 0.255
-      :background "transport-tool-chip-bg"
-      :active (if (sbrowser-project-browser-mode?) 1 0)
-      :on-click |x y r| (sbrowser-open-project-browser)
-      (box :width 5.0 
-        (v-stack :align :center
-          (label " files "
-            :font-size 12
-            :color (if (sbrowser-project-browser-mode?) :white :white)
-            :bg :transparent))))
     
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4

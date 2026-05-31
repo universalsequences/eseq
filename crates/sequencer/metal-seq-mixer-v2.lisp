@@ -135,6 +135,11 @@
   (and (< i (len SEQ.track-instrument-types))
     (= (nth SEQ.track-instrument-types i) "modulator")))
 
+(def mixer-v2-track-mod-output? (i)
+  (or (mixer-v2-track-modulator? i)
+    (and (< i (len SEQ.track-mod-output-available))
+      (nth SEQ.track-mod-output-available i))))
+
 (def mixer-v2-clear-delete-target ()
   (seq-clear-delete-target))
 
@@ -192,14 +197,14 @@
   (mixer-v2-selected-mod-sources-at dest input 0 (list)))
 
 (def mixer-v2-mod-out-click (track)
-  (if (mixer-v2-track-modulator? track)
+  (if (mixer-v2-track-mod-output? track)
     (do
       (set! mixer-v2-pending-mod-source track)
       (mixer-v2-clear-delete-target)
       (status (str "Mod out: track " (+ track 1))))
     (do
       (mixer-v2-clear-delete-target)
-      (status "Only modulator tracks expose mod out in v1"))))
+      (status "This track has no mod output"))))
 
 (def mixer-v2-cancel-mod-draw ()
   (do
@@ -259,11 +264,11 @@
       :patch-port true
       :direction :out
       :track track
-      :active (mixer-v2-track-modulator? track)
+      :active (mixer-v2-track-mod-output? track)
       :pending (= mixer-v2-pending-mod-source track)
       :output true
       :selected false
-      :style (if (mixer-v2-track-modulator? track) mixer-v2-mod-output-style nil)
+      :style (if (mixer-v2-track-mod-output? track) mixer-v2-mod-output-style nil)
       :on-click |x y r| (mixer-v2-mod-out-click track)
       :on-mouse-down |x y r| (mixer-v2-mod-out-click track)
       :on-patch-cancel (lambda (source)

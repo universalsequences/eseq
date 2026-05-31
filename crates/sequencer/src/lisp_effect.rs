@@ -339,6 +339,12 @@ pub struct DGenModulator {
     pub name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DGenSidechainInput {
+    pub input_channel: usize,
+    pub name: String,
+}
+
 #[derive(Clone)]
 pub struct DGenModOutput {
     pub slot: usize,
@@ -434,6 +440,8 @@ pub struct EffectRenderReport {
     pub frames: usize,
     pub peak: f32,
     pub rms: f32,
+    pub left_rms: f32,
+    pub right_rms: f32,
     pub mean_abs: f32,
     pub diff_rms: f32,
     pub nonzero_frames: usize,
@@ -870,6 +878,60 @@ pub fn instrument_descriptor_from_manifest(
 
 pub fn effect_has_host_modulation(manifest: &DGenManifest) -> bool {
     !manifest.mod_destinations.is_empty()
+}
+
+fn normalized_dgen_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn is_named_sidechain_input(name: &str) -> bool {
+    normalized_dgen_name(name).starts_with("sidechain")
+}
+
+fn sidechain_control_name(name: &str) -> String {
+    if is_named_sidechain_input(name) || name.trim().is_empty() {
+        "sidechain".to_string()
+    } else {
+        format!("sidechain {name}")
+    }
+}
+
+pub fn effect_sidechain_inputs(manifest: &DGenManifest) -> Vec<DGenSidechainInput> {
+    let has_host_modulation = effect_has_host_modulation(manifest);
+    let mut inputs = Vec::new();
+
+    for input in &manifest.inputs {
+        if input.channel < 2 {
+            continue;
+        }
+
+        let modulator = manifest
+            .modulators
+            .iter()
+            .find(|modulator| modulator.input_channel == input.channel);
+        if let Some(modulator) = modulator {
+            if !has_host_modulation {
+                inputs.push(DGenSidechainInput {
+                    input_channel: modulator.input_channel,
+                    name: sidechain_control_name(&modulator.name),
+                });
+            }
+            continue;
+        }
+
+        if is_named_sidechain_input(&input.name) {
+            inputs.push(DGenSidechainInput {
+                input_channel: input.channel,
+                name: sidechain_control_name(&input.name),
+            });
+        }
+    }
+
+    inputs.sort_by_key(|input| input.input_channel);
+    inputs
 }
 
 pub fn append_effect_host_modulation_controls(
@@ -2814,11 +2876,24 @@ pub fn render_loaded_effect_for_test(
     let rms = (sum_sq / samples as f64).sqrt() as f32;
     let mean_abs = (sum_abs / samples as f64) as f32;
     let diff_rms = (diff_sq / samples as f64).sqrt() as f32;
+    let mut left_sq = 0.0f64;
+    let mut right_sq = 0.0f64;
+    let mut stereo_frames = 0usize;
+    for frame in rendered.chunks_exact(2) {
+        left_sq += (frame[0] as f64) * (frame[0] as f64);
+        right_sq += (frame[1] as f64) * (frame[1] as f64);
+        stereo_frames += 1;
+    }
+    let stereo_frames = stereo_frames.max(1) as f64;
+    let left_rms = (left_sq / stereo_frames).sqrt() as f32;
+    let right_rms = (right_sq / stereo_frames).sqrt() as f32;
 
     Ok(EffectRenderReport {
         frames: options.frames,
         peak,
         rms,
+        left_rms,
+        right_rms,
         mean_abs,
         diff_rms,
         nonzero_frames,
@@ -2857,10 +2932,11 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 (def pitch (in 2 @name pitch))
 (def velocity (in 3 @name velocity))
 (def trigger (in 4 @name trigger))
-(def mod1 (in 5 @name mod1 @modulator 1))
-(def mod2 (in 6 @name mod2 @modulator 2))
-(def mod3 (in 7 @name mod3 @modulator 3))
-(def mod4 (in 8 @name mod4 @modulator 4))
+(def clock (in 5 @name clock))
+(def mod1 (in 6 @name mod1 @modulator 1))
+(def mod2 (in 7 @name mod2 @modulator 2))
+(def mod3 (in 8 @name mod3 @modulator 3))
+(def mod4 (in 9 @name mod4 @modulator 4))
 
 ; -- Parameters --
 (param attack  @default 5    @min 0   @max 1000 @unit ms)
@@ -7690,10 +7766,11 @@ pub fn run_instrument_editor_flow(
 #[cfg(test)]
 mod tests {
     use super::{
-        compile_instrument, compile_instrument_with_asset_base, fallback_effect_descriptors,
-        fallback_instrument_descriptors, new_eval_context, parse_manifest,
-        read_eseqlisp_init_source, register_sequencer_natives, scratch_runtime_with_fallbacks,
-        shared_native_metadata, AccumulatorNoteSpan, DGenParam, ScratchControlRuntime,
+        compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
+        effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
+        new_eval_context, parse_manifest, read_eseqlisp_init_source, register_sequencer_natives,
+        scratch_runtime_with_fallbacks, shared_native_metadata, AccumulatorNoteSpan, DGenParam,
+        DGenSidechainInput, ScratchControlRuntime,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
@@ -8062,6 +8139,100 @@ mod tests {
                 ("gain", 1, "mod gain slot 1 amt"),
                 ("gain", 2, "mod gain slot 2 amt"),
             ]
+        );
+    }
+
+    #[test]
+    fn legacy_effect_modulator_inputs_are_sidechain_controls_without_host_modulation() {
+        let manifest = parse_manifest(
+            r#"
+            {
+              "totalMemorySlots": 128,
+              "params": [],
+              "inputs": [
+                { "channel": 0, "name": "left" },
+                { "channel": 1, "name": "right" },
+                { "channel": 2, "name": "signal" }
+              ],
+              "outputs": [
+                { "channel": 0, "name": "left" },
+                { "channel": 1, "name": "right" }
+              ],
+              "modulators": [
+                { "slot": 1, "inputChannel": 2, "name": "signal" }
+              ],
+              "modDestinations": [],
+              "tensors": [],
+              "tensorInitData": []
+            }
+            "#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(
+            effect_sidechain_inputs(&manifest),
+            vec![DGenSidechainInput {
+                input_channel: 2,
+                name: "sidechain signal".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn effect_host_modulation_can_coexist_with_named_sidechain_input() {
+        let manifest = parse_manifest(
+            r#"
+            {
+              "totalMemorySlots": 128,
+              "params": [
+                { "name": "threshold", "cellId": 10, "default": -20, "min": -80, "max": -2 }
+              ],
+              "inputs": [
+                { "channel": 0, "name": "left" },
+                { "channel": 1, "name": "right" },
+                { "channel": 2, "name": "mod1" },
+                { "channel": 3, "name": "mod2" },
+                { "channel": 4, "name": "mod3" },
+                { "channel": 5, "name": "mod4" },
+                { "channel": 6, "name": "sidechain" }
+              ],
+              "outputs": [
+                { "channel": 0, "name": "left" },
+                { "channel": 1, "name": "right" }
+              ],
+              "modulators": [
+                { "slot": 1, "inputChannel": 2, "name": "mod1" },
+                { "slot": 2, "inputChannel": 3, "name": "mod2" },
+                { "slot": 3, "inputChannel": 4, "name": "mod3" },
+                { "slot": 4, "inputChannel": 5, "name": "mod4" }
+              ],
+              "modDestinations": [
+                {
+                  "name": "threshold",
+                  "paramCellId": 10,
+                  "activeCellId": 20,
+                  "depthLanes": [
+                    { "slot": 1, "depthCellId": 21 }
+                  ],
+                  "mode": "additive",
+                  "min": -80,
+                  "max": -2
+                }
+              ],
+              "tensors": [],
+              "tensorInitData": []
+            }
+            "#,
+        )
+        .expect("manifest parses");
+
+        assert!(effect_has_host_modulation(&manifest));
+        assert_eq!(
+            effect_sidechain_inputs(&manifest),
+            vec![DGenSidechainInput {
+                input_channel: 6,
+                name: "sidechain".to_string(),
+            }]
         );
     }
 
@@ -10086,6 +10257,233 @@ mod tests {
         assert!(
             diff > 0.01,
             "expected mod1 input to affect (mod xyz), diff={diff}"
+        );
+    }
+
+    #[test]
+    fn spectral_cumsum_soothe_amount_zero_full_wet_preserves_stereo_energy() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        for block_size in [256, 512] {
+            let report = super::render_loaded_effect_for_test(
+                &compiled.manifest,
+                &compiled.lib,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size,
+                    frames: 8192,
+                    param_overrides: vec![
+                        ("amount".to_string(), 0.0),
+                        ("mix".to_string(), 1.0),
+                        ("output".to_string(), 1.0),
+                    ],
+                    input_overrides: vec![],
+                },
+            )
+            .expect("effect should compile and render");
+            println!("spectral-cumsum-soothe amount=0 mix=1 block={block_size} report: {report:?}");
+
+            assert!(
+                report.left_rms > 0.01,
+                "left channel should not collapse at amount=0/mix=1 block={block_size}, report={report:?}"
+            );
+            assert!(
+                report.right_rms > 0.01,
+                "right channel should not collapse at amount=0/mix=1 block={block_size}, report={report:?}"
+            );
+            let ratio = report.left_rms / report.right_rms.max(1.0e-9);
+            assert!(
+                (0.25..4.0).contains(&ratio),
+                "stereo energy should stay within a plausible range at block={block_size}, ratio={ratio}, report={report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spectral_cumsum_soothe_is_listed_and_ui_validates() {
+        let effect_name = "spectral-cumsum-soothe";
+        let listed = super::list_saved_effects();
+        assert!(
+            listed.iter().any(|name| name == effect_name),
+            "effect picker list should include {effect_name:?}; listed={listed:?}"
+        );
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let ui_source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("effects/spectral-cumsum-soothe/ui.lisp"),
+        )
+        .expect("read spectral cumsum soothe ui");
+        crate::agent::ui_validate::validate_effect_ui_source(&ui_source, &compiled.manifest)
+            .expect("effect ui should validate");
+    }
+
+    #[test]
+    fn spectral_cumsum_soothe_high_amount_reduces_resonant_energy() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let render = |amount: f32| {
+            super::render_loaded_effect_for_test(
+                &compiled.manifest,
+                &compiled.lib,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size: 512,
+                    frames: 8192,
+                    param_overrides: vec![
+                        ("amount".to_string(), amount),
+                        ("threshold".to_string(), 0.0),
+                        ("attack".to_string(), 0.0),
+                        ("release".to_string(), 0.8),
+                        ("mix".to_string(), 1.0),
+                        ("output".to_string(), 1.0),
+                    ],
+                    input_overrides: vec![],
+                },
+            )
+            .expect("effect should compile and render")
+        };
+
+        let bypass = render(0.0);
+        let active = render(8.0);
+        println!("spectral-cumsum-soothe high amount bypass={bypass:?} active={active:?}");
+
+        assert!(
+            active.rms < bypass.rms * 0.85,
+            "high amount should produce audible attenuation, bypass={bypass:?}, active={active:?}"
+        );
+        assert!(
+            active.left_rms > 0.001 && active.right_rms > 0.001,
+            "active processing should not collapse either channel, active={active:?}"
+        );
+    }
+
+    #[test]
+    fn spectral_cumsum_soothe_delta_is_removed_signal() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let render = |amount: f32| {
+            super::render_loaded_effect_for_test(
+                &compiled.manifest,
+                &compiled.lib,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size: 512,
+                    frames: 8192,
+                    param_overrides: vec![
+                        ("amount".to_string(), amount),
+                        ("threshold".to_string(), 0.0),
+                        ("gate".to_string(), -2.0),
+                        ("low".to_string(), 0.0),
+                        ("high".to_string(), 1.0),
+                        ("attack".to_string(), 0.0),
+                        ("release".to_string(), 0.8),
+                        ("mix".to_string(), 1.0),
+                        ("delta".to_string(), 1.0),
+                        ("output".to_string(), 1.0),
+                    ],
+                    input_overrides: vec![],
+                },
+            )
+            .expect("effect should compile and render")
+        };
+
+        let inactive = render(0.0);
+        let active = render(8.0);
+        println!("spectral-cumsum-soothe delta inactive={inactive:?} active={active:?}");
+
+        assert!(
+            inactive.rms < 0.001,
+            "delta should be nearly silent when amount=0, inactive={inactive:?}"
+        );
+        assert!(
+            active.rms > inactive.rms + 0.005,
+            "delta should expose removed spectral energy under heavy reduction, inactive={inactive:?}, active={active:?}"
+        );
+    }
+
+    #[test]
+    fn spectral_notch_phaser_is_listed_and_ui_validates() {
+        let effect_name = "spectral-notch-phaser";
+        let listed = super::list_saved_effects();
+        assert!(
+            listed.iter().any(|name| name == effect_name),
+            "effect picker list should include {effect_name:?}; listed={listed:?}"
+        );
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-notch-phaser/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral notch phaser effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let ui_source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("effects/spectral-notch-phaser/ui.lisp"),
+        )
+        .expect("read spectral notch phaser ui");
+        crate::agent::ui_validate::validate_effect_ui_source(&ui_source, &compiled.manifest)
+            .expect("effect ui should validate");
+    }
+
+    #[test]
+    fn spectral_notch_phaser_depth_changes_signal() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-notch-phaser/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral notch phaser effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let render = |depth: f32| {
+            super::render_loaded_effect_for_test(
+                &compiled.manifest,
+                &compiled.lib,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size: 512,
+                    frames: 8192,
+                    param_overrides: vec![
+                        ("depth".to_string(), depth),
+                        ("sharp".to_string(), 0.0),
+                        ("distance".to_string(), 16.0),
+                        ("lowkeep".to_string(), 0.0),
+                        ("mix".to_string(), 1.0),
+                        ("output".to_string(), 1.0),
+                    ],
+                    input_overrides: vec![],
+                },
+            )
+            .expect("effect should compile and render")
+        };
+
+        let bypass = render(0.0);
+        let active = render(1.0);
+        println!("spectral-notch-phaser bypass={bypass:?} active={active:?}");
+
+        assert!(
+            active.rms < bypass.rms * 0.9,
+            "deep notches should produce audible attenuation, bypass={bypass:?}, active={active:?}"
+        );
+        assert!(
+            active.left_rms > 0.001 && active.right_rms > 0.001,
+            "active processing should not collapse either channel, active={active:?}"
         );
     }
 

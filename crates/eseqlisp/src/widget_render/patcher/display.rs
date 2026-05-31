@@ -19,6 +19,7 @@ pub(super) fn preview(text: &str, max_chars: usize) -> String {
 
 pub(super) fn node_display_label(node: &PatchNode) -> String {
     let base = match node.kind {
+        NodeKind::Out if node.label.contains("@modulator") => return node.label.clone(),
         NodeKind::Builtin | NodeKind::MacroInstance | NodeKind::Out | NodeKind::Constant => {
             node.op.as_str()
         }

@@ -263,6 +263,14 @@ pub(crate) fn init_runtime(
                 ("sampler-playhead", Value::Number(0.0)),
                 ("track-ids", build_track_ids(&app)),
                 ("track-instrument-types", build_track_instrument_types(&app)),
+                (
+                    "track-mod-output-available",
+                    build_track_mod_output_available(&app),
+                ),
+                (
+                    "track-instrument-run-modes",
+                    build_track_instrument_run_modes(&app),
+                ),
                 ("track-names", build_track_names(&track_names)),
                 (
                     "track-num-steps",
@@ -628,6 +636,10 @@ pub(crate) fn init_runtime(
                 ("editor-error", Value::String(String::new())),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
+                (
+                    "editor-instrument-run-mode",
+                    Value::String("instrument".to_string()),
+                ),
             ];
             for idx in 0..track_count {
                 fields.push((
@@ -796,12 +808,7 @@ pub(crate) fn init_runtime(
                     .into(),
             );
         };
-        if *track < 0.0
-            || *track_id < 0.0
-            || *page < 0.0
-            || *mode < 0.0
-            || *cursor_step < 0.0
-        {
+        if *track < 0.0 || *track_id < 0.0 || *page < 0.0 || *mode < 0.0 || *cursor_step < 0.0 {
             return Err("seqv-sync-expanded-step-slots: numeric args must be non-negative".into());
         }
         let max_page = MAX_STEPS.saturating_sub(1) / PAGE_SIZE;

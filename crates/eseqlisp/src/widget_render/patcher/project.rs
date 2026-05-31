@@ -428,15 +428,8 @@ impl Projector {
             return false;
         }
         expected_host_modulator_slot(name).is_some_and(|slot| {
-            host_modulator_input_signature(expr).is_some_and(|(channel, input_name, modulator)| {
-                if input_name != name || modulator != slot {
-                    return false;
-                }
-                match self.intent {
-                    PatcherIntent::Instrument => channel == slot + 4,
-                    PatcherIntent::Effect => channel >= 3,
-                }
-            })
+            host_modulator_input_signature(expr)
+                .is_some_and(|(_, input_name, modulator)| input_name == name && modulator == slot)
         })
     }
 

@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "*#0": {
+        "x": 82.015,
+        "y": 26.982498
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 8.0
+      },
+      "audio": {
+        "x": 85.495,
+        "y": 33.664997
+      },
+      "clock": {
+        "x": 204.48,
+        "y": 8.0
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 10.68
+      },
+      "env": {
+        "x": 97.525,
+        "y": 20.3
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "gate": {
+        "x": 136.815,
+        "y": 8.0
+      },
+      "mod1": {
+        "x": 154.14876,
+        "y": 33.664997
+      },
+      "mul1": {
+        "x": 195.34962,
+        "y": 13.848533
+      },
+      "phase": {
+        "x": 84.915,
+        "y": 20.3
+      },
+      "pitch": {
+        "x": 84.915,
+        "y": 8.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 13.360001
+      },
+      "trigger": {
+        "x": 159.865,
+        "y": 8.0
+      },
+      "velocity": {
+        "x": 109.125,
+        "y": 8.0
+      },
+      "wrap#0": {
+        "x": 160.95253,
+        "y": 26.982498
+      }
+    },
+    "cables": {
+      "*#0:0->audio:0": {
+        "segmented": true,
+        "y": 31.113747
+      },
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->*#0:1": {
+        "segmented": true,
+        "y": 24.431248
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 14.150001
+      },
+      "mul1:0->wrap#0:0": {
+        "segmented": true,
+        "y": 24.431248
+      },
+      "phase:0->*#0:0": {
+        "segmented": true,
+        "y": 23.811247
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 15.490001
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 17.150002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.18
+      },
+      "velocity:0->*#0:2": {
+        "segmented": true,
+        "y": 18.96
+      },
+      "wrap#0:0->mod1:0": {
+        "segmented": true,
+        "y": 30.493746
+      }
+    },
+    "inputPresentation": {
+      "mul1:0": "cable"
+    }
+  },
+  "macros": {}
+}

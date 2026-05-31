@@ -38,10 +38,19 @@ Critical effect DSP rules:
   and output both channels:
   `(out left_signal 1 @name left)`
   `(out right_signal 2 @name right)`.
-- Effect parameters are not host-modulatable in this build. Never write
-  `@mod true`, `@mod-mode`, `@modulator`, `mod1`, `mod2`, `mod3`, `mod4`, or `(mod param)` in effect DSP.
-- Read every effect parameter directly by name. For example, use `depth`, not
-  `(mod depth)`.
+- Effect parameters may be host-modulatable. If any parameter uses
+  `@mod true`, declare all four effect modulation inputs immediately after the
+  stereo audio inputs:
+  `(def mod1 (in 3 @name mod1 @modulator 1))`
+  `(def mod2 (in 4 @name mod2 @modulator 2))`
+  `(def mod3 (in 5 @name mod3 @modulator 3))`
+  `(def mod4 (in 6 @name mod4 @modulator 4))`.
+- Read host-modulatable parameters with `(mod param_name)`. Read ordinary
+  parameters directly by name.
+- For track-selectable sidechain audio, declare a separate non-modulator input
+  named `sidechain` after the effect modulation inputs, for example
+  `(def sidechain (in 7 @name sidechain))`. Do not use `@modulator` for
+  sidechain audio in effects that also use host modulation.
 - `%` is the numeric remainder/modulo-style operator. Do not use `(mod x y)`.
   To wrap a phase or signal into a range, use `(wrap expr min max)`.
 - Use valid operators and preamble helpers from local examples such as `def`,
