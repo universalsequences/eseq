@@ -31,7 +31,7 @@ use crate::sequencer::{
 use crate::ui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
 
-pub const HOST_SAMPLE_RATE: u32 = 44_100;
+pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
 
 unsafe fn push_param_span(lg: *mut LiveGraph, logical_id: u64, idx: u64, span: u32, value: f32) {
@@ -110,17 +110,21 @@ fn select_output_config(
 ) -> Option<OutputDeviceConfig> {
     let ranges: Vec<OutputFormatRange> = ranges.into_iter().collect();
     if let Some(channels) =
-        select_output_channels(HOST_SAMPLE_RATE, default_channels, ranges.clone())
+        select_output_channels(default_sample_rate, default_channels, ranges.clone())
     {
         return Some(OutputDeviceConfig {
-            sample_rate: HOST_SAMPLE_RATE,
+            sample_rate: default_sample_rate,
             channels,
         });
     }
 
-    select_output_channels(default_sample_rate, default_channels, ranges).map(|channels| {
+    if default_sample_rate == FALLBACK_SAMPLE_RATE {
+        return None;
+    }
+
+    select_output_channels(FALLBACK_SAMPLE_RATE, default_channels, ranges).map(|channels| {
         OutputDeviceConfig {
-            sample_rate: default_sample_rate,
+            sample_rate: FALLBACK_SAMPLE_RATE,
             channels,
         }
     })
@@ -3741,7 +3745,7 @@ pub fn build_output_stream(
     Ok(stream)
 }
 
-/// Query the default output device, preferring 44.1 kHz when supported.
+/// Query the default output device, preserving the system sample rate when possible.
 pub fn query_device_config() -> Result<(u32, u16), String> {
     let host = cpal::default_host();
     let device = host
@@ -3771,7 +3775,7 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
             .unwrap_or_else(|_| "default output device".to_string());
         format!(
             "{device_name} does not support f32 output at either {} Hz or its default {} Hz rate",
-            HOST_SAMPLE_RATE,
+            FALLBACK_SAMPLE_RATE,
             default_config.sample_rate().0
         )
     })?;
@@ -3788,14 +3792,14 @@ mod tests {
         bus_gate_target_at, instrument_sound_fingerprint, resolve_live_keyboard_transpose,
         resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
         select_output_config, swing_delay_samples, CustomEnginePool, GateOffTracker,
-        OutputDeviceConfig, OutputFormatRange, HOST_SAMPLE_RATE,
+        OutputDeviceConfig, OutputFormatRange, FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::AccumulatorRuntimeState;
     use crate::analysis::{pack_ptr, OnsetTableShared};
     use crate::sequencer::{SequencerState, SwingResolution};
 
     #[test]
-    fn output_config_keeps_default_channels_at_44100() {
+    fn output_config_prefers_system_default_sample_rate_over_44100() {
         let ranges = [
             OutputFormatRange {
                 channels: 2,
@@ -3817,16 +3821,28 @@ mod tests {
             },
         ];
 
-        assert_eq!(select_output_channels(HOST_SAMPLE_RATE, 4, ranges), Some(4));
+        assert_eq!(
+            select_output_config(48_000, 2, ranges),
+            Some(OutputDeviceConfig {
+                sample_rate: 48_000,
+                channels: 2,
+            })
+        );
     }
 
     #[test]
-    fn output_config_prefers_stereo_when_default_channels_do_not_support_44100() {
+    fn output_config_keeps_default_channels_at_selected_rate() {
         let ranges = [
             OutputFormatRange {
                 channels: 6,
                 min_sample_rate: 48_000,
-                max_sample_rate: 48_000,
+                max_sample_rate: 96_000,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 48_000,
+                max_sample_rate: 96_000,
                 supports_f32: true,
             },
             OutputFormatRange {
@@ -3835,19 +3851,39 @@ mod tests {
                 max_sample_rate: 44_100,
                 supports_f32: true,
             },
+        ];
+
+        assert_eq!(select_output_channels(48_000, 6, ranges), Some(6));
+    }
+
+    #[test]
+    fn output_config_prefers_stereo_when_default_channels_do_not_support_selected_rate() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 6,
+                min_sample_rate: 44_100,
+                max_sample_rate: 44_100,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 1,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: true,
+            },
             OutputFormatRange {
                 channels: 2,
-                min_sample_rate: 44_100,
+                min_sample_rate: 48_000,
                 max_sample_rate: 96_000,
                 supports_f32: true,
             },
         ];
 
-        assert_eq!(select_output_channels(HOST_SAMPLE_RATE, 6, ranges), Some(2));
+        assert_eq!(select_output_channels(48_000, 6, ranges), Some(2));
     }
 
     #[test]
-    fn output_config_falls_back_to_default_sample_rate_without_44100() {
+    fn output_config_uses_default_sample_rate_without_44100() {
         let ranges = [
             OutputFormatRange {
                 channels: 2,
@@ -3873,7 +3909,7 @@ mod tests {
     }
 
     #[test]
-    fn output_config_falls_back_to_default_sample_rate_without_f32_at_44100() {
+    fn output_config_uses_default_sample_rate_when_44100_lacks_f32() {
         let ranges = [
             OutputFormatRange {
                 channels: 2,
@@ -3899,7 +3935,33 @@ mod tests {
     }
 
     #[test]
-    fn output_config_rejects_when_preferred_and_default_rates_lack_f32_support() {
+    fn output_config_falls_back_to_44100_when_default_rate_lacks_f32() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: false,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: FALLBACK_SAMPLE_RATE,
+                max_sample_rate: FALLBACK_SAMPLE_RATE,
+                supports_f32: true,
+            },
+        ];
+
+        assert_eq!(
+            select_output_config(48_000, 2, ranges),
+            Some(OutputDeviceConfig {
+                sample_rate: FALLBACK_SAMPLE_RATE,
+                channels: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn output_config_rejects_when_default_and_fallback_rates_lack_f32_support() {
         let ranges = [
             OutputFormatRange {
                 channels: 2,

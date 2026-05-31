@@ -35,14 +35,14 @@
 
 ; ── Gate envelope ──
 (def env_prev (read-history h_env))
-(def att_c    (exp (/ -1.0 (max 1.0 (* attack 44.1)))))
-(def rel_c    (exp (/ -1.0 (max 1.0 (* release 44.1)))))
+(def att_c    (exp (/ -1.0 (max 1.0 (* attack samplerate 0.001)))))
+(def rel_c    (exp (/ -1.0 (max 1.0 (* release samplerate 0.001)))))
 (def env      (write-history h_env (mix gate env_prev (gswitch (gt gate env_prev) att_c rel_c))))
 
 ; ── Pitch ──
 (def vib_sig  (* (sin (* twopi (phasor (mod vibRate)))) (mod vibDepth)))
 (def pitch_hz (max 20.0 (+ pitch vib_sig)))
-(def period   (max 2.0 (- (/ 44100.0 pitch_hz) tuning)))
+(def period   (max 2.0 (- (/ samplerate pitch_hz) tuning)))
 
 ; ── Noise ──
 (def raw_noise (noise))

@@ -294,6 +294,8 @@ mod engine_registry_tests {
     fn manifest() -> DGenManifest {
         DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            version: 2,
+            process_abi: "dgen-c-v2-host-sample-rate".to_string(),
             total_memory_slots: 0,
             params: Vec::new(),
             groups: Vec::new(),

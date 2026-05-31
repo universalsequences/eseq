@@ -53,7 +53,7 @@
 ; Delay calculation (compensation for cylinder/cone shift)
 (def b_type (clip (mod bore_type) 0 1))
 (def delay_scale (+ 0.5 (* b_type 0.5)))
-(def delay_samps (clip (* (/ 44100.0 pitch_freq) delay_scale) 2 2000))
+(def delay_samps (clip (* (/ samplerate pitch_freq) delay_scale) 2 2000))
 
 ; Breath & Blow excitation
 (def env (adsr gate trigger amp_attack amp_decay amp_sustain amp_release))

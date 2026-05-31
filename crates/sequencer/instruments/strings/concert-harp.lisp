@@ -32,7 +32,7 @@
 
 ; ── Safe pitch ──
 (def safe_pitch (max pitch 25.0))
-(def delay_nominal (/ 44100.0 safe_pitch))
+(def delay_nominal (/ samplerate safe_pitch))
 
 ; ── Note-on detector / exciter window ──
 (make-history gate_hist)
@@ -63,8 +63,8 @@
 ; ── Main string loop ──
 (def lp_freq      (max (* safe_pitch 1.8)
                        (+ 120.0 (* bright_amt 9800.0))))
-(def exp1         (exp (/ (* -1.0 twopi lp_freq) 44100.0)))
-(def cos_term     (cos (* (/ safe_pitch 44100.0) twopi)))
+(def exp1         (exp (/ (* -1.0 twopi lp_freq) samplerate)))
+(def cos_term     (cos (* (/ safe_pitch samplerate) twopi)))
 (def mag_sq       (max 0.000001 (+ 1.0 (* exp1 exp1) (* -2.0 exp1 cos_term))))
 (def mag_h        (/ (- 1.0 exp1) (sqrt mag_sq)))
 (def sustain_main (max 0.15 (mod sustain_s)))
@@ -86,8 +86,8 @@
 (def halo_pitch      (* safe_pitch halo_ratio))
 (def halo_lp_freq    (max (* halo_pitch 2.0)
                           (+ 260.0 (* bright_amt 7200.0))))
-(def halo_exp        (exp (/ (* -1.0 twopi halo_lp_freq) 44100.0)))
-(def halo_cos_term   (cos (* (/ halo_pitch 44100.0) twopi)))
+(def halo_exp        (exp (/ (* -1.0 twopi halo_lp_freq) samplerate)))
+(def halo_cos_term   (cos (* (/ halo_pitch samplerate) twopi)))
 (def halo_mag_sq     (max 0.000001 (+ 1.0 (* halo_exp halo_exp) (* -2.0 halo_exp halo_cos_term))))
 (def halo_mag_h      (/ (- 1.0 halo_exp) (sqrt halo_mag_sq)))
 (def halo_sustain    (max 0.12 (* sustain_main 0.72)))
@@ -95,7 +95,7 @@
                        (/ (pow 0.001 (/ 1.0 (* halo_sustain halo_pitch)))
                           halo_mag_h)))
 (def halo_group_dly  (/ halo_exp (max 0.001 (- 1.0 halo_exp))))
-(def halo_delay_len  (max 1.5 (- (/ 44100.0 halo_pitch) halo_group_dly)))
+(def halo_delay_len  (max 1.5 (- (/ samplerate halo_pitch) halo_group_dly)))
 
 (make-history halo_hist)
 (def halo_prev    (read-history halo_hist))

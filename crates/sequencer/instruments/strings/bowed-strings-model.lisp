@@ -41,7 +41,7 @@
 (def vibrato_lfo  (sin (* twopi (phasor vibrato_rate))))
 (def pitch_mod    (+ pitch (* pitch (mod vibrato_depth) 0.01 vibrato_lfo)))
 (def safe_pitch   (max pitch_mod 12.0))
-(def delay_nominal (/ 44100.0 safe_pitch))
+(def delay_nominal (/ samplerate safe_pitch))
 (def sustain_s    (max 0.10 (/ (mod decay_time_ms) 1000.0)))
 (def vel_scale    (+ 0.25 (* 0.75 velocity)))
 
@@ -67,8 +67,8 @@
 ; ── Main string loop ──
 (def lp_freq      (max (* safe_pitch 1.6)
                        (+ 180.0 (* bright_amt 12000.0))))
-(def exp1         (exp (/ (* -1.0 twopi lp_freq) 44100.0)))
-(def cos_term     (cos (* (/ safe_pitch 44100.0) twopi)))
+(def exp1         (exp (/ (* -1.0 twopi lp_freq) samplerate)))
+(def cos_term     (cos (* (/ safe_pitch samplerate) twopi)))
 (def mag_sq       (max 0.000001 (+ 1.0 (* exp1 exp1) (* -2.0 exp1 cos_term))))
 (def mag_h        (/ (- 1.0 exp1) (sqrt mag_sq)))
 (def stretch      (min 0.99998
@@ -118,8 +118,8 @@
 (def ens_pitch       (max 45.0 (* safe_pitch detune_ratio)))
 (def ens_lp_freq     (max (* ens_pitch 1.8)
                           (+ 220.0 (* bright_amt 9000.0))))
-(def ens_exp         (exp (/ (* -1.0 twopi ens_lp_freq) 44100.0)))
-(def ens_cos_term    (cos (* (/ ens_pitch 44100.0) twopi)))
+(def ens_exp         (exp (/ (* -1.0 twopi ens_lp_freq) samplerate)))
+(def ens_cos_term    (cos (* (/ ens_pitch samplerate) twopi)))
 (def ens_mag_sq      (max 0.000001 (+ 1.0 (* ens_exp ens_exp) (* -2.0 ens_exp ens_cos_term))))
 (def ens_mag_h       (/ (- 1.0 ens_exp) (sqrt ens_mag_sq)))
 (def ens_sustain_s   (max 0.10 (* sustain_s 0.85)))
@@ -127,7 +127,7 @@
                        (/ (pow 0.001 (/ 1.0 (* ens_sustain_s ens_pitch)))
                           ens_mag_h)))
 (def ens_group_dly   (/ ens_exp (max 0.001 (- 1.0 ens_exp))))
-(def ens_delay_len   (max 1.5 (- (/ 44100.0 ens_pitch) ens_group_dly)))
+(def ens_delay_len   (max 1.5 (- (/ samplerate ens_pitch) ens_group_dly)))
 
 (make-history ens_hist)
 (def ens_prev        (read-history ens_hist))

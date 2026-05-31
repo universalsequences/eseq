@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -61,6 +61,7 @@ type DGenProcessFn = unsafe extern "C" fn(
     frame_count: c_int,
     memory_read: *mut c_void,
     memory_write: *mut c_void,
+    host_sample_rate: c_float,
 );
 
 // ── Global process function registry ──
@@ -95,11 +96,13 @@ fn set_dgen_process_fn_raw(slot_id: usize, f: usize) {
 // state[2] = canary
 // state[3] = declared input count (f32)
 // state[4] = enabled (0 = bypass/silent, 1 = active)
-// state[5..5+N] = DGenLisp read buffer
+// state[5] = host sample rate
+// state[6..6+N] = DGenLisp read buffer
 // state[...]     = DGenLisp write buffer (separate to respect `restrict`)
 
 pub const DGEN_ENABLED_PARAM_IDX: usize = 4;
-pub const HEADER_SLOTS: usize = 5;
+pub const DGEN_HOST_SAMPLE_RATE_IDX: usize = 5;
+pub const HEADER_SLOTS: usize = 6;
 pub const DGEN_STATE_REDZONE_SLOTS: usize = 256;
 const HEADER_CANARY: f32 = f32::from_bits(0x4cd35a1d);
 
@@ -127,6 +130,15 @@ unsafe fn dgen_read_buffer_ptr(state: *mut f32) -> *mut f32 {
 
 unsafe fn dgen_write_buffer_ptr(state: *mut f32, total_memory_slots: usize) -> *mut f32 {
     state.add(HEADER_SLOTS + dgen_buffer_span_slots(total_memory_slots))
+}
+
+unsafe fn dgen_host_sample_rate(state: *mut f32) -> f32 {
+    let sample_rate = *state.add(DGEN_HOST_SAMPLE_RATE_IDX);
+    if sample_rate.is_finite() && sample_rate > 0.0 {
+        sample_rate
+    } else {
+        44_100.0
+    }
 }
 
 unsafe extern "C" fn dgenlisp_wrapper_process(
@@ -168,7 +180,14 @@ unsafe extern "C" fn dgenlisp_wrapper_process(
         if inp.is_null() || out.is_null() {
             return;
         }
-        process_fn(inp, out, nframes, memory_read, memory_write);
+        process_fn(
+            inp,
+            out,
+            nframes,
+            memory_read,
+            memory_write,
+            dgen_host_sample_rate(s),
+        );
     } else {
         // Passthrough: copy input to output
         let nf = nframes as usize;
@@ -188,7 +207,7 @@ unsafe extern "C" fn dgenlisp_wrapper_process(
 ///   [6..6+2N] = pairs of (index, value)
 unsafe extern "C" fn dgenlisp_init(
     state: *mut c_void,
-    _sample_rate: c_int,
+    sample_rate: c_int,
     _max_block: c_int,
     initial_state: *const c_void,
 ) {
@@ -204,6 +223,7 @@ unsafe extern "C" fn dgenlisp_init(
     *dst.add(2) = *src.add(2); // canary
     *dst.add(3) = *src.add(3); // declared input count
     *dst.add(DGEN_ENABLED_PARAM_IDX) = *src.add(4); // enabled
+    *dst.add(DGEN_HOST_SAMPLE_RATE_IDX) = (sample_rate.max(1)) as f32;
 
     // Apply sparse index/value pairs into the memory region
     let num_entries = (*src.add(5)) as usize;
@@ -239,6 +259,15 @@ pub unsafe fn queue_tensor_write(
     )
 }
 
+pub unsafe fn queue_dgen_host_sample_rate_update(
+    lg: *mut LiveGraph,
+    node_id: i32,
+    sample_rate: u32,
+) -> bool {
+    let value = sample_rate.max(1) as f32;
+    audiograph::write_node_state(lg, node_id, DGEN_HOST_SAMPLE_RATE_IDX, &value, 1)
+}
+
 fn dgenlisp_vtable() -> NodeVTable {
     NodeVTable {
         process: Some(dgenlisp_wrapper_process),
@@ -259,6 +288,8 @@ pub struct EffectGraphNodeIds {
 #[derive(Clone)]
 pub struct DGenManifest {
     pub dylib_path: PathBuf,
+    pub version: u32,
+    pub process_abi: String,
     pub total_memory_slots: usize,
     pub params: Vec<DGenParam>,
     pub groups: Vec<DGenUiGroup>,
@@ -324,6 +355,7 @@ pub struct TensorMeta {
     pub kind: String,
     pub mutable: bool,
     pub source_file: Option<String>,
+    pub source_sample_rate: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -669,6 +701,8 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
     let dir = output_dir();
     let dylib_name = v["dylib"].as_str().unwrap_or("effect.dylib");
     let dylib_path = dir.join(dylib_name);
+    let version = v["version"].as_u64().unwrap_or(0) as u32;
+    let process_abi = v["processAbi"].as_str().unwrap_or("").to_string();
 
     let params = v["params"]
         .as_array()
@@ -832,6 +866,9 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
                     kind: t["kind"].as_str().unwrap_or("").to_string(),
                     mutable: t["mutable"].as_bool().unwrap_or(false),
                     source_file: t["sourceFile"].as_str().map(|s| s.to_string()),
+                    source_sample_rate: t["sourceSampleRate"]
+                        .as_f64()
+                        .map(|rate| rate.round().max(1.0) as u32),
                 })
                 .collect()
         })
@@ -841,6 +878,8 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
 
     Ok(DGenManifest {
         dylib_path,
+        version,
+        process_abi,
         total_memory_slots: v["totalMemorySlots"].as_u64().unwrap_or(256) as usize,
         params,
         groups,
@@ -2046,7 +2085,14 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
                 DGEN_ENGINE_PROCESS_BLOCKS[engine_id].fetch_add(1, Ordering::Relaxed);
             }
         }
-        process_fn(inp, out, nframes, memory_read, memory_write);
+        process_fn(
+            inp,
+            out,
+            nframes,
+            memory_read,
+            memory_write,
+            dgen_host_sample_rate(s),
+        );
     } else {
         let nf = nframes as usize;
         let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
@@ -2225,9 +2271,7 @@ pub fn load_instrument_source(name: &str) -> io::Result<String> {
 // ── Instrument compilation ──
 
 const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at compile time.
-; `samplerate` is substituted by the Rust host before DGenLisp compilation.
-
-(def samplerate __SAMPLE_RATE__)
+; `samplerate` is provided by DGenLisp as runtime host sample-rate context.
 
 (defmacro mod_unipolar (m)
   (* (+ m 1.0) 0.5))
@@ -2437,7 +2481,8 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
 "#;
 
 fn instrument_preamble(sample_rate: u32) -> String {
-    INSTRUMENT_PREAMBLE.replace("__SAMPLE_RATE__", &format!("{sample_rate}.0"))
+    let _ = sample_rate;
+    INSTRUMENT_PREAMBLE.to_string()
 }
 
 fn effect_preamble(sample_rate: u32) -> String {
@@ -2661,6 +2706,7 @@ pub fn render_loaded_instrument_for_test(
                 block as c_int,
                 memory_read.as_mut_ptr() as *mut c_void,
                 memory_write.as_mut_ptr() as *mut c_void,
+                options.sample_rate.max(1) as c_float,
             );
         }
         rendered.extend_from_slice(&output_buffers[0]);
@@ -2842,6 +2888,7 @@ pub fn render_loaded_effect_for_test(
                 block as c_int,
                 memory_read.as_mut_ptr() as *mut c_void,
                 memory_write.as_mut_ptr() as *mut c_void,
+                options.sample_rate.max(1) as c_float,
             );
         }
         for frame in 0..block {
@@ -7781,7 +7828,20 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::vm::Value;
     use eseqlisp::{BufferMode, Editor, EditorConfig, Runtime};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static CAPTURED_DGEN_SAMPLE_RATE_BITS: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn capture_dgen_sample_rate_process(
+        _inp: *const *mut f32,
+        _out: *const *mut f32,
+        _nframes: std::os::raw::c_int,
+        _state: *mut std::ffi::c_void,
+        _buffers: *mut std::ffi::c_void,
+        host_sample_rate: std::os::raw::c_float,
+    ) {
+        CAPTURED_DGEN_SAMPLE_RATE_BITS.store(host_sample_rate.to_bits(), Ordering::SeqCst);
+    }
 
     fn descriptors_with_filter(track_count: usize) -> Vec<Vec<EffectDescriptor>> {
         (0..track_count)
@@ -7912,6 +7972,8 @@ mod tests {
     fn dgen_init_message_honors_param_span() {
         let manifest = super::DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            version: 2,
+            process_abi: "dgen-c-v2-host-sample-rate".to_string(),
             total_memory_slots: 16,
             params: vec![
                 DGenParam {
@@ -7964,6 +8026,144 @@ mod tests {
         assert!(!entries.contains(&(5, 0.25)));
         assert!(entries.contains(&(8, 0.5)));
         assert!(entries.contains(&(11, 0.5)));
+    }
+
+    #[test]
+    fn dgenlisp_init_writes_host_sample_rate_without_shifting_compact_entries() {
+        let total_memory_slots = 16;
+        let mut state = vec![0.0_f32; super::dgen_total_state_slots(total_memory_slots)];
+        let initial_state = [
+            7.0,
+            total_memory_slots as f32,
+            super::HEADER_CANARY,
+            2.0,
+            1.0,
+            2.0,
+            4.0,
+            0.25,
+            8.0,
+            0.5,
+        ];
+
+        unsafe {
+            super::dgenlisp_init(
+                state.as_mut_ptr() as *mut std::ffi::c_void,
+                48_000,
+                128,
+                initial_state.as_ptr() as *const std::ffi::c_void,
+            );
+        }
+
+        assert_eq!(state[super::DGEN_HOST_SAMPLE_RATE_IDX], 48_000.0);
+        assert_eq!(state[super::HEADER_SLOTS + 4], 0.25);
+        assert_eq!(state[super::HEADER_SLOTS + 8], 0.5);
+        let write_offset = super::HEADER_SLOTS + super::dgen_buffer_span_slots(total_memory_slots);
+        assert_eq!(state[write_offset + 4], 0.25);
+        assert_eq!(state[write_offset + 8], 0.5);
+    }
+
+    #[test]
+    fn dgenlisp_wrapper_passes_header_sample_rate_to_generated_process() {
+        let total_memory_slots = 4;
+        let slot_id = 17usize;
+        let mut state = vec![0.0_f32; super::dgen_total_state_slots(total_memory_slots)];
+        state[0] = slot_id as f32;
+        state[1] = total_memory_slots as f32;
+        state[2] = super::HEADER_CANARY;
+        state[3] = 1.0;
+        state[super::DGEN_ENABLED_PARAM_IDX] = 1.0;
+        state[super::DGEN_HOST_SAMPLE_RATE_IDX] = 48_000.0;
+
+        CAPTURED_DGEN_SAMPLE_RATE_BITS.store(0, Ordering::SeqCst);
+        super::set_dgen_process_fn(slot_id, capture_dgen_sample_rate_process);
+
+        let mut input = vec![0.0_f32; 8];
+        let mut output = vec![0.0_f32; 8];
+        let inputs = [input.as_mut_ptr()];
+        let outputs = [output.as_mut_ptr()];
+        unsafe {
+            super::dgenlisp_wrapper_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                8,
+                state.as_mut_ptr() as *mut std::ffi::c_void,
+                std::ptr::null_mut(),
+            );
+        }
+        super::set_dgen_process_fn_raw(slot_id, 0);
+
+        assert_eq!(
+            f32::from_bits(CAPTURED_DGEN_SAMPLE_RATE_BITS.load(Ordering::SeqCst)),
+            48_000.0
+        );
+    }
+
+    #[test]
+    fn parse_manifest_reads_process_abi_and_tensor_source_sample_rate() {
+        let manifest = parse_manifest(
+            r#"{
+                "version": 2,
+                "processAbi": "dgen-c-v2-host-sample-rate",
+                "dylib": "test.dylib",
+                "totalMemorySlots": 16,
+                "params": [],
+                "tensors": [
+                    {
+                        "name": "sample",
+                        "cellOffset": 4,
+                        "shape": [8],
+                        "kind": "audio",
+                        "mutable": false,
+                        "sourceFile": "sample.wav",
+                        "sourceSampleRate": 48000
+                    }
+                ],
+                "tensorInitData": []
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(manifest.version, 2);
+        assert_eq!(manifest.process_abi, "dgen-c-v2-host-sample-rate");
+        assert_eq!(manifest.tensors.len(), 1);
+        assert_eq!(manifest.tensors[0].source_sample_rate, Some(48_000));
+    }
+
+    #[test]
+    fn built_in_instrument_dsp_files_do_not_hardcode_44100_sample_rate() {
+        fn visit(dir: &std::path::Path, failures: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, failures);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("lisp") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (idx, line) in source.lines().enumerate() {
+                    let code = line.split(';').next().unwrap_or("");
+                    if code.contains("44100") || code.contains("44.1") {
+                        failures.push(format!("{}:{}", path.display(), idx + 1));
+                    }
+                }
+            }
+        }
+
+        let mut failures = Vec::new();
+        visit(std::path::Path::new(super::INSTRUMENTS_DIR), &mut failures);
+
+        assert!(
+            failures.is_empty(),
+            "hardcoded 44.1kHz timing constants found in Lisp DSP files:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]
@@ -10188,9 +10388,10 @@ mod tests {
     }
 
     #[test]
-    fn instrument_preamble_substitutes_sample_rate_constant() {
+    fn instrument_preamble_uses_runtime_sample_rate_context() {
         let preamble = super::instrument_preamble(48_000);
-        assert!(preamble.contains("(def samplerate 48000.0)"));
+        assert!(preamble.contains("runtime host sample-rate"));
+        assert!(!preamble.contains("(def samplerate"));
         assert!(!preamble.contains("__SAMPLE_RATE__"));
     }
 

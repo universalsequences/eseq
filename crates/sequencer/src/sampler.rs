@@ -1527,6 +1527,15 @@ pub fn create_sampler_node(
     })
 }
 
+pub unsafe fn queue_sampler_host_sample_rate_update(
+    lg: *mut LiveGraph,
+    node_id: i32,
+    sample_rate: u32,
+) -> bool {
+    let value = sample_rate.max(1) as f32;
+    crate::audiograph::write_node_state(lg, node_id, STATE_SAMPLE_RATE, &value, 1)
+}
+
 /// Load a WAV file, create an audiograph buffer and sampler node.
 pub fn create_sampler_track(lg: *mut LiveGraph, wav_path: &Path) -> Result<SamplerTrack, String> {
     let loaded = load_wav_buffer(lg, wav_path)?;

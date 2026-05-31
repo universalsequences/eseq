@@ -35,7 +35,7 @@
 
 ; ── Safe pitch: floor at 40Hz ──
 (def safe_pitch (max pitch 40.0))
-(def delay_nominal (/ 44100.0 safe_pitch))
+(def delay_nominal (/ samplerate safe_pitch))
 
 ; ── Exciter: sample counter reset on gate rising edge ──
 ; This mirrors the working editor patch more closely than relying on trigger timing.
@@ -62,13 +62,13 @@
 (def eff_bright  (clip (+ (mod brightness) (* vel_bright velocity)) 0.05 0.99))
 (def lp_freq     (max (* safe_pitch 1.5)
                        (+ 200.0 (* eff_bright 18000.0))))
-(def exp1        (exp (/ (* -1.0 twopi lp_freq) 44100.0)))
+(def exp1        (exp (/ (* -1.0 twopi lp_freq) samplerate)))
 
 ; ── Stretch: compensates for LP attenuation at the fundamental ──
 ; |H(e^j2πf/sr)| = (1-exp1) / sqrt(1 + exp1² - 2*exp1*cos(2πf/sr))
 ; stretch = pow(0.001, 1/(sustain_s * pitch)) / |H|
 ; → guarantees -60dB decay in exactly sustain_s seconds regardless of brightness/pitch
-(def cos_term (cos (* (/ safe_pitch 44100.0) twopi)))
+(def cos_term (cos (* (/ safe_pitch samplerate) twopi)))
 (def mag_sq   (max 0.000001 (+ 1.0 (* exp1 exp1) (* -2.0 exp1 cos_term))))
 (def mag_h    (/ (- 1.0 exp1) (sqrt mag_sq)))
 (def stretch  (min 0.99999
@@ -99,7 +99,7 @@
 (def body_out (* (+ body1 body2 body3) (clip (mod wood) 0 1)))
 
 ; ── Mic distance: subtle delay adds air / early room ──
-(def mic_dly  (max 1.0 (* mic_dist_ms 44.1)))
+(def mic_dly  (max 1.0 (* mic_dist_ms samplerate 0.001)))
 (def with_body (delay (+ ks_out body_out) mic_dly))
 
 ; ── Output: air rolloff + DC block ──
