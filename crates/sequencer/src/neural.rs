@@ -344,30 +344,64 @@ impl NeuralRuntime {
         if !self.active || end_beats <= start_beats {
             return;
         }
+
+        while let Some(boundary_beats) = self.next_eval_boundary(start_beats, end_beats) {
+            if self.next_reset_beat > 0.0 && self.next_reset_beat <= boundary_beats {
+                self.apply_energy_decay(self.next_reset_beat);
+                self.reset_state(self.next_reset_beat);
+                continue;
+            }
+
+            self.apply_energy_decay(boundary_beats);
+            let sample_offset = ((boundary_beats - start_beats) * samples_per_quarter)
+                .round()
+                .max(0.0) as u64;
+            let sample_time = block_start_sample.saturating_add(sample_offset);
+            for neuron_idx in 0..self.num_neurons {
+                let step_beats = self.neurons[neuron_idx]
+                    .resolution
+                    .step_beats(NUM_NEURONS)
+                    .max(1e-9);
+                let next_index = self.last_eval_indices[neuron_idx].saturating_add(1);
+                let neuron_boundary = next_index as f64 * step_beats;
+                if (neuron_boundary - boundary_beats).abs() <= 1e-9 {
+                    self.last_eval_indices[neuron_idx] = next_index;
+                    self.evaluate_neuron(neuron_idx, sample_time, samples_per_quarter, out);
+                }
+            }
+        }
+
         while self.next_reset_beat > 0.0 && self.next_reset_beat <= end_beats {
+            self.apply_energy_decay(self.next_reset_beat);
             self.reset_state(self.next_reset_beat);
         }
         self.apply_energy_decay(end_beats);
+    }
 
+    fn next_eval_boundary(&mut self, start_beats: f64, end_beats: f64) -> Option<f64> {
+        let mut next_boundary: Option<f64> = None;
         for neuron_idx in 0..self.num_neurons {
             let step_beats = self.neurons[neuron_idx]
                 .resolution
                 .step_beats(NUM_NEURONS)
                 .max(1e-9);
-            let end_index = (end_beats / step_beats).floor() as u64;
-            while self.last_eval_indices[neuron_idx] < end_index {
-                self.last_eval_indices[neuron_idx] += 1;
-                let boundary_beats = self.last_eval_indices[neuron_idx] as f64 * step_beats;
-                if boundary_beats <= start_beats || boundary_beats > end_beats {
+            loop {
+                let next_index = self.last_eval_indices[neuron_idx].saturating_add(1);
+                let boundary_beats = next_index as f64 * step_beats;
+                if boundary_beats <= start_beats {
+                    self.last_eval_indices[neuron_idx] = next_index;
                     continue;
                 }
-                let sample_offset = ((boundary_beats - start_beats) * samples_per_quarter)
-                    .round()
-                    .max(0.0) as u64;
-                let sample_time = block_start_sample.saturating_add(sample_offset);
-                self.evaluate_neuron(neuron_idx, sample_time, samples_per_quarter, out);
+                if boundary_beats <= end_beats {
+                    next_boundary = Some(match next_boundary {
+                        Some(current) => current.min(boundary_beats),
+                        None => boundary_beats,
+                    });
+                }
+                break;
             }
         }
+        next_boundary
     }
 
     fn apply_energy_decay(&mut self, end_beats: f64) {
@@ -550,6 +584,13 @@ mod tests {
         }
     }
 
+    fn output_neuron(event: &StepEvent) -> usize {
+        match event.source {
+            EventSource::Network { neuron, .. } => neuron,
+            EventSource::Step { .. } => panic!("expected network event"),
+        }
+    }
+
     #[test]
     fn runtime_runs_first_enabled_valid_network() {
         let mut disabled = ProjectNeuralNetwork::default();
@@ -599,5 +640,124 @@ mod tests {
             runtime.pending[0].entries.len(),
             NEURAL_DELAY_QUEUE_CAPACITY
         );
+    }
+
+    #[test]
+    fn evaluates_by_sample_time_then_neuron_index() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 2;
+        network.neurons[0].route = Some(0);
+        network.neurons[0].resolution = Timebase::Eighth as u8;
+        network.neurons[0].threshold = 0.5;
+        network.neurons[1].route = Some(0);
+        network.neurons[1].resolution = Timebase::Sixteenth as u8;
+        network.neurons[1].threshold = 0.5;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed(&test_event(0));
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 0.5, 0, 48_000.0, &mut out);
+
+        let observed = out
+            .iter()
+            .map(|(sample, event)| (*sample, output_neuron(event)))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![(12_000, 1), (24_000, 0)]);
+    }
+
+    #[test]
+    fn delayed_propagation_becomes_visible_on_later_boundary() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 2;
+        network.weights = vec![vec![0.0, 1.0], vec![0.0, 0.0]];
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.neurons[0].delay_steps = 2;
+        network.neurons[1].route = Some(1);
+        network.neurons[1].threshold = 0.5;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed(&test_event(0));
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 1.0, 0, 48_000.0, &mut out);
+
+        let observed = out
+            .iter()
+            .map(|(sample, event)| (*sample, event.track, output_neuron(event)))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![(12_000, 0, 0), (36_000, 1, 1)]);
+    }
+
+    #[test]
+    fn quantize_snaps_to_project_relative_grid() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 1;
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.neurons[0].quantize = Some(Timebase::Eighth as u8);
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed(&test_event(0));
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.20, 0.30, 9_600, 48_000.0, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 24_000);
+    }
+
+    #[test]
+    fn reset_interval_does_not_clear_pre_reset_boundaries_in_same_block() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 1;
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.reset_interval_bars = 0.25;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed(&test_event(0));
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 1.0, 0, 48_000.0, &mut out);
+
+        let samples = out.iter().map(|(sample, _)| *sample).collect::<Vec<_>>();
+        assert_eq!(samples, vec![12_000]);
+
+        out.clear();
+        runtime.process_boundaries(1.0, 1.25, 48_000, 48_000.0, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn manual_reset_clears_pending_delays() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 2;
+        network.weights = vec![vec![0.0, 1.0], vec![0.0, 0.0]];
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.neurons[0].delay_steps = 1;
+        network.neurons[1].route = Some(1);
+        network.neurons[1].threshold = 0.5;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed(&test_event(0));
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 0.25, 0, 48_000.0, &mut out);
+        assert_eq!(runtime.pending[0].entries.len(), 1);
+
+        runtime.reset_state(0.25);
+        out.clear();
+        runtime.process_boundaries(0.25, 0.5, 12_000, 48_000.0, &mut out);
+
+        assert!(runtime.pending[0].entries.is_empty());
+        assert!(out.is_empty());
     }
 }
