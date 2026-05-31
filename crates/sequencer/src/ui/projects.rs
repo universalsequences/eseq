@@ -11,7 +11,8 @@ use crate::project::{
     ProjectScratchState, ProjectTrack,
 };
 use crate::sequencer::{
-    BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
+    BusId, CustomInstrumentRunMode, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS,
+    TRACK_PATTERN_WORDS,
 };
 
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
@@ -1539,6 +1540,10 @@ impl App {
             bank[current_pattern].restore(&self.state);
             bank[current_pattern].sample_ids.clone()
         };
+        {
+            let mut graph = self.graph_controller();
+            graph.sync_track_instrument_run_modes_from_live_state()?;
+        }
         eprintln!(
             "project-load: restored current_pattern={} sample_ids={} graph_tracks={}",
             current_pattern,
@@ -1585,6 +1590,7 @@ impl App {
             self.editor.status_message =
                 Some((format!("Scratch eval error: {error}"), Instant::now()));
         }
+        let repaired_sidechains = self.repair_stale_sidechain_effect_slots()?;
         let status = if pending.fallback_samples > 0 {
             format!(
                 "Opened project '{}' with {} fallback sample{}",
@@ -1598,6 +1604,11 @@ impl App {
             )
         } else {
             format!("Opened project '{}'", pending.name)
+        };
+        let status = if repaired_sidechains > 0 {
+            format!("{status}; repaired {repaired_sidechains} sidechain effect route")
+        } else {
+            status
         };
         eprintln!("project-load: finish complete status={status}");
         self.editor.status_message = Some((status, Instant::now()));
@@ -1694,6 +1705,7 @@ impl App {
             bus_patterns,
             mod_connections,
             instrument_types: _,
+            instrument_run_modes,
             sample_paths: _,
             sample_names: _,
         } = pattern;
@@ -1890,6 +1902,10 @@ impl App {
                 })
                 .collect(),
             instrument_types: self.graph.track_instrument_types.clone(),
+            instrument_run_modes: instrument_run_modes
+                .into_iter()
+                .map(CustomInstrumentRunMode::from)
+                .collect(),
             mod_connections: mod_connections.into_iter().map(Into::into).collect(),
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
@@ -2065,6 +2081,7 @@ mod tests {
                 midi_fx_slots: Vec::new(),
                 instrument_slots: Vec::new(),
                 instrument_base_note_offsets: Vec::new(),
+                instrument_run_modes: Vec::new(),
                 track_sound_states: Vec::new(),
                 chord_snapshots: Vec::new(),
                 chord_duration_snapshots: Vec::new(),

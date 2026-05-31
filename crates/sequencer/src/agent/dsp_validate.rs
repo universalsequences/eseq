@@ -85,7 +85,7 @@ pub fn validate_instrument_dsp_source(source: &str) -> Result<(), String> {
     extra.dedup();
     if !extra.is_empty() {
         return Err(format!(
-            "dsp.lisp declares unsupported host modulator input(s): {}. Instruments expose exactly four configurable host modulation slots: `(def mod1 (in 5 @name mod1 @modulator 1))` through `(def mod4 (in 8 @name mod4 @modulator 4))`; remove legacy mod5/mod6/ext1..ext4 declarations.",
+            "dsp.lisp declares unsupported host modulator input(s): {}. Instruments expose exactly four configurable host modulation slots: `(def mod1 (in 6 @name mod1 @modulator 1))` through `(def mod4 (in 9 @name mod4 @modulator 4))`; remove legacy mod5/mod6/ext1..ext4 declarations.",
             extra.join(", ")
         ));
     }
@@ -102,7 +102,7 @@ pub fn validate_instrument_dsp_source(source: &str) -> Result<(), String> {
             .collect::<Vec<_>>();
         if !missing.is_empty() {
             return Err(format!(
-                "dsp.lisp declares host-modulatable parameter(s) with `@mod true` but is missing modulator input declaration(s): {}. Declare exactly the four configurable host modulation slots: `(def mod1 (in 5 @name mod1 @modulator 1))` through `(def mod4 (in 8 @name mod4 @modulator 4))`, when any param uses `@mod true`.",
+                "dsp.lisp declares host-modulatable parameter(s) with `@mod true` but is missing modulator input declaration(s): {}. Declare exactly the four configurable host modulation slots: `(def mod1 (in 6 @name mod1 @modulator 1))` through `(def mod4 (in 9 @name mod4 @modulator 4))`, when any param uses `@mod true`.",
                 missing.join(", ")
             ));
         }
@@ -624,10 +624,11 @@ mod tests {
             (def pitch (in 2 @name pitch))
             (def velocity (in 3 @name velocity))
             (def trigger (in 4 @name trigger))
-            (def mod1 (in 5 @name mod1 @modulator 1))
-            (def mod2 (in 6 @name mod2 @modulator 2))
-            (def mod3 (in 7 @name mod3 @modulator 3))
-            (def mod4 (in 8 @name mod4 @modulator 4))
+            (def clock (in 5 @name clock))
+            (def mod1 (in 6 @name mod1 @modulator 1))
+            (def mod2 (in 7 @name mod2 @modulator 2))
+            (def mod3 (in 8 @name mod3 @modulator 3))
+            (def mod4 (in 9 @name mod4 @modulator 4))
             (param cutoff @default 900 @min 40 @max 12000 @mod true @mod-mode additive)
             (def filtered (svf (sin (* (phasor pitch) twopi)) (clip (mod cutoff) 40 12000) 1 0))
             (out (* filtered gate velocity) 1 @name audio)
@@ -752,10 +753,11 @@ mod tests {
             (def pitch (in 2 @name pitch))
             (def velocity (in 3 @name velocity))
             (def trigger (in 4 @name trigger))
-            (def mod1 (in 5 @name mod1 @modulator 1))
-            (def mod2 (in 6 @name mod2 @modulator 2))
-            (def mod3 (in 7 @name mod3 @modulator 3))
-            (def mod4 (in 8 @name mod4 @modulator 4))
+            (def clock (in 5 @name clock))
+            (def mod1 (in 6 @name mod1 @modulator 1))
+            (def mod2 (in 7 @name mod2 @modulator 2))
+            (def mod3 (in 8 @name mod3 @modulator 3))
+            (def mod4 (in 9 @name mod4 @modulator 4))
             (param lfo_to_pitch @default 0 @min 0 @max 0.14)
             (def pitch_mod (+ pitch (* pitch (sin (* (phasor 1) twopi)) (mod lfo_to_pitch))))
             (out (* (sin (* (phasor pitch_mod) twopi)) gate velocity) 1 @name audio)
@@ -845,10 +847,11 @@ mod tests {
             (def pitch (in 2 @name pitch))
             (def velocity (in 3 @name velocity))
             (def trigger (in 4 @name trigger))
-            (def mod1 (in 5 @name mod1 @modulator 1))
-            (def mod2 (in 6 @name mod2 @modulator 2))
-            (def mod3 (in 7 @name mod3 @modulator 3))
-            (def mod4 (in 8 @name mod4 @modulator 4))
+            (def clock (in 5 @name clock))
+            (def mod1 (in 6 @name mod1 @modulator 1))
+            (def mod2 (in 7 @name mod2 @modulator 2))
+            (def mod3 (in 8 @name mod3 @modulator 3))
+            (def mod4 (in 9 @name mod4 @modulator 4))
             (def ext1 (in 11 @name ext1 @modulator 7))
             (param cutoff @default 900 @min 40 @max 12000 @mod true @mod-mode additive)
             (out (sin (* (phasor (mod cutoff)) twopi)) 1 @name audio)
@@ -869,8 +872,9 @@ mod tests {
             (def pitch (in 2 @name pitch))
             (def velocity (in 3 @name velocity))
             (def trigger (in 4 @name trigger))
-            (def mod1 (in 5 @name mod1 @modulator 1))
-            (def mod2 (in 6 @name mod2 @modulator 2))
+            (def clock (in 5 @name clock))
+            (def mod1 (in 6 @name mod1 @modulator 1))
+            (def mod2 (in 7 @name mod2 @modulator 2))
             (param cutoff @default 900 @min 40 @max 12000 @mod true @mod-mode additive)
             (def cutoff-hz (+ (mod cutoff) (* mod1 2500)))
             (def pw (+ 0.5 (* mod2 0.08)))

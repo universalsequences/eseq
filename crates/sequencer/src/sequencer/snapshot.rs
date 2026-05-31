@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use crate::effects::EffectSlotSnapshot;
 
 use super::data::{
-    InstrumentType, ModConnection, StepParam, SwingResolution, Timebase, TrackParamsSnapshot,
-    MAX_STEPS, NUM_PARAMS,
+    CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
+    TrackParamsSnapshot, MAX_STEPS, NUM_PARAMS,
 };
 use super::state::SequencerState;
 
@@ -34,6 +34,7 @@ pub struct SequencerStepSnapshot {
 pub struct SequencerTrackSnapshot {
     pub params: TrackParamsSnapshot,
     pub instrument_type: InstrumentType,
+    pub instrument_run_mode: CustomInstrumentRunMode,
     pub instrument_base_note_offset: f32,
     pub engine_id: Option<usize>,
     pub effect_slots: Vec<EffectSlotSnapshot>,
@@ -111,6 +112,9 @@ impl SequencerSnapshot {
             let instrument_base_note_offset = f32::from_bits(
                 state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
             );
+            let instrument_run_mode = CustomInstrumentRunMode::from_runtime_flag(
+                state.runtime.instrument_run_mode_flags[track_idx].load(Ordering::Relaxed),
+            );
             let engine_id = match state.runtime.track_engine_ids[track_idx].load(Ordering::Relaxed)
             {
                 u32::MAX => None,
@@ -163,6 +167,7 @@ impl SequencerSnapshot {
             tracks.push(SequencerTrackSnapshot {
                 params,
                 instrument_type,
+                instrument_run_mode,
                 instrument_base_note_offset,
                 engine_id,
                 effect_slots,

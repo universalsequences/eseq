@@ -25,8 +25,8 @@ use crate::scheduled_event::{
     TimedEvent,
 };
 use crate::sequencer::{
-    sync_beats, BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, SwingResolution,
-    MAX_TRACKS,
+    sync_beats, BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState,
+    StepParam, SwingResolution, MAX_TRACKS,
 };
 use crate::ui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
@@ -246,6 +246,8 @@ struct AudioCallbackData {
     last_pattern: u32,
     last_num_tracks: usize,
     last_topology_epoch: u64,
+    host_clock_was_playing: bool,
+    host_clock_play_start_sample: u64,
     /// Per-track flag set on pattern switch/play-start; each track clears its own flag at step 0.
     pending_accum_reset: [bool; MAX_TRACKS],
     scheduled_events: Arc<ScheduledEventQueue<4096>>,
@@ -490,11 +492,46 @@ impl CustomEnginePool {
         }
     }
 
+    fn allocate_free_patch_voice(
+        &mut self,
+        track: usize,
+        note: f32,
+    ) -> Option<CustomVoiceAllocation> {
+        if self.num_voices == 0 {
+            return None;
+        }
+        self.age_counter += 1;
+        let slot = &mut self.voices[0];
+        let previous_track = slot.assigned_track;
+        let stole_active_voice = slot.active;
+        slot.age = self.age_counter;
+        slot.active = true;
+        slot.release_started_sample = None;
+        slot.note = note;
+        slot.assigned_track = Some(track);
+        Some(CustomVoiceAllocation {
+            voice_idx: 0,
+            logical_id: slot.logical_id,
+            previous_track,
+            stole_active_voice,
+        })
+    }
+
     fn release_voice_by_logical_id(&mut self, logical_id: u64, release_sample: u64) {
         for i in 0..self.num_voices {
             if self.voices[i].logical_id == logical_id {
                 self.voices[i].active = false;
                 self.voices[i].release_started_sample = Some(release_sample);
+                return;
+            }
+        }
+    }
+
+    fn release_free_patch_voice_by_logical_id(&mut self, logical_id: u64) {
+        for i in 0..self.num_voices {
+            if self.voices[i].logical_id == logical_id {
+                self.voices[i].active = false;
+                self.voices[i].release_started_sample = None;
                 return;
             }
         }
@@ -659,6 +696,8 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     data.last_num_tracks = num_tracks;
     data.last_topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
     data.last_playing = false;
+    data.host_clock_was_playing = false;
+    data.host_clock_play_start_sample = 0;
     data.last_pattern = u32::MAX;
 
     for t in 0..num_tracks {
@@ -1332,6 +1371,12 @@ fn track_engine_id(state: &SequencerState, track_idx: usize) -> Option<usize> {
     }
 }
 
+fn track_custom_run_mode(state: &SequencerState, track_idx: usize) -> CustomInstrumentRunMode {
+    CustomInstrumentRunMode::from_runtime_flag(
+        state.runtime.instrument_run_mode_flags[track_idx].load(Ordering::Relaxed),
+    )
+}
+
 fn sampler_warp_runtime(
     state: &SequencerState,
     track_idx: usize,
@@ -1593,10 +1638,16 @@ fn dispatch_instrument_params_to_active_voices(
     }
     if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
         let pool = &mut data.custom_engine_pools[engine_id];
+        let free_patch =
+            track_custom_run_mode(&data.state, track_idx) == CustomInstrumentRunMode::FreePatch;
         for voice_idx in 0..pool.num_voices {
-            if !pool.voices[voice_idx].active
-                || pool.voices[voice_idx].assigned_track != Some(track_idx)
-            {
+            let targets_voice = if free_patch {
+                voice_idx == 0
+            } else {
+                pool.voices[voice_idx].active
+                    && pool.voices[voice_idx].assigned_track == Some(track_idx)
+            };
+            if !targets_voice {
                 continue;
             }
             let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
@@ -1979,6 +2030,59 @@ fn sync_bus_gate_params(data: &mut AudioCallbackData, block_start_sample: u64) {
     }
 }
 
+fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, block_start_sample: u64) {
+    let playing = data.state.transport.playing.load(Ordering::Relaxed);
+    if playing && !data.host_clock_was_playing {
+        data.host_clock_play_start_sample = block_start_sample;
+    }
+    if !playing && data.host_clock_was_playing {
+        data.host_clock_play_start_sample = block_start_sample;
+    }
+    data.host_clock_was_playing = playing;
+
+    let (phase, increment) = if playing {
+        let bpm = data.state.transport.bpm.load(Ordering::Relaxed).max(1) as f64;
+        let samples_per_bar = data.sample_rate * 240.0 / bpm;
+        let elapsed_samples = block_start_sample.saturating_sub(data.host_clock_play_start_sample);
+        (
+            (elapsed_samples as f64 / samples_per_bar).fract() as f32,
+            (1.0 / samples_per_bar) as f32,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+
+    for engine_id in 0..data.state.runtime.engine_voice_counts.len() {
+        let voice_count =
+            data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
+        for voice_idx in 0..voice_count.min(MAX_VOICES) {
+            let lid =
+                data.state.runtime.engine_voice_lids[engine_id][voice_idx].load(Ordering::Acquire);
+            if lid == 0 {
+                continue;
+            }
+            unsafe {
+                params_push_wrapper(
+                    data.lg.0,
+                    ParamMsg {
+                        idx: gatepitch::PARAM_CLOCK_PHASE,
+                        logical_id: lid,
+                        fvalue: phase,
+                    },
+                );
+                params_push_wrapper(
+                    data.lg.0,
+                    ParamMsg {
+                        idx: gatepitch::PARAM_CLOCK_INC,
+                        logical_id: lid,
+                        fvalue: increment,
+                    },
+                );
+            }
+        }
+    }
+}
+
 fn interleaved_peak(output: &[f32], num_channels: usize) -> (f32, f32) {
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
@@ -2175,6 +2279,8 @@ fn fire_resolved(
     } else {
         None
     };
+    let free_patch = is_custom
+        && track_custom_run_mode(&data.state, track_idx) == CustomInstrumentRunMode::FreePatch;
 
     // Check chord data: if chord has notes, trigger each note on its own voice
     let chord_count = chord.count;
@@ -2198,12 +2304,21 @@ fn fire_resolved(
                 let Some(engine_id) = engine_id else {
                     continue;
                 };
-                let allocation = data.custom_engine_pools[engine_id].allocate_voice(
-                    track_idx,
-                    transpose,
-                    track_polyphonic,
-                    track_max_polyphony,
-                );
+                let allocation = if free_patch {
+                    let Some(allocation) = data.custom_engine_pools[engine_id]
+                        .allocate_free_patch_voice(track_idx, transpose)
+                    else {
+                        continue;
+                    };
+                    allocation
+                } else {
+                    data.custom_engine_pools[engine_id].allocate_voice(
+                        track_idx,
+                        transpose,
+                        track_polyphonic,
+                        track_max_polyphony,
+                    )
+                };
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let lid = allocation.logical_id;
@@ -2225,7 +2340,7 @@ fn fire_resolved(
                 }
                 let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
                 cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
-                if allocation.stole_active_voice || !track_polyphonic {
+                if allocation.stole_active_voice || !track_polyphonic || free_patch {
                     unsafe {
                         send_custom_note_off(data.lg.0, lid);
                         route_custom_voice_to_track(
@@ -2347,12 +2462,21 @@ fn fire_resolved(
             let Some(engine_id) = engine_id else {
                 return;
             };
-            let allocation = data.custom_engine_pools[engine_id].allocate_voice(
-                track_idx,
-                transpose,
-                track_polyphonic,
-                track_max_polyphony,
-            );
+            let allocation = if free_patch {
+                let Some(allocation) = data.custom_engine_pools[engine_id]
+                    .allocate_free_patch_voice(track_idx, transpose)
+                else {
+                    return;
+                };
+                allocation
+            } else {
+                data.custom_engine_pools[engine_id].allocate_voice(
+                    track_idx,
+                    transpose,
+                    track_polyphonic,
+                    track_max_polyphony,
+                )
+            };
             let voice_idx = allocation.voice_idx;
             data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
             let lid = allocation.logical_id;
@@ -2373,7 +2497,7 @@ fn fire_resolved(
             }
             let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
             cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
-            if allocation.stole_active_voice || !track_polyphonic {
+            if allocation.stole_active_voice || !track_polyphonic || free_patch {
                 unsafe {
                     send_custom_note_off(data.lg.0, lid);
                     route_custom_voice_to_track(
@@ -2548,6 +2672,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
     sync_bus_gate_params(data, block_start_sample);
+    sync_instrument_host_clock_params(data, block_start_sample);
 
     // Sync voice pools against current runtime bindings. Project loads can
     // replace tracks in-place, so growth-only sync leaves dead logical IDs.
@@ -2591,7 +2716,13 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     continue;
                 };
                 let pool = &mut data.custom_engine_pools[engine_id];
-                pool.release_voice_by_logical_id(active_note.logical_id, block_end_sample);
+                if track_custom_run_mode(&data.state, kt.track)
+                    == CustomInstrumentRunMode::FreePatch
+                {
+                    pool.release_free_patch_voice_by_logical_id(active_note.logical_id);
+                } else {
+                    pool.release_voice_by_logical_id(active_note.logical_id, block_end_sample);
+                }
                 if active_note.logical_id != 0 {
                     unsafe {
                         send_custom_note_off(data.lg.0, active_note.logical_id);
@@ -2640,12 +2771,23 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let Some(engine_id) = track_engine_id(&data.state, kt.track) else {
                     continue;
                 };
-                let allocation = data.custom_engine_pools[engine_id].allocate_voice(
-                    kt.track,
-                    resolved_transpose,
-                    track_polyphonic,
-                    track_max_polyphony,
-                );
+                let free_patch = track_custom_run_mode(&data.state, kt.track)
+                    == CustomInstrumentRunMode::FreePatch;
+                let allocation = if free_patch {
+                    let Some(allocation) = data.custom_engine_pools[engine_id]
+                        .allocate_free_patch_voice(kt.track, resolved_transpose)
+                    else {
+                        continue;
+                    };
+                    allocation
+                } else {
+                    data.custom_engine_pools[engine_id].allocate_voice(
+                        kt.track,
+                        resolved_transpose,
+                        track_polyphonic,
+                        track_max_polyphony,
+                    )
+                };
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let voice_lid = allocation.logical_id;
@@ -2691,7 +2833,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     }
                 }
                 data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint = fingerprint;
-                if allocation.stole_active_voice || !track_polyphonic {
+                if allocation.stole_active_voice || !track_polyphonic || free_patch {
                     unsafe {
                         send_custom_note_off(data.lg.0, voice_lid);
                     }
@@ -3107,8 +3249,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     set_modulator_gate(data.lg.0, lid, 0.0);
                 }
             } else if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
-                data.custom_engine_pools[engine_id]
-                    .release_voice_by_logical_id(lid, block_end_sample);
+                if track_custom_run_mode(&data.state, track_idx)
+                    == CustomInstrumentRunMode::FreePatch
+                {
+                    data.custom_engine_pools[engine_id].release_free_patch_voice_by_logical_id(lid);
+                } else {
+                    data.custom_engine_pools[engine_id]
+                        .release_voice_by_logical_id(lid, block_end_sample);
+                }
                 unsafe {
                     send_custom_note_off(data.lg.0, lid);
                 }
@@ -3468,6 +3616,8 @@ pub fn build_output_stream(
         last_pattern: u32::MAX,
         last_num_tracks: num_tracks,
         last_topology_epoch: initial_topology_epoch,
+        host_clock_was_playing: false,
+        host_clock_play_start_sample: 0,
         pending_accum_reset: [false; MAX_TRACKS],
         scheduled_events: Arc::clone(&scheduled_events),
         rendered_samples: Arc::clone(&rendered_samples),
@@ -3887,6 +4037,29 @@ mod tests {
         assert_eq!(reused.logical_id, first.logical_id);
         assert!(reused.stole_active_voice);
         assert_eq!(reused.previous_track, Some(3));
+    }
+
+    #[test]
+    fn custom_engine_pool_free_patch_always_targets_voice_zero_without_release_tail() {
+        let mut pool = CustomEnginePool::new();
+        for lid in 10..=12 {
+            pool.add_voice(lid);
+        }
+
+        let first = pool.allocate_free_patch_voice(2, 0.0).unwrap();
+        let second = pool.allocate_free_patch_voice(2, 7.0).unwrap();
+
+        assert_eq!(first.voice_idx, 0);
+        assert_eq!(first.logical_id, 10);
+        assert_eq!(second.voice_idx, 0);
+        assert_eq!(second.logical_id, 10);
+        assert!(second.stole_active_voice);
+
+        pool.release_free_patch_voice_by_logical_id(second.logical_id);
+
+        assert!(!pool.voices[0].active);
+        assert_eq!(pool.voices[0].assigned_track, Some(2));
+        assert_eq!(pool.voices[0].release_started_sample, None);
     }
 
     #[test]

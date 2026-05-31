@@ -7,10 +7,10 @@ use crate::effects::{
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, InstrumentType, ModConnection, StepData, StepParam, SwingPLockData,
-    SwingResolution, SwingResolutionPLockData, Timebase, TimebasePLockData, TrackParams,
-    TrackParamsSnapshot, TrackPattern, TrackSoundState, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
-    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection, StepData,
+    StepParam, SwingPLockData, SwingResolution, SwingResolutionPLockData, Timebase,
+    TimebasePLockData, TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
+    DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
 
@@ -64,6 +64,7 @@ pub struct PatternSnapshot {
     pub swing_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub swing_resolution_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub instrument_types: Vec<InstrumentType>,
+    pub instrument_run_modes: Vec<CustomInstrumentRunMode>,
     pub mod_connections: Vec<ModConnection>,
 }
 
@@ -93,6 +94,7 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.swing_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.swing_resolution_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.instrument_types, track_idx);
+        remove_track_lane_if_present(&mut self.instrument_run_modes, track_idx);
         self.mod_connections = self
             .mod_connections
             .iter()
@@ -251,6 +253,8 @@ impl PatternSnapshot {
             self.swing_resolution_plock_snapshots
                 .push([None; MAX_STEPS]);
             self.instrument_types.push(InstrumentType::Sampler);
+            self.instrument_run_modes
+                .push(CustomInstrumentRunMode::Instrument);
         }
         self.mod_connections.retain(|connection| {
             connection.source_track < track_count
@@ -285,6 +289,7 @@ impl PatternSnapshot {
         self.swing_plock_snapshots.truncate(track_count);
         self.swing_resolution_plock_snapshots.truncate(track_count);
         self.instrument_types.truncate(track_count);
+        self.instrument_run_modes.truncate(track_count);
         self.mod_connections.retain(|connection| {
             connection.source_track < track_count
                 && connection.dest_track < track_count
@@ -315,6 +320,7 @@ impl PatternSnapshot {
         let mut swing_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut swing_resolution_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut inst_types = Vec::with_capacity(num_tracks);
+        let mut instrument_run_modes = Vec::with_capacity(num_tracks);
 
         for t in 0..num_tracks {
             track_bits.push(state.pattern.patterns[t].load_bits());
@@ -408,6 +414,9 @@ impl PatternSnapshot {
             } else {
                 InstrumentType::Sampler
             });
+            instrument_run_modes.push(CustomInstrumentRunMode::from_runtime_flag(
+                state.pattern.instrument_run_modes[t].load(Ordering::Relaxed),
+            ));
         }
 
         Self {
@@ -425,6 +434,7 @@ impl PatternSnapshot {
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
             instrument_types: inst_types,
+            instrument_run_modes,
             mod_connections: Vec::new(),
         }
     }
@@ -509,6 +519,14 @@ impl PatternSnapshot {
                     Ordering::Relaxed,
                 );
             }
+            let run_mode = self
+                .instrument_run_modes
+                .get(t)
+                .copied()
+                .unwrap_or(CustomInstrumentRunMode::Instrument);
+            state.pattern.instrument_run_modes[t].store(run_mode.runtime_flag(), Ordering::Relaxed);
+            state.runtime.instrument_run_mode_flags[t]
+                .store(run_mode.runtime_flag(), Ordering::Relaxed);
             if t < self.track_sound_states.len() && t < track_sound_state.len() {
                 track_sound_state[t] = self.track_sound_states[t].clone();
             }
@@ -550,7 +568,16 @@ impl PatternSnapshot {
         self.swing_plock_snapshots[track] = source.swing_plock_snapshots[track];
         self.swing_resolution_plock_snapshots[track] =
             source.swing_resolution_plock_snapshots[track];
-        self.instrument_types[track] = source.instrument_types[track];
+        self.instrument_types[track] = source
+            .instrument_types
+            .get(track)
+            .copied()
+            .unwrap_or(InstrumentType::Sampler);
+        self.instrument_run_modes[track] = source
+            .instrument_run_modes
+            .get(track)
+            .copied()
+            .unwrap_or(CustomInstrumentRunMode::Instrument);
     }
 
     pub fn clear_track(
@@ -576,6 +603,7 @@ impl PatternSnapshot {
         self.swing_plock_snapshots[track] = [None; MAX_STEPS];
         self.swing_resolution_plock_snapshots[track] = [None; MAX_STEPS];
         self.instrument_types[track] = instrument_type;
+        self.instrument_run_modes[track] = CustomInstrumentRunMode::Instrument;
     }
 
     fn default_step_data() -> Vec<[f32; NUM_PARAMS]> {
@@ -631,6 +659,8 @@ impl PatternSnapshot {
         self.swing_resolution_plock_snapshots
             .push([None; MAX_STEPS]);
         self.instrument_types.push(InstrumentType::Sampler);
+        self.instrument_run_modes
+            .push(CustomInstrumentRunMode::Instrument);
     }
 
     pub fn new_default(num_tracks: usize, slot_descriptors: &[Vec<EffectDescriptor>]) -> Self {
@@ -649,6 +679,7 @@ impl PatternSnapshot {
             swing_plock_snapshots: Vec::with_capacity(num_tracks),
             swing_resolution_plock_snapshots: Vec::with_capacity(num_tracks),
             instrument_types: Vec::with_capacity(num_tracks),
+            instrument_run_modes: Vec::with_capacity(num_tracks),
             mod_connections: Vec::new(),
         };
         for t in 0..num_tracks {
@@ -687,7 +718,7 @@ impl PatternSnapshot {
             && self.swing_plock_snapshots.len() == n
             && self.instrument_types.len() == n
             && self.swing_resolution_plock_snapshots.len() == n
-            && self.instrument_types.len() == n
+            && self.instrument_run_modes.len() == n
             && self.step_data.iter().all(|steps| steps.len() == MAX_STEPS)
     }
 
@@ -922,6 +953,7 @@ pub struct PatternState {
     pub swing_resolution_plocks: Vec<SwingResolutionPLockData>,
     pub instrument_slots: Vec<EffectSlotState>,
     pub instrument_base_note_offsets: Vec<AtomicU32>,
+    pub instrument_run_modes: Vec<AtomicU32>,
     pub track_sound_state: Mutex<Vec<TrackSoundState>>,
 }
 
@@ -961,6 +993,7 @@ pub struct RuntimeBindingState {
     pub voice_lids: Vec<[AtomicU64; MAX_VOICES]>,
     pub voice_counts: Vec<AtomicU32>,
     pub instrument_type_flags: Vec<AtomicU32>,
+    pub instrument_run_mode_flags: Vec<AtomicU32>,
     pub synth_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
     pub sampler_gatepitch_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
     pub sampler_modulator_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
@@ -1072,6 +1105,9 @@ impl SequencerState {
                 instrument_base_note_offsets: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
+                instrument_run_modes: (0..MAX_TRACKS)
+                    .map(|_| AtomicU32::new(CustomInstrumentRunMode::Instrument.runtime_flag()))
+                    .collect(),
                 track_sound_state: Mutex::new(
                     (0..MAX_TRACKS)
                         .map(|_| TrackSoundState::default())
@@ -1116,6 +1152,9 @@ impl SequencerState {
                     .collect(),
                 voice_counts: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 instrument_type_flags: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                instrument_run_mode_flags: (0..MAX_TRACKS)
+                    .map(|_| AtomicU32::new(CustomInstrumentRunMode::Instrument.runtime_flag()))
+                    .collect(),
                 synth_node_ids: (0..MAX_TRACKS)
                     .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
                     .collect(),
@@ -1290,6 +1329,10 @@ impl SequencerState {
         }
         self.pattern.instrument_slots[track].clear();
         self.pattern.instrument_base_note_offsets[track].store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.pattern.instrument_run_modes[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Relaxed,
+        );
         if let Some(sound) = self
             .pattern
             .track_sound_state
@@ -1308,6 +1351,10 @@ impl SequencerState {
         self.runtime.modulator_lids[track].store(0, Ordering::Relaxed);
         self.runtime.voice_counts[track].store(0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[track].store(0, Ordering::Relaxed);
+        self.runtime.instrument_run_mode_flags[track].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Relaxed,
+        );
         self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Relaxed);
         self.runtime.sampler_analysis_buffer_ids[track].store(u32::MAX, Ordering::Relaxed);
         self.runtime.sampler_analysis_bpm[track].store(0.0_f32.to_bits(), Ordering::Relaxed);
@@ -1371,6 +1418,10 @@ impl SequencerState {
             );
             self.runtime.instrument_type_flags[idx].store(
                 self.runtime.instrument_type_flags[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.instrument_run_mode_flags[idx].store(
+                self.runtime.instrument_run_mode_flags[next].load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
             self.runtime.track_engine_ids[idx].store(
@@ -1455,6 +1506,10 @@ impl SequencerState {
         self.runtime.send_lids[last].store(0, Ordering::Relaxed);
         self.runtime.voice_counts[last].store(0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[last].store(0, Ordering::Relaxed);
+        self.runtime.instrument_run_mode_flags[last].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Relaxed,
+        );
         self.runtime.track_engine_ids[last].store(u32::MAX, Ordering::Relaxed);
         self.runtime.sampler_analysis_buffer_ids[last].store(u32::MAX, Ordering::Relaxed);
         self.runtime.sampler_analysis_bpm[last].store(0.0_f32.to_bits(), Ordering::Relaxed);
@@ -2252,6 +2307,15 @@ mod tests {
             instrument_base_note_offsets: (0..num_tracks)
                 .map(|track| track as f32 - 12.0)
                 .collect(),
+            instrument_run_modes: (0..num_tracks)
+                .map(|track| {
+                    if track % 2 == 0 {
+                        CustomInstrumentRunMode::Instrument
+                    } else {
+                        CustomInstrumentRunMode::FreePatch
+                    }
+                })
+                .collect(),
             track_sound_states: (0..num_tracks)
                 .map(|track| TrackSoundState {
                     loaded_preset: Some(format!("preset-{track}")),
@@ -2351,6 +2415,7 @@ mod tests {
         assert_eq!(snapshot.swing_plock_snapshots.len(), 2);
         assert_eq!(snapshot.swing_resolution_plock_snapshots.len(), 2);
         assert_eq!(snapshot.instrument_types.len(), 2);
+        assert_eq!(snapshot.instrument_run_modes.len(), 2);
 
         assert_eq!(snapshot.track_bits[0][0], 1);
         assert_eq!(snapshot.track_bits[1][0], 3);
@@ -2383,6 +2448,13 @@ mod tests {
         assert_eq!(snapshot.swing_resolution_plock_snapshots[1][2], Some(22));
         assert_eq!(snapshot.instrument_types[0], InstrumentType::Sampler);
         assert_eq!(snapshot.instrument_types[1], InstrumentType::Sampler);
+        assert_eq!(
+            snapshot.instrument_run_modes,
+            vec![
+                CustomInstrumentRunMode::Instrument,
+                CustomInstrumentRunMode::Instrument
+            ]
+        );
     }
 
     #[test]
@@ -2453,6 +2525,10 @@ mod tests {
         );
         assert_eq!(snapshot.sample_ids[2], (-1, String::new(), 44_100));
         assert_eq!(snapshot.instrument_types[1], InstrumentType::Sampler);
+        assert_eq!(
+            snapshot.instrument_run_modes[1],
+            CustomInstrumentRunMode::Instrument
+        );
     }
 
     #[test]
@@ -2551,6 +2627,7 @@ mod tests {
         snapshot.swing_plock_snapshots.clear();
         snapshot.swing_resolution_plock_snapshots.truncate(1);
         snapshot.instrument_types.truncate(2);
+        snapshot.instrument_run_modes.truncate(2);
 
         snapshot.remove_track(1);
 
@@ -2560,6 +2637,7 @@ mod tests {
         assert_eq!(snapshot.swing_plock_snapshots.len(), 0);
         assert_eq!(snapshot.swing_resolution_plock_snapshots.len(), 1);
         assert_eq!(snapshot.instrument_types.len(), 1);
+        assert_eq!(snapshot.instrument_run_modes.len(), 1);
     }
 
     #[test]
@@ -2615,6 +2693,7 @@ mod tests {
             swing_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             swing_resolution_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             instrument_types: vec![InstrumentType::Sampler; 4],
+            instrument_run_modes: vec![CustomInstrumentRunMode::Instrument; 4],
             mod_connections: Vec::new(),
         };
         let descriptors = vec![
@@ -2945,6 +3024,13 @@ mod tests {
                 .set(track, 0, 0.25 + track as f32);
             state.pattern.instrument_base_note_offsets[track]
                 .store((track as f32 + 12.0).to_bits(), Ordering::Relaxed);
+            let run_mode = if track == 2 {
+                CustomInstrumentRunMode::FreePatch
+            } else {
+                CustomInstrumentRunMode::Instrument
+            };
+            state.pattern.instrument_run_modes[track]
+                .store(run_mode.runtime_flag(), Ordering::Relaxed);
             state.pattern.track_sound_state.lock().unwrap()[track] = TrackSoundState {
                 engine_id: Some(track),
                 loaded_preset: Some(format!("preset-{track}")),
@@ -2959,6 +3045,8 @@ mod tests {
             state.runtime.send_lids[track].store((track as u64) + 40, Ordering::Relaxed);
             state.runtime.voice_counts[track].store((track + 1) as u32, Ordering::Relaxed);
             state.runtime.instrument_type_flags[track].store((track % 2) as u32, Ordering::Relaxed);
+            state.runtime.instrument_run_mode_flags[track]
+                .store(run_mode.runtime_flag(), Ordering::Relaxed);
             state.runtime.track_engine_ids[track].store((track as u32) + 50, Ordering::Relaxed);
             state.runtime.voice_lids[track][0].store((track as u64) + 60, Ordering::Relaxed);
             state.runtime.synth_node_ids[track][0].store((track as u32) + 70, Ordering::Relaxed);
@@ -3044,6 +3132,18 @@ mod tests {
             0
         );
         assert_eq!(
+            CustomInstrumentRunMode::from_runtime_flag(
+                state.pattern.instrument_run_modes[1].load(Ordering::Relaxed)
+            ),
+            CustomInstrumentRunMode::FreePatch
+        );
+        assert_eq!(
+            CustomInstrumentRunMode::from_runtime_flag(
+                state.runtime.instrument_run_mode_flags[1].load(Ordering::Relaxed)
+            ),
+            CustomInstrumentRunMode::FreePatch
+        );
+        assert_eq!(
             state.runtime.track_engine_ids[1].load(Ordering::Relaxed),
             52
         );
@@ -3083,8 +3183,16 @@ mod tests {
             .num_params
             .store(1, Ordering::Relaxed);
         state.pattern.instrument_slots[2].plocks.set(0, 0, 0.75);
+        state.pattern.instrument_run_modes[2].store(
+            CustomInstrumentRunMode::FreePatch.runtime_flag(),
+            Ordering::Relaxed,
+        );
         state.transport.track_playheads[2].store(12, Ordering::Relaxed);
         state.runtime.sampler_lids[2].store(77, Ordering::Relaxed);
+        state.runtime.instrument_run_mode_flags[2].store(
+            CustomInstrumentRunMode::FreePatch.runtime_flag(),
+            Ordering::Relaxed,
+        );
         state.runtime.track_engine_ids[2].store(66, Ordering::Relaxed);
 
         assert!(state.remove_track(
@@ -3124,6 +3232,18 @@ mod tests {
             0
         );
         assert_eq!(state.runtime.sampler_lids[2].load(Ordering::Relaxed), 0);
+        assert_eq!(
+            CustomInstrumentRunMode::from_runtime_flag(
+                state.pattern.instrument_run_modes[2].load(Ordering::Relaxed)
+            ),
+            CustomInstrumentRunMode::Instrument
+        );
+        assert_eq!(
+            CustomInstrumentRunMode::from_runtime_flag(
+                state.runtime.instrument_run_mode_flags[2].load(Ordering::Relaxed)
+            ),
+            CustomInstrumentRunMode::Instrument
+        );
         assert_eq!(
             state.runtime.track_engine_ids[2].load(Ordering::Relaxed),
             u32::MAX

@@ -129,16 +129,6 @@ pub(super) fn emit_patch_writeback_result(
     apply_created_macro_parameter_writeback(&mut document, interaction_state)?;
 
     validate_connection_edits(&effective_root_patch, interaction_state)?;
-    let empty_generated = GeneratedBindings::default();
-    let empty_history_bindings = HistoryBindings::default();
-    apply_created_out_writeback(
-        &mut document,
-        &effective_root_patch,
-        interaction_state,
-        &empty_generated,
-        &empty_history_bindings,
-        CreatedOutWritebackScope::Root,
-    )?;
     apply_node_deletions(&mut document, &effective_root_patch, interaction_state)?;
 
     let active_view_key = active_patcher_view_key(interaction_state);
@@ -252,6 +242,14 @@ pub(super) fn emit_patch_writeback_result(
         interaction_state,
         &generated,
         &history_bindings,
+        CreatedOutWritebackScope::Root,
+    )?;
+    apply_created_out_writeback(
+        &mut document,
+        &effective_root_patch,
+        interaction_state,
+        &generated,
+        &history_bindings,
         CreatedOutWritebackScope::Macro,
     )?;
     apply_cable_writeback(
@@ -272,9 +270,11 @@ pub(super) fn emit_patch_writeback_result(
         macro_prune_candidate_names(&effective_root_patch, interaction_state);
     document.remove_unreferenced_candidate_macros(&macro_prune_candidates);
 
+    let mut generated_node_ids = generated.node_id_map();
+    generated_node_ids.extend(history_bindings.node_id_map());
     Ok(PatchWritebackResult {
         source: document.emit(),
-        generated_node_ids: generated.node_id_map(),
+        generated_node_ids,
     })
 }
 
@@ -1042,29 +1042,17 @@ fn apply_node_deletions(
             let Some(source) = node.source.as_ref() else {
                 return Err(WriteBackError::MissingSourceOwner { view_key, node_id });
             };
-            match &source.owner {
-                SourceOwner::TopLevelForm { form_id } => Ok((
-                    view_key,
-                    node_id,
-                    SourceDeletionTarget::Form(form_id.clone()),
-                )),
-                SourceOwner::BindingValue { form_id, .. } => Ok((
-                    view_key,
-                    node_id,
-                    SourceDeletionTarget::Form(form_id.clone()),
-                )),
-                SourceOwner::NestedExpr { expr } => {
-                    Ok((view_key, node_id, SourceDeletionTarget::Expr(expr.clone())))
-                }
-                SourceOwner::CodeIsland { .. } => {
-                    return Err(WriteBackError::EditedCodeIsland { view_key, node_id });
-                }
-                _ => {
-                    return Err(WriteBackError::UnsupportedDeletedNode { view_key, node_id });
-                }
-            }
+            let mut targets = Vec::new();
+            source_deletion_targets_for_owner(&view_key, &node_id, &source.owner, &mut targets)?;
+            Ok(targets
+                .into_iter()
+                .map(move |target| (view_key.clone(), node_id.clone(), target))
+                .collect::<Vec<_>>())
         })
-        .collect::<Result<Vec<_>, WriteBackError>>()?;
+        .collect::<Result<Vec<_>, WriteBackError>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
     let mut deleted_forms = deletion_targets
         .iter()
@@ -1116,6 +1104,44 @@ fn apply_node_deletions(
         document.remove_form(&form_id)?;
     }
     Ok(())
+}
+
+fn source_deletion_targets_for_owner(
+    view_key: &str,
+    node_id: &str,
+    owner: &SourceOwner,
+    targets: &mut Vec<SourceDeletionTarget>,
+) -> Result<(), WriteBackError> {
+    match owner {
+        SourceOwner::TopLevelForm { form_id } | SourceOwner::BindingValue { form_id, .. } => {
+            targets.push(SourceDeletionTarget::Form(form_id.clone()));
+            Ok(())
+        }
+        SourceOwner::NestedExpr { expr } => {
+            targets.push(SourceDeletionTarget::Expr(expr.clone()));
+            Ok(())
+        }
+        SourceOwner::ArgumentSlot { arg, .. } | SourceOwner::SymbolReference { arg, .. } => {
+            targets.push(SourceDeletionTarget::Expr(arg.expr.clone()));
+            Ok(())
+        }
+        SourceOwner::Compound { parts } => {
+            for part in parts {
+                source_deletion_targets_for_owner(view_key, node_id, part, targets)?;
+            }
+            Ok(())
+        }
+        SourceOwner::CodeIsland { .. } => Err(WriteBackError::EditedCodeIsland {
+            view_key: view_key.to_string(),
+            node_id: node_id.to_string(),
+        }),
+        SourceOwner::MacroParameter { .. } | SourceOwner::Created { .. } => {
+            Err(WriteBackError::UnsupportedDeletedNode {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+            })
+        }
+    }
 }
 
 fn macro_prune_candidate_names(
@@ -1650,12 +1676,19 @@ impl GeneratedBindings {
 #[derive(Debug, Clone, Default)]
 struct HistoryBindings {
     names: HashMap<(String, String), String>,
+    created_names: HashMap<(String, String), String>,
     pending_make_forms: Vec<(SourceScopeId, String)>,
 }
 
 impl HistoryBindings {
     fn insert(&mut self, view_key: &str, node_id: &str, name: String) {
         self.names
+            .insert((view_key.to_string(), node_id.to_string()), name);
+    }
+
+    fn insert_created(&mut self, view_key: &str, node_id: &str, name: String) {
+        self.insert(view_key, node_id, name.clone());
+        self.created_names
             .insert((view_key.to_string(), node_id.to_string()), name);
     }
 
@@ -1672,6 +1705,10 @@ impl HistoryBindings {
                 Expression::Symbol(name.to_string()),
             ])
         })
+    }
+
+    fn node_id_map(&self) -> HashMap<(String, String), String> {
+        self.created_names.clone()
     }
 }
 
@@ -1705,7 +1742,7 @@ fn resolve_history_bindings(
         created_history_ids.sort();
         for node_id in created_history_ids {
             let name = allocator.allocate(&scope);
-            bindings.insert(&view_key, &node_id, name.clone());
+            bindings.insert_created(&view_key, &node_id, name.clone());
             bindings.pending_make_forms.push((scope.clone(), name));
         }
     }
@@ -4751,6 +4788,7 @@ fn edited_expression_for_node(
         merged.push(edited_items[0].clone());
         merged.push(first_input_item.clone());
         merged.extend(edited_items.iter().skip(1).cloned());
+        append_missing_original_attributes(original_items, &mut merged);
         return expand_editor_mod_shorthand_for_node(
             Expression::List(merged),
             Some(source_expr),
@@ -4849,6 +4887,42 @@ fn append_original_attributes(original_items: &[Expression], merged: &mut Vec<Ex
             idx += 1;
         }
     }
+}
+
+fn append_missing_original_attributes(original_items: &[Expression], merged: &mut Vec<Expression>) {
+    let existing = attribute_keys(merged);
+    let mut idx = 1usize;
+    while idx < original_items.len() {
+        if matches!(&original_items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+            if let Expression::Symbol(symbol) = &original_items[idx]
+                && !existing.contains(symbol)
+            {
+                merged.push(original_items[idx].clone());
+                if let Some(value) = original_items.get(idx + 1) {
+                    merged.push(value.clone());
+                }
+            }
+            idx += 2;
+        } else {
+            idx += 1;
+        }
+    }
+}
+
+fn attribute_keys(items: &[Expression]) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    let mut idx = 1usize;
+    while idx < items.len() {
+        if let Expression::Symbol(symbol) = &items[idx]
+            && symbol.starts_with('@')
+        {
+            keys.insert(symbol.clone());
+            idx += 2;
+            continue;
+        }
+        idx += 1;
+    }
+    keys
 }
 
 fn merge_edited_inline_inputs(
@@ -6773,16 +6847,12 @@ fn host_modulator_def_name(expr: &Expression) -> Option<&str> {
     (expected_host_modulator_slot(name) == Some(slot)).then_some(name)
 }
 
-fn host_modulator_def_slot_for_intent(expr: &Expression, intent: PatcherIntent) -> Option<usize> {
-    let (slot, name, channel) = host_modulator_def_signature(expr)?;
+fn host_modulator_def_slot_for_intent(expr: &Expression, _intent: PatcherIntent) -> Option<usize> {
+    let (slot, name, _) = host_modulator_def_signature(expr)?;
     if expected_host_modulator_slot(name) != Some(slot) {
         return None;
     }
-    match intent {
-        PatcherIntent::Instrument if channel == slot + 4 => Some(slot),
-        PatcherIntent::Effect if channel >= 3 => Some(slot),
-        _ => None,
-    }
+    Some(slot)
 }
 
 fn host_modulator_def_signature(expr: &Expression) -> Option<(usize, &str, usize)> {
@@ -6809,7 +6879,7 @@ fn expected_host_modulator_slot(name: &str) -> Option<usize> {
 
 fn host_modulator_input_channel(intent: PatcherIntent, slot: usize) -> usize {
     match intent {
-        PatcherIntent::Instrument => slot + 4,
+        PatcherIntent::Instrument => slot + 5,
         PatcherIntent::Effect => slot + 2,
     }
 }

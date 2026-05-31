@@ -898,13 +898,17 @@ fn slot_param_stored_value(
         })
 }
 
+fn reactive_set_needs_ui(result: eseqlisp::runtime::ReactiveSetResult) -> bool {
+    result.effects_dirty || result.widgets_dirty
+}
+
 pub(crate) fn sync_instrument_param_value_field(
     rt: &mut Runtime,
     app: &ui::App,
     track: usize,
     param_idx: usize,
     display_step: Option<usize>,
-) {
+) -> bool {
     if let Some((name, value)) = app
         .graph
         .instrument_descriptors
@@ -917,12 +921,13 @@ pub(crate) fn sync_instrument_param_value_field(
             })
         })
     {
-        rt.set_reactive(
+        return reactive_set_needs_ui(rt.set_reactive(
             "SEQ",
             &instrument_param_value_field(track, param_idx, &name),
             Value::Number(value as f64),
-        );
+        ));
     }
+    false
 }
 
 pub(crate) fn sync_sampler_selection_time_fields(
@@ -930,9 +935,9 @@ pub(crate) fn sync_sampler_selection_time_fields(
     app: &ui::App,
     track: usize,
     display_step: Option<usize>,
-) {
+) -> bool {
     if !app.is_sampler_track(track) {
-        return;
+        return false;
     }
     let sample_duration = app
         .sampler_path_for_track(track)
@@ -941,7 +946,7 @@ pub(crate) fn sync_sampler_selection_time_fields(
         .map(|sample| sample.duration_seconds)
         .unwrap_or(1.0);
     let Some(slot) = app.state.pattern.instrument_slots.get(track) else {
-        return;
+        return false;
     };
     let start_raw = display_step
         .and_then(|step| slot.plocks.get(step, 2))
@@ -951,29 +956,35 @@ pub(crate) fn sync_sampler_selection_time_fields(
         .unwrap_or_else(|| slot.defaults.get(3));
     let start = start_raw as f64 * sample_duration;
     let end = end_raw as f64 * sample_duration;
-    rt.set_reactive(
+    let mut needs_ui = reactive_set_needs_ui(rt.set_reactive(
         "SEQ",
         &sampler_selection_time_field(track, "start"),
         Value::Number(start),
-    );
-    rt.set_reactive(
+    ));
+    needs_ui |= reactive_set_needs_ui(rt.set_reactive(
         "SEQ",
         &sampler_selection_time_field(track, "end"),
         Value::Number(end),
-    );
+    ));
+    needs_ui
 }
 
-pub(crate) fn sync_instrument_base_note_value_field(rt: &mut Runtime, app: &ui::App, track: usize) {
+pub(crate) fn sync_instrument_base_note_value_field(
+    rt: &mut Runtime,
+    app: &ui::App,
+    track: usize,
+) -> bool {
     if track < app.tracks.len() {
         let value = f32::from_bits(
             app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
         );
-        rt.set_reactive(
+        return reactive_set_needs_ui(rt.set_reactive(
             "SEQ",
             &instrument_base_note_value_field(track),
             Value::Number(value as f64),
-        );
+        ));
     }
+    false
 }
 
 pub(crate) fn sync_track_effect_param_value_field(
@@ -984,7 +995,7 @@ pub(crate) fn sync_track_effect_param_value_field(
     slot_idx: usize,
     param_idx: usize,
     display_step: Option<usize>,
-) {
+) -> bool {
     if let Some((name, value)) = descriptors
         .get(track)
         .and_then(|slots| slots.get(slot_idx))
@@ -1001,12 +1012,13 @@ pub(crate) fn sync_track_effect_param_value_field(
                 })
         })
     {
-        rt.set_reactive(
+        return reactive_set_needs_ui(rt.set_reactive(
             "SEQ",
             &track_effect_param_value_field(track, slot_idx, param_idx, &name),
             Value::Number(value as f64),
-        );
+        ));
     }
+    false
 }
 
 pub(crate) fn sync_midi_fx_param_value_field(
@@ -1016,7 +1028,7 @@ pub(crate) fn sync_midi_fx_param_value_field(
     slot_idx: usize,
     param_idx: usize,
     display_step: Option<usize>,
-) {
+) -> bool {
     let chain = state.pattern.track_params[track].midi_fx_chain();
     if let Some((name, value)) = chain
         .get(slot_idx)
@@ -1034,12 +1046,13 @@ pub(crate) fn sync_midi_fx_param_value_field(
                 })
         })
     {
-        rt.set_reactive(
+        return reactive_set_needs_ui(rt.set_reactive(
             "SEQ",
             &midi_fx_param_value_field(track, slot_idx, param_idx, &name),
             Value::Number(value as f64),
-        );
+        ));
     }
+    false
 }
 
 pub(crate) fn sync_bus_effect_param_value_field(
@@ -1048,7 +1061,7 @@ pub(crate) fn sync_bus_effect_param_value_field(
     bus_idx: usize,
     slot_idx: usize,
     param_idx: usize,
-) {
+) -> bool {
     if let Some((name, value)) = app.buses.get(bus_idx).and_then(|bus| {
         bus.effect_descriptors
             .get(slot_idx)
@@ -1065,12 +1078,13 @@ pub(crate) fn sync_bus_effect_param_value_field(
                 })
             })
     }) {
-        rt.set_reactive(
+        return reactive_set_needs_ui(rt.set_reactive(
             "SEQ",
             &bus_effect_param_value_field(bus_idx, slot_idx, param_idx, &name),
             Value::Number(value as f64),
-        );
+        ));
     }
+    false
 }
 
 pub(crate) fn sync_fx_param_binding_fields(
@@ -1079,16 +1093,18 @@ pub(crate) fn sync_fx_param_binding_fields(
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-) {
+) -> bool {
+    let mut needs_ui = false;
     if track < app.tracks.len() {
         let selected_step = selected_plock_step(selected_steps);
         let display_step = displayed_plock_step(state, track, selected_step);
-        sync_instrument_base_note_value_field(rt, app, track);
-        sync_sampler_selection_time_fields(rt, app, track, display_step);
+        needs_ui |= sync_instrument_base_note_value_field(rt, app, track);
+        needs_ui |= sync_sampler_selection_time_fields(rt, app, track, display_step);
         if let Some(desc) = app.graph.instrument_descriptors.get(track) {
             for (param_idx, pdesc) in desc.params.iter().enumerate() {
                 if param_supports_value_binding(pdesc) {
-                    sync_instrument_param_value_field(rt, app, track, param_idx, display_step);
+                    needs_ui |=
+                        sync_instrument_param_value_field(rt, app, track, param_idx, display_step);
                 }
             }
         }
@@ -1096,7 +1112,7 @@ pub(crate) fn sync_fx_param_binding_fields(
             for (slot_idx, desc) in slots.iter().enumerate() {
                 for (param_idx, pdesc) in desc.params.iter().enumerate() {
                     if param_supports_value_binding(pdesc) {
-                        sync_track_effect_param_value_field(
+                        needs_ui |= sync_track_effect_param_value_field(
                             rt,
                             state,
                             &app.graph.effect_descriptors,
@@ -1117,7 +1133,7 @@ pub(crate) fn sync_fx_param_binding_fields(
             if let Some(desc) = sequencer::lisp_effect::load_midi_fx_descriptor(name) {
                 for (param_idx, pdesc) in desc.params.iter().enumerate() {
                     if param_supports_value_binding(pdesc) {
-                        sync_midi_fx_param_value_field(
+                        needs_ui |= sync_midi_fx_param_value_field(
                             rt,
                             state,
                             track,
@@ -1135,11 +1151,13 @@ pub(crate) fn sync_fx_param_binding_fields(
         for (slot_idx, desc) in bus.effect_descriptors.iter().enumerate() {
             for (param_idx, pdesc) in desc.params.iter().enumerate() {
                 if param_supports_value_binding(pdesc) {
-                    sync_bus_effect_param_value_field(rt, app, bus_idx, slot_idx, param_idx);
+                    needs_ui |=
+                        sync_bus_effect_param_value_field(rt, app, bus_idx, slot_idx, param_idx);
                 }
             }
         }
     }
+    needs_ui
 }
 
 pub(crate) fn sync_track_playhead_field_delta(
@@ -1529,6 +1547,33 @@ pub(crate) fn build_track_instrument_types(app: &ui::App) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn build_track_mod_output_available(app: &ui::App) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = (0..app.graph.track_instrument_types.len())
+        .map(|track| {
+            Rc::new(RefCell::new(Value::Bool(
+                app.graph.track_exposes_mod_output(track),
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
+pub(crate) fn build_track_instrument_run_modes(app: &ui::App) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = app
+        .graph
+        .track_instrument_run_modes
+        .iter()
+        .map(|run_mode| {
+            let label = match run_mode {
+                sequencer::sequencer::CustomInstrumentRunMode::Instrument => "instrument",
+                sequencer::sequencer::CustomInstrumentRunMode::FreePatch => "free_patch",
+            };
+            Rc::new(RefCell::new(Value::String(label.to_string())))
+        })
+        .collect();
+    Value::List(items)
+}
+
 pub(crate) fn sync_track_name_state(
     rt: &mut Runtime,
     track_names: &mut Vec<String>,
@@ -1539,6 +1584,16 @@ pub(crate) fn sync_track_name_state(
         "SEQ",
         "track-instrument-types",
         build_track_instrument_types(app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-mod-output-available",
+        build_track_mod_output_available(app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-instrument-run-modes",
+        build_track_instrument_run_modes(app),
     );
     if *track_names == app.tracks {
         return;
@@ -1806,6 +1861,16 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
         "track-instrument-types",
         build_track_instrument_types(app),
     );
+    rt.set_reactive(
+        "SEQ",
+        "track-mod-output-available",
+        build_track_mod_output_available(app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-instrument-run-modes",
+        build_track_instrument_run_modes(app),
+    );
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
     rt.set_reactive("SEQ", "track-mixer-pans", build_track_pans(state));
     sync_track_volume_pan_binding_fields(rt, state);
@@ -1882,6 +1947,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
@@ -6270,6 +6336,10 @@ mod tests {
                 ("editor-buffer-name", Value::String(String::new())),
                 ("editor-canceling", Value::Bool(false)),
                 ("editor-error", Value::String(String::new())),
+                (
+                    "editor-instrument-run-mode",
+                    Value::String("instrument".to_string()),
+                ),
             ],
             true,
         );
@@ -6457,9 +6527,10 @@ mod tests {
                 field: actual_field,
                 ..
             }) if actual_namespace == namespace && actual_field == field
-        ) || node.children.iter().any(|child| {
-            layout_tree_has_reactive_prop_field(child, prop, namespace, field)
-        })
+        ) || node
+            .children
+            .iter()
+            .any(|child| layout_tree_has_reactive_prop_field(child, prop, namespace, field))
     }
 
     fn render_layout_cells(layout: &eseqlisp::layout::LayoutNode, cols: u16, rows: u16) -> String {
@@ -6575,15 +6646,39 @@ mod tests {
             .iter()
             .find(|buffer| buffer.name == "*samples*")
             .expect("browser lisp should create the *samples* buffer");
-        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
-        assert!(value_contains_string(tree, "Draft patch"));
-        assert!(value_contains_string(tree, "track "));
-        assert!(value_contains_string(tree, "Save as"));
-        assert!(value_contains_string(tree, "Finalize"));
+        let tree = browser
+            .widget_tree
+            .as_ref()
+            .expect("browser widget tree")
+            .clone();
+        assert!(value_contains_string(&tree, "Draft patch"));
+        assert!(value_contains_string(&tree, "track "));
+        assert!(value_contains_string(&tree, "Mode"));
+        assert!(value_contains_string(&tree, "Instrument"));
+        assert!(value_contains_string(&tree, "Free Patch"));
+        assert!(value_contains_string(&tree, "Save as"));
+        assert!(value_contains_string(&tree, "Finalize"));
         assert!(
-            !value_contains_string(tree, "Save & Add"),
+            !value_contains_string(&tree, "Save & Add"),
             "new instrument editor should use finalization copy"
         );
+
+        let layout = editor
+            .runtime_mut()
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((28.0, 13.0)))
+            .expect("new instrument editor sidebar should lay out");
+        for label in ["Mode", "Instrument", "Free Patch", "Finalize"] {
+            let node = find_layout_text_containing(&layout, label)
+                .unwrap_or_else(|| panic!("expected visible editor text: {label}"));
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.width > 0.0
+                    && node.rect.height > 0.0,
+                "editor text should have a finite nonzero rect for {label}: {:?}",
+                node.rect
+            );
+        }
     }
 
     #[test]
@@ -9463,6 +9558,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sync_track_effect_param_value_field_uses_selected_plock_value() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![vec![sequencer::effects::EffectSlotState::new(&desc, 0)]],
+        ));
+        state.pattern.effect_chains[0][0]
+            .defaults
+            .set(cutoff_idx, 5000.0);
+        state.pattern.effect_chains[0][0]
+            .plocks
+            .set(3, cutoff_idx, 1200.0);
+        let descriptors = vec![vec![desc.clone()]];
+        let field = track_effect_param_value_field(0, 0, cutoff_idx, &desc.params[cutoff_idx].name);
+        let mut runtime = Runtime::new();
+
+        sync_track_effect_param_value_field(
+            &mut runtime,
+            &state,
+            &descriptors,
+            0,
+            0,
+            cutoff_idx,
+            Some(3),
+        );
+
+        assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(1200.0));
+
+        sync_track_effect_param_value_field(
+            &mut runtime,
+            &state,
+            &descriptors,
+            0,
+            0,
+            cutoff_idx,
+            None,
+        );
+
+        assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(5000.0));
+    }
+
+    fn reactive_number(runtime: &Runtime, namespace: &str, field: &str) -> Option<f64> {
+        let namespace = runtime.global_value(namespace)?;
+        let Value::Map(map) = namespace else {
+            return None;
+        };
+        map.get(field).and_then(|value| match &*value.borrow() {
+            Value::Number(value) => Some(*value),
+            _ => None,
+        })
+    }
+
     fn test_string_list(values: &[&str]) -> Value {
         test_list(
             values
@@ -9818,6 +9971,10 @@ mod tests {
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
                 ("editor-error", Value::String(String::new())),
+                (
+                    "editor-instrument-run-mode",
+                    Value::String("instrument".to_string()),
+                ),
                 ("recording", Value::Bool(false)),
                 ("transport-playhead", Value::Number(0.0)),
                 ("bpm", Value::Number(120.0)),
@@ -12783,6 +12940,10 @@ mod tests {
                     test_list(vec![Value::String("modulator".to_string())]),
                 ),
                 (
+                    "track-mod-output-available",
+                    test_list(vec![Value::Bool(true)]),
+                ),
+                (
                     "mod-routes",
                     test_list(vec![Value::Map({
                         let mut map = std::collections::HashMap::new();
@@ -14928,6 +15089,147 @@ mod tests {
             delays.rect,
             cut.rect
         );
+    }
+
+    #[test]
+    fn metal_seq_fx_sidechain_custom_ui_renders_route_dropdown() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(2.0)),
+                ("compiling", Value::Bool(false)),
+                ("delete-target-version", Value::Number(0.0)),
+                (
+                    "available-effects",
+                    test_list(vec![Value::String("sidechain".to_string())]),
+                ),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "sidechain",
+                        0,
+                        vec![
+                            Value::Map(test_param_map("threshold", 0, -20.0, -80.0, -2.0)),
+                            Value::Map(test_param_map("ratio", 1, 10.0, 1.0, 20.0)),
+                            Value::Map(test_enum_param_map(
+                                "sidechain signal",
+                                2,
+                                1.0,
+                                vec!["off", "kick", "snare"],
+                            )),
+                        ],
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 2);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load initial custom audio FX UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load custom audio FX UI");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("sidechain fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor.widget_layout().expect("sidechain fx layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let selector = find_layout_node_by_debug_name(&layout, "sidechain-route-selector")
+            .unwrap_or_else(|| panic!("sidechain selector; layout={layout_summaries:#?}"));
+        assert!(
+            selector.rect.width > 1.0 && selector.rect.height > 1.0,
+            "sidechain selector should have a finite visible rect: {:?}",
+            selector.rect
+        );
+        let dropdown = find_layout_node_by_widget_type(selector, "dropdown").unwrap_or_else(|| {
+            panic!("sidechain selector should contain dropdown: {layout_summaries:#?}")
+        });
+        assert!(
+            dropdown.rect.width > 1.0 && dropdown.rect.height > 0.5,
+            "sidechain dropdown should have a finite visible rect: {:?}",
+            dropdown.rect
+        );
+
+        let callback = dropdown
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("sidechain dropdown on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::String("snare".to_string())])
+            .expect("invoke sidechain dropdown on-change");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-effect-param-option");
+                let Value::Map(payload) = payload else {
+                    panic!("set-effect-param-option payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("slot-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0)),
+                    "sidechain callback must target the rendered effect slot"
+                );
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0)),
+                    "sidechain callback must target the sidechain selector parameter"
+                );
+                assert_eq!(
+                    payload.get("label").map(|value| value.borrow().clone()),
+                    Some(Value::String("snare".to_string())),
+                    "sidechain callback must pass the selected track label"
+                );
+            }
+            other => panic!("expected set-effect-param-option host command, got {other:?}"),
+        }
     }
 
     #[test]
@@ -19192,6 +19494,10 @@ mod tests {
                     ]),
                 ),
                 (
+                    "track-mod-output-available",
+                    test_list(vec![Value::Bool(true), Value::Bool(true)]),
+                ),
+                (
                     "mod-routes",
                     test_list(vec![Value::Map({
                         let mut map = std::collections::HashMap::new();
@@ -19636,8 +19942,15 @@ mod tests {
         );
         let mod_out =
             find_node_by_stable_key(&layout, "mixer-v2-mod-out-0").expect("track mod out port");
+        let custom_mod_out = find_node_by_stable_key(&layout, "mixer-v2-mod-out-1")
+            .expect("custom track mod out port");
         let mod_in =
             find_node_by_stable_key(&layout, "mixer-v2-mod-in-1-0").expect("track mod in port");
+        assert_eq!(
+            custom_mod_out.props.get("active"),
+            Some(&Value::Bool(true)),
+            "custom track with a declared mod output should expose the mixer source port"
+        );
         for input in 1..4 {
             let key = format!("mixer-v2-mod-in-1-{input}");
             let node = find_node_by_stable_key(&layout, &key)

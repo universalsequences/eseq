@@ -21,7 +21,7 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
-use crate::sequencer::{StepParam, StepSnapshot, Timebase};
+use crate::sequencer::{CustomInstrumentRunMode, StepParam, StepSnapshot, Timebase};
 
 /// Monotonic counter so each compile produces a unique dylib filename,
 /// preventing dlopen from returning a stale cached handle.
@@ -265,6 +265,7 @@ pub struct DGenManifest {
     pub envelopes: Vec<DGenEnvelope>,
     pub inputs: Vec<DGenInput>,
     pub modulators: Vec<DGenModulator>,
+    pub mod_outputs: Vec<DGenModOutput>,
     pub mod_destinations: Vec<DGenModDestination>,
     pub n_inputs: usize,
     pub n_outputs: usize,
@@ -336,6 +337,20 @@ pub struct DGenModulator {
     pub slot: usize,
     pub input_channel: usize,
     pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DGenSidechainInput {
+    pub input_channel: usize,
+    pub name: String,
+}
+
+#[derive(Clone)]
+pub struct DGenModOutput {
+    pub slot: usize,
+    pub channel: usize,
+    pub name: String,
+    pub range: String,
 }
 
 #[derive(Clone)]
@@ -425,6 +440,8 @@ pub struct EffectRenderReport {
     pub frames: usize,
     pub peak: f32,
     pub rms: f32,
+    pub left_rms: f32,
+    pub right_rms: f32,
     pub mean_abs: f32,
     pub diff_rms: f32,
     pub nonzero_frames: usize,
@@ -733,6 +750,20 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
         })
         .unwrap_or_default();
 
+    let mod_outputs = v["modOutputs"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|m| DGenModOutput {
+                    slot: m["slot"].as_u64().unwrap_or(0) as usize,
+                    channel: m["channel"].as_u64().unwrap_or(0) as usize,
+                    name: m["name"].as_str().unwrap_or("").to_string(),
+                    range: m["range"].as_str().unwrap_or("unipolar").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mod_destinations = v["modDestinations"]
         .as_array()
         .map(|arr| {
@@ -816,6 +847,7 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
         envelopes,
         inputs,
         modulators,
+        mod_outputs,
         mod_destinations,
         n_inputs,
         n_outputs,
@@ -846,6 +878,60 @@ pub fn instrument_descriptor_from_manifest(
 
 pub fn effect_has_host_modulation(manifest: &DGenManifest) -> bool {
     !manifest.mod_destinations.is_empty()
+}
+
+fn normalized_dgen_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn is_named_sidechain_input(name: &str) -> bool {
+    normalized_dgen_name(name).starts_with("sidechain")
+}
+
+fn sidechain_control_name(name: &str) -> String {
+    if is_named_sidechain_input(name) || name.trim().is_empty() {
+        "sidechain".to_string()
+    } else {
+        format!("sidechain {name}")
+    }
+}
+
+pub fn effect_sidechain_inputs(manifest: &DGenManifest) -> Vec<DGenSidechainInput> {
+    let has_host_modulation = effect_has_host_modulation(manifest);
+    let mut inputs = Vec::new();
+
+    for input in &manifest.inputs {
+        if input.channel < 2 {
+            continue;
+        }
+
+        let modulator = manifest
+            .modulators
+            .iter()
+            .find(|modulator| modulator.input_channel == input.channel);
+        if let Some(modulator) = modulator {
+            if !has_host_modulation {
+                inputs.push(DGenSidechainInput {
+                    input_channel: modulator.input_channel,
+                    name: sidechain_control_name(&modulator.name),
+                });
+            }
+            continue;
+        }
+
+        if is_named_sidechain_input(&input.name) {
+            inputs.push(DGenSidechainInput {
+                input_channel: input.channel,
+                name: sidechain_control_name(&input.name),
+            });
+        }
+    }
+
+    inputs.sort_by_key(|input| input.input_channel);
+    inputs
 }
 
 pub fn append_effect_host_modulation_controls(
@@ -1548,6 +1634,12 @@ pub struct InstrumentPreset {
 }
 
 #[derive(Serialize, Deserialize)]
+struct InstrumentMetadataFile {
+    version: u32,
+    run_mode: String,
+}
+
+#[derive(Serialize, Deserialize)]
 struct InstrumentPresetBank {
     version: u32,
     engine_name: String,
@@ -1663,6 +1755,74 @@ fn resolve_instrument_folder_path(name: &str) -> io::Result<PathBuf> {
 
 pub fn instrument_source_path(name: &str) -> io::Result<PathBuf> {
     resolve_instrument_storage_path(name, "lisp")
+}
+
+fn instrument_metadata_path_for_source_path(source: &Path) -> io::Result<PathBuf> {
+    if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        source
+            .parent()
+            .map(|parent| parent.join("instrument.json"))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Resolved folder-style instrument source '{}' has no parent directory",
+                        source.display()
+                    ),
+                )
+            })
+    } else {
+        Ok(source.with_extension("instrument.json"))
+    }
+}
+
+pub fn instrument_metadata_path(name: &str) -> io::Result<PathBuf> {
+    let source = instrument_source_path(name)?;
+    instrument_metadata_path_for_source_path(&source)
+}
+
+pub fn load_instrument_run_mode(name: &str) -> io::Result<CustomInstrumentRunMode> {
+    let path = instrument_metadata_path(name)?;
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(CustomInstrumentRunMode::Instrument);
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata: InstrumentMetadataFile = serde_json::from_str(&source).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to parse instrument metadata '{}': {error}",
+                path.display()
+            ),
+        )
+    })?;
+    CustomInstrumentRunMode::parse(&metadata.run_mode).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid instrument run_mode '{}'", metadata.run_mode),
+        )
+    })
+}
+
+pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -> io::Result<()> {
+    let path = instrument_metadata_path(name)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let metadata = InstrumentMetadataFile {
+        version: 1,
+        run_mode: run_mode.as_str().to_string(),
+    };
+    let json = serde_json::to_string_pretty(&metadata).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to encode instrument metadata: {error}"),
+        )
+    })?;
+    std::fs::write(path, format!("{json}\n"))
 }
 
 fn instrument_name_from_source_path(path: &Path) -> Option<String> {
@@ -2716,11 +2876,24 @@ pub fn render_loaded_effect_for_test(
     let rms = (sum_sq / samples as f64).sqrt() as f32;
     let mean_abs = (sum_abs / samples as f64) as f32;
     let diff_rms = (diff_sq / samples as f64).sqrt() as f32;
+    let mut left_sq = 0.0f64;
+    let mut right_sq = 0.0f64;
+    let mut stereo_frames = 0usize;
+    for frame in rendered.chunks_exact(2) {
+        left_sq += (frame[0] as f64) * (frame[0] as f64);
+        right_sq += (frame[1] as f64) * (frame[1] as f64);
+        stereo_frames += 1;
+    }
+    let stereo_frames = stereo_frames.max(1) as f64;
+    let left_rms = (left_sq / stereo_frames).sqrt() as f32;
+    let right_rms = (right_sq / stereo_frames).sqrt() as f32;
 
     Ok(EffectRenderReport {
         frames: options.frames,
         peak,
         rms,
+        left_rms,
+        right_rms,
         mean_abs,
         diff_rms,
         nonzero_frames,
@@ -2759,10 +2932,11 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 (def pitch (in 2 @name pitch))
 (def velocity (in 3 @name velocity))
 (def trigger (in 4 @name trigger))
-(def mod1 (in 5 @name mod1 @modulator 1))
-(def mod2 (in 6 @name mod2 @modulator 2))
-(def mod3 (in 7 @name mod3 @modulator 3))
-(def mod4 (in 8 @name mod4 @modulator 4))
+(def clock (in 5 @name clock))
+(def mod1 (in 6 @name mod1 @modulator 1))
+(def mod2 (in 7 @name mod2 @modulator 2))
+(def mod3 (in 8 @name mod3 @modulator 3))
+(def mod4 (in 9 @name mod4 @modulator 4))
 
 ; -- Parameters --
 (param attack  @default 5    @min 0   @max 1000 @unit ms)
@@ -7592,10 +7766,11 @@ pub fn run_instrument_editor_flow(
 #[cfg(test)]
 mod tests {
     use super::{
-        compile_instrument_with_asset_base, fallback_effect_descriptors,
-        fallback_instrument_descriptors, new_eval_context, parse_manifest,
-        read_eseqlisp_init_source, register_sequencer_natives, scratch_runtime_with_fallbacks,
-        shared_native_metadata, AccumulatorNoteSpan, DGenParam, ScratchControlRuntime,
+        compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
+        effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
+        new_eval_context, parse_manifest, read_eseqlisp_init_source, register_sequencer_natives,
+        scratch_runtime_with_fallbacks, shared_native_metadata, AccumulatorNoteSpan, DGenParam,
+        DGenSidechainInput, ScratchControlRuntime,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
@@ -7770,6 +7945,7 @@ mod tests {
             envelopes: Vec::new(),
             inputs: Vec::new(),
             modulators: Vec::new(),
+            mod_outputs: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 2,
@@ -7834,6 +8010,55 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, 21), (2, 22)]
         );
+    }
+
+    #[test]
+    fn parse_manifest_reads_modulation_outputs() {
+        let json = r#"
+        {
+          "totalMemorySlots": 128,
+          "inputs": [],
+          "outputs": [{ "channel": 0, "name": "audio" }],
+          "modOutputs": [
+            { "slot": 1, "channel": 2, "name": "macro-a", "range": "unipolar" },
+            { "slot": 2, "channel": 3, "name": "macro-b", "range": "unipolar" }
+          ],
+          "tensors": [],
+          "tensorInitData": []
+        }
+        "#;
+
+        let manifest = parse_manifest(json).expect("manifest parses");
+        assert_eq!(manifest.n_outputs, 1);
+        assert_eq!(manifest.mod_outputs.len(), 2);
+        assert_eq!(
+            manifest
+                .mod_outputs
+                .iter()
+                .map(|output| (
+                    output.slot,
+                    output.channel,
+                    output.name.as_str(),
+                    output.range.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![(1, 2, "macro-a", "unipolar"), (2, 3, "macro-b", "unipolar")]
+        );
+    }
+
+    #[test]
+    fn parse_manifest_defaults_missing_modulation_outputs_to_empty() {
+        let manifest = parse_manifest(
+            r#"{
+                "totalMemorySlots": 16,
+                "inputs": [],
+                "outputs": [{ "channel": 0, "name": "audio" }]
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert!(manifest.mod_outputs.is_empty());
+        assert_eq!(manifest.n_outputs, 1);
     }
 
     #[test]
@@ -7914,6 +8139,100 @@ mod tests {
                 ("gain", 1, "mod gain slot 1 amt"),
                 ("gain", 2, "mod gain slot 2 amt"),
             ]
+        );
+    }
+
+    #[test]
+    fn legacy_effect_modulator_inputs_are_sidechain_controls_without_host_modulation() {
+        let manifest = parse_manifest(
+            r#"
+            {
+              "totalMemorySlots": 128,
+              "params": [],
+              "inputs": [
+                { "channel": 0, "name": "left" },
+                { "channel": 1, "name": "right" },
+                { "channel": 2, "name": "signal" }
+              ],
+              "outputs": [
+                { "channel": 0, "name": "left" },
+                { "channel": 1, "name": "right" }
+              ],
+              "modulators": [
+                { "slot": 1, "inputChannel": 2, "name": "signal" }
+              ],
+              "modDestinations": [],
+              "tensors": [],
+              "tensorInitData": []
+            }
+            "#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(
+            effect_sidechain_inputs(&manifest),
+            vec![DGenSidechainInput {
+                input_channel: 2,
+                name: "sidechain signal".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn effect_host_modulation_can_coexist_with_named_sidechain_input() {
+        let manifest = parse_manifest(
+            r#"
+            {
+              "totalMemorySlots": 128,
+              "params": [
+                { "name": "threshold", "cellId": 10, "default": -20, "min": -80, "max": -2 }
+              ],
+              "inputs": [
+                { "channel": 0, "name": "left" },
+                { "channel": 1, "name": "right" },
+                { "channel": 2, "name": "mod1" },
+                { "channel": 3, "name": "mod2" },
+                { "channel": 4, "name": "mod3" },
+                { "channel": 5, "name": "mod4" },
+                { "channel": 6, "name": "sidechain" }
+              ],
+              "outputs": [
+                { "channel": 0, "name": "left" },
+                { "channel": 1, "name": "right" }
+              ],
+              "modulators": [
+                { "slot": 1, "inputChannel": 2, "name": "mod1" },
+                { "slot": 2, "inputChannel": 3, "name": "mod2" },
+                { "slot": 3, "inputChannel": 4, "name": "mod3" },
+                { "slot": 4, "inputChannel": 5, "name": "mod4" }
+              ],
+              "modDestinations": [
+                {
+                  "name": "threshold",
+                  "paramCellId": 10,
+                  "activeCellId": 20,
+                  "depthLanes": [
+                    { "slot": 1, "depthCellId": 21 }
+                  ],
+                  "mode": "additive",
+                  "min": -80,
+                  "max": -2
+                }
+              ],
+              "tensors": [],
+              "tensorInitData": []
+            }
+            "#,
+        )
+        .expect("manifest parses");
+
+        assert!(effect_has_host_modulation(&manifest));
+        assert_eq!(
+            effect_sidechain_inputs(&manifest),
+            vec![DGenSidechainInput {
+                input_channel: 6,
+                name: "sidechain".to_string(),
+            }]
         );
     }
 
@@ -9588,6 +9907,24 @@ mod tests {
     }
 
     #[test]
+    fn compile_instrument_manifest_includes_modulation_outputs_from_out_forms() {
+        let source = r#"
+            (out (phasor 0.25) 2 @name macro-a @modulator 1)
+            (out (phasor 50.0) 1 @name audio)
+        "#;
+
+        let json = compile_instrument(source, 44_100).expect("instrument compiles");
+        let manifest = parse_manifest(&json).expect("manifest parses");
+
+        assert_eq!(manifest.mod_outputs.len(), 1);
+        let output = &manifest.mod_outputs[0];
+        assert_eq!(output.slot, 1);
+        assert_eq!(output.channel, 1);
+        assert_eq!(output.name, "macro-a");
+        assert_eq!(output.range, "unipolar");
+    }
+
+    #[test]
     fn patcher_writeback_for_real_instrument_compiles() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("instruments/bass/bad-subbass1/dsp.lisp");
@@ -9691,6 +10028,100 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_file(&legacy_file);
+    }
+
+    #[test]
+    fn missing_instrument_metadata_defaults_to_instrument_run_mode() {
+        let name = format!("__test-run-mode-missing-{}/", std::process::id());
+        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let _ = std::fs::remove_dir_all(&folder);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+
+        assert_eq!(
+            super::load_instrument_run_mode(&name).unwrap(),
+            super::CustomInstrumentRunMode::Instrument
+        );
+        assert!(!folder.join("instrument.json").exists());
+
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn folder_instrument_run_mode_roundtrips_to_instrument_json() {
+        let name = format!("__test-run-mode-folder-{}/", std::process::id());
+        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let _ = std::fs::remove_dir_all(&folder);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+        super::save_instrument_run_mode(&name, super::CustomInstrumentRunMode::FreePatch).unwrap();
+
+        let metadata_path = folder.join("instrument.json");
+        assert_eq!(
+            super::instrument_metadata_path(&name).unwrap(),
+            metadata_path
+        );
+        assert!(metadata_path.exists());
+        assert_eq!(
+            super::load_instrument_run_mode(&name).unwrap(),
+            super::CustomInstrumentRunMode::FreePatch
+        );
+        super::save_instrument_run_mode(&name, super::CustomInstrumentRunMode::Instrument).unwrap();
+        assert_eq!(
+            super::load_instrument_run_mode(&name).unwrap(),
+            super::CustomInstrumentRunMode::Instrument
+        );
+
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn legacy_file_instrument_run_mode_roundtrips_to_sidecar_json() {
+        let name = format!("__test-run-mode-legacy-{}", std::process::id());
+        let root = std::path::Path::new(super::INSTRUMENTS_DIR);
+        let source_path = root.join(format!("{name}.lisp"));
+        let metadata_path = root.join(format!("{name}.instrument.json"));
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&metadata_path);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+        super::save_instrument_run_mode(&name, super::CustomInstrumentRunMode::FreePatch).unwrap();
+
+        assert_eq!(
+            super::instrument_metadata_path(&name).unwrap(),
+            metadata_path
+        );
+        assert!(metadata_path.exists());
+        assert_eq!(
+            super::load_instrument_run_mode(&name).unwrap(),
+            super::CustomInstrumentRunMode::FreePatch
+        );
+
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&metadata_path);
+    }
+
+    #[test]
+    fn invalid_instrument_run_mode_reports_error() {
+        let name = format!("__test-run-mode-invalid-{}/", std::process::id());
+        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let _ = std::fs::remove_dir_all(&folder);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+        std::fs::write(
+            folder.join("instrument.json"),
+            r#"{ "version": 1, "run_mode": "forever_note" }"#,
+        )
+        .unwrap();
+
+        let error = super::load_instrument_run_mode(&name).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("invalid instrument run_mode"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]
@@ -9826,6 +10257,233 @@ mod tests {
         assert!(
             diff > 0.01,
             "expected mod1 input to affect (mod xyz), diff={diff}"
+        );
+    }
+
+    #[test]
+    fn spectral_cumsum_soothe_amount_zero_full_wet_preserves_stereo_energy() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        for block_size in [256, 512] {
+            let report = super::render_loaded_effect_for_test(
+                &compiled.manifest,
+                &compiled.lib,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size,
+                    frames: 8192,
+                    param_overrides: vec![
+                        ("amount".to_string(), 0.0),
+                        ("mix".to_string(), 1.0),
+                        ("output".to_string(), 1.0),
+                    ],
+                    input_overrides: vec![],
+                },
+            )
+            .expect("effect should compile and render");
+            println!("spectral-cumsum-soothe amount=0 mix=1 block={block_size} report: {report:?}");
+
+            assert!(
+                report.left_rms > 0.01,
+                "left channel should not collapse at amount=0/mix=1 block={block_size}, report={report:?}"
+            );
+            assert!(
+                report.right_rms > 0.01,
+                "right channel should not collapse at amount=0/mix=1 block={block_size}, report={report:?}"
+            );
+            let ratio = report.left_rms / report.right_rms.max(1.0e-9);
+            assert!(
+                (0.25..4.0).contains(&ratio),
+                "stereo energy should stay within a plausible range at block={block_size}, ratio={ratio}, report={report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spectral_cumsum_soothe_is_listed_and_ui_validates() {
+        let effect_name = "spectral-cumsum-soothe";
+        let listed = super::list_saved_effects();
+        assert!(
+            listed.iter().any(|name| name == effect_name),
+            "effect picker list should include {effect_name:?}; listed={listed:?}"
+        );
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let ui_source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("effects/spectral-cumsum-soothe/ui.lisp"),
+        )
+        .expect("read spectral cumsum soothe ui");
+        crate::agent::ui_validate::validate_effect_ui_source(&ui_source, &compiled.manifest)
+            .expect("effect ui should validate");
+    }
+
+    #[test]
+    fn spectral_cumsum_soothe_high_amount_reduces_resonant_energy() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let render = |amount: f32| {
+            super::render_loaded_effect_for_test(
+                &compiled.manifest,
+                &compiled.lib,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size: 512,
+                    frames: 8192,
+                    param_overrides: vec![
+                        ("amount".to_string(), amount),
+                        ("threshold".to_string(), 0.0),
+                        ("attack".to_string(), 0.0),
+                        ("release".to_string(), 0.8),
+                        ("mix".to_string(), 1.0),
+                        ("output".to_string(), 1.0),
+                    ],
+                    input_overrides: vec![],
+                },
+            )
+            .expect("effect should compile and render")
+        };
+
+        let bypass = render(0.0);
+        let active = render(8.0);
+        println!("spectral-cumsum-soothe high amount bypass={bypass:?} active={active:?}");
+
+        assert!(
+            active.rms < bypass.rms * 0.85,
+            "high amount should produce audible attenuation, bypass={bypass:?}, active={active:?}"
+        );
+        assert!(
+            active.left_rms > 0.001 && active.right_rms > 0.001,
+            "active processing should not collapse either channel, active={active:?}"
+        );
+    }
+
+    #[test]
+    fn spectral_cumsum_soothe_delta_is_removed_signal() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-cumsum-soothe/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral cumsum soothe effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let render = |amount: f32| {
+            super::render_loaded_effect_for_test(
+                &compiled.manifest,
+                &compiled.lib,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size: 512,
+                    frames: 8192,
+                    param_overrides: vec![
+                        ("amount".to_string(), amount),
+                        ("threshold".to_string(), 0.0),
+                        ("gate".to_string(), -2.0),
+                        ("low".to_string(), 0.0),
+                        ("high".to_string(), 1.0),
+                        ("attack".to_string(), 0.0),
+                        ("release".to_string(), 0.8),
+                        ("mix".to_string(), 1.0),
+                        ("delta".to_string(), 1.0),
+                        ("output".to_string(), 1.0),
+                    ],
+                    input_overrides: vec![],
+                },
+            )
+            .expect("effect should compile and render")
+        };
+
+        let inactive = render(0.0);
+        let active = render(8.0);
+        println!("spectral-cumsum-soothe delta inactive={inactive:?} active={active:?}");
+
+        assert!(
+            inactive.rms < 0.001,
+            "delta should be nearly silent when amount=0, inactive={inactive:?}"
+        );
+        assert!(
+            active.rms > inactive.rms + 0.005,
+            "delta should expose removed spectral energy under heavy reduction, inactive={inactive:?}, active={active:?}"
+        );
+    }
+
+    #[test]
+    fn spectral_notch_phaser_is_listed_and_ui_validates() {
+        let effect_name = "spectral-notch-phaser";
+        let listed = super::list_saved_effects();
+        assert!(
+            listed.iter().any(|name| name == effect_name),
+            "effect picker list should include {effect_name:?}; listed={listed:?}"
+        );
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-notch-phaser/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral notch phaser effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let ui_source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("effects/spectral-notch-phaser/ui.lisp"),
+        )
+        .expect("read spectral notch phaser ui");
+        crate::agent::ui_validate::validate_effect_ui_source(&ui_source, &compiled.manifest)
+            .expect("effect ui should validate");
+    }
+
+    #[test]
+    fn spectral_notch_phaser_depth_changes_signal() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("effects/spectral-notch-phaser/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read spectral notch phaser effect");
+        let asset_base = path.parent();
+        let compiled = super::compile_and_load_with_asset_base(&source, 44_100, asset_base)
+            .expect("effect should compile");
+        let render = |depth: f32| {
+            super::render_loaded_effect_for_test(
+                &compiled.manifest,
+                &compiled.lib,
+                &super::EffectRenderOptions {
+                    sample_rate: 44_100,
+                    block_size: 512,
+                    frames: 8192,
+                    param_overrides: vec![
+                        ("depth".to_string(), depth),
+                        ("sharp".to_string(), 0.0),
+                        ("distance".to_string(), 16.0),
+                        ("lowkeep".to_string(), 0.0),
+                        ("mix".to_string(), 1.0),
+                        ("output".to_string(), 1.0),
+                    ],
+                    input_overrides: vec![],
+                },
+            )
+            .expect("effect should compile and render")
+        };
+
+        let bypass = render(0.0);
+        let active = render(1.0);
+        println!("spectral-notch-phaser bypass={bypass:?} active={active:?}");
+
+        assert!(
+            active.rms < bypass.rms * 0.9,
+            "deep notches should produce audible attenuation, bypass={bypass:?}, active={active:?}"
+        );
+        assert!(
+            active.left_rms > 0.001 && active.right_rms > 0.001,
+            "active processing should not collapse either channel, active={active:?}"
         );
     }
 

@@ -10,7 +10,7 @@ use crate::effects::{
     BUILTIN_SLOT_COUNT,
 };
 use crate::lisp_effect::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
-use crate::sequencer::InstrumentType;
+use crate::sequencer::{CustomInstrumentRunMode, InstrumentType};
 use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
 
@@ -140,6 +140,7 @@ impl App {
 
     pub fn add_saved_instrument_track_sync(&mut self, name: &str) -> Result<usize, String> {
         let source = lisp_effect::load_instrument_source(name).map_err(|e| e.to_string())?;
+        let run_mode = lisp_effect::load_instrument_run_mode(name).map_err(|e| e.to_string())?;
         let asset_base = lisp_effect::instrument_source_path(name)
             .ok()
             .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
@@ -151,9 +152,14 @@ impl App {
             let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
             let lib_ptr: *const lisp_effect::LoadedDGenLib =
                 &self.editor.instrument_libs[lib_index];
+            let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
+                self.register_dedicated_instrument_engine(name, &source, &manifest, lib_index)?
+            } else {
+                cache_idx
+            };
             return unsafe {
                 self.graph_controller()
-                    .add_custom_track(name, cache_idx, &manifest, &*lib_ptr)
+                    .add_custom_track(name, engine_id, &manifest, &*lib_ptr, run_mode)
             };
         }
 
@@ -168,9 +174,14 @@ impl App {
             .clone();
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
         let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
+            self.register_dedicated_instrument_engine(name, &source, &manifest, lib_index)?
+        } else {
+            cache_idx
+        };
         unsafe {
             self.graph_controller()
-                .add_custom_track(name, cache_idx, &manifest, &*lib_ptr)
+                .add_custom_track(name, engine_id, &manifest, &*lib_ptr, run_mode)
         }
     }
 
@@ -192,8 +203,13 @@ impl App {
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
         let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         unsafe {
-            self.graph_controller()
-                .add_custom_track(name, cache_idx, &manifest, &*lib_ptr)
+            self.graph_controller().add_custom_track(
+                name,
+                cache_idx,
+                &manifest,
+                &*lib_ptr,
+                crate::sequencer::CustomInstrumentRunMode::Instrument,
+            )
         }
     }
 
@@ -251,6 +267,12 @@ impl App {
                 source: source.to_string(),
                 manifest: manifest.clone(),
                 lib_index,
+                shared_runtime: self
+                    .editor
+                    .engine_registry
+                    .get(runtime_engine_id)
+                    .map(|engine| engine.shared_runtime)
+                    .unwrap_or(true),
             },
         );
 
@@ -349,6 +371,12 @@ impl App {
                 source: source.to_string(),
                 manifest,
                 lib_index,
+                shared_runtime: self
+                    .editor
+                    .engine_registry
+                    .get(engine_id)
+                    .map(|engine| engine.shared_runtime)
+                    .unwrap_or(true),
             },
         );
         Ok(())
@@ -374,8 +402,32 @@ impl App {
             source: source.to_string(),
             manifest: manifest.clone(),
             lib_index,
+            shared_runtime: true,
         };
         self.editor.engine_registry.upsert(entry)
+    }
+
+    fn register_dedicated_instrument_engine(
+        &mut self,
+        name: &str,
+        source: &str,
+        manifest: &lisp_effect::DGenManifest,
+        lib_index: usize,
+    ) -> Result<usize, String> {
+        if self.editor.engine_registry.engines.len() >= self.state.runtime.engine_voice_lids.len() {
+            return Err(format!(
+                "Instrument engine runtime slots are exhausted; maximum runtime engines is {}",
+                self.state.runtime.engine_voice_lids.len()
+            ));
+        }
+        let entry = super::EngineDescriptor {
+            name: name.to_string(),
+            source: source.to_string(),
+            manifest: manifest.clone(),
+            lib_index,
+            shared_runtime: false,
+        };
+        Ok(self.editor.engine_registry.upsert(entry))
     }
 
     fn push_instrument_lib(&mut self, lib: lisp_effect::LoadedDGenLib) -> usize {
@@ -394,8 +446,13 @@ impl App {
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
         let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         match unsafe {
-            self.graph_controller()
-                .add_custom_track(name, cache_idx, &manifest, &*lib_ptr)
+            self.graph_controller().add_custom_track(
+                name,
+                cache_idx,
+                &manifest,
+                &*lib_ptr,
+                crate::sequencer::CustomInstrumentRunMode::Instrument,
+            )
         } {
             Ok(idx) => {
                 self.ui.cursor_track = idx;
@@ -1608,12 +1665,11 @@ impl App {
         lisp_effect::append_effect_host_modulation_controls(&mut desc, manifest);
 
         let sidechain_labels = self.effect_sidechain_labels(track);
-        let mut modulators = manifest.modulators.clone();
-        modulators.sort_by_key(|m| m.slot);
-        if !lisp_effect::effect_has_host_modulation(manifest) {
-            desc.params
-                .extend(modulators.into_iter().map(|modulator| ParamDescriptor {
-                    name: format!("sidechain {}", modulator.name),
+        desc.params.extend(
+            lisp_effect::effect_sidechain_inputs(manifest)
+                .into_iter()
+                .map(|input| ParamDescriptor {
+                    name: input.name,
                     min: 0.0,
                     max: sidechain_labels.len().saturating_sub(1) as f32,
                     default: 0.0,
@@ -1624,11 +1680,11 @@ impl App {
                     node_param_idx: u32::MAX,
                     node_param_span: 1,
                     host_control: Some(HostControl::FxSidechain {
-                        input_channel: modulator.input_channel,
+                        input_channel: input.input_channel,
                     }),
                     ui_metadata: None,
-                }));
-        }
+                }),
+        );
         desc
     }
 
@@ -1646,12 +1702,11 @@ impl App {
         lisp_effect::append_effect_host_modulation_controls(&mut desc, manifest);
 
         let sidechain_labels = self.bus_effect_sidechain_labels();
-        let mut modulators = manifest.modulators.clone();
-        modulators.sort_by_key(|m| m.slot);
-        if !lisp_effect::effect_has_host_modulation(manifest) {
-            desc.params
-                .extend(modulators.into_iter().map(|modulator| ParamDescriptor {
-                    name: format!("sidechain {}", modulator.name),
+        desc.params.extend(
+            lisp_effect::effect_sidechain_inputs(manifest)
+                .into_iter()
+                .map(|input| ParamDescriptor {
+                    name: input.name,
                     min: 0.0,
                     max: sidechain_labels.len().saturating_sub(1) as f32,
                     default: 0.0,
@@ -1662,11 +1717,11 @@ impl App {
                     node_param_idx: u32::MAX,
                     node_param_span: 1,
                     host_control: Some(HostControl::FxSidechain {
-                        input_channel: modulator.input_channel,
+                        input_channel: input.input_channel,
                     }),
                     ui_metadata: None,
-                }));
-        }
+                }),
+        );
         desc
     }
 
@@ -1894,15 +1949,28 @@ impl App {
         name: &str,
         manifest: &lisp_effect::DGenManifest,
     ) {
+        let old_desc = self.graph.effect_descriptors[track][slot_idx].clone();
+        let preserve_by_param_name =
+            old_desc.name == name && self.state.pattern.effect_chains[track][slot_idx].node_id
+                .load(Ordering::Relaxed)
+                != 0;
         let desc = self.build_effect_descriptor(track, name, manifest);
         self.graph.effect_descriptors[track][slot_idx] = desc.clone();
 
         let slot = &self.state.pattern.effect_chains[track][slot_idx];
-        slot.apply_descriptor_with_modulator(
-            &desc,
-            node_ids.effect_node_id as u32,
-            node_ids.modulator_node_id.unwrap_or(0) as u32,
-        );
+        if preserve_by_param_name {
+            slot.sync_descriptor_by_param_name(&old_desc, &desc, node_ids.effect_node_id as u32);
+            slot.modulator_node_id.store(
+                node_ids.modulator_node_id.unwrap_or(0) as u32,
+                Ordering::Relaxed,
+            );
+        } else {
+            slot.apply_descriptor_with_modulator(
+                &desc,
+                node_ids.effect_node_id as u32,
+                node_ids.modulator_node_id.unwrap_or(0) as u32,
+            );
+        }
 
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
         let current_snapshot = self.state.capture_current_pattern_snapshot(
@@ -1932,6 +2000,62 @@ impl App {
         self.push_track_effect_slot_defaults(track, slot_idx);
         self.push_all_delay_bpm();
         self.state.publish_scheduler_snapshot();
+    }
+
+    fn descriptor_has_sidechain_control(desc: &EffectDescriptor) -> bool {
+        desc.params
+            .iter()
+            .any(|param| matches!(param.host_control, Some(HostControl::FxSidechain { .. })))
+    }
+
+    fn is_sidechain_effect_name(name: &str) -> bool {
+        name.trim().trim_end_matches('/') == "sidechain"
+    }
+
+    pub fn repair_stale_sidechain_effect_slots(&mut self) -> Result<usize, String> {
+        let mut targets = Vec::new();
+        for (track, descs) in self.graph.effect_descriptors.iter().enumerate() {
+            for slot_idx in BUILTIN_SLOT_COUNT..descs.len() {
+                let desc = &descs[slot_idx];
+                if !Self::is_sidechain_effect_name(&desc.name)
+                    || Self::descriptor_has_sidechain_control(desc)
+                {
+                    continue;
+                }
+                let node_id = self
+                    .state
+                    .pattern
+                    .effect_chains
+                    .get(track)
+                    .and_then(|chain| chain.get(slot_idx))
+                    .map(|slot| slot.node_id.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+                if node_id != 0 {
+                    targets.push((track, slot_idx, desc.name.clone()));
+                }
+            }
+        }
+
+        let saved_effect_tab = self.ui.effect_tab;
+        let saved_effect_tab_cursor = self.ui.effect_tab_cursor;
+        let saved_effect_param_cursor = self.ui.effect_param_cursor;
+        let saved_effect_scroll_offset = self.ui.effect_scroll_offset;
+        let mut repaired = 0;
+        for (track, slot_idx, name) in targets {
+            let result = self.compile_saved_effect(&name)?;
+            if lisp_effect::effect_sidechain_inputs(&result.manifest).is_empty() {
+                continue;
+            }
+            self.apply_compiled_effect_to_slot_sync(result, &name, slot_idx, track)?;
+            repaired += 1;
+        }
+        if repaired > 0 {
+            self.ui.effect_tab = saved_effect_tab;
+            self.ui.effect_tab_cursor = saved_effect_tab_cursor;
+            self.ui.effect_param_cursor = saved_effect_param_cursor;
+            self.ui.effect_scroll_offset = saved_effect_scroll_offset;
+        }
+        Ok(repaired)
     }
 
     fn run_effect_editor(&mut self, slot_idx: usize, existing_name: Option<String>) {
@@ -2858,8 +2982,13 @@ impl App {
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
         let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         match unsafe {
-            self.graph_controller()
-                .add_custom_track(name, cache_idx, &manifest, &*lib_ptr)
+            self.graph_controller().add_custom_track(
+                name,
+                cache_idx,
+                &manifest,
+                &*lib_ptr,
+                crate::sequencer::CustomInstrumentRunMode::Instrument,
+            )
         } {
             Ok(idx) => {
                 self.ui.cursor_track = idx;
@@ -2908,6 +3037,12 @@ impl App {
                                 source: source.to_string(),
                                 manifest: manifest.clone(),
                                 lib_index,
+                                shared_runtime: self
+                                    .editor
+                                    .engine_registry
+                                    .get(runtime_engine_id)
+                                    .map(|engine| engine.shared_runtime)
+                                    .unwrap_or(true),
                             },
                         );
                     }
@@ -2957,6 +3092,12 @@ impl App {
                                     source: r.source.clone(),
                                     manifest: manifest.clone(),
                                     lib_index,
+                                    shared_runtime: self
+                                        .editor
+                                        .engine_registry
+                                        .get(runtime_engine_id)
+                                        .map(|engine| engine.shared_runtime)
+                                        .unwrap_or(true),
                                 },
                             );
                         }
@@ -2989,8 +3130,13 @@ impl App {
                 let lib_ptr: *const lisp_effect::LoadedDGenLib =
                     &self.editor.instrument_libs[lib_index];
                 match unsafe {
-                    self.graph_controller()
-                        .add_custom_track(&r.name, cache_idx, &manifest, &*lib_ptr)
+                    self.graph_controller().add_custom_track(
+                        &r.name,
+                        cache_idx,
+                        &manifest,
+                        &*lib_ptr,
+                        crate::sequencer::CustomInstrumentRunMode::Instrument,
+                    )
                 } {
                     Ok(idx) => {
                         self.ui.cursor_track = idx;
@@ -3241,8 +3387,13 @@ mod tests {
     use std::sync::{mpsc, Mutex};
     use std::time::Duration;
 
-    fn test_app_with_track() -> App {
-        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+    fn test_app_with_track_count(track_count: usize) -> App {
+        let state = Arc::new(SequencerState::new(
+            track_count,
+            (0..track_count)
+                .map(|_| default_empty_effect_chain())
+                .collect(),
+        ));
         let (keyboard_tx, _keyboard_rx) = mpsc::channel();
         let mut app = App::new(
             state,
@@ -3260,8 +3411,32 @@ mod tests {
             Arc::new(MasterRecorder::new(44_100, 2)),
             keyboard_tx,
         );
-        app.tracks = vec!["Track 1".to_string()];
+        app.tracks = (0..track_count)
+            .map(|idx| format!("Track {}", idx + 1))
+            .collect();
         app
+    }
+
+    fn test_app_with_track() -> App {
+        test_app_with_track_count(1)
+    }
+
+    #[test]
+    fn sidechain_effect_descriptor_uses_other_tracks_as_options() {
+        let app = test_app_with_track_count(2);
+        let result = app
+            .compile_saved_effect("sidechain")
+            .expect("compile sidechain effect");
+        let desc = app.build_effect_descriptor(0, "sidechain", &result.manifest);
+        let sidechain = desc
+            .params
+            .iter()
+            .find(|param| param.name == "sidechain")
+            .expect("sidechain effect descriptor should expose sidechain selector");
+        let ParamKind::Enum { labels } = &sidechain.kind else {
+            panic!("sidechain selector should be an enum param");
+        };
+        assert_eq!(labels, &vec!["off".to_string(), "Track 2".to_string()]);
     }
 
     #[test]

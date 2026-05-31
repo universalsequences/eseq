@@ -5,10 +5,12 @@ use std::sync::atomic::Ordering;
 
 use crate::effects::EffectDescriptor;
 use crate::lisp_effect::{self, DGenManifest, LoadedDGenLib};
-use crate::sequencer::{BusId, InstrumentType, TrackOutput, EXT_MOD_INPUT_COUNT, MAX_TRACKS};
+use crate::sequencer::{
+    BusId, CustomInstrumentRunMode, InstrumentType, TrackOutput, EXT_MOD_INPUT_COUNT, MAX_TRACKS,
+};
 use crate::voice::MAX_VOICES;
 
-use super::{App, EngineNodeIds, TrackNodeIds};
+use super::{App, EngineDescriptor, EngineNodeIds, TrackNodeIds};
 
 const DELETE_WITHOUT_SHIFT_ENV: &str = "TINYSEQ_DELETE_TRACK_WITHOUT_SHIFT";
 
@@ -50,6 +52,7 @@ enum InstrumentRegistration<'a> {
     Custom {
         engine_id: usize,
         manifest: &'a DGenManifest,
+        run_mode: CustomInstrumentRunMode,
     },
     Modulator,
 }
@@ -110,6 +113,91 @@ fn add_gain_node_checked(
     Ok(node_id)
 }
 
+fn push_graph_param(lg: *mut crate::audiograph::LiveGraph, logical_id: u64, idx: u64, value: f32) {
+    if logical_id == 0 {
+        return;
+    }
+    unsafe {
+        crate::audiograph::params_push_wrapper(
+            lg,
+            crate::audiograph::ParamMsg {
+                idx,
+                logical_id,
+                fvalue: value,
+            },
+        );
+    }
+}
+
+fn push_graph_param_span(
+    lg: *mut crate::audiograph::LiveGraph,
+    logical_id: u64,
+    idx: u64,
+    span: u32,
+    value: f32,
+) {
+    for lane in 0..span.max(1) as u64 {
+        push_graph_param(lg, logical_id, idx + lane, value);
+    }
+}
+
+fn normalized_host_input_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn host_signal_output_for_input(
+    manifest: &DGenManifest,
+    input: &lisp_effect::DGenInput,
+) -> Option<i32> {
+    let manifest_lacks_names = manifest
+        .inputs
+        .iter()
+        .all(|candidate| candidate.name.trim().is_empty());
+    let normalized = normalized_host_input_name(&input.name);
+    match normalized.as_str() {
+        "gate" => Some(crate::gatepitch::PARAM_GATE as i32),
+        "pitch" => Some(crate::gatepitch::PARAM_PITCH as i32),
+        "velocity" | "vel" => Some(crate::gatepitch::PARAM_VELOCITY as i32),
+        "trigger" | "trig" => Some(crate::gatepitch::PARAM_TRIGGER as i32),
+        "clock" | "barclock" => Some(crate::gatepitch::PARAM_CLOCK_PHASE as i32),
+        _ if manifest_lacks_names && input.channel < 4 => Some(input.channel as i32),
+        _ => None,
+    }
+}
+
+fn manifest_mod_output_channels(manifest: &DGenManifest) -> Vec<usize> {
+    let output_count = manifest.n_outputs.max(1);
+    let mut channels = Vec::new();
+    for output in &manifest.mod_outputs {
+        if output.channel < output_count && !channels.contains(&output.channel) {
+            channels.push(output.channel);
+        }
+    }
+    channels
+}
+
+fn manifest_audio_output_channels(manifest: &DGenManifest) -> Vec<usize> {
+    let output_count = manifest.n_outputs.max(1);
+    let mod_channels = manifest_mod_output_channels(manifest);
+    (0..output_count)
+        .filter(|channel| !mod_channels.contains(channel))
+        .collect()
+}
+
+fn stereo_route_source_channel(audio_channels: &[usize], route_idx: usize) -> Option<usize> {
+    match route_idx {
+        0 => audio_channels.first().copied(),
+        1 => audio_channels
+            .get(1)
+            .copied()
+            .or_else(|| audio_channels.first().copied()),
+        _ => None,
+    }
+}
+
 impl App {
     pub fn graph_controller(&mut self) -> GraphController<'_> {
         GraphController { app: self }
@@ -162,6 +250,10 @@ impl GraphController<'_> {
                 || connection.dest_track >= track_count
                 || connection.source_track == connection.dest_track
                 || connection.dest_input >= EXT_MOD_INPUT_COUNT
+                || !self
+                    .app
+                    .graph
+                    .track_exposes_mod_output(connection.source_track)
             {
                 continue;
             }
@@ -191,10 +283,8 @@ impl GraphController<'_> {
         if source_track == dest_track {
             return Err("mod route cannot connect a track to itself".to_string());
         }
-        if self.app.graph.track_instrument_types.get(source_track)
-            != Some(&InstrumentType::Modulator)
-        {
-            return Err("mod route source track is not a modulator".to_string());
+        if !self.app.graph.track_exposes_mod_output(source_track) {
+            return Err("mod route source track has no mod output".to_string());
         }
         let current_pattern = self
             .app
@@ -772,6 +862,7 @@ impl GraphController<'_> {
         engine_id: usize,
         manifest: &DGenManifest,
         lib: &LoadedDGenLib,
+        run_mode: CustomInstrumentRunMode,
     ) -> Result<usize, String> {
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
         let idx = self.app.state.active_track_count();
@@ -788,6 +879,7 @@ impl GraphController<'_> {
             &track_name,
             shell.voice_sum_id,
             shell.voice_sum_r_id,
+            shell.mod_out_id,
             shell.mod_in_clip_ids,
         )?;
         self.finish_track_registration(TrackRegistration {
@@ -798,9 +890,13 @@ impl GraphController<'_> {
             instrument: InstrumentRegistration::Custom {
                 engine_id,
                 manifest,
+                run_mode,
             },
         });
         self.app.sampler_paths.push(None);
+        if run_mode == CustomInstrumentRunMode::FreePatch {
+            self.apply_free_patch_idle_voice(idx)?;
+        }
         self.debug_assert_track_vectors_aligned();
         Ok(idx)
     }
@@ -829,6 +925,20 @@ impl GraphController<'_> {
             if self.app.graph.track_engine_ids.get(bound_track) == Some(&Some(engine_id)) {
                 let track_name = self.app.tracks[bound_track].clone();
                 self.sync_instrument_slot(bound_track, &track_name, manifest);
+            }
+        }
+
+        for bound_track in 0..self.app.tracks.len() {
+            if self.app.graph.track_engine_ids.get(bound_track) == Some(&Some(engine_id))
+                && self
+                    .app
+                    .graph
+                    .track_instrument_run_modes
+                    .get(bound_track)
+                    .copied()
+                    == Some(CustomInstrumentRunMode::FreePatch)
+            {
+                self.apply_free_patch_idle_voice(bound_track)?;
             }
         }
 
@@ -991,6 +1101,7 @@ impl GraphController<'_> {
         self.app.graph.track_sample_rates.clear();
         self.app.graph.track_voice_lids.clear();
         self.app.graph.track_instrument_types.clear();
+        self.app.graph.track_instrument_run_modes.clear();
         self.app.graph.track_engine_ids.clear();
         self.app.graph.track_synth_node_ids.clear();
         self.app.graph.track_gatepitch_node_ids.clear();
@@ -1204,6 +1315,7 @@ impl GraphController<'_> {
         self.app.graph.track_buffer_ids[track_idx] = -1;
         self.app.graph.track_sample_rates[track_idx] = self.app.graph.sample_rate;
         self.app.graph.track_instrument_types[track_idx] = InstrumentType::Sampler;
+        self.set_track_instrument_run_mode(track_idx, CustomInstrumentRunMode::Instrument)?;
         self.app.graph.track_engine_ids[track_idx] = None;
         self.app.graph.track_synth_node_ids[track_idx].clear();
         self.app.graph.track_gatepitch_node_ids[track_idx].clear();
@@ -1687,12 +1799,389 @@ impl GraphController<'_> {
         self.app.graph.track_sample_rates.remove(track_idx);
         self.app.graph.track_voice_lids.remove(track_idx);
         self.app.graph.track_instrument_types.remove(track_idx);
+        self.app.graph.track_instrument_run_modes.remove(track_idx);
         self.app.graph.track_engine_ids.remove(track_idx);
         self.app.graph.track_synth_node_ids.remove(track_idx);
         self.app.graph.track_gatepitch_node_ids.remove(track_idx);
         self.app.graph.effect_descriptors.remove(track_idx);
         self.app.graph.instrument_descriptors.remove(track_idx);
         self.app.graph.record_armed.remove(track_idx);
+    }
+
+    fn create_dedicated_engine_descriptor_from(
+        &mut self,
+        engine_id: usize,
+    ) -> Result<usize, String> {
+        if self.app.editor.engine_registry.engines.len()
+            >= self.app.state.runtime.engine_voice_lids.len()
+        {
+            return Err(format!(
+                "Instrument engine runtime slots are exhausted; maximum runtime engines is {}",
+                self.app.state.runtime.engine_voice_lids.len()
+            ));
+        }
+        let descriptor = self
+            .app
+            .editor
+            .engine_registry
+            .get(engine_id)
+            .cloned()
+            .ok_or_else(|| format!("Missing instrument engine descriptor {engine_id}"))?;
+        let dedicated_id = self.app.editor.engine_registry.upsert(EngineDescriptor {
+            name: descriptor.name,
+            source: descriptor.source,
+            manifest: descriptor.manifest,
+            lib_index: descriptor.lib_index,
+            shared_runtime: false,
+        });
+        if dedicated_id >= self.app.state.runtime.engine_voice_lids.len() {
+            return Err(format!(
+                "Instrument engine runtime slots are exhausted; cannot create dedicated free-patch engine {dedicated_id}"
+            ));
+        }
+        Ok(dedicated_id)
+    }
+
+    fn ensure_track_uses_dedicated_engine(&mut self, track: usize) -> Result<(), String> {
+        if self.app.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
+            return Ok(());
+        }
+        let old_engine_id = self
+            .app
+            .graph
+            .track_engine_ids
+            .get(track)
+            .and_then(|engine_id| *engine_id)
+            .ok_or_else(|| format!("Custom track {} has no engine binding", track + 1))?;
+        let descriptor = self
+            .app
+            .editor
+            .engine_registry
+            .get(old_engine_id)
+            .cloned()
+            .ok_or_else(|| format!("Missing instrument engine descriptor {old_engine_id}"))?;
+        if !descriptor.shared_runtime {
+            return Ok(());
+        }
+        if descriptor.lib_index >= self.app.editor.instrument_libs.len() {
+            return Err(format!(
+                "Instrument engine {old_engine_id} references missing library {}",
+                descriptor.lib_index
+            ));
+        }
+
+        let dedicated_engine_id = self.create_dedicated_engine_descriptor_from(old_engine_id)?;
+        let manifest = descriptor.manifest;
+        let name = descriptor.name;
+        let lib_ptr: *const LoadedDGenLib = &self.app.editor.instrument_libs[descriptor.lib_index];
+        let track_name = self.app.tracks[track].clone();
+        let track_nodes = self
+            .app
+            .graph
+            .track_node_ids
+            .get(track)
+            .cloned()
+            .ok_or_else(|| format!("Missing graph nodes for track {}", track + 1))?;
+
+        self.delete_track_engine_routes(track);
+        if !self.engine_is_still_referenced_excluding(old_engine_id, track) {
+            self.delete_engine_runtime(old_engine_id);
+        }
+
+        self.ensure_custom_engine_runtime(dedicated_engine_id, &name, &manifest, unsafe {
+            &*lib_ptr
+        })?;
+        self.connect_engine_to_track(
+            dedicated_engine_id,
+            track,
+            &track_name,
+            track_nodes.voice_sum_id,
+            track_nodes.voice_sum_r_id,
+            track_nodes.mod_out_id,
+            track_nodes.mod_in_clip_ids,
+        )?;
+
+        self.app.graph.track_engine_ids[track] = Some(dedicated_engine_id);
+        self.app.state.runtime.track_engine_ids[track]
+            .store(dedicated_engine_id as u32, Ordering::Release);
+        if let Some(engine) = self.app.graph.engine_node_ids[dedicated_engine_id].as_ref() {
+            self.app.graph.track_synth_node_ids[track] = engine.synth_ids.clone();
+            self.app.graph.track_gatepitch_node_ids[track] = engine.gatepitch_ids.clone();
+        }
+        if let Some(sound) = self
+            .app
+            .state
+            .pattern
+            .track_sound_state
+            .lock()
+            .unwrap()
+            .get_mut(track)
+        {
+            sound.engine_id = Some(dedicated_engine_id);
+        }
+        Ok(())
+    }
+
+    fn set_engine_voice_route_to_track(
+        &self,
+        engine_id: usize,
+        voice_idx: usize,
+        track_idx: usize,
+        value: f32,
+    ) {
+        let Some(engine) = self
+            .app
+            .graph
+            .engine_node_ids
+            .get(engine_id)
+            .and_then(|engine| engine.as_ref())
+        else {
+            return;
+        };
+        if let Some(route_pair) = engine
+            .route_gain_ids
+            .get(track_idx)
+            .and_then(|routes| routes.get(voice_idx))
+        {
+            for &route_id in route_pair {
+                if route_id > 0 {
+                    push_graph_param(self.app.graph.lg.0, route_id as u64, 0, value);
+                }
+            }
+        }
+        if let Some(ext_routes) = engine
+            .ext_route_gain_ids
+            .get(track_idx)
+            .and_then(|routes| routes.get(voice_idx))
+        {
+            for &route_id in ext_routes {
+                if route_id > 0 {
+                    push_graph_param(self.app.graph.lg.0, route_id as u64, 0, value);
+                }
+            }
+        }
+    }
+
+    fn route_free_patch_idle_voice_to_track(
+        &self,
+        engine_id: usize,
+        track: usize,
+    ) -> Result<(), String> {
+        let engine = self
+            .app
+            .graph
+            .engine_node_ids
+            .get(engine_id)
+            .and_then(|engine| engine.as_ref())
+            .ok_or_else(|| format!("Missing runtime for instrument engine {engine_id}"))?;
+        if engine.synth_ids.is_empty() || engine.gatepitch_ids.is_empty() {
+            return Err(format!(
+                "Instrument engine {engine_id} has no voice 0 runtime for free-patch mode"
+            ));
+        }
+        for track_idx in 0..self.app.tracks.len() {
+            let value = if track_idx == track { 1.0 } else { 0.0 };
+            self.set_engine_voice_route_to_track(engine_id, 0, track_idx, value);
+        }
+        Ok(())
+    }
+
+    fn close_free_patch_idle_route(&self, track: usize) {
+        let Some(engine_id) = self
+            .app
+            .graph
+            .track_engine_ids
+            .get(track)
+            .and_then(|engine_id| *engine_id)
+        else {
+            return;
+        };
+        self.set_engine_voice_route_to_track(engine_id, 0, track, 0.0);
+    }
+
+    fn dispatch_instrument_defaults_to_engine_voice(
+        &self,
+        track: usize,
+        engine_id: usize,
+        voice_idx: usize,
+    ) -> Result<(), String> {
+        let engine = self
+            .app
+            .graph
+            .engine_node_ids
+            .get(engine_id)
+            .and_then(|engine| engine.as_ref())
+            .ok_or_else(|| format!("Missing runtime for instrument engine {engine_id}"))?;
+        let synth_id =
+            engine.synth_ids.get(voice_idx).copied().ok_or_else(|| {
+                format!("Missing synth node for engine {engine_id} voice {voice_idx}")
+            })? as u64;
+        let modulator_id = engine.modulator_ids.get(voice_idx).copied().unwrap_or(0) as u64;
+        let slot = &self.app.state.pattern.instrument_slots[track];
+        let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+        let mut param_indices = (0..num_params).collect::<Vec<_>>();
+        param_indices.sort_by_key(|param_idx| slot.resolve_node_idx(*param_idx));
+        for param_idx in param_indices {
+            let idx = slot.resolve_node_idx(param_idx);
+            let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+            let logical_id = if is_mod_param { modulator_id } else { synth_id };
+            let resolved_idx = if is_mod_param {
+                idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+            } else {
+                idx
+            };
+            push_graph_param_span(
+                self.app.graph.lg.0,
+                logical_id,
+                resolved_idx,
+                slot.resolve_node_span(param_idx),
+                slot.defaults.get(param_idx),
+            );
+        }
+        Ok(())
+    }
+
+    fn push_free_patch_idle_gatepitch(&self, engine_id: usize) -> Result<(), String> {
+        let engine = self
+            .app
+            .graph
+            .engine_node_ids
+            .get(engine_id)
+            .and_then(|engine| engine.as_ref())
+            .ok_or_else(|| format!("Missing runtime for instrument engine {engine_id}"))?;
+        let gatepitch_id = engine
+            .gatepitch_ids
+            .first()
+            .copied()
+            .ok_or_else(|| format!("Missing gatepitch node for engine {engine_id} voice 0"))?
+            as u64;
+        push_graph_param(
+            self.app.graph.lg.0,
+            gatepitch_id,
+            crate::gatepitch::PARAM_TRIGGER,
+            0.0,
+        );
+        push_graph_param(
+            self.app.graph.lg.0,
+            gatepitch_id,
+            crate::gatepitch::PARAM_PITCH,
+            440.0,
+        );
+        push_graph_param(
+            self.app.graph.lg.0,
+            gatepitch_id,
+            crate::gatepitch::PARAM_VELOCITY,
+            1.0,
+        );
+        push_graph_param(
+            self.app.graph.lg.0,
+            gatepitch_id,
+            crate::gatepitch::PARAM_GATE,
+            0.0,
+        );
+        Ok(())
+    }
+
+    fn apply_free_patch_idle_voice(&self, track: usize) -> Result<(), String> {
+        let engine_id = self
+            .app
+            .graph
+            .track_engine_ids
+            .get(track)
+            .and_then(|engine_id| *engine_id)
+            .ok_or_else(|| format!("Custom track {} has no engine binding", track + 1))?;
+        self.route_free_patch_idle_voice_to_track(engine_id, track)?;
+        self.dispatch_instrument_defaults_to_engine_voice(track, engine_id, 0)?;
+        self.push_free_patch_idle_gatepitch(engine_id)?;
+        lisp_effect::set_dgen_engine_enabled_voices(engine_id, 1);
+        Ok(())
+    }
+
+    pub fn set_track_instrument_run_mode(
+        &mut self,
+        track: usize,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Result<(), String> {
+        if track >= self.app.tracks.len() {
+            return Err(format!("Invalid track index {}", track + 1));
+        }
+        let normalized_mode =
+            if self.app.graph.track_instrument_types.get(track) == Some(&InstrumentType::Custom) {
+                run_mode
+            } else {
+                CustomInstrumentRunMode::Instrument
+            };
+
+        if normalized_mode == CustomInstrumentRunMode::FreePatch {
+            self.ensure_track_uses_dedicated_engine(track)?;
+        }
+
+        if let Some(mode) = self.app.graph.track_instrument_run_modes.get_mut(track) {
+            *mode = normalized_mode;
+        }
+        self.app.state.pattern.instrument_run_modes[track]
+            .store(normalized_mode.runtime_flag(), Ordering::Relaxed);
+        self.app.state.runtime.instrument_run_mode_flags[track]
+            .store(normalized_mode.runtime_flag(), Ordering::Release);
+
+        let current_pattern = self
+            .app
+            .state
+            .pattern
+            .current_pattern
+            .load(Ordering::Relaxed) as usize;
+        if let Some(snapshot) = self
+            .app
+            .state
+            .pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get_mut(current_pattern)
+        {
+            snapshot
+                .normalize_track_count(self.app.tracks.len(), &self.app.graph.effect_descriptors);
+            snapshot.instrument_run_modes[track] = normalized_mode;
+        }
+        if normalized_mode == CustomInstrumentRunMode::FreePatch {
+            self.apply_free_patch_idle_voice(track)?;
+        } else {
+            self.close_free_patch_idle_route(track);
+        }
+        self.app.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    pub fn sync_track_instrument_run_modes_from_live_state(&mut self) -> Result<(), String> {
+        let track_count = self.app.tracks.len();
+        self.app
+            .graph
+            .track_instrument_run_modes
+            .resize(track_count, CustomInstrumentRunMode::Instrument);
+        for track in 0..track_count {
+            let mode = CustomInstrumentRunMode::from_runtime_flag(
+                self.app.state.pattern.instrument_run_modes[track].load(Ordering::Relaxed),
+            );
+            let mode = if self.app.graph.track_instrument_types.get(track)
+                == Some(&InstrumentType::Custom)
+            {
+                mode
+            } else {
+                CustomInstrumentRunMode::Instrument
+            };
+            if mode == CustomInstrumentRunMode::FreePatch {
+                self.ensure_track_uses_dedicated_engine(track)?;
+            }
+            self.app.graph.track_instrument_run_modes[track] = mode;
+            self.app.state.runtime.instrument_run_mode_flags[track]
+                .store(mode.runtime_flag(), Ordering::Release);
+            if mode == CustomInstrumentRunMode::FreePatch {
+                self.apply_free_patch_idle_voice(track)?;
+            } else {
+                self.close_free_patch_idle_route(track);
+            }
+        }
+        Ok(())
     }
 
     fn rebind_live_track_runtime_after_delete(&mut self) {
@@ -1723,6 +2212,15 @@ impl GraphController<'_> {
                 engine_id.map(|id| id as u32).unwrap_or(u32::MAX),
                 Ordering::Relaxed,
             );
+            let run_mode = self
+                .app
+                .graph
+                .track_instrument_run_modes
+                .get(track_idx)
+                .copied()
+                .unwrap_or(CustomInstrumentRunMode::Instrument);
+            self.app.state.runtime.instrument_run_mode_flags[track_idx]
+                .store(run_mode.runtime_flag(), Ordering::Relaxed);
             if let Some(meta) = track_sound_state.get_mut(track_idx) {
                 meta.engine_id = engine_id;
             }
@@ -1873,7 +2371,7 @@ impl GraphController<'_> {
                     crate::gatepitch::GATEPITCH_STATE_SIZE * std::mem::size_of::<f32>(),
                     gp_name.as_ptr(),
                     0,
-                    4,
+                    crate::gatepitch::OUTPUT_COUNT as i32,
                     std::ptr::null(),
                     0,
                 )
@@ -2013,6 +2511,70 @@ impl GraphController<'_> {
         }
     }
 
+    fn connect_custom_host_inputs(
+        &self,
+        gp_id: i32,
+        mod_id: i32,
+        synth_id: i32,
+        manifest: &DGenManifest,
+        context: &str,
+    ) -> Result<(), String> {
+        for input in &manifest.inputs {
+            if input.channel >= manifest.n_inputs {
+                return Err(format!(
+                    "{context}: manifest input '{}' references channel {} but instrument has {} inputs",
+                    input.name, input.channel, manifest.n_inputs
+                ));
+            }
+            if manifest
+                .modulators
+                .iter()
+                .any(|modulator| modulator.input_channel == input.channel)
+            {
+                continue;
+            }
+            let Some(host_output) = host_signal_output_for_input(manifest, input) else {
+                continue;
+            };
+            self.graph_connect_checked(
+                gp_id,
+                host_output,
+                synth_id,
+                input.channel as i32,
+                &format!(
+                    "{context} host input '{}' channel {}",
+                    input.name, input.channel
+                ),
+            )?;
+        }
+
+        for modulator in &manifest.modulators {
+            if modulator.input_channel >= manifest.n_inputs {
+                return Err(format!(
+                    "{context}: modulator '{}' references channel {} but instrument has {} inputs",
+                    modulator.name, modulator.input_channel, manifest.n_inputs
+                ));
+            }
+            if modulator.slot == 0 || modulator.slot > crate::voice_modulator::NUM_OUTPUTS {
+                return Err(format!(
+                    "{context}: modulator '{}' has invalid slot {}",
+                    modulator.name, modulator.slot
+                ));
+            }
+            self.graph_connect_checked(
+                mod_id,
+                (modulator.slot - 1) as i32,
+                synth_id,
+                modulator.input_channel as i32,
+                &format!(
+                    "{context} modulator '{}' slot {} channel {}",
+                    modulator.name, modulator.slot, modulator.input_channel
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
     fn ensure_custom_engine_runtime(
         &mut self,
         engine_id: usize,
@@ -2021,6 +2583,12 @@ impl GraphController<'_> {
         lib: &LoadedDGenLib,
     ) -> Result<(), String> {
         self.ensure_engine_slot(engine_id);
+        if engine_id >= self.app.state.runtime.engine_voice_lids.len() {
+            return Err(format!(
+                "Instrument engine runtime slot {engine_id} is unavailable; maximum runtime engines is {}",
+                self.app.state.runtime.engine_voice_lids.len()
+            ));
+        }
         if self.app.graph.engine_node_ids[engine_id].is_some() {
             return Ok(());
         }
@@ -2039,7 +2607,7 @@ impl GraphController<'_> {
                     crate::gatepitch::GATEPITCH_STATE_SIZE * std::mem::size_of::<f32>(),
                     gp_name.as_ptr(),
                     0,
-                    4,
+                    crate::gatepitch::OUTPUT_COUNT as i32,
                     std::ptr::null(),
                     0,
                 )
@@ -2112,20 +2680,13 @@ impl GraphController<'_> {
                     engine_id, v, manifest.n_inputs
                 ));
             }
-            for input in &manifest.inputs {
-                if input.channel < 4 {
-                    self.graph_connect_checked(
-                        gp_id,
-                        input.channel as i32,
-                        synth_id,
-                        input.channel as i32,
-                        &format!(
-                            "ensure_custom_engine_runtime engine {} voice {} input {}",
-                            engine_id, v, input.channel
-                        ),
-                    )?;
-                }
-            }
+            self.connect_custom_host_inputs(
+                gp_id,
+                mod_id,
+                synth_id,
+                manifest,
+                &format!("ensure_custom_engine_runtime engine {engine_id} voice {v}"),
+            )?;
             self.graph_connect_checked(
                 gp_id,
                 0,
@@ -2166,32 +2727,20 @@ impl GraphController<'_> {
                     engine_id, v
                 ),
             )?;
-            for mod_out in 0..crate::voice_modulator::NUM_OUTPUTS {
-                let synth_in = 4 + mod_out as i32;
-                if manifest.n_inputs > synth_in as usize {
-                    self.graph_connect_checked(
-                        mod_id,
-                        mod_out as i32,
-                        synth_id,
-                        synth_in,
-                        &format!(
-                            "ensure_custom_engine_runtime engine {} voice {} mod {}",
-                            engine_id, v, mod_out
-                        ),
-                    )?;
-                }
-            }
-
             gatepitch_ids.push(gp_id);
             modulator_ids.push(mod_id);
             synth_ids.push(synth_id);
             voice_lids.push(gp_id as u64);
         }
 
+        let audio_output_channels = manifest_audio_output_channels(manifest);
+        let mod_output_channels = manifest_mod_output_channels(manifest);
         self.app.graph.engine_node_ids[engine_id] = Some(EngineNodeIds {
             synth_ids,
             synth_inputs: manifest.n_inputs,
-            synth_outputs: manifest.n_outputs.max(1),
+            synth_outputs: audio_output_channels.len(),
+            audio_output_channels,
+            mod_output_channels,
             gatepitch_ids,
             modulator_ids,
             route_gain_ids: (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
@@ -2224,6 +2773,7 @@ impl GraphController<'_> {
         track_name: &str,
         voice_sum_id: i32,
         voice_sum_r_id: i32,
+        track_mod_out_id: i32,
         track_mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
     ) -> Result<(), String> {
         self.ensure_engine_slot(engine_id);
@@ -2237,7 +2787,8 @@ impl GraphController<'_> {
             return Ok(());
         }
         let synth_ids = existing_engine.synth_ids.clone();
-        let synth_outputs = existing_engine.synth_outputs.max(1);
+        let audio_output_channels = existing_engine.audio_output_channels.clone();
+        let primary_mod_output_channel = existing_engine.mod_output_channels.first().copied();
         let modulator_ids = existing_engine.modulator_ids.clone();
 
         let mut route_ids = Vec::with_capacity(MAX_VOICES);
@@ -2252,16 +2803,18 @@ impl GraphController<'_> {
                     engine_id, track_idx, v
                 ),
             )?;
-            self.graph_connect_checked(
-                synth_ids[v],
-                0,
-                route_l_id,
-                0,
-                &format!(
-                    "connect_engine_to_track left engine {} track {} voice {}",
-                    engine_id, track_idx, v
-                ),
-            )?;
+            if let Some(src_channel) = stereo_route_source_channel(&audio_output_channels, 0) {
+                self.graph_connect_checked(
+                    synth_ids[v],
+                    src_channel as i32,
+                    route_l_id,
+                    0,
+                    &format!(
+                        "connect_engine_to_track left engine {} track {} voice {}",
+                        engine_id, track_idx, v
+                    ),
+                )?;
+            }
             self.graph_connect_checked(
                 route_l_id,
                 0,
@@ -2277,7 +2830,7 @@ impl GraphController<'_> {
             self.app.state.runtime.engine_route_lids[engine_id][v][track_idx]
                 .store(route_l_id as u64, Ordering::Release);
 
-            if synth_outputs > 1 {
+            if let Some(src_channel) = stereo_route_source_channel(&audio_output_channels, 1) {
                 let route_r_id = add_gain_node_checked(
                     self.app.graph.lg.0,
                     0.0,
@@ -2289,7 +2842,7 @@ impl GraphController<'_> {
                 )?;
                 self.graph_connect_checked(
                     synth_ids[v],
-                    1,
+                    src_channel as i32,
                     route_r_id,
                     0,
                     &format!(
@@ -2321,16 +2874,6 @@ impl GraphController<'_> {
                     ),
                 )?;
                 self.graph_connect_checked(
-                    synth_ids[v],
-                    0,
-                    route_r_id,
-                    0,
-                    &format!(
-                        "connect_engine_to_track mirrored-right engine {} track {} voice {}",
-                        engine_id, track_idx, v
-                    ),
-                )?;
-                self.graph_connect_checked(
                     route_r_id,
                     0,
                     voice_sum_r_id,
@@ -2346,6 +2889,19 @@ impl GraphController<'_> {
             }
 
             route_ids.push(route_pair);
+
+            if let Some(src_channel) = primary_mod_output_channel {
+                self.graph_connect_checked(
+                    synth_ids[v],
+                    src_channel as i32,
+                    track_mod_out_id,
+                    0,
+                    &format!(
+                        "connect_engine_to_track mod output engine {} track {} voice {}",
+                        engine_id, track_idx, v
+                    ),
+                )?;
+            }
 
             let mut voice_ext_route_ids = [0; EXT_MOD_INPUT_COUNT];
             for input in 0..EXT_MOD_INPUT_COUNT {
@@ -2469,6 +3025,10 @@ impl GraphController<'_> {
         self.silence_engine_routes(engine_id, &engine);
         lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
 
+        let audio_output_channels = manifest_audio_output_channels(manifest);
+        let mod_output_channels = manifest_mod_output_channels(manifest);
+        let primary_mod_output_channel = mod_output_channels.first().copied();
+
         let mut new_synth_ids = Vec::with_capacity(MAX_VOICES);
         for v in 0..MAX_VOICES {
             let old_synth = engine.synth_ids[v];
@@ -2498,18 +3058,17 @@ impl GraphController<'_> {
                         if route_id <= 0 {
                             continue;
                         }
-                        let src_port = if engine.synth_outputs > 1 {
-                            route_idx as i32
-                        } else {
-                            0
-                        };
-                        crate::audiograph::graph_disconnect(
-                            self.app.graph.lg.0,
-                            old_synth,
-                            src_port,
-                            route_id,
-                            0,
-                        );
+                        if let Some(src_channel) =
+                            stereo_route_source_channel(&engine.audio_output_channels, route_idx)
+                        {
+                            crate::audiograph::graph_disconnect(
+                                self.app.graph.lg.0,
+                                old_synth,
+                                src_channel as i32,
+                                route_id,
+                                0,
+                            );
+                        }
                     }
                 }
                 for (input, ext_route_id) in engine
@@ -2557,35 +3116,13 @@ impl GraphController<'_> {
                     engine_id, v, manifest.n_inputs
                 ));
             }
-            for input in &manifest.inputs {
-                if input.channel < 4 {
-                    self.graph_connect_checked(
-                        gp_id,
-                        input.channel as i32,
-                        synth_id,
-                        input.channel as i32,
-                        &format!(
-                            "rebuild_custom_engine_runtime engine {} voice {} input {}",
-                            engine_id, v, input.channel
-                        ),
-                    )?;
-                }
-            }
-            for mod_out in 0..crate::voice_modulator::NUM_OUTPUTS {
-                let synth_in = 4 + mod_out as i32;
-                if manifest.n_inputs > synth_in as usize {
-                    self.graph_connect_checked(
-                        mod_id,
-                        mod_out as i32,
-                        synth_id,
-                        synth_in,
-                        &format!(
-                            "rebuild_custom_engine_runtime engine {} voice {} mod {}",
-                            engine_id, v, mod_out
-                        ),
-                    )?;
-                }
-            }
+            self.connect_custom_host_inputs(
+                gp_id,
+                mod_id,
+                synth_id,
+                manifest,
+                &format!("rebuild_custom_engine_runtime engine {engine_id} voice {v}"),
+            )?;
             for route_pair in engine
                 .route_gain_ids
                 .iter()
@@ -2595,21 +3132,40 @@ impl GraphController<'_> {
                     if route_id <= 0 {
                         continue;
                     }
-                    let src_port = if manifest.n_outputs > 1 {
-                        route_idx as i32
-                    } else {
-                        0
-                    };
-                    self.graph_connect_checked(
-                        synth_id,
-                        src_port,
-                        route_id,
-                        0,
-                        &format!(
-                            "rebuild_custom_engine_runtime engine {} voice {} route {}:{}",
-                            engine_id, v, route_id, src_port
-                        ),
-                    )?;
+                    if let Some(src_channel) =
+                        stereo_route_source_channel(&audio_output_channels, route_idx)
+                    {
+                        self.graph_connect_checked(
+                            synth_id,
+                            src_channel as i32,
+                            route_id,
+                            0,
+                            &format!(
+                                "rebuild_custom_engine_runtime engine {} voice {} route {}:{}",
+                                engine_id, v, route_id, src_channel
+                            ),
+                        )?;
+                    }
+                }
+            }
+            if let Some(src_channel) = primary_mod_output_channel {
+                for bound_track in 0..self.app.graph.track_engine_ids.len() {
+                    if self.app.graph.track_engine_ids.get(bound_track) == Some(&Some(engine_id)) {
+                        let Some(track_nodes) = self.app.graph.track_node_ids.get(bound_track)
+                        else {
+                            continue;
+                        };
+                        self.graph_connect_checked(
+                            synth_id,
+                            src_channel as i32,
+                            track_nodes.mod_out_id,
+                            0,
+                            &format!(
+                                "rebuild_custom_engine_runtime engine {} voice {} track {} mod output {}",
+                                engine_id, v, bound_track, src_channel
+                            ),
+                        )?;
+                    }
                 }
             }
             for (input, ext_route_id) in engine
@@ -2643,7 +3199,9 @@ impl GraphController<'_> {
 
         engine.synth_ids = new_synth_ids;
         engine.synth_inputs = manifest.n_inputs;
-        engine.synth_outputs = manifest.n_outputs.max(1);
+        engine.synth_outputs = audio_output_channels.len();
+        engine.audio_output_channels = audio_output_channels;
+        engine.mod_output_channels = mod_output_channels;
         for (v, &mid) in engine.modulator_ids.iter().enumerate() {
             self.app.state.runtime.engine_modulator_node_ids[engine_id][v]
                 .store(mid as u32, Ordering::Release);
@@ -2667,10 +3225,16 @@ impl GraphController<'_> {
             voice_lids,
             instrument,
         } = registration;
-        let instrument_type = match instrument {
+        let instrument_type = match &instrument {
             InstrumentRegistration::Sampler { .. } => InstrumentType::Sampler,
             InstrumentRegistration::Custom { .. } => InstrumentType::Custom,
             InstrumentRegistration::Modulator => InstrumentType::Modulator,
+        };
+        let run_mode = match &instrument {
+            InstrumentRegistration::Custom { run_mode, .. } => *run_mode,
+            InstrumentRegistration::Sampler { .. } | InstrumentRegistration::Modulator => {
+                CustomInstrumentRunMode::Instrument
+            }
         };
 
         for (v, &lid) in voice_lids.iter().enumerate() {
@@ -2692,6 +3256,10 @@ impl GraphController<'_> {
         self.app.state.runtime.send_lids[idx].store(shell.send_id as u64, Ordering::Release);
         self.app.state.runtime.instrument_type_flags[idx]
             .store(instrument_type.runtime_flag(), Ordering::Release);
+        self.app.state.pattern.instrument_run_modes[idx]
+            .store(run_mode.runtime_flag(), Ordering::Release);
+        self.app.state.runtime.instrument_run_mode_flags[idx]
+            .store(run_mode.runtime_flag(), Ordering::Release);
 
         self.app.tracks.push(track_name.clone());
         self.app.push_next_track_color();
@@ -2702,6 +3270,7 @@ impl GraphController<'_> {
         self.app.graph.record_armed.push(false);
         self.app.graph.track_voice_lids.push(voice_lids);
         self.app.graph.track_instrument_types.push(instrument_type);
+        self.app.graph.track_instrument_run_modes.push(run_mode);
 
         match instrument {
             InstrumentRegistration::Sampler {
@@ -2762,6 +3331,7 @@ impl GraphController<'_> {
             InstrumentRegistration::Custom {
                 engine_id,
                 manifest,
+                run_mode: _,
             } => {
                 self.app.state.runtime.track_engine_ids[idx]
                     .store(engine_id as u32, Ordering::Release);
@@ -2865,6 +3435,9 @@ impl GraphController<'_> {
         let mut bank = self.app.state.pattern.pattern_bank.lock().unwrap();
         for snap in bank.iter_mut() {
             snap.extend_to_tracks(idx + 1, &self.app.graph.effect_descriptors);
+            if let Some(mode) = snap.instrument_run_modes.get_mut(idx) {
+                *mode = run_mode;
+            }
             if instrument_type == InstrumentType::Custom
                 || instrument_type == InstrumentType::Modulator
             {
@@ -2917,6 +3490,10 @@ impl GraphController<'_> {
         debug_assert_eq!(self.app.graph.track_voice_lids.len(), self.app.tracks.len());
         debug_assert_eq!(
             self.app.graph.track_instrument_types.len(),
+            self.app.tracks.len()
+        );
+        debug_assert_eq!(
+            self.app.graph.track_instrument_run_modes.len(),
             self.app.tracks.len()
         );
         debug_assert_eq!(self.app.graph.track_engine_ids.len(), self.app.tracks.len());

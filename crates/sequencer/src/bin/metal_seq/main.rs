@@ -61,8 +61,8 @@ use sequencer::agent::actions::{
 use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
-    KeyboardTrigger, MidiFxPosition, SequencerState, StepParam, SwingResolution, Timebase,
-    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
+    CustomInstrumentRunMode, KeyboardTrigger, MidiFxPosition, SequencerState, StepParam,
+    SwingResolution, Timebase, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
@@ -109,10 +109,12 @@ struct InstrumentEditSession {
     path: PathBuf,
     buffer_name: String,
     engine_id: usize,
+    track: usize,
     last_valid_source: String,
     last_valid_layout: Option<String>,
     visible_revision_valid: bool,
     preview_generation: u64,
+    run_mode: CustomInstrumentRunMode,
     mode: InstrumentEditMode,
 }
 
@@ -122,17 +124,21 @@ impl InstrumentEditSession {
         path: PathBuf,
         buffer_name: String,
         engine_id: usize,
+        track: usize,
         persisted_source: String,
+        run_mode: CustomInstrumentRunMode,
     ) -> Self {
         Self {
             name,
             path,
             buffer_name,
             engine_id,
+            track,
             last_valid_source: persisted_source.clone(),
             last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
+            run_mode,
             mode: InstrumentEditMode::EditExisting { persisted_source },
         }
     }
@@ -152,10 +158,12 @@ impl InstrumentEditSession {
             path,
             buffer_name,
             engine_id,
+            track: draft_track,
             last_valid_source: source,
             last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
+            run_mode: CustomInstrumentRunMode::Instrument,
             mode: InstrumentEditMode::CreateDraft {
                 temp_dir,
                 draft_track,
@@ -305,10 +313,11 @@ const NEW_INSTRUMENT_STARTER_DSP: &str = r#"(def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
 (def velocity (in 3 @name velocity))
 (def trigger (in 4 @name trigger))
-(def mod1 (in 5 @name mod1 @modulator 1))
-(def mod2 (in 6 @name mod2 @modulator 2))
-(def mod3 (in 7 @name mod3 @modulator 3))
-(def mod4 (in 8 @name mod4 @modulator 4))
+(def clock (in 5 @name clock))
+(def mod1 (in 6 @name mod1 @modulator 1))
+(def mod2 (in 7 @name mod2 @modulator 2))
+(def mod3 (in 8 @name mod3 @modulator 3))
+(def mod4 (in 9 @name mod4 @modulator 4))
 
 (param attack @group amp @env amp-env @role attack @default 5 @min 0 @max 1000 @unit ms)
 (param decay @group amp @env amp-env @role decay @default 120 @min 1 @max 2000 @unit ms)
@@ -345,6 +354,17 @@ fn create_new_effect_draft_dir() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("Failed to create draft effect directory: {error}"))?;
     Ok(dir)
+}
+
+fn instrument_run_mode_label(run_mode: CustomInstrumentRunMode) -> &'static str {
+    match run_mode {
+        CustomInstrumentRunMode::Instrument => "instrument",
+        CustomInstrumentRunMode::FreePatch => "free_patch",
+    }
+}
+
+fn instrument_run_mode_from_label(label: &str) -> Option<CustomInstrumentRunMode> {
+    CustomInstrumentRunMode::parse(label)
 }
 
 fn show_instrument_patcher_layout_source(buffer_name: &str) -> String {
@@ -988,6 +1008,28 @@ fn sync_single_step_structural_bindings(
     dirty
 }
 
+fn sync_track_duration_span_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    start_step: usize,
+) -> bool {
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let mut dirty = false;
+    for step in start_step.min(MAX_STEPS)..MAX_STEPS {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_duration_field(track, step),
+                Value::Bool(step < num_steps && track_step_duration_covered(state, track, step)),
+            )
+            .effects_dirty;
+    }
+    dirty
+}
+
 fn sync_step_selection_bindings(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1029,6 +1071,41 @@ fn sync_step_selection_bindings(
                 );
             }
         }
+    }
+    dirty
+}
+
+fn sync_expanded_step_viewports_for_track(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    current_track_idx: usize,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    track: usize,
+) -> bool {
+    let selected = selected_steps.lock().unwrap();
+    let mut dirty = false;
+    for viewport in expanded_step_projection.viewports_for_track(track) {
+        dirty |=
+            sync_expanded_step_viewport(rt, state, app, &selected, current_track_idx, viewport);
+    }
+    dirty
+}
+
+fn sync_all_expanded_step_viewports(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    current_track_idx: usize,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+) -> bool {
+    let selected = selected_steps.lock().unwrap();
+    let mut dirty = false;
+    for viewport in expanded_step_projection.all_viewports() {
+        dirty |=
+            sync_expanded_step_viewport(rt, state, app, &selected, current_track_idx, viewport);
     }
     dirty
 }
@@ -1149,6 +1226,15 @@ fn apply_ui_invalidations(
                         current_track_idx,
                         selected_steps,
                     );
+                    let _ = sync_expanded_step_viewports_for_track(
+                        rt,
+                        state,
+                        app,
+                        selected_steps,
+                        current_track_idx,
+                        expanded_step_projection,
+                        track,
+                    );
                     needs_reactive_cycle = true;
                 }
             }
@@ -1170,10 +1256,31 @@ fn apply_ui_invalidations(
                         Value::Number(state.pattern.track_params[track].get_num_steps() as f64),
                     )
                     .effects_dirty;
+                if sequencer_visible {
+                    needs_reactive_cycle |= sync_expanded_step_viewports_for_track(
+                        rt,
+                        state,
+                        app,
+                        selected_steps,
+                        current_track_idx,
+                        expanded_step_projection,
+                        track,
+                    );
+                }
             }
             UiInvalidation::Pattern(PatternInvalidation::AllTracks)
             | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { .. }) => {
                 sync_pattern_state(rt, state);
+                if sequencer_visible {
+                    let _ = sync_all_expanded_step_viewports(
+                        rt,
+                        state,
+                        app,
+                        selected_steps,
+                        current_track_idx,
+                        expanded_step_projection,
+                    );
+                }
                 needs_reactive_cycle = true;
             }
             UiInvalidation::Step {
@@ -1193,13 +1300,8 @@ fn apply_ui_invalidations(
                     );
                 }
                 StepInvalidation::DurationSpan => {
-                    needs_reactive_cycle |= rt
-                        .set_reactive(
-                            "SEQ",
-                            &track_step_duration_field(track, step),
-                            Value::Bool(track_step_duration_covered(state, track, step)),
-                        )
-                        .effects_dirty;
+                    needs_reactive_cycle |=
+                        sync_track_duration_span_binding_fields(rt, state, track, step);
                 }
                 StepInvalidation::Active
                 | StepInvalidation::Payload
@@ -1227,10 +1329,13 @@ fn apply_ui_invalidations(
                     current_track_idx,
                     expanded_step_projection,
                 );
-                if fx_visible && track == current_track_idx {
-                    sync_track_params(rt, app, state, track, selected_steps);
-                    sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
-                    needs_reactive_cycle = true;
+                if track == current_track_idx {
+                    if fx_visible {
+                        sync_track_params(rt, app, state, track, selected_steps);
+                        needs_reactive_cycle = true;
+                    }
+                    needs_reactive_cycle |=
+                        sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
                 }
             }
             UiInvalidation::ExpandedStepViewport { track: _, track_id } => {
@@ -1388,13 +1493,16 @@ fn apply_ui_invalidations(
                     displayed_plock_step(state, track, selected_plock_step(selected_steps));
                 match change {
                     InstrumentInvalidation::Param { param } => {
-                        sync_instrument_param_value_field(rt, app, track, param, display_step);
+                        needs_reactive_cycle |=
+                            sync_instrument_param_value_field(rt, app, track, param, display_step);
                     }
                     InstrumentInvalidation::BaseNote => {
-                        sync_instrument_base_note_value_field(rt, app, track);
+                        needs_reactive_cycle |=
+                            sync_instrument_base_note_value_field(rt, app, track);
                     }
                     InstrumentInvalidation::SamplerSelectionTime => {
-                        sync_sampler_selection_time_fields(rt, app, track, display_step);
+                        needs_reactive_cycle |=
+                            sync_sampler_selection_time_fields(rt, app, track, display_step);
                     }
                     InstrumentInvalidation::PanelTopology | InstrumentInvalidation::Analysis => {
                         if fx_visible && track == current_track_idx {
@@ -1423,7 +1531,7 @@ fn apply_ui_invalidations(
                 | TrackFxInvalidation::Plock { slot, param } => {
                     let display_step =
                         displayed_plock_step(state, track, selected_plock_step(selected_steps));
-                    sync_track_effect_param_value_field(
+                    needs_reactive_cycle |= sync_track_effect_param_value_field(
                         rt,
                         state,
                         &app.graph.effect_descriptors,
@@ -1462,7 +1570,8 @@ fn apply_ui_invalidations(
                 MidiFxInvalidation::Param { slot, param } => {
                     let display_step =
                         displayed_plock_step(state, track, selected_plock_step(selected_steps));
-                    sync_midi_fx_param_value_field(rt, state, track, slot, param, display_step);
+                    needs_reactive_cycle |=
+                        sync_midi_fx_param_value_field(rt, state, track, slot, param, display_step);
                 }
                 MidiFxInvalidation::Topology => {
                     if fx_visible && track == current_track_idx {
@@ -2387,8 +2496,8 @@ mod tests {
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, Value,
-        AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
+        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
+        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -2462,6 +2571,32 @@ mod tests {
                 .eval_str("(nth SEQ.selected-steps 3)")
                 .expect("read selected step"),
             Some(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn duration_span_sync_updates_covered_steps_after_source_duration_change() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
+        state.pattern.track_params[0].set_num_steps(8);
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(2, StepParam::Duration, 3.0);
+        let mut runtime = Runtime::new();
+
+        super::sync_track_duration_span_binding_fields(&mut runtime, &state, 0, 2);
+
+        assert_eq!(
+            runtime
+                .eval_str(r#"(reactive-get "SEQ" "seq-track-step-duration-0-4")"#)
+                .expect("read covered step"),
+            Some(Value::Bool(true)),
+            "duration source at step 2 with length 3 should mark step 4 covered"
+        );
+        assert_eq!(
+            runtime
+                .eval_str(r#"(reactive-get "SEQ" "seq-track-step-duration-0-5")"#)
+                .expect("read uncovered step"),
+            Some(Value::Bool(false)),
+            "duration source at step 2 with length 3 should not cover step 5"
         );
     }
 
@@ -7700,6 +7835,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(sample_ids) = switched {
                                     let started = Instant::now();
                                     app.graph_controller().apply_sample_ids(&sample_ids);
+                                    if let Err(error) = app
+                                        .graph_controller()
+                                        .sync_track_instrument_run_modes_from_live_state()
+                                    {
+                                        app.editor.status_message = Some((
+                                            format!("Pattern switch failed: {error}"),
+                                            Instant::now(),
+                                        ));
+                                    }
                                     app.graph_controller().sync_current_pattern_mod_routes();
                                     apply_samples_elapsed = started.elapsed();
                                     let started = Instant::now();
@@ -8398,12 +8542,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "editor-buffer-name",
                             Value::String(buf_name.clone()),
                         );
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-instrument-run-mode",
+                            Value::String("instrument".to_string()),
+                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Created draft instrument track {}",
                             draft_track + 1
                         )));
+                    }
+
+                    "set-draft-instrument-run-mode" => {
+                        let Some(session) = instrument_edit_session.as_mut() else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "No instrument edit session is active".to_string(),
+                            ));
+                            continue;
+                        };
+                        if !matches!(&session.mode, InstrumentEditMode::CreateDraft { .. }) {
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(
+                                    "Run mode can only be changed for draft instruments"
+                                        .to_string(),
+                                ),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            continue;
+                        }
+                        let requested = extract_string_from_payload(&payload, "run-mode")
+                            .unwrap_or_else(|| "instrument".to_string());
+                        let Some(run_mode) = instrument_run_mode_from_label(&requested) else {
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(format!("Unknown instrument run mode '{requested}'")),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            continue;
+                        };
+                        match app
+                            .graph_controller()
+                            .set_track_instrument_run_mode(session.track, run_mode)
+                        {
+                            Ok(()) => {
+                                session.run_mode = run_mode;
+                                if let Some(engine_id) = app.graph.track_engine_ids[session.track] {
+                                    session.engine_id = engine_id;
+                                }
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-instrument-run-mode",
+                                    Value::String(instrument_run_mode_label(run_mode).to_string()),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-error",
+                                    Value::String(String::new()),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Draft instrument mode: {}",
+                                    match run_mode {
+                                        CustomInstrumentRunMode::Instrument => "Instrument",
+                                        CustomInstrumentRunMode::FreePatch => "Free Patch",
+                                    }
+                                )));
+                            }
+                            Err(error) => {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive("SEQ", "editor-error", Value::String(error));
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                            }
+                        }
                     }
 
                     "save-new-instrument" => {
@@ -8513,6 +8735,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.refresh_runtime_side_effects();
                                         continue;
                                     }
+                                    if let Err(error) =
+                                        sequencer::lisp_effect::save_instrument_run_mode(
+                                            &final_name,
+                                            session.run_mode,
+                                        )
+                                    {
+                                        let _ = std::fs::remove_dir_all(&final_dir);
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(format!(
+                                                "Failed to save finalized instrument mode: {error}"
+                                            )),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
                                     let target_dsp = final_dir.join("dsp.lisp");
                                     if let Some(layout) = session.last_valid_layout.as_deref() {
                                         if let Err(error) =
@@ -8571,6 +8812,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.refresh_runtime_side_effects();
                                         continue;
                                     }
+                                    if let Err(error) =
+                                        app.graph_controller().set_track_instrument_run_mode(
+                                            draft_track,
+                                            session.run_mode,
+                                        )
+                                    {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(format!(
+                                                "Failed to apply finalized instrument mode: {error}"
+                                            )),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
 
                                     let session =
                                         instrument_edit_session.take().expect("session checked");
@@ -8608,6 +8867,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "SEQ",
                                         "editor-error",
                                         Value::String(String::new()),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "editor-instrument-run-mode",
+                                        Value::String("instrument".to_string()),
                                     );
                                     rt.set_reactive(
                                         "SEQ",
@@ -8688,6 +8952,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             continue;
                                         }
                                     };
+                                    let run_mode =
+                                        match sequencer::lisp_effect::load_instrument_run_mode(
+                                            &inst_name,
+                                        ) {
+                                            Ok(run_mode) => run_mode,
+                                            Err(error) => {
+                                                editor.handle_host_event(HostEvent::Error(
+                                                    format!(
+                                                        "Failed to load instrument mode: {error}"
+                                                    ),
+                                                ));
+                                                continue;
+                                            }
+                                        };
                                     let buf_name = format!("*instrument-patcher:{inst_name}*");
                                     editor.remove_buffer_by_name(&buf_name);
                                     editor.create_scratch_buffer(
@@ -8727,7 +9005,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             file_path,
                                             buf_name.clone(),
                                             engine_id,
+                                            track,
                                             persisted_source,
+                                            run_mode,
                                         ));
                                     let rt = editor.runtime_mut();
                                     rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
@@ -8745,6 +9025,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "SEQ",
                                         "editor-buffer-name",
                                         Value::String(buf_name),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "editor-instrument-run-mode",
+                                        Value::String(
+                                            instrument_run_mode_label(run_mode).to_string(),
+                                        ),
                                     );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
@@ -8843,6 +9130,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                         rt.set_reactive(
                                             "SEQ",
+                                            "editor-instrument-run-mode",
+                                            Value::String("instrument".to_string()),
+                                        );
+                                        rt.set_reactive(
+                                            "SEQ",
                                             "track-names",
                                             build_track_names(&track_names),
                                         );
@@ -8907,6 +9199,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 "SEQ",
                                                 "editor-buffer-name",
                                                 Value::String(String::new()),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-instrument-run-mode",
+                                                Value::String("instrument".to_string()),
                                             );
                                             rt.set_reactive(
                                                 "SEQ",
@@ -10165,6 +10462,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
                         rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
                         rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-instrument-run-mode",
+                            Value::String("instrument".to_string()),
+                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.handle_host_event(HostEvent::Status("Editor cancelled".to_string()));
@@ -11407,6 +11709,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sync_step_param_lists(rt, &state, ct);
                     if metal_visible || sequencer_visible {
                         sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
+                    }
+                    if sequencer_visible {
+                        let _ = sync_all_expanded_step_viewports(
+                            rt,
+                            &state,
+                            &app,
+                            &selected_steps,
+                            ct,
+                            &expanded_step_projection,
+                        );
                     }
                     sync_track_mixer_state(rt, &app, &state);
                     sync_bus_mixer_state(rt, &app);

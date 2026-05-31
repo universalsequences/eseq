@@ -4,9 +4,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::EffectSlotSnapshot;
 use crate::sequencer::{
-    BusId, ChordSnapshot, InstrumentType, MidiFxPosition, ModConnection, PatternSnapshot,
-    SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot, TrackSendSnapshot,
-    TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
+    PatternSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
+    TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 
@@ -242,6 +242,8 @@ pub struct ProjectPattern {
     #[serde(default)]
     pub mod_connections: Vec<ProjectModConnection>,
     pub instrument_types: Vec<ProjectInstrumentType>,
+    #[serde(default)]
+    pub instrument_run_modes: Vec<ProjectCustomInstrumentRunMode>,
     pub sample_paths: Vec<Option<String>>,
     pub sample_names: Vec<String>,
 }
@@ -340,6 +342,13 @@ pub enum ProjectInstrumentType {
     Sampler,
     Custom,
     Modulator,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectCustomInstrumentRunMode {
+    Instrument,
+    FreePatch,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -442,6 +451,12 @@ impl ProjectPattern {
                 .iter()
                 .copied()
                 .map(ProjectInstrumentType::from)
+                .collect(),
+            instrument_run_modes: snapshot
+                .instrument_run_modes
+                .iter()
+                .copied()
+                .map(ProjectCustomInstrumentRunMode::from)
                 .collect(),
             sample_paths,
             sample_names,
@@ -636,6 +651,24 @@ impl From<ProjectInstrumentType> for InstrumentType {
             ProjectInstrumentType::Sampler => InstrumentType::Sampler,
             ProjectInstrumentType::Custom => InstrumentType::Custom,
             ProjectInstrumentType::Modulator => InstrumentType::Modulator,
+        }
+    }
+}
+
+impl From<CustomInstrumentRunMode> for ProjectCustomInstrumentRunMode {
+    fn from(value: CustomInstrumentRunMode) -> Self {
+        match value {
+            CustomInstrumentRunMode::Instrument => Self::Instrument,
+            CustomInstrumentRunMode::FreePatch => Self::FreePatch,
+        }
+    }
+}
+
+impl From<ProjectCustomInstrumentRunMode> for CustomInstrumentRunMode {
+    fn from(value: ProjectCustomInstrumentRunMode) -> Self {
+        match value {
+            ProjectCustomInstrumentRunMode::Instrument => CustomInstrumentRunMode::Instrument,
+            ProjectCustomInstrumentRunMode::FreePatch => CustomInstrumentRunMode::FreePatch,
         }
     }
 }
@@ -1315,6 +1348,10 @@ mod tests {
                     ProjectInstrumentType::Custom,
                     ProjectInstrumentType::Sampler,
                 ],
+                instrument_run_modes: vec![
+                    ProjectCustomInstrumentRunMode::FreePatch,
+                    ProjectCustomInstrumentRunMode::Instrument,
+                ],
                 mod_connections: vec![ProjectModConnection {
                     source_track: 0,
                     dest_track: 1,
@@ -1374,6 +1411,13 @@ mod tests {
                 dest_track: 1,
                 dest_input: 2,
             }]
+        );
+        assert_eq!(
+            restored.patterns[0].instrument_run_modes,
+            vec![
+                ProjectCustomInstrumentRunMode::FreePatch,
+                ProjectCustomInstrumentRunMode::Instrument,
+            ]
         );
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);
@@ -1480,6 +1524,46 @@ mod tests {
 
         assert_eq!(sampler.color(), None);
         assert_eq!(custom.color(), None);
+    }
+
+    #[test]
+    fn legacy_project_defaults_missing_instrument_run_modes() {
+        let json = r#"{
+            "version": 1,
+            "name": "legacy",
+            "bpm": 120,
+            "current_pattern": 0,
+            "reverb": {"size": 0.2, "brightness": 0.8, "replace": 0.3},
+            "tracks": [{"kind":"custom","instrument_name":"lead"}],
+            "custom_effects": [[]],
+            "patterns": [{
+                "track_bits": [[0,0,0,0]],
+                "step_data": [[[1.0,0.5,1.0,0.0,0.0,0.0,1.0,0.0]]],
+                "track_params": [{
+                    "gate": true,
+                    "attack_ms": 0.0,
+                    "release_ms": 0.0,
+                    "swing": 50.0,
+                    "num_steps": 16,
+                    "send": 0.0,
+                    "polyphonic": true,
+                    "timebase": 4
+                }],
+                "effect_slots": [[]],
+                "instrument_slots": [{"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]}],
+                "instrument_base_note_offsets": [0.0],
+                "track_sound_states": [{"loaded_preset": null, "dirty": false}],
+                "chord_snapshots": [[[]]],
+                "timebase_plock_snapshots": [[null]],
+                "instrument_types": ["custom"],
+                "sample_paths": [null],
+                "sample_names": ["lead"]
+            }]
+        }"#;
+
+        let project: ProjectFile = serde_json::from_str(json).expect("deserialize legacy project");
+
+        assert!(project.patterns[0].instrument_run_modes.is_empty());
     }
 
     #[test]

@@ -77,6 +77,46 @@ impl InstrumentType {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CustomInstrumentRunMode {
+    #[default]
+    Instrument,
+    FreePatch,
+}
+
+impl CustomInstrumentRunMode {
+    pub const COUNT: usize = 2;
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Instrument => "instrument",
+            Self::FreePatch => "free_patch",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "instrument" => Some(Self::Instrument),
+            "free_patch" => Some(Self::FreePatch),
+            _ => None,
+        }
+    }
+
+    pub fn runtime_flag(self) -> u32 {
+        match self {
+            Self::Instrument => 0,
+            Self::FreePatch => 1,
+        }
+    }
+
+    pub fn from_runtime_flag(flag: u32) -> Self {
+        match flag {
+            1 => Self::FreePatch,
+            _ => Self::Instrument,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ModConnection {
     pub source_track: usize,

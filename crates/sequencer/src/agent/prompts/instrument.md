@@ -127,11 +127,12 @@ Critical syntax rules:
   `(def pitch (in 2 @name pitch))`
   `(def velocity (in 3 @name velocity))`
   `(def trigger (in 4 @name trigger))`
+  `(def clock (in 5 @name clock))`
 - If any param uses `@mod true`, also declare the four configurable modulation inputs:
-  `(def mod1 (in 5 @name mod1 @modulator 1))`
-  `(def mod2 (in 6 @name mod2 @modulator 2))`
-  `(def mod3 (in 7 @name mod3 @modulator 3))`
-  `(def mod4 (in 8 @name mod4 @modulator 4))`
+  `(def mod1 (in 6 @name mod1 @modulator 1))`
+  `(def mod2 (in 7 @name mod2 @modulator 2))`
+  `(def mod3 (in 8 @name mod3 @modulator 3))`
+  `(def mod4 (in 9 @name mod4 @modulator 4))`
 - Do not mark a parameter `@mod true` just because it appears in the UI or is
   related to modulation. Host-modulatable params are destination controls for
   the host modulation matrix. Local modulation amount knobs are usually plain
@@ -208,10 +209,11 @@ Minimal valid instrument shape:
 (def pitch (in 2 @name pitch))
 (def velocity (in 3 @name velocity))
 (def trigger (in 4 @name trigger))
-(def mod1 (in 5 @name mod1 @modulator 1))
-(def mod2 (in 6 @name mod2 @modulator 2))
-(def mod3 (in 7 @name mod3 @modulator 3))
-(def mod4 (in 8 @name mod4 @modulator 4))
+(def clock (in 5 @name clock))
+(def mod1 (in 6 @name mod1 @modulator 1))
+(def mod2 (in 7 @name mod2 @modulator 2))
+(def mod3 (in 8 @name mod3 @modulator 3))
+(def mod4 (in 9 @name mod4 @modulator 4))
 (param amp_attack @default 3 @min 1 @max 1000 @unit ms)
 (param amp_decay @default 180 @min 1 @max 2000 @unit ms)
 (param amp_sustain @default 0.55 @min 0 @max 1)

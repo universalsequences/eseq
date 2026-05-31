@@ -846,6 +846,27 @@
             :font-size 11
             :color :white
             :bg :transparent)
+          (label "Mode"
+            :font-size 9
+            :color :gray
+            :bg :transparent)
+          (h-stack :width :fill :gap 0.35
+            (button "Instrument"
+              :variant (if (= SEQ.editor-instrument-run-mode "instrument") :primary :secondary)
+              :width 8.5
+              :height 1.2
+              :font-size 9
+              :on-click |x y r|
+                (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
+              :color :white)
+            (button "Free Patch"
+              :variant (if (= SEQ.editor-instrument-run-mode "free_patch") :primary :secondary)
+              :width 8.5
+              :height 1.2
+              :font-size 9
+              :on-click |x y r|
+                (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
+              :color :white))
           (label "Save as"
             :font-size 9
             :color :gray
