@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::effects::EffectSlotSnapshot;
+use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
     CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
@@ -48,6 +49,7 @@ pub struct SequencerSnapshot {
     pub transport: SequencerTransportSnapshot,
     pub tracks: Vec<SequencerTrackSnapshot>,
     pub mod_connections: Vec<ModConnection>,
+    pub neural_networks: Vec<ProjectNeuralNetwork>,
 }
 
 impl SequencerSnapshot {
@@ -63,6 +65,7 @@ impl SequencerSnapshot {
             },
             tracks: Vec::new(),
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
         }
     }
 
@@ -177,17 +180,25 @@ impl SequencerSnapshot {
             });
         }
 
+        let (mod_connections, neural_networks) = state
+            .pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|pattern| {
+                (
+                    pattern.mod_connections.clone(),
+                    pattern.neural_networks.clone(),
+                )
+            })
+            .unwrap_or_default();
+
         Self {
             transport,
             tracks,
-            mod_connections: state
-                .pattern
-                .pattern_bank
-                .lock()
-                .unwrap()
-                .get(current_pattern)
-                .map(|pattern| pattern.mod_connections.clone())
-                .unwrap_or_default(),
+            mod_connections,
+            neural_networks,
         }
     }
 }

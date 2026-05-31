@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::EffectSlotSnapshot;
+use crate::neural::ProjectNeuralNetwork;
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
     PatternSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
@@ -241,6 +242,8 @@ pub struct ProjectPattern {
     pub bus_patterns: Vec<ProjectBusPatternSnapshot>,
     #[serde(default)]
     pub mod_connections: Vec<ProjectModConnection>,
+    #[serde(default)]
+    pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub instrument_types: Vec<ProjectInstrumentType>,
     #[serde(default)]
     pub instrument_run_modes: Vec<ProjectCustomInstrumentRunMode>,
@@ -446,6 +449,7 @@ impl ProjectPattern {
                 .copied()
                 .map(ProjectModConnection::from)
                 .collect(),
+            neural_networks: snapshot.neural_networks.clone(),
             instrument_types: snapshot
                 .instrument_types
                 .iter()
@@ -1357,6 +1361,34 @@ mod tests {
                     dest_track: 1,
                     dest_input: 2,
                 }],
+                neural_networks: {
+                    let mut network = ProjectNeuralNetwork::default();
+                    network.id = 42;
+                    network.name = "drum-net".to_string();
+                    network.enabled = true;
+                    network.num_neurons = 6;
+                    network.neurons[0].route = Some(1);
+                    network.neurons[0].output_overrides.instrument =
+                        vec![crate::neural::ProjectParamOverride {
+                            param_id: crate::neural::ParamNodeId {
+                                logical_id: 7,
+                                node_param_idx: 3,
+                            },
+                            param_index: 2,
+                            value: 0.75,
+                        }];
+                    network.neurons[0].output_overrides.effects =
+                        vec![crate::neural::ProjectEffectParamOverride {
+                            slot_index: 0,
+                            param_id: crate::neural::ParamNodeId {
+                                logical_id: 11,
+                                node_param_idx: 5,
+                            },
+                            param_index: 4,
+                            value: 0.33,
+                        }];
+                    vec![network]
+                },
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
             }],
@@ -1418,6 +1450,26 @@ mod tests {
                 ProjectCustomInstrumentRunMode::FreePatch,
                 ProjectCustomInstrumentRunMode::Instrument,
             ]
+        );
+        assert_eq!(restored.patterns[0].neural_networks.len(), 1);
+        let network = &restored.patterns[0].neural_networks[0];
+        assert_eq!(network.id, 42);
+        assert_eq!(network.name, "drum-net");
+        assert_eq!(network.num_neurons, 6);
+        assert_eq!(network.neurons[0].route, Some(1));
+        assert_eq!(
+            network.neurons[0].output_overrides.instrument[0].param_id,
+            crate::neural::ParamNodeId {
+                logical_id: 7,
+                node_param_idx: 3,
+            }
+        );
+        assert_eq!(
+            network.neurons[0].output_overrides.effects[0].param_id,
+            crate::neural::ParamNodeId {
+                logical_id: 11,
+                node_param_idx: 5,
+            }
         );
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);

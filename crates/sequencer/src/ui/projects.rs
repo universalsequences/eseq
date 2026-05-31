@@ -921,6 +921,7 @@ impl App {
             let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
             if current_pattern < bank.len() {
                 let current_mod_connections = bank[current_pattern].mod_connections.clone();
+                let current_neural_networks = bank[current_pattern].neural_networks.clone();
                 let mut snapshot = PatternSnapshot::capture(
                     &self.state,
                     num_tracks,
@@ -930,6 +931,7 @@ impl App {
                     &self.graph.track_instrument_types,
                 );
                 snapshot.mod_connections = current_mod_connections;
+                snapshot.neural_networks = current_neural_networks;
                 bank[current_pattern] = snapshot;
             }
         }
@@ -1704,6 +1706,7 @@ impl App {
             swing_resolution_plock_snapshots,
             bus_patterns,
             mod_connections,
+            neural_networks,
             instrument_types: _,
             instrument_run_modes,
             sample_paths: _,
@@ -1907,6 +1910,7 @@ impl App {
                 .map(CustomInstrumentRunMode::from)
                 .collect(),
             mod_connections: mod_connections.into_iter().map(Into::into).collect(),
+            neural_networks,
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
 
@@ -2092,6 +2096,7 @@ mod tests {
                 bus_patterns: Vec::new(),
                 instrument_types: Vec::new(),
                 mod_connections: Vec::new(),
+                neural_networks: Vec::new(),
                 sample_paths: Vec::new(),
                 sample_names: Vec::new(),
             }],

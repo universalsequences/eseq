@@ -22,7 +22,7 @@ use crate::sampler::{
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
     ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
-    TimedEvent,
+    ScheduledSamplerParams, TimedEvent,
 };
 use crate::sequencer::{
     sync_beats, BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState,
@@ -1764,6 +1764,34 @@ fn dispatch_scheduled_step(
         chord,
         instrument_params,
         instrument_fingerprint,
+        None,
+    );
+}
+
+fn dispatch_scheduled_network_step(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    samples_per_step: f32,
+    resolved: crate::accumulator::ResolvedStep,
+    chord: crate::scheduled_event::ScheduledChordData,
+    effect_params: Vec<ScheduledEffectParam>,
+    instrument_params: ScheduledInstrumentParams,
+    sampler_params: ScheduledSamplerParams,
+    instrument_fingerprint: u64,
+) {
+    unsafe {
+        dispatch_effect_chain_for_track(data.lg.0, &effect_params);
+    }
+    fire_resolved(
+        data,
+        track_idx,
+        0,
+        samples_per_step as f64,
+        resolved,
+        chord,
+        instrument_params,
+        instrument_fingerprint,
+        Some(sampler_params),
     );
 }
 
@@ -1796,6 +1824,29 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
             instrument_params,
         } => {
             dispatch_instrument_params_to_active_voices(data, track, &instrument_params);
+        }
+        ScheduledEventKind::NetworkTrigger {
+            track,
+            samples_per_step,
+            resolved,
+            chord,
+            effect_params,
+            instrument_params,
+            sampler_params,
+            instrument_fingerprint,
+            ..
+        } => {
+            dispatch_scheduled_network_step(
+                data,
+                track,
+                samples_per_step,
+                resolved,
+                chord,
+                effect_params,
+                instrument_params,
+                sampler_params,
+                instrument_fingerprint,
+            );
         }
     }
 }
@@ -2123,6 +2174,7 @@ fn fire_resolved(
     chord: crate::scheduled_event::ScheduledChordData,
     instrument_params: ScheduledInstrumentParams,
     instrument_fingerprint: u64,
+    scheduled_sampler_params: Option<ScheduledSamplerParams>,
 ) {
     let tp = &data.state.pattern.track_params[track_idx];
     let instrument_type = InstrumentType::from_runtime_flag(
@@ -2141,69 +2193,85 @@ fn fire_resolved(
     let total_gate = (resolved.duration as f64 * samples_per_step) as f32;
     let chop_gate = total_gate / chop as f32;
 
-    // Envelope and sampler params from instrument slot.
-    let inst_slot = &data.state.pattern.instrument_slots[track_idx];
-    let attack_ms = inst_slot
-        .plocks
-        .get(step, 0)
-        .unwrap_or_else(|| inst_slot.defaults.get(0));
-    let release_ms = inst_slot
-        .plocks
-        .get(step, 1)
-        .unwrap_or_else(|| inst_slot.defaults.get(1));
+    let fallback_sampler_params = || {
+        let inst_slot = &data.state.pattern.instrument_slots[track_idx];
+        ScheduledSamplerParams {
+            attack_ms: inst_slot
+                .plocks
+                .get(step, 0)
+                .unwrap_or_else(|| inst_slot.defaults.get(0)),
+            release_ms: inst_slot
+                .plocks
+                .get(step, 1)
+                .unwrap_or_else(|| inst_slot.defaults.get(1)),
+            start_point: inst_slot
+                .plocks
+                .get(step, 2)
+                .unwrap_or_else(|| inst_slot.defaults.get(2)),
+            end_point: inst_slot
+                .plocks
+                .get(step, 3)
+                .unwrap_or_else(|| inst_slot.defaults.get(3)),
+            instrument_enabled: inst_slot
+                .plocks
+                .get(step, 4)
+                .unwrap_or_else(|| inst_slot.defaults.get(4)),
+            reverse: inst_slot
+                .plocks
+                .get(step, 5)
+                .unwrap_or_else(|| inst_slot.defaults.get(5)),
+            loop_mode: inst_slot
+                .plocks
+                .get(step, 6)
+                .unwrap_or_else(|| inst_slot.defaults.get(6)),
+            loop_xfade_ms: inst_slot
+                .plocks
+                .get(step, 7)
+                .unwrap_or_else(|| inst_slot.defaults.get(7)),
+            sr_hz: inst_slot
+                .plocks
+                .get(step, 8)
+                .unwrap_or_else(|| inst_slot.defaults.get(8)),
+            warp_enabled: inst_slot
+                .plocks
+                .get(step, 9)
+                .unwrap_or_else(|| inst_slot.defaults.get(9)),
+            warp_mode: inst_slot
+                .plocks
+                .get(step, 10)
+                .unwrap_or_else(|| inst_slot.defaults.get(10)),
+            sample_bpm: inst_slot
+                .plocks
+                .get(step, 11)
+                .unwrap_or_else(|| inst_slot.defaults.get(11)),
+            playback_speed: inst_slot
+                .plocks
+                .get(step, 12)
+                .unwrap_or_else(|| inst_slot.defaults.get(12)),
+            scrub: inst_slot
+                .plocks
+                .get(step, 13)
+                .unwrap_or_else(|| inst_slot.defaults.get(13)),
+        }
+    };
+    let sampler_params = scheduled_sampler_params.unwrap_or_else(fallback_sampler_params);
+    let attack_ms = sampler_params.attack_ms;
+    let release_ms = sampler_params.release_ms;
     let attack_samples = attack_ms * data.sample_rate as f32 / 1000.0;
     let release_samples = release_ms * data.sample_rate as f32 / 1000.0;
     let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
-    let start_point = inst_slot
-        .plocks
-        .get(step, 2)
-        .unwrap_or_else(|| inst_slot.defaults.get(2));
-    let end_point = inst_slot
-        .plocks
-        .get(step, 3)
-        .unwrap_or_else(|| inst_slot.defaults.get(3));
-    let instrument_enabled = inst_slot
-        .plocks
-        .get(step, 4)
-        .unwrap_or_else(|| inst_slot.defaults.get(4));
-    let reverse = inst_slot
-        .plocks
-        .get(step, 5)
-        .unwrap_or_else(|| inst_slot.defaults.get(5));
-    let loop_mode = inst_slot
-        .plocks
-        .get(step, 6)
-        .unwrap_or_else(|| inst_slot.defaults.get(6));
-    let loop_xfade_samples = inst_slot
-        .plocks
-        .get(step, 7)
-        .unwrap_or_else(|| inst_slot.defaults.get(7))
-        * data.sample_rate as f32
-        / 1000.0;
-    let sr_hz = inst_slot
-        .plocks
-        .get(step, 8)
-        .unwrap_or_else(|| inst_slot.defaults.get(8));
-    let warp_enabled = inst_slot
-        .plocks
-        .get(step, 9)
-        .unwrap_or_else(|| inst_slot.defaults.get(9));
-    let warp_mode = inst_slot
-        .plocks
-        .get(step, 10)
-        .unwrap_or_else(|| inst_slot.defaults.get(10));
-    let sample_bpm = inst_slot
-        .plocks
-        .get(step, 11)
-        .unwrap_or_else(|| inst_slot.defaults.get(11));
-    let playback_speed = inst_slot
-        .plocks
-        .get(step, 12)
-        .unwrap_or_else(|| inst_slot.defaults.get(12));
-    let scrub = inst_slot
-        .plocks
-        .get(step, 13)
-        .unwrap_or_else(|| inst_slot.defaults.get(13));
+    let start_point = sampler_params.start_point;
+    let end_point = sampler_params.end_point;
+    let instrument_enabled = sampler_params.instrument_enabled;
+    let reverse = sampler_params.reverse;
+    let loop_mode = sampler_params.loop_mode;
+    let loop_xfade_samples = sampler_params.loop_xfade_ms * data.sample_rate as f32 / 1000.0;
+    let sr_hz = sampler_params.sr_hz;
+    let warp_enabled = sampler_params.warp_enabled;
+    let warp_mode = sampler_params.warp_mode;
+    let sample_bpm = sampler_params.sample_bpm;
+    let playback_speed = sampler_params.playback_speed;
+    let scrub = sampler_params.scrub;
     let (
         warp_enabled,
         warp_mode,

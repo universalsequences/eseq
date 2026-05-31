@@ -39,6 +39,71 @@ pub struct ScheduledInstrumentParam {
 
 pub type ScheduledInstrumentParams = ArrayVec<ScheduledInstrumentParam, MAX_SLOT_PARAMS>;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScheduledSamplerParams {
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    pub start_point: f32,
+    pub end_point: f32,
+    pub instrument_enabled: f32,
+    pub reverse: f32,
+    pub loop_mode: f32,
+    pub loop_xfade_ms: f32,
+    pub sr_hz: f32,
+    pub warp_enabled: f32,
+    pub warp_mode: f32,
+    pub sample_bpm: f32,
+    pub playback_speed: f32,
+    pub scrub: f32,
+}
+
+impl Default for ScheduledSamplerParams {
+    fn default() -> Self {
+        Self {
+            attack_ms: 0.0,
+            release_ms: 0.0,
+            start_point: 0.0,
+            end_point: 1.0,
+            instrument_enabled: 1.0,
+            reverse: 0.0,
+            loop_mode: 0.0,
+            loop_xfade_ms: 0.0,
+            sr_hz: 0.0,
+            warp_enabled: 0.0,
+            warp_mode: 0.0,
+            sample_bpm: 120.0,
+            playback_speed: 1.0,
+            scrub: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EventSource {
+    Step {
+        track: usize,
+        step: usize,
+        instrument_fingerprint: u64,
+    },
+    Network {
+        seed: Option<(usize, usize)>,
+        neuron: usize,
+        instrument_fingerprint: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepEvent {
+    pub track: usize,
+    pub samples_per_step: f32,
+    pub resolved: ResolvedStep,
+    pub chord: ScheduledChordData,
+    pub effect_params: Vec<ScheduledEffectParam>,
+    pub instrument_params: ScheduledInstrumentParams,
+    pub sampler_params: ScheduledSamplerParams,
+    pub source: EventSource,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScheduledEventKind {
     ResolvedTrigger {
@@ -49,6 +114,18 @@ pub enum ScheduledEventKind {
         chord: ScheduledChordData,
         effect_params: Vec<ScheduledEffectParam>,
         instrument_params: ScheduledInstrumentParams,
+        instrument_fingerprint: u64,
+    },
+    NetworkTrigger {
+        track: usize,
+        source_neuron: usize,
+        seed: Option<(usize, usize)>,
+        samples_per_step: f32,
+        resolved: ResolvedStep,
+        chord: ScheduledChordData,
+        effect_params: Vec<ScheduledEffectParam>,
+        instrument_params: ScheduledInstrumentParams,
+        sampler_params: ScheduledSamplerParams,
         instrument_fingerprint: u64,
     },
     InstrumentParams {

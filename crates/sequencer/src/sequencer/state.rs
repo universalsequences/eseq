@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
 };
+use crate::neural::{remap_neural_network_routes_after_track_delete, ProjectNeuralNetwork};
 use crate::voice::MAX_VOICES;
 
 use super::data::{
@@ -66,6 +67,7 @@ pub struct PatternSnapshot {
     pub instrument_types: Vec<InstrumentType>,
     pub instrument_run_modes: Vec<CustomInstrumentRunMode>,
     pub mod_connections: Vec<ModConnection>,
+    pub neural_networks: Vec<ProjectNeuralNetwork>,
 }
 
 impl PatternSnapshot {
@@ -102,6 +104,7 @@ impl PatternSnapshot {
                 remap_mod_connection_after_track_delete(*connection, track_idx)
             })
             .collect();
+        remap_neural_network_routes_after_track_delete(&mut self.neural_networks, track_idx);
     }
 
     pub fn remove_effect_slot(&mut self, track: usize, slot_idx: usize) {
@@ -436,6 +439,7 @@ impl PatternSnapshot {
             instrument_types: inst_types,
             instrument_run_modes,
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
         }
     }
 
@@ -447,6 +451,7 @@ impl PatternSnapshot {
         track_names: &[String],
         instrument_types: &[InstrumentType],
         mod_connections: Vec<ModConnection>,
+        neural_networks: Vec<ProjectNeuralNetwork>,
     ) -> Self {
         let mut snapshot = Self::capture(
             state,
@@ -457,6 +462,7 @@ impl PatternSnapshot {
             instrument_types,
         );
         snapshot.mod_connections = mod_connections;
+        snapshot.neural_networks = neural_networks;
         snapshot
     }
 
@@ -681,6 +687,7 @@ impl PatternSnapshot {
             instrument_types: Vec::with_capacity(num_tracks),
             instrument_run_modes: Vec::with_capacity(num_tracks),
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
         };
         for t in 0..num_tracks {
             snap.push_default_track(t, slot_descriptors);
@@ -1039,13 +1046,18 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
     ) -> PatternSnapshot {
         let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mod_connections = self
+        let (mod_connections, neural_networks) = self
             .pattern
             .pattern_bank
             .lock()
             .unwrap()
             .get(current_pattern)
-            .map(|snapshot| snapshot.mod_connections.clone())
+            .map(|snapshot| {
+                (
+                    snapshot.mod_connections.clone(),
+                    snapshot.neural_networks.clone(),
+                )
+            })
             .unwrap_or_default();
         PatternSnapshot::capture_with_mod_connections(
             self,
@@ -1055,6 +1067,7 @@ impl SequencerState {
             names,
             instrument_types,
             mod_connections,
+            neural_networks,
         )
     }
 
@@ -1760,6 +1773,7 @@ impl SequencerState {
                 names,
                 instrument_types,
                 bank[cur].mod_connections.clone(),
+                bank[cur].neural_networks.clone(),
             );
             bank[cur] = current_snapshot;
             bank[new_idx].restore(self);
@@ -1793,6 +1807,7 @@ impl SequencerState {
                 names,
                 instrument_types,
                 bank[cur].mod_connections.clone(),
+                bank[cur].neural_networks.clone(),
             );
             let cloned = bank[cur].clone();
             bank.push(cloned);
@@ -1832,6 +1847,7 @@ impl SequencerState {
                 names,
                 instrument_types,
                 bank[cur].mod_connections.clone(),
+                bank[cur].neural_networks.clone(),
             );
             bank.remove(cur);
             let new_idx = cur.min(bank.len() - 1);
@@ -1872,6 +1888,7 @@ impl SequencerState {
             names,
             instrument_types,
             bank[cur].mod_connections.clone(),
+            bank[cur].neural_networks.clone(),
         );
         let source = bank[cur].clone();
         for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
@@ -2364,6 +2381,7 @@ mod tests {
                 })
                 .collect(),
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
         }
     }
 
@@ -2501,6 +2519,23 @@ mod tests {
                 dest_input: 1,
             }]
         );
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_remaps_neural_routes() {
+        let mut snapshot = sample_pattern_snapshot(4);
+        let mut network = crate::neural::ProjectNeuralNetwork::default();
+        network.neurons[0].route = Some(0);
+        network.neurons[1].route = Some(1);
+        network.neurons[2].route = Some(3);
+        snapshot.neural_networks = vec![network];
+
+        snapshot.remove_track(1);
+
+        let neurons = &snapshot.neural_networks[0].neurons;
+        assert_eq!(neurons[0].route, Some(0));
+        assert_eq!(neurons[1].route, None);
+        assert_eq!(neurons[2].route, Some(2));
     }
 
     #[test]
@@ -2695,6 +2730,7 @@ mod tests {
             instrument_types: vec![InstrumentType::Sampler; 4],
             instrument_run_modes: vec![CustomInstrumentRunMode::Instrument; 4],
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
         };
         let descriptors = vec![
             vec![EffectDescriptor::builtin_filter()],
