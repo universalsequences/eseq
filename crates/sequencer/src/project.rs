@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::EffectSlotSnapshot;
-use crate::neural::ProjectNeuralNetwork;
+use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
     PatternSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
@@ -192,6 +192,8 @@ impl ProjectTrack {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectPattern {
     pub track_bits: Vec<[u64; TRACK_PATTERN_WORDS]>,
+    #[serde(default)]
+    pub neural_reset_bits: Vec<[u64; TRACK_PATTERN_WORDS]>,
     #[serde(
         serialize_with = "serialize_step_data",
         deserialize_with = "deserialize_step_data"
@@ -326,6 +328,7 @@ pub struct ProjectEffectSlot {
     pub num_params: u32,
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
+    pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
     /// Effect-specific instance data that isn't a numeric param. Currently just
@@ -383,6 +386,7 @@ impl ProjectPattern {
     ) -> Self {
         Self {
             track_bits: snapshot.track_bits.clone(),
+            neural_reset_bits: snapshot.neural_reset_bits.clone(),
             step_data: snapshot.step_data.clone(),
             track_params: snapshot
                 .track_params
@@ -598,6 +602,7 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             num_params: value.num_params,
             defaults: value.defaults.clone(),
             plocks: value.plocks.clone(),
+            plock_param_ids: value.plock_param_ids.clone(),
             param_node_indices: value.param_node_indices.clone(),
             param_node_spans: value.param_node_spans.clone(),
             ir: value.ir.clone(),
@@ -613,6 +618,7 @@ impl ProjectEffectSlot {
             num_params: self.num_params,
             defaults: self.defaults,
             plocks: self.plocks,
+            plock_param_ids: self.plock_param_ids,
             param_node_indices: self.param_node_indices,
             param_node_spans: self.param_node_spans,
             ir: self.ir,
@@ -1046,6 +1052,8 @@ struct SparseEffectSlotPlock {
     step: usize,
     param: usize,
     value: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    param_id: Option<ParamNodeId>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1067,6 +1075,8 @@ struct DenseProjectEffectSlot {
     num_params: u32,
     defaults: Vec<f32>,
     plocks: Vec<Vec<Option<f32>>>,
+    #[serde(default)]
+    plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
     param_node_indices: Vec<u32>,
     #[serde(default)]
     param_node_spans: Vec<u32>,
@@ -1093,7 +1103,17 @@ impl Serialize for ProjectEffectSlot {
             .enumerate()
             .flat_map(|(step, row)| {
                 row.iter().enumerate().filter_map(move |(param, value)| {
-                    value.map(|value| SparseEffectSlotPlock { step, param, value })
+                    value.map(|value| SparseEffectSlotPlock {
+                        step,
+                        param,
+                        value,
+                        param_id: self
+                            .plock_param_ids
+                            .get(step)
+                            .and_then(|ids| ids.get(param))
+                            .copied()
+                            .flatten(),
+                    })
                 })
             })
             .collect::<Vec<_>>();
@@ -1128,15 +1148,18 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
         Ok(match repr {
             ProjectEffectSlotRepr::Sparse(slot) => {
                 let mut plocks = vec![vec![None; slot.defaults.len()]; MAX_STEPS];
+                let mut plock_param_ids = vec![vec![None; slot.defaults.len()]; MAX_STEPS];
                 for entry in slot.plocks_sparse {
                     if entry.step < plocks.len() && entry.param < slot.defaults.len() {
                         plocks[entry.step][entry.param] = Some(entry.value);
+                        plock_param_ids[entry.step][entry.param] = entry.param_id;
                     }
                 }
                 Self {
                     num_params: slot.num_params,
                     defaults: slot.defaults,
                     plocks,
+                    plock_param_ids,
                     param_node_indices: slot.param_node_indices,
                     param_node_spans: slot.param_node_spans,
                     ir: slot.ir,
@@ -1146,6 +1169,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 num_params: slot.num_params,
                 defaults: slot.defaults,
                 plocks: slot.plocks,
+                plock_param_ids: slot.plock_param_ids,
                 param_node_indices: slot.param_node_indices,
                 param_node_spans: slot.param_node_spans,
                 ir: slot.ir,
@@ -1154,6 +1178,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 num_params: 0,
                 defaults: Vec::new(),
                 plocks: vec![Vec::new(); MAX_STEPS],
+                plock_param_ids: vec![Vec::new(); MAX_STEPS],
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
                 ir: None,
@@ -1240,6 +1265,7 @@ mod tests {
             },
             patterns: vec![ProjectPattern {
                 track_bits: vec![[0b1011, 0, 0, 0], [0b0101, 1, 0, 0]],
+                neural_reset_bits: vec![[0b0010, 0, 0, 0], [0, 0, 0, 0]],
                 step_data: vec![vec![default_step_values(); 256]; 2],
                 track_params: vec![
                     ProjectTrackParams {
@@ -1305,6 +1331,7 @@ mod tests {
                         num_params: 2,
                         defaults: vec![0.1, 0.2],
                         plocks: vec![vec![None, Some(0.8)]; 256],
+                        plock_param_ids: vec![vec![None, None]; 256],
                         param_node_indices: vec![0, 1],
                         param_node_spans: vec![1, 1],
                         ir: None,
@@ -1313,6 +1340,7 @@ mod tests {
                         num_params: 0,
                         defaults: vec![],
                         plocks: vec![vec![]; 256],
+                        plock_param_ids: vec![vec![]; 256],
                         param_node_indices: vec![],
                         param_node_spans: vec![],
                         ir: None,
@@ -1419,6 +1447,7 @@ mod tests {
         assert_eq!(restored.patterns.len(), 1);
         assert_eq!(restored.patterns[0].track_bits[0], [0b1011, 0, 0, 0]);
         assert_eq!(restored.patterns[0].track_bits[1], [0b0101, 1, 0, 0]);
+        assert_eq!(restored.patterns[0].neural_reset_bits[0], [0b0010, 0, 0, 0]);
         assert_eq!(restored.patterns[0].step_data[0].len(), 256);
         assert_eq!(
             restored.patterns[0].chord_snapshots[1][3],
@@ -1652,6 +1681,7 @@ mod tests {
             num_params: 2,
             defaults: vec![0.35, 1.0],
             plocks: vec![Vec::new(); MAX_STEPS],
+            plock_param_ids: vec![Vec::new(); MAX_STEPS],
             param_node_indices: vec![10, 11],
             param_node_spans: vec![1, 1],
             ir: Some("lexicon-300-rich-plate".to_string()),

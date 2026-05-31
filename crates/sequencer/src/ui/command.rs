@@ -76,8 +76,7 @@ fn sync_instrument_mod_active_plock(
                 .abs()
                 > f32::EPSILON
         });
-    slot.plocks
-        .set(step, active_param_idx, if active { 1.0 } else { 0.0 });
+    slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
 }
 
 fn effect_mod_active_param_idx(
@@ -164,8 +163,7 @@ fn sync_effect_mod_active_plock(
                 .abs()
                 > f32::EPSILON
         });
-    slot.plocks
-        .set(step, active_param_idx, if active { 1.0 } else { 0.0 });
+    slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
 }
 
 fn sanitize_pasted_step_snapshot(
@@ -725,6 +723,7 @@ mod tests {
         params[0] = 0.75;
         let snapshot = StepSnapshot {
             active: true,
+            neural_reset: true,
             params,
             chord: vec![0.0, 7.0],
             chord_durations: vec![1.0, 1.0],
@@ -743,6 +742,7 @@ mod tests {
         let sanitized = sanitize_pasted_step_snapshot(&snapshot, false);
 
         assert!(sanitized.active);
+        assert!(sanitized.neural_reset);
         assert_eq!(sanitized.params, params);
         assert_eq!(sanitized.chord, vec![0.0, 7.0]);
         assert_eq!(sanitized.chord_durations, vec![1.0, 1.0]);
@@ -766,6 +766,7 @@ mod tests {
     fn paste_sanitizer_preserves_audio_plocks_for_same_track_paste() {
         let snapshot = StepSnapshot {
             active: true,
+            neural_reset: true,
             params: [0.0; NUM_PARAMS],
             chord: vec![],
             chord_durations: vec![],
@@ -1246,7 +1247,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         } => {
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
-                slot.plocks.set(step, param_idx, value);
+                slot.set_plock(step, param_idx, value);
                 sync_effect_mod_active_plock(app, track, step, slot_idx, param_idx);
             }
         }
@@ -1266,7 +1267,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
                 .and_then(|chain| chain.get(slot_idx))
                 .is_some_and(|slot| {
                     for step in &steps {
-                        slot.plocks.set(*step, param_idx, value);
+                        slot.set_plock(*step, param_idx, value);
                     }
                     true
                 });
@@ -1296,9 +1297,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
-            app.state.pattern.instrument_slots[track]
-                .plocks
-                .set(step, param_idx, value);
+            app.state.pattern.instrument_slots[track].set_plock(step, param_idx, value);
             sync_instrument_mod_active_plock(app, track, step, param_idx);
         }
 
@@ -1309,9 +1308,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             value,
         } => {
             for step in steps {
-                app.state.pattern.instrument_slots[track]
-                    .plocks
-                    .set(step, param_idx, value);
+                app.state.pattern.instrument_slots[track].set_plock(step, param_idx, value);
                 sync_instrument_mod_active_plock(app, track, step, param_idx);
             }
         }

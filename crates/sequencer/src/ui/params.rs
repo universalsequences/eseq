@@ -873,7 +873,7 @@ impl App {
             let slot = &self.state.pattern.instrument_slots[self.ui.cursor_track];
             if self.has_selection() {
                 for step in self.selected_steps() {
-                    slot.plocks.set(step, param_idx, val);
+                    slot.set_plock(step, param_idx, val);
                 }
             } else {
                 slot.defaults.set(param_idx, val);
@@ -935,7 +935,7 @@ impl App {
 
         if self.has_selection() {
             for step in self.selected_steps() {
-                slot.plocks.set(step, param_idx, val);
+                slot.set_plock(step, param_idx, val);
             }
         } else {
             slot.defaults.set(param_idx, val);

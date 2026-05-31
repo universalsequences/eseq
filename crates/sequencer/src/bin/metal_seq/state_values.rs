@@ -9542,7 +9542,7 @@ mod tests {
             .expect("filter descriptor should include cutoff");
         let slot = sequencer::effects::EffectSlotState::new(&desc, 0);
         slot.defaults.set(cutoff_idx, 5000.0);
-        slot.plocks.set(4, cutoff_idx, 200.0);
+        slot.set_plock(4, cutoff_idx, 200.0);
 
         assert_eq!(
             slot_param_stored_value(&slot, &desc.params[cutoff_idx], cutoff_idx, None),

@@ -4200,7 +4200,7 @@ mod tests {
         state.pattern.instrument_slots[0].defaults.set(1, 0.4);
 
         let base = instrument_sound_fingerprint(&state, 0, 2, Some(3));
-        state.pattern.instrument_slots[0].plocks.set(3, 1, 0.9);
+        state.pattern.instrument_slots[0].set_plock(3, 1, 0.9);
         let changed = instrument_sound_fingerprint(&state, 0, 2, Some(3));
 
         assert_ne!(base, changed);

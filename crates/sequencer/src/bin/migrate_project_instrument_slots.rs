@@ -123,6 +123,7 @@ fn migrate_slot(slot: &ProjectEffectSlot, desc: &EffectDescriptor) -> ProjectEff
         num_params: new_param_count as u32,
         defaults,
         plocks,
+        plock_param_ids: vec![vec![None; new_param_count]; MAX_STEPS],
         param_node_indices: desc
             .params
             .iter()

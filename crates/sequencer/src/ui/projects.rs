@@ -33,6 +33,7 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
         num_params: num_params as u32,
         defaults: desc.params.iter().map(|param| param.default).collect(),
         plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+        plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
         param_node_indices: desc
             .params
             .iter()
@@ -363,6 +364,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         num_params: new_np as u32,
         defaults,
         plocks,
+        plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; new_np]).collect(),
         param_node_indices: desc.params.iter().map(|p| p.node_param_idx).collect(),
         param_node_spans: desc
             .params
@@ -489,6 +491,7 @@ fn project_bus_pattern_snapshot_from_ui(
                 num_params: plocks.iter().map(Vec::len).max().unwrap_or(0) as u32,
                 defaults: Vec::new(),
                 plocks: plocks.clone(),
+                plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
                 ir: None,
@@ -1691,6 +1694,7 @@ impl App {
 
         let crate::project::ProjectPattern {
             track_bits,
+            neural_reset_bits,
             step_data,
             track_params,
             effect_slots,
@@ -1726,6 +1730,7 @@ impl App {
 
         let mut snapshot = PatternSnapshot {
             track_bits,
+            neural_reset_bits,
             step_data,
             track_params: track_params.into_iter().map(Into::into).collect(),
             effect_slots: effect_slots
@@ -1776,6 +1781,7 @@ impl App {
                                     num_params: 0,
                                     defaults: Vec::new(),
                                     plocks: vec![Vec::new(); MAX_STEPS],
+                                    plock_param_ids: vec![Vec::new(); MAX_STEPS],
                                     param_node_indices: Vec::new(),
                                     param_node_spans: Vec::new(),
                                     ir: None,
@@ -1804,6 +1810,7 @@ impl App {
                                 num_params: defaults.len() as u32,
                                 defaults,
                                 plocks: vec![Vec::new(); MAX_STEPS],
+                                plock_param_ids: vec![Vec::new(); MAX_STEPS],
                                 param_node_indices: sampler_desc
                                     .params
                                     .iter()
@@ -1824,6 +1831,7 @@ impl App {
                                 num_params: 0,
                                 defaults: Vec::new(),
                                 plocks: vec![Vec::new(); MAX_STEPS],
+                                plock_param_ids: vec![Vec::new(); MAX_STEPS],
                                 param_node_indices: Vec::new(),
                                 param_node_spans: Vec::new(),
                                 ir: None,
@@ -2079,6 +2087,7 @@ mod tests {
             scratch: ProjectScratchState::default(),
             patterns: vec![ProjectPattern {
                 track_bits: Vec::new(),
+                neural_reset_bits: Vec::new(),
                 step_data: Vec::new(),
                 track_params: Vec::new(),
                 effect_slots: vec![effect_slots],
@@ -2118,6 +2127,7 @@ mod tests {
             num_params: 1,
             defaults: vec![0.42],
             plocks: vec![vec![None]; MAX_STEPS],
+            plock_param_ids: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![9],
             param_node_spans: vec![1],
             ir: None,
@@ -2155,6 +2165,7 @@ mod tests {
             num_params: 1,
             defaults: vec![0.24],
             plocks: vec![vec![None]; MAX_STEPS],
+            plock_param_ids: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![11],
             param_node_spans: vec![1],
             ir: None,
@@ -2194,6 +2205,7 @@ mod tests {
             num_params: 4,
             defaults: vec![0.12, 0.34, 0.56, 0.78],
             plocks,
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![
                 (crate::lisp_effect::HEADER_SLOTS - 1) as u32,
                 crate::lisp_effect::HEADER_SLOTS as u32,
@@ -2254,6 +2266,7 @@ mod tests {
             num_params: 4,
             defaults: vec![0.12, 0.34, 8.0, 9.0],
             plocks,
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![
                 crate::lisp_effect::HEADER_SLOTS as u32,
                 crate::lisp_effect::HEADER_SLOTS as u32 + 1,
@@ -2307,6 +2320,7 @@ mod tests {
             num_params: 4,
             defaults: vec![0.12, 0.34, 0.56, 0.78],
             plocks,
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![10, 14, 18, 22],
             param_node_spans: vec![1, 1, 1, 1],
             ir: None,
@@ -2370,6 +2384,7 @@ mod tests {
             num_params: desc.params.len() as u32,
             defaults: vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78],
             plocks,
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
             param_node_indices: desc
                 .params
                 .iter()
@@ -2421,6 +2436,7 @@ mod tests {
             num_params: desc.params.len() as u32,
             defaults: vec![0.5, 7400.0, 0.0, 0.0],
             plocks: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
             param_node_indices: desc
                 .params
                 .iter()
@@ -2461,6 +2477,7 @@ mod tests {
             num_params: desc.params.len() as u32,
             defaults: vec![0.12, 1.0, 0.31, 2.0, -0.27],
             plocks,
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
             param_node_indices: desc
                 .params
                 .iter()

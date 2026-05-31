@@ -2022,7 +2022,7 @@ pub(crate) fn init_runtime(
         };
         let steps = sel.lock().unwrap();
         for &step in steps.iter() {
-            slot_state.plocks.set(step, param_idx, val);
+            slot_state.set_plock(step, param_idx, val);
             ui_inv.push(UiInvalidation::Step {
                 track,
                 step,
@@ -2079,7 +2079,7 @@ pub(crate) fn init_runtime(
         let steps = sel.lock().unwrap();
         for &step in steps.iter() {
             for (param_idx, val) in updates {
-                slot_state.plocks.set(step, param_idx, val);
+                slot_state.set_plock(step, param_idx, val);
                 ui_inv.push(UiInvalidation::TrackFx {
                     track,
                     change: TrackFxInvalidation::Plock {

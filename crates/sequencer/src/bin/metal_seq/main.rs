@@ -4929,7 +4929,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 );
                                             } else {
                                                 for step in selected {
-                                                    slot.plocks.set(step, param_idx, next);
+                                                    slot.set_plock(step, param_idx, next);
                                                 }
                                             }
                                             state.publish_scheduler_snapshot();
@@ -6440,7 +6440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
                                     for step in steps {
-                                        slot.plocks.set(step, param_idx, clamped);
+                                        slot.set_plock(step, param_idx, clamped);
                                     }
                                     state.publish_scheduler_snapshot();
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -6527,7 +6527,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .copied()
                                             .collect();
                                         for step in steps {
-                                            slot.plocks.set(step, param_idx, selected_idx as f32);
+                                            slot.set_plock(step, param_idx, selected_idx as f32);
                                         }
                                         state.publish_scheduler_snapshot();
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -6621,8 +6621,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let stored =
                                                     desc.clamp(desc.user_input_to_stored(value));
                                                 state.pattern.instrument_slots[track]
-                                                    .plocks
-                                                    .set(step, param_idx, stored);
+                                                    .set_plock(step, param_idx, stored);
                                                 state.publish_scheduler_snapshot();
                                             }
                                         }
@@ -6645,7 +6644,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .and_then(|d| d.params.get(param_idx))
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                slot.plocks.set(step, param_idx, clamped);
+                                                slot.set_plock(step, param_idx, clamped);
                                                 state.publish_scheduler_snapshot();
                                             }
                                         }
@@ -6672,7 +6671,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     })
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                slot.plocks.set(step, param_idx, clamped);
+                                                slot.set_plock(step, param_idx, clamped);
                                                 state.publish_scheduler_snapshot();
                                             }
                                         }
@@ -6759,7 +6758,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     _ => None,
                                                 })
                                             {
-                                                state.pattern.instrument_slots[track].plocks.set(
+                                                state.pattern.instrument_slots[track].set_plock(
                                                     step,
                                                     param_idx,
                                                     selected_idx as f32,
@@ -6800,7 +6799,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .get(track)
                                                     .and_then(|chain| chain.get(slot_idx))
                                                 {
-                                                    slot.plocks.set(
+                                                    slot.set_plock(
                                                         step,
                                                         param_idx,
                                                         selected_idx as f32,
@@ -6849,7 +6848,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .get(track)
                                                     .and_then(|slots| slots.get(slot_idx))
                                                 {
-                                                    slot.plocks.set(
+                                                    slot.set_plock(
                                                         step,
                                                         param_idx,
                                                         selected_idx as f32,

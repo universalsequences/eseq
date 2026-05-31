@@ -1707,7 +1707,7 @@ impl App {
 
                         if self.has_selection() {
                             for step in self.selected_steps() {
-                                slot.plocks.set(step, param_idx, store_val);
+                                slot.set_plock(step, param_idx, store_val);
                             }
                             self.state.publish_scheduler_snapshot();
                         } else {
@@ -1755,7 +1755,7 @@ impl App {
                         slot.defaults.set(param_idx, selection as f32);
                     } else if self.has_selection() {
                         for step in self.selected_steps() {
-                            slot.plocks.set(step, param_idx, store_val);
+                            slot.set_plock(step, param_idx, store_val);
                         }
                     } else {
                         slot.defaults.set(param_idx, store_val);

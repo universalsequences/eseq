@@ -4001,7 +4001,7 @@ fn register_sequencer_natives_with_accumulators(
                 .get(track_idx)
                 .and_then(|slots| slots.get(slot_idx))
                 .ok_or_else(|| "MIDI FX slot out of range".to_string())?;
-            slot.plocks.set(step_idx, param_idx, param_desc.clamp(value));
+            slot.set_plock(step_idx, param_idx, param_desc.clamp(value));
             state_for_plock_midi_fx.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {track_idx} step {step_idx} MIDI FX slot {slot_idx} param {param_idx}"
@@ -5176,7 +5176,7 @@ fn register_sequencer_natives_with_accumulators(
                 .cloned()
                 .ok_or_else(|| "effect descriptor missing for parameter".to_string())?;
             let value = param_desc.denormalize(normalized);
-            slot.plocks.set(step_idx, param_idx, value);
+            slot.set_plock(step_idx, param_idx, value);
             state_for_effect_plock.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} effect {} param {} {}",
@@ -5210,7 +5210,7 @@ fn register_sequencer_natives_with_accumulators(
             if param_idx >= num_params {
                 return Err("effect param index out of range".to_string());
             }
-            slot.plocks.set(step_idx, param_idx, value);
+            slot.set_plock(step_idx, param_idx, value);
             state_for_effect_plock_raw.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} effect {} param {} {}",
@@ -5296,7 +5296,7 @@ fn register_sequencer_natives_with_accumulators(
                 .cloned()
                 .ok_or_else(|| "instrument descriptor missing for parameter".to_string())?;
             let value = param_desc.denormalize(normalized);
-            slot.plocks.set(step_idx, param_idx, value);
+            slot.set_plock(step_idx, param_idx, value);
             state_for_instrument_plock.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} instrument param {} {}",
@@ -5325,7 +5325,7 @@ fn register_sequencer_natives_with_accumulators(
             if param_idx >= num_params {
                 return Err("instrument param index out of range".to_string());
             }
-            slot.plocks.set(step_idx, param_idx, value);
+            slot.set_plock(step_idx, param_idx, value);
             state_for_instrument_plock_raw.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} instrument param {} {}",
@@ -8328,7 +8328,7 @@ mod tests {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         state.pattern.patterns[0].set_step_active(2, true);
         state.pattern.step_data[0].set(2, StepParam::Velocity, 0.8);
-        state.pattern.effect_chains[0][0].plocks.set(2, 0, 0.25);
+        state.pattern.effect_chains[0][0].set_plock(2, 0, 0.25);
 
         let mut runtime = Runtime::new();
         register_sequencer_natives(

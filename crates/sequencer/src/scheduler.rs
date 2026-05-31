@@ -11,7 +11,7 @@ use crate::accumulator::{
     ACCUMULATOR_REGISTRY,
 };
 use crate::lisp_effect::{self, AccumulatorNoteSpan};
-use crate::neural::NeuralRuntime;
+use crate::neural::{NeuralRuntime, ParamNodeId};
 use crate::scheduled_event::{
     EventSource, ScheduledChordData, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
@@ -295,6 +295,79 @@ fn step_delay_samples(step_params: &[f32], samples_per_step: f32) -> u64 {
     (delay as f64 * samples_per_step.max(0.0) as f64).round() as u64
 }
 
+fn slot_param_identity(
+    node_id: u32,
+    modulator_node_id: u32,
+    raw_idx: u32,
+) -> Option<ParamNodeId> {
+    if raw_idx == u32::MAX {
+        return None;
+    }
+    if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        if modulator_node_id == 0 {
+            return None;
+        }
+        Some(ParamNodeId {
+            logical_id: modulator_node_id as u64,
+            node_param_idx: raw_idx - crate::voice_modulator::MOD_PARAM_BASE,
+        })
+    } else {
+        if node_id == 0 {
+            return None;
+        }
+        Some(ParamNodeId {
+            logical_id: node_id as u64,
+            node_param_idx: raw_idx,
+        })
+    }
+}
+
+fn plock_identity_matches(
+    plock_ids: &[Vec<Option<ParamNodeId>>],
+    step_idx: usize,
+    param_idx: usize,
+    expected: Option<ParamNodeId>,
+) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    plock_ids
+        .get(step_idx)
+        .and_then(|step| step.get(param_idx))
+        .copied()
+        .flatten()
+        == Some(expected)
+}
+
+fn resolved_slot_param_value(
+    slot: &crate::effects::EffectSlotSnapshot,
+    step_idx: usize,
+    param_idx: usize,
+    default: f32,
+) -> f32 {
+    let default_value = slot.defaults.get(param_idx).copied().unwrap_or(default);
+    let Some(plock) = slot
+        .plocks
+        .get(step_idx)
+        .and_then(|step| step.get(param_idx))
+        .copied()
+        .flatten()
+    else {
+        return default_value;
+    };
+    let raw_idx = slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()
+        .unwrap_or(param_idx as u32);
+    let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
+    if plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id) {
+        plock
+    } else {
+        default_value
+    }
+}
+
 fn delayed_step_sample_time(
     base_sample_time: u64,
     step_params: &[f32],
@@ -315,32 +388,26 @@ fn resolve_effect_params(
         }
         let num_params = slot.num_params as usize;
         for param_idx in 0..num_params {
-            let idx = slot
+            let raw_idx = slot
                 .param_node_indices
                 .get(param_idx)
                 .copied()
-                .unwrap_or(param_idx as u32) as u64;
-            if idx == u32::MAX as u64 {
+                .unwrap_or(param_idx as u32);
+            if raw_idx == u32::MAX {
                 continue;
             }
-            let (logical_id, idx) = if idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE {
+            let (logical_id, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
                 if slot.modulator_node_id == 0 {
                     continue;
                 }
                 (
                     slot.modulator_node_id as u64,
-                    idx - crate::voice_modulator::MOD_PARAM_BASE as u64,
+                    raw_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
                 )
             } else {
-                (slot.node_id as u64, idx)
+                (slot.node_id as u64, raw_idx as u64)
             };
-            let value = slot
-                .plocks
-                .get(step_idx)
-                .and_then(|step| step.get(param_idx))
-                .copied()
-                .flatten()
-                .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(0.0));
+            let value = resolved_slot_param_value(slot, step_idx, param_idx, 0.0);
             if !value.is_finite() {
                 continue;
             }
@@ -383,13 +450,7 @@ fn resolve_instrument_params(
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
         };
-        let value = slot
-            .plocks
-            .get(step_idx)
-            .and_then(|step| step.get(param_idx))
-            .copied()
-            .flatten()
-            .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(0.0));
+        let value = resolved_slot_param_value(slot, step_idx, param_idx, 0.0);
         if !value.is_finite() {
             continue;
         }
@@ -534,6 +595,10 @@ fn resolve_instrument_plocks(
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
         };
+        let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
+        if !plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id) {
+            continue;
+        }
         params.push(ScheduledInstrumentParam {
             target,
             idx,
@@ -585,14 +650,7 @@ fn resolve_midi_fx_slot_param(
     if param_idx >= slot.num_params as usize {
         return None;
     }
-    Some(
-        slot.plocks
-            .get(step_idx)
-            .and_then(|step| step.get(param_idx))
-            .copied()
-            .flatten()
-            .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(0.0)),
-    )
+    Some(resolved_slot_param_value(slot, step_idx, param_idx, 0.0))
 }
 
 fn live_midi_fx_tick_beats(snapshot: &SequencerSnapshot, track_idx: usize, step_idx: usize) -> f32 {
@@ -640,12 +698,7 @@ fn resolve_sampler_params(
         return ScheduledSamplerParams::default();
     };
     let value = |param_idx: usize, default: f32| {
-        slot.plocks
-            .get(step_idx)
-            .and_then(|step| step.get(param_idx))
-            .copied()
-            .flatten()
-            .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(default))
+        resolved_slot_param_value(slot, step_idx, param_idx, default)
     };
     ScheduledSamplerParams {
         attack_ms: value(0, 0.0),
@@ -1179,7 +1232,12 @@ fn apply_neuron_output_overrides(
         else {
             continue;
         };
-        if raw_idx != override_param.param_id.node_param_idx {
+        let expected_id = slot_param_identity(
+            track.instrument_slot.node_id,
+            track.instrument_slot.modulator_node_id,
+            raw_idx,
+        );
+        if expected_id != Some(override_param.param_id) {
             continue;
         }
         let span = track
@@ -1213,7 +1271,11 @@ fn apply_neuron_output_overrides(
             });
         }
         if matches!(target, ScheduledInstrumentParamTarget::Synth) {
-            apply_sampler_param_override(&mut event.sampler_params, idx, override_param.value);
+            apply_sampler_param_override(
+                &mut event.sampler_params,
+                param_idx as u64,
+                override_param.value,
+            );
         }
     }
     event
@@ -1234,7 +1296,8 @@ fn apply_neuron_output_overrides(
         else {
             continue;
         };
-        if raw_idx != override_param.param_id.node_param_idx {
+        let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
+        if expected_id != Some(override_param.param_id) {
             continue;
         }
         let (logical_id, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
@@ -2269,6 +2332,9 @@ pub fn spawn_scheduler_thread(
                             }
                         }
                         let step_snapshot = &track.steps[trigger.step];
+                        if step_snapshot.neural_reset {
+                            neural_runtime.reset_state(trigger.absolute_beats);
+                        }
                         let swing_pct = step_snapshot.swing_override.unwrap_or(track.params.swing);
                         let swing_resolution = step_snapshot
                             .swing_resolution_override
@@ -2721,17 +2787,36 @@ pub fn spawn_scheduler_thread(
 #[cfg(test)]
 mod tests {
     use super::{
-        delayed_step_sample_time, enqueue_resolved_trigger, midi_fx_window_events_from_step,
-        quantized_live_tick_sample, resolve_effect_params, resolve_instrument_plocks,
-        track_active_note_spans_at_beat, track_note_spans_for_trigger, SnapshotSequencerClock,
+        apply_neuron_output_overrides, delayed_step_sample_time, enqueue_resolved_trigger,
+        midi_fx_window_events_from_step, quantized_live_tick_sample, resolve_effect_params,
+        resolve_instrument_plocks, resolve_sampler_params, track_active_note_spans_at_beat,
+        track_note_spans_for_trigger, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
+    use crate::neural::{
+        ParamNodeId, ProjectEffectParamOverride, ProjectNeuralNetwork, ProjectNeuron,
+        ProjectParamOverride,
+    };
     use crate::scheduled_event::{
-        ScheduledChordData, ScheduledEffectParam, ScheduledEventQueue, ScheduledInstrumentParam,
-        ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
+        EventSource, ScheduledChordData, ScheduledEffectParam, ScheduledEventQueue,
+        ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
+        ScheduledSamplerParams, StepEvent,
     };
     use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
+
+    fn test_resolved_step() -> ResolvedStep {
+        ResolvedStep {
+            duration: 1.0,
+            velocity: 1.0,
+            speed: 1.0,
+            aux_a: 0.0,
+            aux_b: 0.0,
+            transpose: 0.0,
+            pan: 0.0,
+            chop: 1.0,
+        }
+    }
 
     #[test]
     fn snapshot_clock_emits_triggers_for_active_steps() {
@@ -2808,12 +2893,8 @@ mod tests {
         let step = 3;
         state.pattern.instrument_slots[track]
             .apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
-        state.pattern.instrument_slots[track]
-            .plocks
-            .set(step, 12, 2.0);
-        state.pattern.instrument_slots[track]
-            .plocks
-            .set(step, 13, 0.25);
+        state.pattern.instrument_slots[track].set_plock(step, 12, 2.0);
+        state.pattern.instrument_slots[track].set_plock(step, 13, 0.25);
 
         let snapshot = state.publish_scheduler_snapshot();
         assert!(!snapshot.tracks[track].steps[step].active);
@@ -2837,6 +2918,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn resolve_instrument_plocks_drops_stale_identity() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        state.pattern.instrument_slots[track]
+            .apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
+        state.pattern.instrument_slots[track]
+            .plocks
+            .set(step, 12, 2.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let params = resolve_instrument_plocks(&snapshot, track, step);
+
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn resolve_sampler_params_drops_stale_identity() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        state.pattern.instrument_slots[track]
+            .apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
+        state.pattern.instrument_slots[track]
+            .plocks
+            .set(step, 12, 2.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let params = resolve_sampler_params(&snapshot, track, step);
+
+        assert_eq!(params.playback_speed, 1.0);
     }
 
     #[test]
@@ -2881,12 +2996,8 @@ mod tests {
             ],
         };
         state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 77);
-        state.pattern.effect_chains[track][0]
-            .plocks
-            .set(step, 0, 0.75);
-        state.pattern.effect_chains[track][0]
-            .plocks
-            .set(step, 1, 1.0);
+        state.pattern.effect_chains[track][0].set_plock(step, 0, 0.75);
+        state.pattern.effect_chains[track][0].set_plock(step, 1, 1.0);
 
         let snapshot = state.publish_scheduler_snapshot();
         let params = resolve_effect_params(&snapshot, track, step);
@@ -2906,6 +3017,176 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn neuron_output_overrides_apply_only_with_matching_identity() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        state.pattern.instrument_slots[track]
+            .apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
+        let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
+        let mut neuron = ProjectNeuron::default();
+        neuron.output_overrides.instrument.push(ProjectParamOverride {
+            param_id: ParamNodeId {
+                logical_id: 12,
+                node_param_idx: crate::sampler::PARAM_SPEED as u32,
+            },
+            param_index: 12,
+            value: 2.5,
+        });
+        snapshot.neural_networks = vec![ProjectNeuralNetwork {
+            id: 1,
+            name: "test".to_string(),
+            enabled: true,
+            num_neurons: 1,
+            weights: vec![vec![0.0]],
+            neurons: vec![neuron],
+            ..ProjectNeuralNetwork::default()
+        }];
+        let mut event = StepEvent {
+            track,
+            samples_per_step: 1.0,
+            resolved: test_resolved_step(),
+            chord: ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            source: EventSource::Network {
+                seed: None,
+                neuron: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+
+        apply_neuron_output_overrides(&snapshot, 0, &mut event);
+
+        assert_eq!(event.sampler_params.playback_speed, 2.5);
+        assert_eq!(
+            event.instrument_params.as_slice(),
+            &[ScheduledInstrumentParam {
+                target: ScheduledInstrumentParamTarget::Synth,
+                idx: crate::sampler::PARAM_SPEED,
+                span: 1,
+                value: 2.5,
+            }]
+        );
+
+        let mut stale_snapshot = snapshot.clone();
+        stale_snapshot.neural_networks[0].neurons[0].output_overrides.instrument[0].param_id =
+            ParamNodeId {
+                logical_id: 99,
+                node_param_idx: crate::sampler::PARAM_SPEED as u32,
+            };
+        let mut stale_event = event.clone();
+        stale_event.instrument_params.clear();
+        stale_event.sampler_params = ScheduledSamplerParams::default();
+
+        apply_neuron_output_overrides(&stale_snapshot, 0, &mut stale_event);
+
+        assert!(stale_event.instrument_params.is_empty());
+        assert_eq!(stale_event.sampler_params.playback_speed, 1.0);
+    }
+
+    #[test]
+    fn neuron_effect_output_overrides_match_modulator_identity() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let desc = EffectDescriptor {
+            name: "modded effect".to_string(),
+            input_channels: 6,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![ParamDescriptor {
+                name: "mod1_source".to_string(),
+                min: 0.0,
+                max: 8.0,
+                default: 0.0,
+                kind: ParamKind::Enum {
+                    labels: vec!["off".to_string(), "lfo".to_string()],
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: crate::voice_modulator::MOD_PARAM_BASE
+                    + crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+        };
+        state.pattern.effect_chains[track][0].apply_descriptor_with_modulator(&desc, 42, 77);
+        let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
+        let mut neuron = ProjectNeuron::default();
+        neuron
+            .output_overrides
+            .effects
+            .push(ProjectEffectParamOverride {
+                slot_index: 0,
+                param_id: ParamNodeId {
+                    logical_id: 77,
+                    node_param_idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+                },
+                param_index: 0,
+                value: 1.0,
+            });
+        snapshot.neural_networks = vec![ProjectNeuralNetwork {
+            id: 1,
+            name: "test".to_string(),
+            enabled: true,
+            num_neurons: 1,
+            weights: vec![vec![0.0]],
+            neurons: vec![neuron],
+            ..ProjectNeuralNetwork::default()
+        }];
+        let mut event = StepEvent {
+            track,
+            samples_per_step: 1.0,
+            resolved: test_resolved_step(),
+            chord: ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            source: EventSource::Network {
+                seed: None,
+                neuron: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+
+        apply_neuron_output_overrides(&snapshot, 0, &mut event);
+
+        assert_eq!(
+            event.effect_params,
+            vec![ScheduledEffectParam {
+                logical_id: 77,
+                idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                value: 1.0,
+            }]
+        );
+
+        let mut stale_snapshot = snapshot.clone();
+        stale_snapshot.neural_networks[0].neurons[0].output_overrides.effects[0].param_id =
+            ParamNodeId {
+                logical_id: 42,
+                node_param_idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+            };
+        event.effect_params.clear();
+
+        apply_neuron_output_overrides(&stale_snapshot, 0, &mut event);
+
+        assert!(event.effect_params.is_empty());
     }
 
     #[test]
@@ -2949,12 +3230,8 @@ mod tests {
             ],
         };
         state.pattern.instrument_slots[track].apply_descriptor(&desc, 12);
-        state.pattern.instrument_slots[track]
-            .plocks
-            .set(step, 0, 9155.0);
-        state.pattern.instrument_slots[track]
-            .plocks
-            .set(step, 1, 1.0);
+        state.pattern.instrument_slots[track].set_plock(step, 0, 9155.0);
+        state.pattern.instrument_slots[track].set_plock(step, 1, 1.0);
 
         let snapshot = state.publish_scheduler_snapshot();
         let params = resolve_instrument_plocks(&snapshot, track, step);

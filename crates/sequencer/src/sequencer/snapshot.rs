@@ -22,6 +22,7 @@ pub struct SequencerTransportSnapshot {
 #[derive(Clone, Debug)]
 pub struct SequencerStepSnapshot {
     pub active: bool,
+    pub neural_reset: bool,
     pub params: [f32; NUM_PARAMS],
     pub chord: Vec<f32>,
     pub chord_durations: Vec<f32>,
@@ -156,6 +157,8 @@ impl SequencerSnapshot {
 
                 steps.push(SequencerStepSnapshot {
                     active: state.pattern.patterns[track_idx].is_active(step_idx),
+                    neural_reset: state.pattern.neural_reset_patterns[track_idx]
+                        .is_active(step_idx),
                     params: step_params,
                     chord,
                     chord_durations,
