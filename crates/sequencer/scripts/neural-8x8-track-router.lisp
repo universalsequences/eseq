@@ -7,6 +7,9 @@
 (def neural-8x8-track-router-row-height 1.5)
 (def neural-8x8-track-router-matrix-height 12)
 (defstate neural-8x8-track-router-id 0)
+(defstate neural-8x8-track-router-reset-bars 4)
+(defstate neural-8x8-track-router-energy-decay 0.994)
+(defstate neural-8x8-track-router-max-poly 2)
 
 (def neural-8x8-track-router-route-options
   (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8" "Off"))
@@ -51,6 +54,33 @@
 (defstate neural-8x8-track-router-quantize-5 "off")
 (defstate neural-8x8-track-router-quantize-6 "off")
 (defstate neural-8x8-track-router-quantize-7 "off")
+
+(defstate neural-8x8-track-router-transpose-0 0)
+(defstate neural-8x8-track-router-transpose-1 0)
+(defstate neural-8x8-track-router-transpose-2 0)
+(defstate neural-8x8-track-router-transpose-3 0)
+(defstate neural-8x8-track-router-transpose-4 0)
+(defstate neural-8x8-track-router-transpose-5 0)
+(defstate neural-8x8-track-router-transpose-6 0)
+(defstate neural-8x8-track-router-transpose-7 0)
+
+(defstate neural-8x8-track-router-dampening-0 0)
+(defstate neural-8x8-track-router-dampening-1 0)
+(defstate neural-8x8-track-router-dampening-2 0)
+(defstate neural-8x8-track-router-dampening-3 0)
+(defstate neural-8x8-track-router-dampening-4 0)
+(defstate neural-8x8-track-router-dampening-5 0)
+(defstate neural-8x8-track-router-dampening-6 0)
+(defstate neural-8x8-track-router-dampening-7 0)
+
+(defstate neural-8x8-track-router-recovery-0 0.98)
+(defstate neural-8x8-track-router-recovery-1 0.98)
+(defstate neural-8x8-track-router-recovery-2 0.98)
+(defstate neural-8x8-track-router-recovery-3 0.98)
+(defstate neural-8x8-track-router-recovery-4 0.98)
+(defstate neural-8x8-track-router-recovery-5 0.98)
+(defstate neural-8x8-track-router-recovery-6 0.98)
+(defstate neural-8x8-track-router-recovery-7 0.98)
 
 (def neural-8x8-track-router-route-index (route)
   (if (= route "Off")
@@ -127,11 +157,20 @@
     false
     quantize))
 
-(def neural-8x8-track-router-apply-neuron (network idx route delay quantize)
+(def neural-8x8-track-router-apply-network (network reset-bars energy-decay max-poly)
+  (neural-set network
+    :reset-bars reset-bars
+    :energy-decay energy-decay
+    :max-poly max-poly))
+
+(def neural-8x8-track-router-apply-neuron (network idx route delay quantize transpose dampening recovery)
   (neural-neuron network idx
     :route (neural-8x8-track-router-route-index route)
     :delay delay
-    :quantize (neural-8x8-track-router-quantize-value quantize)))
+    :quantize (neural-8x8-track-router-quantize-value quantize)
+    :transpose transpose
+    :dampening dampening
+    :recovery recovery))
 
 (def neural-8x8-track-router-existing-network ()
   (let ((matches
@@ -146,6 +185,9 @@
   (let ((neurons (get network :neurons)))
     (do
       (set! neural-8x8-track-router-weights (get network :weights))
+      (set! neural-8x8-track-router-reset-bars (get network :reset-bars))
+      (set! neural-8x8-track-router-energy-decay (get network :energy-decay))
+      (set! neural-8x8-track-router-max-poly (get network :max-poly))
       (set! neural-8x8-track-router-route-0 (neural-8x8-track-router-route-label (get (nth neurons 0) :route)))
       (set! neural-8x8-track-router-route-1 (neural-8x8-track-router-route-label (get (nth neurons 1) :route)))
       (set! neural-8x8-track-router-route-2 (neural-8x8-track-router-route-label (get (nth neurons 2) :route)))
@@ -170,9 +212,142 @@
       (set! neural-8x8-track-router-quantize-5 (neural-8x8-track-router-quantize-label (get (nth neurons 5) :quantize)))
       (set! neural-8x8-track-router-quantize-6 (neural-8x8-track-router-quantize-label (get (nth neurons 6) :quantize)))
       (set! neural-8x8-track-router-quantize-7 (neural-8x8-track-router-quantize-label (get (nth neurons 7) :quantize)))
+      (set! neural-8x8-track-router-transpose-0 (get (nth neurons 0) :transpose))
+      (set! neural-8x8-track-router-transpose-1 (get (nth neurons 1) :transpose))
+      (set! neural-8x8-track-router-transpose-2 (get (nth neurons 2) :transpose))
+      (set! neural-8x8-track-router-transpose-3 (get (nth neurons 3) :transpose))
+      (set! neural-8x8-track-router-transpose-4 (get (nth neurons 4) :transpose))
+      (set! neural-8x8-track-router-transpose-5 (get (nth neurons 5) :transpose))
+      (set! neural-8x8-track-router-transpose-6 (get (nth neurons 6) :transpose))
+      (set! neural-8x8-track-router-transpose-7 (get (nth neurons 7) :transpose))
+      (set! neural-8x8-track-router-dampening-0 (get (nth neurons 0) :dampening))
+      (set! neural-8x8-track-router-dampening-1 (get (nth neurons 1) :dampening))
+      (set! neural-8x8-track-router-dampening-2 (get (nth neurons 2) :dampening))
+      (set! neural-8x8-track-router-dampening-3 (get (nth neurons 3) :dampening))
+      (set! neural-8x8-track-router-dampening-4 (get (nth neurons 4) :dampening))
+      (set! neural-8x8-track-router-dampening-5 (get (nth neurons 5) :dampening))
+      (set! neural-8x8-track-router-dampening-6 (get (nth neurons 6) :dampening))
+      (set! neural-8x8-track-router-dampening-7 (get (nth neurons 7) :dampening))
+      (set! neural-8x8-track-router-recovery-0 (get (nth neurons 0) :dampening-recovery))
+      (set! neural-8x8-track-router-recovery-1 (get (nth neurons 1) :dampening-recovery))
+      (set! neural-8x8-track-router-recovery-2 (get (nth neurons 2) :dampening-recovery))
+      (set! neural-8x8-track-router-recovery-3 (get (nth neurons 3) :dampening-recovery))
+      (set! neural-8x8-track-router-recovery-4 (get (nth neurons 4) :dampening-recovery))
+      (set! neural-8x8-track-router-recovery-5 (get (nth neurons 5) :dampening-recovery))
+      (set! neural-8x8-track-router-recovery-6 (get (nth neurons 6) :dampening-recovery))
+      (set! neural-8x8-track-router-recovery-7 (get (nth neurons 7) :dampening-recovery))
       network)))
 
-(def neural-8x8-track-router-control-row (row-label route delay quantize on-route on-delay on-quantize)
+(def neural-8x8-track-router-load-default-state ()
+  (do
+    (set! neural-8x8-track-router-weights
+      (list
+        (list 0 1 0 0 0 0 0 0)
+        (list 0 0 1 0 0 0 0 0)
+        (list 0 0 0 1 0 0 0 0)
+        (list 0 0 0 0 1 0 0 0)
+        (list 0 0 0 0 0 1 0 0)
+        (list 0 0 0 0 0 0 1 0)
+        (list 0 0 0 0 0 0 0 1)
+        (list 1 0 0 0 0 0 0 0)))
+    (set! neural-8x8-track-router-reset-bars 4)
+    (set! neural-8x8-track-router-energy-decay 0.994)
+    (set! neural-8x8-track-router-max-poly 2)
+    (set! neural-8x8-track-router-route-0 "Track 1")
+    (set! neural-8x8-track-router-route-1 "Track 2")
+    (set! neural-8x8-track-router-route-2 "Track 3")
+    (set! neural-8x8-track-router-route-3 "Track 4")
+    (set! neural-8x8-track-router-route-4 "Track 5")
+    (set! neural-8x8-track-router-route-5 "Track 6")
+    (set! neural-8x8-track-router-route-6 "Track 7")
+    (set! neural-8x8-track-router-route-7 "Track 8")
+    (set! neural-8x8-track-router-delay-0 1)
+    (set! neural-8x8-track-router-delay-1 1)
+    (set! neural-8x8-track-router-delay-2 1)
+    (set! neural-8x8-track-router-delay-3 1)
+    (set! neural-8x8-track-router-delay-4 1)
+    (set! neural-8x8-track-router-delay-5 1)
+    (set! neural-8x8-track-router-delay-6 1)
+    (set! neural-8x8-track-router-delay-7 1)
+    (set! neural-8x8-track-router-quantize-0 "off")
+    (set! neural-8x8-track-router-quantize-1 "off")
+    (set! neural-8x8-track-router-quantize-2 "off")
+    (set! neural-8x8-track-router-quantize-3 "off")
+    (set! neural-8x8-track-router-quantize-4 "off")
+    (set! neural-8x8-track-router-quantize-5 "off")
+    (set! neural-8x8-track-router-quantize-6 "off")
+    (set! neural-8x8-track-router-quantize-7 "off")
+    (set! neural-8x8-track-router-transpose-0 0)
+    (set! neural-8x8-track-router-transpose-1 0)
+    (set! neural-8x8-track-router-transpose-2 0)
+    (set! neural-8x8-track-router-transpose-3 0)
+    (set! neural-8x8-track-router-transpose-4 0)
+    (set! neural-8x8-track-router-transpose-5 0)
+    (set! neural-8x8-track-router-transpose-6 0)
+    (set! neural-8x8-track-router-transpose-7 0)
+    (set! neural-8x8-track-router-dampening-0 0)
+    (set! neural-8x8-track-router-dampening-1 0)
+    (set! neural-8x8-track-router-dampening-2 0)
+    (set! neural-8x8-track-router-dampening-3 0)
+    (set! neural-8x8-track-router-dampening-4 0)
+    (set! neural-8x8-track-router-dampening-5 0)
+    (set! neural-8x8-track-router-dampening-6 0)
+    (set! neural-8x8-track-router-dampening-7 0)
+    (set! neural-8x8-track-router-recovery-0 0.98)
+    (set! neural-8x8-track-router-recovery-1 0.98)
+    (set! neural-8x8-track-router-recovery-2 0.98)
+    (set! neural-8x8-track-router-recovery-3 0.98)
+    (set! neural-8x8-track-router-recovery-4 0.98)
+    (set! neural-8x8-track-router-recovery-5 0.98)
+    (set! neural-8x8-track-router-recovery-6 0.98)
+    (set! neural-8x8-track-router-recovery-7 0.98)))
+
+(def neural-8x8-track-router-global-controls ()
+  (h-stack :gap 0.5 :align :center
+    (label "bars" :width 2.8 :height 1.2 :font-size 9 :color :dim)
+    (number-picker
+      :value neural-8x8-track-router-reset-bars
+      :min 0.25
+      :max 64
+      :step 0.25
+      :decimals 2
+      :on-change (lambda (reset-bars)
+        (do
+          (set! neural-8x8-track-router-reset-bars reset-bars)
+          (neural-8x8-track-router-apply-network neural-8x8-track-router-id reset-bars neural-8x8-track-router-energy-decay neural-8x8-track-router-max-poly)))
+      :width 4.8
+      :height 1.2
+      :font-size 9)
+    (label "decay" :width 3.4 :height 1.2 :font-size 9 :color :dim)
+    (number-picker
+      :value neural-8x8-track-router-energy-decay
+      :min 0
+      :max 1
+      :step 0.001
+      :decimals 3
+      :on-change (lambda (energy-decay)
+        (do
+          (set! neural-8x8-track-router-energy-decay energy-decay)
+          (neural-8x8-track-router-apply-network neural-8x8-track-router-id neural-8x8-track-router-reset-bars energy-decay neural-8x8-track-router-max-poly)))
+      :width 4.8
+      :height 1.2
+      :font-size 9)
+    (label "poly" :width 2.8 :height 1.2 :font-size 9 :color :dim)
+    (number-picker
+      :value neural-8x8-track-router-max-poly
+      :min 1
+      :max 32
+      :step 1
+      :decimals 0
+      :on-change (lambda (max-poly)
+        (do
+          (set! neural-8x8-track-router-max-poly max-poly)
+          (neural-8x8-track-router-apply-network neural-8x8-track-router-id neural-8x8-track-router-reset-bars neural-8x8-track-router-energy-decay max-poly)))
+      :width 4.2
+      :height 1.2
+      :font-size 9)))
+
+(def neural-8x8-track-router-control-row (row-label route delay quantize transpose dampening recovery on-route on-delay on-quantize on-transpose on-dampening on-recovery)
   (box :height neural-8x8-track-router-row-height
     (h-stack :gap 0.4 :align :center
       (label row-label :width 1.2 :height 1.2 :font-size 9 :color :dim)
@@ -199,166 +374,185 @@
         :on-change on-quantize
         :width 4.8
         :height 1.2
+        :font-size 9)
+      (number-picker
+        :value transpose
+        :min -48
+        :max 48
+        :step 1
+        :decimals 0
+        :on-change on-transpose
+        :width 4.2
+        :height 1.2
+        :font-size 9)
+      (number-picker
+        :value dampening
+        :min 0
+        :max 1
+        :step 0.01
+        :decimals 2
+        :on-change on-dampening
+        :width 4.2
+        :height 1.2
+        :font-size 9)
+      (number-picker
+        :value recovery
+        :min 0
+        :max 1
+        :step 0.01
+        :decimals 2
+        :on-change on-recovery
+        :width 4.2
+        :height 1.2
         :font-size 9))))
 
-(neural-reset-step :track 0 :step 0 true)
+(def neural-8x8-track-router-apply-neuron-0 ()
+  (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 0 neural-8x8-track-router-route-0 neural-8x8-track-router-delay-0 neural-8x8-track-router-quantize-0 neural-8x8-track-router-transpose-0 neural-8x8-track-router-dampening-0 neural-8x8-track-router-recovery-0))
 
-(let ((existing (neural-8x8-track-router-existing-network)))
-  (let ((network
-          (if existing
-            (if (= (get existing :num-neurons) 8)
-              (do
-                (neural-enable (get existing :id) true)
-                (neural-8x8-track-router-load-network-state (neural-describe (get existing :id))))
-              (do
-                (neural-delete (get existing :id))
-                (neural-create
-                  :name neural-8x8-track-router-name
-                  :neurons 8
-                  :enabled true
-                  :weights neural-8x8-track-router-weights)))
+(def neural-8x8-track-router-apply-neuron-1 ()
+  (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 1 neural-8x8-track-router-route-1 neural-8x8-track-router-delay-1 neural-8x8-track-router-quantize-1 neural-8x8-track-router-transpose-1 neural-8x8-track-router-dampening-1 neural-8x8-track-router-recovery-1))
+
+(def neural-8x8-track-router-apply-neuron-2 ()
+  (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 2 neural-8x8-track-router-route-2 neural-8x8-track-router-delay-2 neural-8x8-track-router-quantize-2 neural-8x8-track-router-transpose-2 neural-8x8-track-router-dampening-2 neural-8x8-track-router-recovery-2))
+
+(def neural-8x8-track-router-apply-neuron-3 ()
+  (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 3 neural-8x8-track-router-route-3 neural-8x8-track-router-delay-3 neural-8x8-track-router-quantize-3 neural-8x8-track-router-transpose-3 neural-8x8-track-router-dampening-3 neural-8x8-track-router-recovery-3))
+
+(def neural-8x8-track-router-apply-neuron-4 ()
+  (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 4 neural-8x8-track-router-route-4 neural-8x8-track-router-delay-4 neural-8x8-track-router-quantize-4 neural-8x8-track-router-transpose-4 neural-8x8-track-router-dampening-4 neural-8x8-track-router-recovery-4))
+
+(def neural-8x8-track-router-apply-neuron-5 ()
+  (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 5 neural-8x8-track-router-route-5 neural-8x8-track-router-delay-5 neural-8x8-track-router-quantize-5 neural-8x8-track-router-transpose-5 neural-8x8-track-router-dampening-5 neural-8x8-track-router-recovery-5))
+
+(def neural-8x8-track-router-apply-neuron-6 ()
+  (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 6 neural-8x8-track-router-route-6 neural-8x8-track-router-delay-6 neural-8x8-track-router-quantize-6 neural-8x8-track-router-transpose-6 neural-8x8-track-router-dampening-6 neural-8x8-track-router-recovery-6))
+
+(def neural-8x8-track-router-apply-neuron-7 ()
+  (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 7 neural-8x8-track-router-route-7 neural-8x8-track-router-delay-7 neural-8x8-track-router-quantize-7 neural-8x8-track-router-transpose-7 neural-8x8-track-router-dampening-7 neural-8x8-track-router-recovery-7))
+
+(def neural-8x8-track-router-create-default-network ()
+  (do
+    (neural-8x8-track-router-load-default-state)
+    (let ((network
             (neural-create
               :name neural-8x8-track-router-name
               :neurons 8
               :enabled true
-              :weights neural-8x8-track-router-weights))))
-  (let ((id (get network :id)))
-    (set! neural-8x8-track-router-id id)
-    (neural-8x8-track-router-apply-neuron id 0 neural-8x8-track-router-route-0 neural-8x8-track-router-delay-0 neural-8x8-track-router-quantize-0)
-    (neural-8x8-track-router-apply-neuron id 1 neural-8x8-track-router-route-1 neural-8x8-track-router-delay-1 neural-8x8-track-router-quantize-1)
-    (neural-8x8-track-router-apply-neuron id 2 neural-8x8-track-router-route-2 neural-8x8-track-router-delay-2 neural-8x8-track-router-quantize-2)
-    (neural-8x8-track-router-apply-neuron id 3 neural-8x8-track-router-route-3 neural-8x8-track-router-delay-3 neural-8x8-track-router-quantize-3)
-    (neural-8x8-track-router-apply-neuron id 4 neural-8x8-track-router-route-4 neural-8x8-track-router-delay-4 neural-8x8-track-router-quantize-4)
-    (neural-8x8-track-router-apply-neuron id 5 neural-8x8-track-router-route-5 neural-8x8-track-router-delay-5 neural-8x8-track-router-quantize-5)
-    (neural-8x8-track-router-apply-neuron id 6 neural-8x8-track-router-route-6 neural-8x8-track-router-delay-6 neural-8x8-track-router-quantize-6)
-    (neural-8x8-track-router-apply-neuron id 7 neural-8x8-track-router-route-7 neural-8x8-track-router-delay-7 neural-8x8-track-router-quantize-7)
+              :weights neural-8x8-track-router-weights)))
+      (let ((id (get network :id)))
+        (set! neural-8x8-track-router-id id)
+        (neural-8x8-track-router-apply-network id neural-8x8-track-router-reset-bars neural-8x8-track-router-energy-decay neural-8x8-track-router-max-poly)
+        (neural-8x8-track-router-apply-neuron-0)
+        (neural-8x8-track-router-apply-neuron-1)
+        (neural-8x8-track-router-apply-neuron-2)
+        (neural-8x8-track-router-apply-neuron-3)
+        (neural-8x8-track-router-apply-neuron-4)
+        (neural-8x8-track-router-apply-neuron-5)
+        (neural-8x8-track-router-apply-neuron-6)
+        (neural-8x8-track-router-apply-neuron-7)
+        (neural-describe id)))))
 
-    (effect-buffer "*matrix*"
-      (h-stack :gap 1 :align :start
-        (v-stack :gap 0
-          (neural-8x8-track-router-control-row
-            "1" neural-8x8-track-router-route-0 neural-8x8-track-router-delay-0 neural-8x8-track-router-quantize-0
-            (lambda (route)
-              (do
-                (set! neural-8x8-track-router-route-0 route)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 0 route neural-8x8-track-router-delay-0 neural-8x8-track-router-quantize-0)))
-            (lambda (delay)
-              (do
-                (set! neural-8x8-track-router-delay-0 delay)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 0 neural-8x8-track-router-route-0 delay neural-8x8-track-router-quantize-0)))
-            (lambda (quantize)
-              (do
-                (set! neural-8x8-track-router-quantize-0 quantize)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 0 neural-8x8-track-router-route-0 neural-8x8-track-router-delay-0 quantize))))
-          (neural-8x8-track-router-control-row
-            "2" neural-8x8-track-router-route-1 neural-8x8-track-router-delay-1 neural-8x8-track-router-quantize-1
-            (lambda (route)
-              (do
-                (set! neural-8x8-track-router-route-1 route)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 1 route neural-8x8-track-router-delay-1 neural-8x8-track-router-quantize-1)))
-            (lambda (delay)
-              (do
-                (set! neural-8x8-track-router-delay-1 delay)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 1 neural-8x8-track-router-route-1 delay neural-8x8-track-router-quantize-1)))
-            (lambda (quantize)
-              (do
-                (set! neural-8x8-track-router-quantize-1 quantize)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 1 neural-8x8-track-router-route-1 neural-8x8-track-router-delay-1 quantize))))
-          (neural-8x8-track-router-control-row
-            "3" neural-8x8-track-router-route-2 neural-8x8-track-router-delay-2 neural-8x8-track-router-quantize-2
-            (lambda (route)
-              (do
-                (set! neural-8x8-track-router-route-2 route)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 2 route neural-8x8-track-router-delay-2 neural-8x8-track-router-quantize-2)))
-            (lambda (delay)
-              (do
-                (set! neural-8x8-track-router-delay-2 delay)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 2 neural-8x8-track-router-route-2 delay neural-8x8-track-router-quantize-2)))
-            (lambda (quantize)
-              (do
-                (set! neural-8x8-track-router-quantize-2 quantize)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 2 neural-8x8-track-router-route-2 neural-8x8-track-router-delay-2 quantize))))
-          (neural-8x8-track-router-control-row
-            "4" neural-8x8-track-router-route-3 neural-8x8-track-router-delay-3 neural-8x8-track-router-quantize-3
-            (lambda (route)
-              (do
-                (set! neural-8x8-track-router-route-3 route)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 3 route neural-8x8-track-router-delay-3 neural-8x8-track-router-quantize-3)))
-            (lambda (delay)
-              (do
-                (set! neural-8x8-track-router-delay-3 delay)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 3 neural-8x8-track-router-route-3 delay neural-8x8-track-router-quantize-3)))
-            (lambda (quantize)
-              (do
-                (set! neural-8x8-track-router-quantize-3 quantize)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 3 neural-8x8-track-router-route-3 neural-8x8-track-router-delay-3 quantize))))
-          (neural-8x8-track-router-control-row
-            "5" neural-8x8-track-router-route-4 neural-8x8-track-router-delay-4 neural-8x8-track-router-quantize-4
-            (lambda (route)
-              (do
-                (set! neural-8x8-track-router-route-4 route)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 4 route neural-8x8-track-router-delay-4 neural-8x8-track-router-quantize-4)))
-            (lambda (delay)
-              (do
-                (set! neural-8x8-track-router-delay-4 delay)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 4 neural-8x8-track-router-route-4 delay neural-8x8-track-router-quantize-4)))
-            (lambda (quantize)
-              (do
-                (set! neural-8x8-track-router-quantize-4 quantize)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 4 neural-8x8-track-router-route-4 neural-8x8-track-router-delay-4 quantize))))
-          (neural-8x8-track-router-control-row
-            "6" neural-8x8-track-router-route-5 neural-8x8-track-router-delay-5 neural-8x8-track-router-quantize-5
-            (lambda (route)
-              (do
-                (set! neural-8x8-track-router-route-5 route)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 5 route neural-8x8-track-router-delay-5 neural-8x8-track-router-quantize-5)))
-            (lambda (delay)
-              (do
-                (set! neural-8x8-track-router-delay-5 delay)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 5 neural-8x8-track-router-route-5 delay neural-8x8-track-router-quantize-5)))
-            (lambda (quantize)
-              (do
-                (set! neural-8x8-track-router-quantize-5 quantize)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 5 neural-8x8-track-router-route-5 neural-8x8-track-router-delay-5 quantize))))
-          (neural-8x8-track-router-control-row
-            "7" neural-8x8-track-router-route-6 neural-8x8-track-router-delay-6 neural-8x8-track-router-quantize-6
-            (lambda (route)
-              (do
-                (set! neural-8x8-track-router-route-6 route)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 6 route neural-8x8-track-router-delay-6 neural-8x8-track-router-quantize-6)))
-            (lambda (delay)
-              (do
-                (set! neural-8x8-track-router-delay-6 delay)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 6 neural-8x8-track-router-route-6 delay neural-8x8-track-router-quantize-6)))
-            (lambda (quantize)
-              (do
-                (set! neural-8x8-track-router-quantize-6 quantize)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 6 neural-8x8-track-router-route-6 neural-8x8-track-router-delay-6 quantize))))
-          (neural-8x8-track-router-control-row
-            "8" neural-8x8-track-router-route-7 neural-8x8-track-router-delay-7 neural-8x8-track-router-quantize-7
-            (lambda (route)
-              (do
-                (set! neural-8x8-track-router-route-7 route)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 7 route neural-8x8-track-router-delay-7 neural-8x8-track-router-quantize-7)))
-            (lambda (delay)
-              (do
-                (set! neural-8x8-track-router-delay-7 delay)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 7 neural-8x8-track-router-route-7 delay neural-8x8-track-router-quantize-7)))
-            (lambda (quantize)
-              (do
-                (set! neural-8x8-track-router-quantize-7 quantize)
-                (neural-8x8-track-router-apply-neuron neural-8x8-track-router-id 7 neural-8x8-track-router-route-7 neural-8x8-track-router-delay-7 quantize)))))
-        (matrix
-          :rows 8
-          :cols 8
-          :width 24
-          :height neural-8x8-track-router-matrix-height
-          :min 0
-          :max 1
-          :value neural-8x8-track-router-weights
-          :on-change (lambda (weights)
-            (do
-              (set! neural-8x8-track-router-weights weights)
-              (neural-weights neural-8x8-track-router-id weights))))))
+(neural-reset-step :track 0 :step 0 true)
 
-    (neural-describe id))))
+(def neural-8x8-track-router-panel (reactive-networks)
+  (let ((reactive-network-count (len reactive-networks)))
+    (let ((existing (neural-8x8-track-router-existing-network)))
+      (let ((network
+              (if existing
+                (if (= (get existing :num-neurons) 8)
+                  (do
+                    (if (get existing :enabled)
+                      existing
+                      (neural-enable (get existing :id) true))
+                    (neural-8x8-track-router-load-network-state (neural-describe (get existing :id))))
+                  (do
+                    (neural-delete (get existing :id))
+                    (neural-8x8-track-router-create-default-network)))
+                (neural-8x8-track-router-create-default-network))))
+        (let ((id (get network :id)))
+          (set! neural-8x8-track-router-id id)
+
+      (v-stack :gap 0.5
+        (neural-8x8-track-router-global-controls)
+        (h-stack :gap 1 :align :start
+          (v-stack :gap 0
+            (neural-8x8-track-router-control-row
+              "1" neural-8x8-track-router-route-0 neural-8x8-track-router-delay-0 neural-8x8-track-router-quantize-0 neural-8x8-track-router-transpose-0 neural-8x8-track-router-dampening-0 neural-8x8-track-router-recovery-0
+              (lambda (route) (do (set! neural-8x8-track-router-route-0 route) (neural-8x8-track-router-apply-neuron-0)))
+              (lambda (delay) (do (set! neural-8x8-track-router-delay-0 delay) (neural-8x8-track-router-apply-neuron-0)))
+              (lambda (quantize) (do (set! neural-8x8-track-router-quantize-0 quantize) (neural-8x8-track-router-apply-neuron-0)))
+              (lambda (transpose) (do (set! neural-8x8-track-router-transpose-0 transpose) (neural-8x8-track-router-apply-neuron-0)))
+              (lambda (dampening) (do (set! neural-8x8-track-router-dampening-0 dampening) (neural-8x8-track-router-apply-neuron-0)))
+              (lambda (recovery) (do (set! neural-8x8-track-router-recovery-0 recovery) (neural-8x8-track-router-apply-neuron-0))))
+            (neural-8x8-track-router-control-row
+              "2" neural-8x8-track-router-route-1 neural-8x8-track-router-delay-1 neural-8x8-track-router-quantize-1 neural-8x8-track-router-transpose-1 neural-8x8-track-router-dampening-1 neural-8x8-track-router-recovery-1
+              (lambda (route) (do (set! neural-8x8-track-router-route-1 route) (neural-8x8-track-router-apply-neuron-1)))
+              (lambda (delay) (do (set! neural-8x8-track-router-delay-1 delay) (neural-8x8-track-router-apply-neuron-1)))
+              (lambda (quantize) (do (set! neural-8x8-track-router-quantize-1 quantize) (neural-8x8-track-router-apply-neuron-1)))
+              (lambda (transpose) (do (set! neural-8x8-track-router-transpose-1 transpose) (neural-8x8-track-router-apply-neuron-1)))
+              (lambda (dampening) (do (set! neural-8x8-track-router-dampening-1 dampening) (neural-8x8-track-router-apply-neuron-1)))
+              (lambda (recovery) (do (set! neural-8x8-track-router-recovery-1 recovery) (neural-8x8-track-router-apply-neuron-1))))
+            (neural-8x8-track-router-control-row
+              "3" neural-8x8-track-router-route-2 neural-8x8-track-router-delay-2 neural-8x8-track-router-quantize-2 neural-8x8-track-router-transpose-2 neural-8x8-track-router-dampening-2 neural-8x8-track-router-recovery-2
+              (lambda (route) (do (set! neural-8x8-track-router-route-2 route) (neural-8x8-track-router-apply-neuron-2)))
+              (lambda (delay) (do (set! neural-8x8-track-router-delay-2 delay) (neural-8x8-track-router-apply-neuron-2)))
+              (lambda (quantize) (do (set! neural-8x8-track-router-quantize-2 quantize) (neural-8x8-track-router-apply-neuron-2)))
+              (lambda (transpose) (do (set! neural-8x8-track-router-transpose-2 transpose) (neural-8x8-track-router-apply-neuron-2)))
+              (lambda (dampening) (do (set! neural-8x8-track-router-dampening-2 dampening) (neural-8x8-track-router-apply-neuron-2)))
+              (lambda (recovery) (do (set! neural-8x8-track-router-recovery-2 recovery) (neural-8x8-track-router-apply-neuron-2))))
+            (neural-8x8-track-router-control-row
+              "4" neural-8x8-track-router-route-3 neural-8x8-track-router-delay-3 neural-8x8-track-router-quantize-3 neural-8x8-track-router-transpose-3 neural-8x8-track-router-dampening-3 neural-8x8-track-router-recovery-3
+              (lambda (route) (do (set! neural-8x8-track-router-route-3 route) (neural-8x8-track-router-apply-neuron-3)))
+              (lambda (delay) (do (set! neural-8x8-track-router-delay-3 delay) (neural-8x8-track-router-apply-neuron-3)))
+              (lambda (quantize) (do (set! neural-8x8-track-router-quantize-3 quantize) (neural-8x8-track-router-apply-neuron-3)))
+              (lambda (transpose) (do (set! neural-8x8-track-router-transpose-3 transpose) (neural-8x8-track-router-apply-neuron-3)))
+              (lambda (dampening) (do (set! neural-8x8-track-router-dampening-3 dampening) (neural-8x8-track-router-apply-neuron-3)))
+              (lambda (recovery) (do (set! neural-8x8-track-router-recovery-3 recovery) (neural-8x8-track-router-apply-neuron-3))))
+            (neural-8x8-track-router-control-row
+              "5" neural-8x8-track-router-route-4 neural-8x8-track-router-delay-4 neural-8x8-track-router-quantize-4 neural-8x8-track-router-transpose-4 neural-8x8-track-router-dampening-4 neural-8x8-track-router-recovery-4
+              (lambda (route) (do (set! neural-8x8-track-router-route-4 route) (neural-8x8-track-router-apply-neuron-4)))
+              (lambda (delay) (do (set! neural-8x8-track-router-delay-4 delay) (neural-8x8-track-router-apply-neuron-4)))
+              (lambda (quantize) (do (set! neural-8x8-track-router-quantize-4 quantize) (neural-8x8-track-router-apply-neuron-4)))
+              (lambda (transpose) (do (set! neural-8x8-track-router-transpose-4 transpose) (neural-8x8-track-router-apply-neuron-4)))
+              (lambda (dampening) (do (set! neural-8x8-track-router-dampening-4 dampening) (neural-8x8-track-router-apply-neuron-4)))
+              (lambda (recovery) (do (set! neural-8x8-track-router-recovery-4 recovery) (neural-8x8-track-router-apply-neuron-4))))
+            (neural-8x8-track-router-control-row
+              "6" neural-8x8-track-router-route-5 neural-8x8-track-router-delay-5 neural-8x8-track-router-quantize-5 neural-8x8-track-router-transpose-5 neural-8x8-track-router-dampening-5 neural-8x8-track-router-recovery-5
+              (lambda (route) (do (set! neural-8x8-track-router-route-5 route) (neural-8x8-track-router-apply-neuron-5)))
+              (lambda (delay) (do (set! neural-8x8-track-router-delay-5 delay) (neural-8x8-track-router-apply-neuron-5)))
+              (lambda (quantize) (do (set! neural-8x8-track-router-quantize-5 quantize) (neural-8x8-track-router-apply-neuron-5)))
+              (lambda (transpose) (do (set! neural-8x8-track-router-transpose-5 transpose) (neural-8x8-track-router-apply-neuron-5)))
+              (lambda (dampening) (do (set! neural-8x8-track-router-dampening-5 dampening) (neural-8x8-track-router-apply-neuron-5)))
+              (lambda (recovery) (do (set! neural-8x8-track-router-recovery-5 recovery) (neural-8x8-track-router-apply-neuron-5))))
+            (neural-8x8-track-router-control-row
+              "7" neural-8x8-track-router-route-6 neural-8x8-track-router-delay-6 neural-8x8-track-router-quantize-6 neural-8x8-track-router-transpose-6 neural-8x8-track-router-dampening-6 neural-8x8-track-router-recovery-6
+              (lambda (route) (do (set! neural-8x8-track-router-route-6 route) (neural-8x8-track-router-apply-neuron-6)))
+              (lambda (delay) (do (set! neural-8x8-track-router-delay-6 delay) (neural-8x8-track-router-apply-neuron-6)))
+              (lambda (quantize) (do (set! neural-8x8-track-router-quantize-6 quantize) (neural-8x8-track-router-apply-neuron-6)))
+              (lambda (transpose) (do (set! neural-8x8-track-router-transpose-6 transpose) (neural-8x8-track-router-apply-neuron-6)))
+              (lambda (dampening) (do (set! neural-8x8-track-router-dampening-6 dampening) (neural-8x8-track-router-apply-neuron-6)))
+              (lambda (recovery) (do (set! neural-8x8-track-router-recovery-6 recovery) (neural-8x8-track-router-apply-neuron-6))))
+            (neural-8x8-track-router-control-row
+              "8" neural-8x8-track-router-route-7 neural-8x8-track-router-delay-7 neural-8x8-track-router-quantize-7 neural-8x8-track-router-transpose-7 neural-8x8-track-router-dampening-7 neural-8x8-track-router-recovery-7
+              (lambda (route) (do (set! neural-8x8-track-router-route-7 route) (neural-8x8-track-router-apply-neuron-7)))
+              (lambda (delay) (do (set! neural-8x8-track-router-delay-7 delay) (neural-8x8-track-router-apply-neuron-7)))
+              (lambda (quantize) (do (set! neural-8x8-track-router-quantize-7 quantize) (neural-8x8-track-router-apply-neuron-7)))
+              (lambda (transpose) (do (set! neural-8x8-track-router-transpose-7 transpose) (neural-8x8-track-router-apply-neuron-7)))
+              (lambda (dampening) (do (set! neural-8x8-track-router-dampening-7 dampening) (neural-8x8-track-router-apply-neuron-7)))
+              (lambda (recovery) (do (set! neural-8x8-track-router-recovery-7 recovery) (neural-8x8-track-router-apply-neuron-7)))))
+          (matrix
+            :rows 8
+            :cols 8
+            :width 24
+            :height neural-8x8-track-router-matrix-height
+            :min 0
+            :max 1
+            :value neural-8x8-track-router-weights
+            :on-change (lambda (weights)
+              (do
+                (set! neural-8x8-track-router-weights weights)
+                (neural-weights neural-8x8-track-router-id weights)))))))))))
+
+(effect-buffer "*matrix*" (neural-8x8-track-router-panel SEQ.neural-networks))
+
+(neural-describe neural-8x8-track-router-id)

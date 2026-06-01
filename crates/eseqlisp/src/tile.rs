@@ -22,9 +22,32 @@ pub enum TileNode {
     Split(TileSplit),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileBufferTab {
+    pub label: String,
+    pub buffer_idx: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileTabLayout {
+    pub index: usize,
+    pub label: String,
+    pub rect: Rect,
+    pub selected: bool,
+}
+
+pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.4;
+const TILE_TAB_MIN_WIDTH: f32 = 4.0;
+const TILE_TAB_MAX_WIDTH: f32 = 14.0;
+const TILE_TAB_LABEL_PAD: f32 = 2.0;
+const TILE_TAB_GAP: f32 = 0.2;
+const TILE_TAB_RIGHT_INSET: f32 = 1.0;
+
 pub struct TileLeaf {
     pub id: TileId,
     pub buffer_idx: usize,
+    pub tabs: Vec<TileBufferTab>,
+    pub selected_tab: Option<usize>,
     pub show_status: bool,
     pub show_border: bool,
     /// Pixel width for Metal tile borders. TUI rendering ignores this.
@@ -136,6 +159,8 @@ impl TileLeaf {
         Self {
             id,
             buffer_idx,
+            tabs: Vec::new(),
+            selected_tab: None,
             show_status: true,
             show_border: true,
             border_width_px: 2.0,
@@ -161,6 +186,75 @@ impl TileLeaf {
             cached_inactive_frame: None,
         }
     }
+}
+
+pub fn tile_body_rect(rect: Rect, _has_tabs: bool) -> Rect {
+    rect
+}
+
+pub fn tile_tab_layouts(
+    rect: Rect,
+    tabs: &[TileBufferTab],
+    selected_tab: Option<usize>,
+) -> Vec<TileTabLayout> {
+    if tabs.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+        return Vec::new();
+    }
+    let available_width = (rect.width - TILE_TAB_RIGHT_INSET * 2.0).max(0.0);
+    if available_width <= 0.0 {
+        return Vec::new();
+    }
+    let gap_total = TILE_TAB_GAP * tabs.len().saturating_sub(1) as f32;
+    let available_tab_width = (available_width - gap_total).max(0.0);
+    if available_tab_width <= 0.0 {
+        return Vec::new();
+    }
+
+    let desired_widths = tabs
+        .iter()
+        .map(|tab| {
+            (tab.label.chars().count() as f32 + TILE_TAB_LABEL_PAD)
+                .clamp(TILE_TAB_MIN_WIDTH, TILE_TAB_MAX_WIDTH)
+        })
+        .collect::<Vec<_>>();
+    let desired_total = desired_widths.iter().sum::<f32>();
+    let widths = if desired_total <= available_tab_width {
+        desired_widths
+    } else {
+        let equal_width = (available_tab_width / tabs.len() as f32).max(1.0);
+        desired_widths
+            .into_iter()
+            .map(|width| width.min(equal_width).max(1.0))
+            .collect::<Vec<_>>()
+    };
+    let total_width = widths.iter().sum::<f32>() + gap_total;
+    let mut col = rect.col + rect.width - TILE_TAB_RIGHT_INSET - total_width;
+    let selected = selected_tab.unwrap_or(usize::MAX);
+    widths
+        .into_iter()
+        .enumerate()
+        .map(|(index, width)| {
+            let is_selected = index == selected;
+            let layout = TileTabLayout {
+                index,
+                label: truncate_tab_label(&tabs[index].label, width),
+                rect: Rect {
+                    row: rect.row - TILE_TAB_STRIP_HEIGHT,
+                    col,
+                    width,
+                    height: TILE_TAB_STRIP_HEIGHT,
+                },
+                selected: is_selected,
+            };
+            col += width + TILE_TAB_GAP;
+            layout
+        })
+        .collect()
+}
+
+fn truncate_tab_label(label: &str, width: f32) -> String {
+    let budget = (width - TILE_TAB_LABEL_PAD).floor().max(0.0) as usize;
+    label.chars().take(budget).collect()
 }
 
 // ── Tree operations ──────────────────────────────────────────────────────

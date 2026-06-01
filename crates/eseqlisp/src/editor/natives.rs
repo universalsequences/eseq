@@ -705,12 +705,53 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
          :rows splits horizontally (top/bottom), :cols splits vertically (left/right).\n\
          Each pane is preceded by its ratio (fraction of parent space).",
         |args, ctx| {
-            use crate::runtime::LayoutSpec;
+            use crate::runtime::{LayoutSpec, LayoutTabSpec};
+
+            fn parse_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabSpec>, String> {
+                let Value::List(entries) = value else {
+                    return Err(":tabs expects a list of (label buffer-name) pairs".to_string());
+                };
+                let mut tabs = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let entry = entry.borrow();
+                    let Value::List(parts) = &*entry else {
+                        return Err(":tabs entries must be lists".to_string());
+                    };
+                    let Some(label) = parts.first().and_then(|value| match &*value.borrow() {
+                        Value::String(label) => Some(label.clone()),
+                        _ => None,
+                    }) else {
+                        return Err(":tabs entry label must be a string".to_string());
+                    };
+                    let Some(buffer_name) = parts.get(1).and_then(|value| match &*value.borrow() {
+                        Value::String(name) => Some(name.clone()),
+                        _ => None,
+                    }) else {
+                        return Err(":tabs entry buffer name must be a string".to_string());
+                    };
+                    if parts.len() != 2 {
+                        return Err(
+                            ":tabs entries must contain exactly label and buffer name".to_string()
+                        );
+                    }
+                    tabs.push(LayoutTabSpec { label, buffer_name });
+                }
+                if tabs.is_empty() {
+                    return Err(":tabs cannot be empty".to_string());
+                }
+                if !tabs.iter().any(|tab| tab.buffer_name == primary_name) {
+                    return Err(format!(
+                        ":tabs for '{primary_name}' must include the primary :buf buffer"
+                    ));
+                }
+                Ok(tabs)
+            }
 
             fn parse_spec(val: &Value) -> Result<LayoutSpec, String> {
                 match val {
                     Value::String(s) => Ok(LayoutSpec::Buffer {
                         name: s.clone(),
+                        tabs: Vec::new(),
                         hide_status: false,
                         borderless: false,
                         border_width_px: 2.0,
@@ -744,6 +785,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         let mut min_height: Option<f32> = None;
                         let mut max_width: Option<f32> = None;
                         let mut max_height: Option<f32> = None;
+                        let mut tabs: Vec<LayoutTabSpec> = Vec::new();
                         let mut i = 2;
                         while i < items.len() {
                             if let Value::Keyword(k) = &*items[i].borrow() {
@@ -804,7 +846,10 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                                                 max_height = Some(*n as f32)
                                             }
                                         }
-                                        _ => {}
+                                        "tabs" => {
+                                            tabs = parse_tabs(&v, &name)?;
+                                        }
+                                        _ => return Err(format!("unknown :buf option :{key}")),
                                     }
                                 }
                             }
@@ -812,6 +857,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         }
                         Ok(LayoutSpec::Buffer {
                             name,
+                            tabs,
                             hide_status,
                             borderless,
                             border_width_px,

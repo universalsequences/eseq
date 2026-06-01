@@ -664,10 +664,17 @@ pub enum TileOp {
 }
 
 /// Declarative layout specification for `set-layout`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutTabSpec {
+    pub label: String,
+    pub buffer_name: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum LayoutSpec {
     Buffer {
         name: String,
+        tabs: Vec<LayoutTabSpec>,
         hide_status: bool,
         borderless: bool,
         border_width_px: f32,

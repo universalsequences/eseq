@@ -2590,6 +2590,135 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "num-patterns",
         Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
     );
+    rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
+}
+
+pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value {
+    Value::List(
+        state
+            .current_neural_networks()
+            .iter()
+            .map(neural_network_value)
+            .map(|network| Rc::new(RefCell::new(network)))
+            .collect(),
+    )
+}
+
+fn neural_network_value(network: &sequencer::neural::ProjectNeuralNetwork) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "id".to_string(),
+        Rc::new(RefCell::new(Value::Number(network.id as f64))),
+    );
+    map.insert(
+        "name".to_string(),
+        Rc::new(RefCell::new(Value::String(network.name.clone()))),
+    );
+    map.insert(
+        "enabled".to_string(),
+        Rc::new(RefCell::new(Value::Bool(network.enabled))),
+    );
+    map.insert(
+        "num-neurons".to_string(),
+        Rc::new(RefCell::new(Value::Number(network.num_neurons as f64))),
+    );
+    map.insert(
+        "reset-bars".to_string(),
+        Rc::new(RefCell::new(Value::Number(
+            network.reset_interval_bars as f64,
+        ))),
+    );
+    map.insert(
+        "energy-decay".to_string(),
+        Rc::new(RefCell::new(Value::Number(network.energy_decay as f64))),
+    );
+    map.insert(
+        "max-poly".to_string(),
+        Rc::new(RefCell::new(Value::Number(network.max_poly as f64))),
+    );
+    map.insert(
+        "weights".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            network
+                .weights
+                .iter()
+                .map(|row| {
+                    Rc::new(RefCell::new(Value::List(
+                        row.iter()
+                            .map(|value| Rc::new(RefCell::new(Value::Number(*value as f64))))
+                            .collect(),
+                    )))
+                })
+                .collect(),
+        ))),
+    );
+    map.insert(
+        "neurons".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            network
+                .neurons
+                .iter()
+                .enumerate()
+                .map(|(idx, neuron)| Rc::new(RefCell::new(neural_neuron_value(idx, neuron))))
+                .collect(),
+        ))),
+    );
+    Value::Map(map)
+}
+
+fn neural_neuron_value(idx: usize, neuron: &sequencer::neural::ProjectNeuron) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "index".to_string(),
+        Rc::new(RefCell::new(Value::Number(idx as f64))),
+    );
+    map.insert(
+        "route".to_string(),
+        Rc::new(RefCell::new(
+            neuron
+                .route
+                .map(|route| Value::Number(route as f64))
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    map.insert(
+        "resolution".to_string(),
+        Rc::new(RefCell::new(Value::Keyword(
+            neuron.resolution_timebase().label().to_string(),
+        ))),
+    );
+    map.insert(
+        "delay".to_string(),
+        Rc::new(RefCell::new(Value::Number(neuron.delay_steps as f64))),
+    );
+    map.insert(
+        "threshold".to_string(),
+        Rc::new(RefCell::new(Value::Number(neuron.threshold as f64))),
+    );
+    map.insert(
+        "transpose".to_string(),
+        Rc::new(RefCell::new(Value::Number(neuron.transpose as f64))),
+    );
+    map.insert(
+        "quantize".to_string(),
+        Rc::new(RefCell::new(
+            neuron
+                .quantize_timebase()
+                .map(|timebase| Value::Keyword(timebase.label().to_string()))
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    map.insert(
+        "dampening".to_string(),
+        Rc::new(RefCell::new(Value::Number(neuron.dampening_amount as f64))),
+    );
+    map.insert(
+        "dampening-recovery".to_string(),
+        Rc::new(RefCell::new(Value::Number(
+            neuron.dampening_recovery as f64,
+        ))),
+    );
+    Value::Map(map)
 }
 
 pub(crate) fn build_sync_labels() -> Value {
@@ -5323,6 +5452,7 @@ pub(crate) fn track_step_has_plock(
 mod tests {
     use super::*;
     use eseqlisp::parser::{ASTParser, Parser, ParserError, Token};
+    use sequencer::sequencer::default_empty_effect_chain;
     use std::collections::HashMap;
 
     fn agent_test_string_list(values: &[&str]) -> Value {
@@ -5360,6 +5490,82 @@ mod tests {
             );
             Ok(Value::Map(map))
         });
+    }
+
+    #[test]
+    fn neural_networks_reactive_value_reflects_current_pattern_model() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state
+            .edit_current_neural_networks(|networks| {
+                let mut network = sequencer::neural::ProjectNeuralNetwork {
+                    id: 11,
+                    name: "router".to_string(),
+                    num_neurons: 2,
+                    weights: vec![vec![0.0, 0.75], vec![0.0, 0.0]],
+                    ..sequencer::neural::ProjectNeuralNetwork::default()
+                };
+                network.reset_interval_bars = 3.0;
+                network.energy_decay = 0.5;
+                network.max_poly = 5;
+                network.neurons[1].route = Some(1);
+                network.neurons[1].delay_steps = 4;
+                network.neurons[1].quantize = Some(Timebase::Eighth as u8);
+                networks.push(network);
+                Ok(())
+            })
+            .unwrap();
+
+        let Value::List(networks) = build_neural_networks_value(&state) else {
+            panic!("expected neural network list");
+        };
+        assert_eq!(networks.len(), 1);
+        let Value::Map(network) = &*networks[0].borrow() else {
+            panic!("expected neural network map");
+        };
+        assert_eq!(
+            network.get("name").map(|value| value.borrow().clone()),
+            Some(Value::String("router".to_string()))
+        );
+        assert_eq!(
+            network
+                .get("reset-bars")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+        assert_eq!(
+            network
+                .get("energy-decay")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(0.5))
+        );
+        assert_eq!(
+            network.get("max-poly").map(|value| value.borrow().clone()),
+            Some(Value::Number(5.0))
+        );
+        let Some(neurons) = network.get("neurons") else {
+            panic!("expected neurons");
+        };
+        let Value::List(neurons) = &*neurons.borrow() else {
+            panic!("expected neuron list");
+        };
+        let Value::Map(neuron) = &*neurons[1].borrow() else {
+            panic!("expected neuron map");
+        };
+        assert_eq!(
+            neuron.get("route").map(|value| value.borrow().clone()),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            neuron.get("delay").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+        assert_eq!(
+            neuron.get("quantize").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("8".to_string()))
+        );
     }
 
     #[test]

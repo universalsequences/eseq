@@ -37,19 +37,29 @@
 (def lower-fx-layout-height 10.5)
 
 (def seq-step-buffer? (buffer)
-  (or (= buffer "*metal*") (= buffer "*sequencer*")))
+  (or (= buffer "*metal*") (or (= buffer "*matrix*") (= buffer "*sequencer*"))))
 
 (def seq-sanitized-step-buffer (buffer)
-  (if (= buffer "*sequencer*") "*sequencer*" "*metal*"))
+  (if (seq-step-buffer? buffer) buffer "*sequencer*"))
 
 (def seq-visible-step-panel-buffer ()
   step-panel-buffer)
+
+(def seq-main-step-tile-layout-spec ()
+  (let ((buffer (seq-visible-step-panel-buffer)))
+    (if (seq-step-buffer? buffer)
+      (list :buf buffer
+        :tabs (list
+          (list "Seq" "*sequencer*")
+          (list "Matrix" "*matrix*"))
+        :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
+      (list :buf buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25))))
 
 (def seq-step-and-track-panel-layout-spec (lower-buffer)
   (if (= lower-buffer "*piano-roll*")
     (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
     (list :cols :gap 1
-      0.78 (list :buf (seq-visible-step-panel-buffer) :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
+      0.78 (seq-main-step-tile-layout-spec)
       0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))))
 
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
@@ -834,6 +844,7 @@
 
 (load "metal-seq-metal.lisp")
 (load "metal-seq-sequencer.lisp")
+(load "scripts/neural-8x8-track-router.lisp")
 
 ; Layout: samples on the left; metal + mixer on the right; fx spans the bottom.
 (seq-apply-fx-layout)

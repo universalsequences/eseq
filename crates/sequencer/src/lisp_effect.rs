@@ -8651,6 +8651,8 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::vm::Value;
     use eseqlisp::{BufferMode, Editor, EditorConfig, Runtime};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static CAPTURED_DGEN_SAMPLE_RATE_BITS: AtomicU32 = AtomicU32::new(0);
@@ -9269,6 +9271,11 @@ mod tests {
                 .collect(),
         ));
         let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![("neural-networks", Value::List(Vec::new()))],
+            true,
+        );
         register_sequencer_natives(
             &mut runtime,
             Arc::clone(&state),
@@ -9411,6 +9418,9 @@ mod tests {
         let network = &networks[0];
         assert_eq!(network.name, "8x8-track-router2");
         assert_eq!(network.num_neurons, 8);
+        assert_eq!(network.reset_interval_bars, 4.0);
+        assert_eq!(network.energy_decay, 0.994);
+        assert_eq!(network.max_poly, 2);
         assert_eq!(
             network.weights,
             vec![
@@ -9454,6 +9464,15 @@ mod tests {
             .neurons
             .iter()
             .all(|neuron| neuron.quantize_timebase().is_none()));
+        assert!(network.neurons.iter().all(|neuron| neuron.transpose == 0.0));
+        assert!(network
+            .neurons
+            .iter()
+            .all(|neuron| neuron.dampening_amount == 0.0));
+        assert!(network
+            .neurons
+            .iter()
+            .all(|neuron| (neuron.dampening_recovery - 0.98).abs() < f32::EPSILON));
         assert!(state.pattern.neural_reset_patterns[0].is_active(0));
     }
 
@@ -9476,7 +9495,12 @@ mod tests {
             .unwrap();
         runtime
             .eval_str(&format!(
-                "(neural-neuron {id} 1 :route 7 :delay 4 :quantize :4)"
+                "(neural-set {id} :reset-bars 2 :energy-decay 0.5 :max-poly 4)"
+            ))
+            .unwrap();
+        runtime
+            .eval_str(&format!(
+                "(neural-neuron {id} 1 :route 7 :delay 4 :quantize :4 :transpose -7 :dampening 0.25 :recovery 0.75)"
             ))
             .unwrap();
 
@@ -9491,12 +9515,122 @@ mod tests {
         let network = &networks[0];
         assert_eq!(network.id, id);
         assert_eq!(network.name, "8x8-track-router2");
+        assert_eq!(network.reset_interval_bars, 2.0);
+        assert_eq!(network.energy_decay, 0.5);
+        assert_eq!(network.max_poly, 4);
         assert_eq!(network.weights[0][1], 0.25);
         assert_eq!(network.neurons[1].route, Some(7));
         assert_eq!(network.neurons[1].delay_steps, 4);
         assert_eq!(
             network.neurons[1].quantize_timebase(),
             Some(crate::sequencer::Timebase::Quarter)
+        );
+        assert_eq!(network.neurons[1].transpose, -7.0);
+        assert_eq!(network.neurons[1].dampening_amount, 0.25);
+        assert_eq!(network.neurons[1].dampening_recovery, 0.75);
+    }
+
+    #[test]
+    fn neural_lisp_track_router_reactive_refresh_loads_model_state() {
+        let (state, mut runtime) = neural_test_runtime(8);
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/neural-8x8-track-router.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read neural router script");
+
+        runtime.eval_str(&source).unwrap();
+        let id = state.current_neural_networks()[0].id;
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        state
+            .edit_current_neural_networks(|networks| {
+                let network = networks
+                    .iter_mut()
+                    .find(|network| network.id == id)
+                    .expect("router network");
+                network.reset_interval_bars = 3.0;
+                network.energy_decay = 0.5;
+                network.max_poly = 5;
+                network.weights[0][1] = 0.75;
+                network.neurons[1].route = Some(6);
+                network.neurons[1].delay_steps = 5;
+                network.neurons[1].quantize = Some(crate::sequencer::Timebase::Eighth as u8);
+                network.neurons[1].transpose = 12.0;
+                network.neurons[1].dampening_amount = 0.33;
+                network.neurons[1].dampening_recovery = 0.44;
+                Ok(())
+            })
+            .unwrap();
+
+        let epoch_before_refresh = state.transport.pattern_epoch.load(Ordering::Relaxed);
+        let outcome = runtime.set_reactive(
+            "SEQ",
+            "neural-networks",
+            Value::List(vec![Rc::new(RefCell::new(Value::Number(id as f64)))]),
+        );
+        assert!(
+            outcome.effects_dirty,
+            "router panel should subscribe to SEQ.neural-networks"
+        );
+        runtime.run_reactive_cycle();
+        assert_eq!(
+            state.transport.pattern_epoch.load(Ordering::Relaxed),
+            epoch_before_refresh,
+            "reactive panel refresh should not write back unchanged network data"
+        );
+
+        assert_eq!(
+            runtime
+                .eval_str("neural-8x8-track-router-reset-bars")
+                .unwrap(),
+            Some(Value::Number(3.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("neural-8x8-track-router-energy-decay")
+                .unwrap(),
+            Some(Value::Number(0.5))
+        );
+        assert_eq!(
+            runtime.eval_str("neural-8x8-track-router-max-poly").unwrap(),
+            Some(Value::Number(5.0))
+        );
+        assert_eq!(
+            runtime.eval_str("neural-8x8-track-router-route-1").unwrap(),
+            Some(Value::String("Track 7".to_string()))
+        );
+        assert_eq!(
+            runtime.eval_str("neural-8x8-track-router-delay-1").unwrap(),
+            Some(Value::Number(5.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("neural-8x8-track-router-quantize-1")
+                .unwrap(),
+            Some(Value::String("8".to_string()))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("neural-8x8-track-router-transpose-1")
+                .unwrap(),
+            Some(Value::Number(12.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("neural-8x8-track-router-dampening-1")
+                .unwrap(),
+            Some(Value::Number(0.33_f32 as f64))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("neural-8x8-track-router-recovery-1")
+                .unwrap(),
+            Some(Value::Number(0.44_f32 as f64))
+        );
+        assert!(
+            !runtime.take_pending_buffer_widget_trees().is_empty(),
+            "reactive refresh should rebuild the matrix buffer"
         );
     }
 
@@ -9560,24 +9694,42 @@ mod tests {
 
         let mut pickers = Vec::new();
         collect_widgets(&layout, "number-picker", &mut pickers);
-        assert_eq!(pickers.len(), 8, "expected one delay picker per neuron");
-        pickers.sort_by(|left, right| {
+        assert_eq!(
+            pickers.len(),
+            35,
+            "expected three global pickers and four pickers per neuron"
+        );
+        for picker in &pickers {
+            assert_measured(picker);
+        }
+
+        let mut row_pickers = pickers
+            .into_iter()
+            .filter(|picker| {
+                let center = picker.rect.row + picker.rect.height * 0.5;
+                center >= matrix.rect.row && center <= matrix.rect.row + matrix.rect.height
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            row_pickers.len(),
+            32,
+            "expected four row-aligned pickers per neuron"
+        );
+        row_pickers.sort_by(|left, right| {
             left.rect
                 .row
                 .total_cmp(&right.rect.row)
                 .then(left.rect.col.total_cmp(&right.rect.col))
         });
-        for picker in &pickers {
-            assert_measured(picker);
-        }
 
         let matrix_row_height = matrix.rect.height / 8.0;
-        for (idx, picker) in pickers.iter().enumerate() {
-            let expected_center = matrix.rect.row + matrix_row_height * (idx as f32 + 0.5);
+        for (idx, picker) in row_pickers.iter().enumerate() {
+            let row_idx = idx / 4;
+            let expected_center = matrix.rect.row + matrix_row_height * (row_idx as f32 + 0.5);
             let actual_center = picker.rect.row + picker.rect.height * 0.5;
             assert!(
                 (actual_center - expected_center).abs() <= 0.05,
-                "delay picker {idx} center {actual_center} should align with matrix row center {expected_center}; picker={:?} matrix={:?}",
+                "row picker {idx} center {actual_center} should align with matrix row center {expected_center}; picker={:?} matrix={:?}",
                 picker.rect,
                 matrix.rect
             );

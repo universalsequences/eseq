@@ -3831,10 +3831,14 @@ fragment float4 waveform_frag(
 
             // ── Per-tile rendering with scissor rect ─────────────────────────
             for tile in &tiled.tiles {
-                let tile_left_px = tile.rect.col * cell_w;
-                let tile_top_px = tile.rect.row * cell_h;
-                let tile_width_px = tile.rect.width * cell_w;
-                let tile_height_px = tile.rect.height * cell_h;
+                let frame_left_px = tile.rect.col * cell_w;
+                let frame_top_px = tile.rect.row * cell_h;
+                let frame_width_px = tile.rect.width * cell_w;
+                let frame_height_px = tile.rect.height * cell_h;
+                let tile_left_px = tile.body_rect.col * cell_w;
+                let tile_top_px = tile.body_rect.row * cell_h;
+                let tile_width_px = tile.body_rect.width * cell_w;
+                let tile_height_px = tile.body_rect.height * cell_h;
                 let border_inset_px = if tile.show_border {
                     tile.border_width_px
                         .max(0.0)
@@ -3855,12 +3859,14 @@ fragment float4 waveform_frag(
                 let content_col = content_left_px / cell_w;
                 let content_row = content_top_px / cell_h;
 
-                let tile_scissor_left = tile_left_px.floor().max(0.0);
-                let tile_scissor_top = tile_top_px.floor().max(0.0);
-                let tile_scissor_right =
-                    (tile_left_px + tile_width_px).ceil().max(tile_scissor_left);
-                let tile_scissor_bottom =
-                    (tile_top_px + tile_height_px).ceil().max(tile_scissor_top);
+                let tile_scissor_left = frame_left_px.floor().max(0.0);
+                let tile_scissor_top = frame_top_px.floor().max(0.0);
+                let tile_scissor_right = (frame_left_px + frame_width_px)
+                    .ceil()
+                    .max(tile_scissor_left);
+                let tile_scissor_bottom = (frame_top_px + frame_height_px)
+                    .ceil()
+                    .max(tile_scissor_top);
                 let tile_scissor = MTLScissorRect {
                     x: tile_scissor_left as usize,
                     y: tile_scissor_top as usize,
@@ -4289,6 +4295,103 @@ fragment float4 waveform_frag(
                 }
             }
 
+            let mut tab_verts = Vec::new();
+            enc.setScissorRect(MTLScissorRect {
+                x: 0,
+                y: 0,
+                width: vp_w.max(0.0).ceil() as usize,
+                height: vp_h.max(0.0).ceil() as usize,
+            });
+            for tile in &tiled.tiles {
+                if tile.tabs.is_empty() {
+                    continue;
+                }
+                let tile_bg = tile
+                    .background_color_name
+                    .as_deref()
+                    .and_then(theme::named_color)
+                    .or(tile.background_color)
+                    .unwrap_or(theme::BG());
+                for tab in &tile.tabs {
+                    let tab_left_px = tab.rect.col * cell_w;
+                    let tab_top_px = tab.rect.row * cell_h;
+                    let tab_width_px = tab.rect.width * cell_w;
+                    let tab_height_px = tab.rect.height * cell_h;
+                    let tab_bg = if tab.selected {
+                        tile_bg
+                    } else {
+                        theme::STATUS_BG()
+                    };
+                    let tab_border = if tab.selected {
+                        theme::BORDER_ACTIVE()
+                    } else {
+                        theme::BORDER_INACTIVE()
+                    };
+                    let tab_radius = tile.border_radius_px.min(tab_height_px * 0.45).min(6.0);
+                    push_top_rounded_rect_fill_px(
+                        &mut tab_verts,
+                        tab_left_px,
+                        tab_top_px,
+                        tab_width_px,
+                        tab_height_px,
+                        tab_radius,
+                        tab_bg,
+                        vp_w,
+                        vp_h,
+                    );
+                    push_top_rounded_rect_border_px(
+                        &mut tab_verts,
+                        tab_left_px,
+                        tab_top_px,
+                        tab_width_px,
+                        tab_height_px,
+                        tile.border_width_px.max(1.0).min(2.0),
+                        tab_radius,
+                        tab_border,
+                        !tab.selected,
+                        vp_w,
+                        vp_h,
+                    );
+                    let text_col = tab.rect.col + 1.0;
+                    let text_row = tab.rect.row + 0.2;
+                    let fg = if tab.selected {
+                        theme::FG()
+                    } else {
+                        theme::STATUS_FG()
+                    };
+                    for (offset, ch) in tab.label.chars().enumerate() {
+                        let ch_col = text_col + offset as f32;
+                        if ch_col + 1.0 > tab.rect.col + tab.rect.width {
+                            break;
+                        }
+                        let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                        rasterize_char(
+                            atlas,
+                            ch,
+                            (ch_col, text_row),
+                            &CharCtx {
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                                fg: to_rgba(fg),
+                                bg: to_rgba(tab_bg),
+                            },
+                            &mut tab_verts,
+                        );
+                    }
+                }
+            }
+            draw_vertices(
+                &enc,
+                &self.device,
+                &mut self.upload_arena,
+                &mut self.stats,
+                &pipeline,
+                &atlas_texture,
+                &tab_verts,
+            );
+
             // ── Global patch cables (no tile scissor) ───────────────────────
             // These are collected from visible mod-port widget rects and drawn
             // after tiles so cables can cross channel strips and tile bounds.
@@ -4455,8 +4558,8 @@ fragment float4 waveform_frag(
                     });
                 }
                 if let Some(tile) = tiled.tiles.iter().find(|t| t.is_active) {
-                    let col_off = tile.rect.col.round() as usize;
-                    let row_off = tile.rect.row.round() as usize;
+                    let col_off = tile.body_rect.col.round() as usize;
+                    let row_off = tile.body_rect.row.round() as usize;
                     let sel_bg = to_rgba(theme::COMP_SELECTED_BG());
                     let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
                     let pop_fg = to_rgba(theme::COMP_FG());
@@ -7310,6 +7413,50 @@ fragment float4 waveform_frag(
         points
     }
 
+    fn top_rounded_rect_points_px(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        segments_per_corner: usize,
+    ) -> Vec<(f32, f32)> {
+        if width <= 0.0 || height <= 0.0 {
+            return Vec::new();
+        }
+        let radius = radius.clamp(0.0, width.min(height) * 0.5);
+        if radius <= 0.0 {
+            return vec![
+                (x, y),
+                (x + width, y),
+                (x + width, y + height),
+                (x, y + height),
+            ];
+        }
+
+        let segments = segments_per_corner.max(2);
+        let mut points = Vec::with_capacity((segments + 1) * 2 + 2);
+        for i in 0..=segments {
+            let t = i as f32 / segments as f32;
+            let angle = (-90.0f32 + 90.0f32 * t).to_radians();
+            points.push((
+                x + width - radius + angle.cos() * radius,
+                y + radius + angle.sin() * radius,
+            ));
+        }
+        points.push((x + width, y + height));
+        points.push((x, y + height));
+        for i in 0..=segments {
+            let t = i as f32 / segments as f32;
+            let angle = (180.0f32 + 90.0f32 * t).to_radians();
+            points.push((
+                x + radius + angle.cos() * radius,
+                y + radius + angle.sin() * radius,
+            ));
+        }
+        points
+    }
+
     fn push_rounded_rect_fill_px(
         verts: &mut Vec<Vertex>,
         x: f32,
@@ -7325,6 +7472,42 @@ fragment float4 waveform_frag(
             return;
         }
         let points = rounded_rect_points_px(x, y, width, height, radius, 8);
+        if points.len() < 3 {
+            return;
+        }
+
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let rgba = color.to_rgba();
+        let center = (x + width * 0.5, y + height * 0.5);
+        let v = |point: (f32, f32)| Vertex {
+            position: [ndc_x(point.0), ndc_y(point.1)],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        };
+
+        for i in 0..points.len() {
+            let j = (i + 1) % points.len();
+            verts.extend_from_slice(&[v(center), v(points[i]), v(points[j])]);
+        }
+    }
+
+    fn push_top_rounded_rect_fill_px(
+        verts: &mut Vec<Vertex>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        color: Color,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let points = top_rounded_rect_points_px(x, y, width, height, radius, 8);
         if points.len() < 3 {
             return;
         }
@@ -7433,6 +7616,66 @@ fragment float4 waveform_frag(
 
         for i in 0..outer.len() {
             let j = (i + 1) % outer.len();
+            verts.extend_from_slice(&[
+                v(outer[i]),
+                v(inner[i]),
+                v(outer[j]),
+                v(outer[j]),
+                v(inner[i]),
+                v(inner[j]),
+            ]);
+        }
+    }
+
+    fn push_top_rounded_rect_border_px(
+        verts: &mut Vec<Vertex>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        border_width: f32,
+        radius: f32,
+        color: Color,
+        include_bottom: bool,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        if width <= 0.0 || height <= 0.0 || border_width <= 0.0 {
+            return;
+        }
+        let inset = border_width.min(width * 0.5).min(height * 0.5);
+        let radius = radius.clamp(0.0, width.min(height) * 0.5);
+        let outer = top_rounded_rect_points_px(x, y, width, height, radius, 8);
+        let inner = top_rounded_rect_points_px(
+            x + inset,
+            y + inset,
+            (width - inset * 2.0).max(0.0),
+            (height - inset * 2.0).max(0.0),
+            (radius - inset).max(0.0),
+            8,
+        );
+        if outer.len() < 3 || outer.len() != inner.len() {
+            return;
+        }
+
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let rgba = color.to_rgba();
+        let v = |point: (f32, f32)| Vertex {
+            position: [ndc_x(point.0), ndc_y(point.1)],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        };
+        let bottom = y + height;
+
+        for i in 0..outer.len() {
+            let j = (i + 1) % outer.len();
+            let is_bottom_edge =
+                (outer[i].1 - bottom).abs() < 0.01 && (outer[j].1 - bottom).abs() < 0.01;
+            if is_bottom_edge && !include_bottom {
+                continue;
+            }
             verts.extend_from_slice(&[
                 v(outer[i]),
                 v(inner[i]),

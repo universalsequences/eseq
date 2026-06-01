@@ -307,25 +307,29 @@ pub fn render_tiled(frame: &mut Frame, tiled: &TiledRenderFrame) {
 
     // Render each tile
     for tile in &tiled.tiles {
-        let tile_area = Rect::new(
-            tile.rect.col.round() as u16,
-            tile.rect.row.round() as u16,
-            tile.rect.width.round() as u16,
-            tile.rect.height.round() as u16,
+        let body_area = Rect::new(
+            tile.body_rect.col.round() as u16,
+            tile.body_rect.row.round() as u16,
+            tile.body_rect.width.round() as u16,
+            tile.body_rect.height.round() as u16,
         );
 
-        if tile_area.width < 3 || tile_area.height < 3 {
+        if body_area.width < 3 || body_area.height < 3 {
             continue; // too small to render
         }
 
         render_tile_in_area(
             frame,
             &tile.frame,
-            tile_area,
+            body_area,
             tile.is_active,
             tile.show_status,
             tile.show_border,
         );
+    }
+
+    for tile in &tiled.tiles {
+        render_tile_tabs(frame, tile);
     }
 
     // Completion popup (rendered last, on top of everything, in active tile's coord space)
@@ -337,15 +341,66 @@ pub fn render_tiled(frame: &mut Frame, tiled: &TiledRenderFrame) {
             .find(|t| t.is_active)
             .map(|t| {
                 Rect::new(
-                    t.rect.col.round() as u16,
-                    t.rect.row.round() as u16,
-                    t.rect.width.round() as u16,
-                    t.rect.height.round() as u16,
+                    t.body_rect.col.round() as u16,
+                    t.body_rect.row.round() as u16,
+                    t.body_rect.width.round() as u16,
+                    t.body_rect.height.round() as u16,
                 )
             })
             .unwrap_or(area);
 
         render_completion_popup(frame, comp, active_tile_area);
+    }
+}
+
+fn render_tile_tabs(frame: &mut Frame, tile: &crate::backend::TileFrame) {
+    let frame_area = frame.area();
+    for tab in &tile.tabs {
+        let col = tab.rect.col.round() as i32;
+        let row = tab.rect.row.round() as i32;
+        let width = tab.rect.width.round() as i32;
+        let height = tab.rect.height.ceil() as i32;
+        if col < 0
+            || row < 0
+            || width <= 0
+            || height <= 0
+            || col >= frame_area.width as i32
+            || row >= frame_area.height as i32
+        {
+            continue;
+        }
+        let area = Rect::new(
+            col as u16,
+            row as u16,
+            width.min(frame_area.width as i32 - col) as u16,
+            height.min(frame_area.height as i32 - row) as u16,
+        );
+        if area.width == 0 || area.height == 0 {
+            continue;
+        }
+        let bg = if tab.selected {
+            crate::theme::BG()
+        } else {
+            crate::theme::STATUS_BG()
+        };
+        let fg = if tab.selected {
+            crate::theme::FG()
+        } else {
+            crate::theme::STATUS_FG()
+        };
+        let border = if tab.selected {
+            crate::theme::BORDER_ACTIVE()
+        } else {
+            crate::theme::BORDER_INACTIVE()
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(to_rcolor(border)))
+            .style(Style::default().bg(to_rcolor(bg)));
+        let text = Paragraph::new(tab.label.clone())
+            .block(block)
+            .style(Style::default().fg(to_rcolor(fg)).bg(to_rcolor(bg)));
+        frame.render_widget(text, area);
     }
 }
 

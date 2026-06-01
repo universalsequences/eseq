@@ -5783,6 +5783,217 @@ fn hidden_ui_only_status_bar_reappears_for_chord_and_minibuffer_input() {
     assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
 }
 
+fn eval_tabbed_test_layout(editor: &mut Editor) {
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (set-layout
+              (list :buf "*sequencer*"
+                :tabs (list
+                  (list "Sequencer" "*sequencer*")
+                  (list "Matrix" "*matrix*"))
+                :hide-status true
+                :border-radius 12
+                :border-width 4))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+}
+
+fn editor_with_tabbed_buffers() -> Editor {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def tab-clicked (state false))
+            (effect-buffer "*sequencer*"
+              (button "under-tab"
+                :width 10
+                :height 1
+                :on-click (lambda (evt) (set! tab-clicked true))))
+            (effect-buffer "*matrix*" (label "matrix"))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    eval_tabbed_test_layout(&mut editor);
+    editor.update_tile_rects(60, 12);
+    editor
+}
+
+#[test]
+fn tabbed_layout_selects_primary_buffer_by_default() {
+    let editor = editor_with_tabbed_buffers();
+    let leaf = editor.active_leaf();
+
+    assert_eq!(editor.active_buffer().name, "*sequencer*");
+    assert_eq!(leaf.tabs.len(), 2);
+    assert_eq!(leaf.selected_tab, Some(0));
+}
+
+#[test]
+fn tabbed_layout_rejects_malformed_tabs_before_applying_layout() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*sequencer*", "");
+    editor.open_scratch_buffer("*matrix*", "");
+
+    let result = editor.runtime_mut().eval_str(
+        r#"(set-layout
+            (list :buf "*sequencer*"
+              :tabs (list (list "Matrix" "*matrix*"))))"#,
+    );
+    if result.is_ok() {
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.active_leaf().tabs.is_empty(),
+            "malformed tab specs must not apply a tabbed tile"
+        );
+    } else {
+        let error = result.unwrap_err();
+        assert!(
+            format!("{error:?}").contains("must include the primary"),
+            "unexpected error: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
+    let mut editor = editor_with_tabbed_buffers();
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*transport*"
+              (button "under-tab"
+                :width 80
+                :height 4
+                :on-click (lambda (evt) (set! tab-clicked true))))
+            (set-layout
+              (list :rows :gap 0
+                0.25 (list :buf "*transport*" :hide-status true)
+                0.75 (list :buf "*sequencer*"
+                  :tabs (list
+                    (list "Sequencer" "*sequencer*")
+                    (list "Matrix" "*matrix*"))
+                  :hide-status true
+                  :border-radius 12
+                  :border-width 4)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+
+    let sequencer_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*sequencer*")
+        .unwrap();
+    let tile_id = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(sequencer_idx)
+        .unwrap()
+        .id;
+    let leaf = editor.tile_root.find_leaf(tile_id).unwrap();
+    let tab_rect = crate::tile::tile_tab_layouts(
+        editor.tile_rect(tile_id).unwrap(),
+        &leaf.tabs,
+        leaf.selected_tab,
+    )
+    .into_iter()
+    .find(|tab| tab.index == 1)
+    .expect("matrix tab layout");
+
+    let precise_col = tab_rect.rect.col + tab_rect.rect.width * 0.5;
+    let precise_row = tab_rect.rect.row + tab_rect.rect.height * 0.5;
+    assert!(
+        tab_rect.rect.row < editor.tile_rect(tile_id).unwrap().row,
+        "folder tabs should be appended above the tile body"
+    );
+    assert_ne!(
+        editor.tile_at_screen(precise_col, precise_row),
+        Some(tile_id),
+        "the tab click point should overlap a different tile, not the tabbed tile body"
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(editor.active_tile, tile_id);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(
+        editor.active_tile, tile_id,
+        "releasing over the covered transport tile must not steal active tile selection"
+    );
+    assert_eq!(editor.active_leaf().selected_tab, Some(1));
+    assert_eq!(
+        editor.runtime.eval_str("tab-clicked").unwrap().unwrap(),
+        Value::Bool(false),
+        "tab clicks must not dispatch to buffer widgets underneath"
+    );
+}
+
+#[test]
+fn tab_selection_survives_reapplying_same_layout() {
+    let mut editor = editor_with_tabbed_buffers();
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-window-buffer-for "*sequencer*" "*matrix*")"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(editor.active_leaf().selected_tab, Some(1));
+
+    eval_tabbed_test_layout(&mut editor);
+
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(editor.active_leaf().selected_tab, Some(1));
+}
+
+#[test]
+fn tabbed_tile_frame_appends_folder_tabs_above_unchanged_body() {
+    let mut editor = editor_with_tabbed_buffers();
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);
+    let tile = &frame.tiles[0];
+
+    assert!(!tile.tabs.is_empty());
+    assert_eq!(tile.body_rect, tile.rect);
+    let first_tab_height = tile.tabs[0].rect.height;
+    for tab in &tile.tabs {
+        assert!(tab.rect.width > 0.0);
+        assert_eq!(tab.rect.height, first_tab_height);
+        assert!(tab.rect.col + tab.rect.width <= tile.rect.col + tile.rect.width);
+        assert!(tab.rect.row + tab.rect.height <= tile.rect.row + f32::EPSILON);
+    }
+    assert!(tile.frame.widget_layout.as_ref().unwrap().rect.height > 0.0);
+    assert_eq!(editor.tile_body_rect(editor.active_tile).unwrap(), tile.rect);
+}
+
 #[test]
 fn set_view_mode_supports_both_as_secondary_mode() {
     let runtime = Runtime::new();

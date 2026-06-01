@@ -26,7 +26,10 @@ use crate::mode::{
 };
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
-use crate::tile::{SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
+use crate::tile::{
+    SplitDir, TileBufferTab, TileId, TileLeaf, TileNode, split_ratio_for_point, tile_body_rect,
+    tile_tab_layouts,
+};
 use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
 use commands::key_str;
@@ -383,6 +386,7 @@ pub struct Editor {
     visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
+    active_tab_mouse_capture: Option<TileId>,
     pointer_drag_started_on_slider: bool,
     last_slider_drag_widget_id: Option<u64>,
     last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
@@ -510,6 +514,7 @@ impl Editor {
             visible_binding_layout_signature: None,
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
+            active_tab_mouse_capture: None,
             pointer_drag_started_on_slider: false,
             last_slider_drag_widget_id: None,
             last_layout_refresh_timings: Vec::new(),
@@ -640,7 +645,7 @@ impl Editor {
                 Some((
                     *tile_id,
                     metal_tile_content_viewport_height_exact(
-                        rect,
+                        &tile_body_rect(*rect, !leaf.tabs.is_empty()),
                         show_status,
                         leaf.show_border,
                         leaf.border_width_px,
@@ -702,6 +707,12 @@ impl Editor {
             .iter()
             .find(|(id, _)| *id == tile_id)
             .map(|(_, rect)| *rect)
+    }
+
+    pub fn tile_body_rect(&self, tile_id: TileId) -> Option<Rect> {
+        let rect = self.tile_rect(tile_id)?;
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        Some(tile_body_rect(rect, !leaf.tabs.is_empty()))
     }
 
     fn tile_root_rect(&self) -> Option<Rect> {
@@ -844,21 +855,74 @@ impl Editor {
         use crate::runtime::LayoutSpec;
         use crate::tile::TileSplit;
 
-        let fallback_buf = self.active_leaf().buffer_idx;
         let outer_gap = match &spec {
             LayoutSpec::Rows { gap, .. } | LayoutSpec::Cols { gap, .. } => *gap,
             LayoutSpec::Buffer { .. } => 0.0,
         };
 
+        #[derive(Clone)]
+        struct PreviousTabbedLeaf {
+            tab_buffer_indices: Vec<usize>,
+            selected_buffer_idx: Option<usize>,
+        }
+
+        fn collect_previous_tabbed_leaves(
+            node: &TileNode,
+            path: &mut Vec<usize>,
+            out: &mut HashMap<Vec<usize>, PreviousTabbedLeaf>,
+        ) {
+            match node {
+                TileNode::Leaf(leaf) => {
+                    if !leaf.tabs.is_empty() {
+                        out.insert(
+                            path.clone(),
+                            PreviousTabbedLeaf {
+                                tab_buffer_indices: leaf
+                                    .tabs
+                                    .iter()
+                                    .map(|tab| tab.buffer_idx)
+                                    .collect(),
+                                selected_buffer_idx: leaf
+                                    .selected_tab
+                                    .and_then(|index| leaf.tabs.get(index))
+                                    .map(|tab| tab.buffer_idx),
+                            },
+                        );
+                    }
+                }
+                TileNode::Split(split) => {
+                    path.push(0);
+                    collect_previous_tabbed_leaves(&split.a, path, out);
+                    path.pop();
+                    path.push(1);
+                    collect_previous_tabbed_leaves(&split.b, path, out);
+                    path.pop();
+                }
+            }
+        }
+
+        let mut previous_tabbed_leaves = HashMap::new();
+        collect_previous_tabbed_leaves(
+            &self.tile_root,
+            &mut Vec::new(),
+            &mut previous_tabbed_leaves,
+        );
+
+        fn buffer_idx_by_name(bufs: &[Buf], name: &str) -> Option<usize> {
+            bufs.iter().position(|buffer| buffer.name == name)
+        }
+
         fn build(
             spec: LayoutSpec,
             bufs: &[Buf],
-            fallback: usize,
             next_id: &mut TileId,
-        ) -> TileNode {
+            path: &mut Vec<usize>,
+            previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
+        ) -> Result<TileNode, String> {
             match spec {
                 LayoutSpec::Buffer {
                     name,
+                    tabs,
                     hide_status,
                     borderless,
                     border_width_px,
@@ -870,10 +934,58 @@ impl Editor {
                     max_width,
                     max_height,
                 } => {
-                    let buf_idx = bufs.iter().position(|b| b.name == name).unwrap_or(fallback);
+                    let buf_idx = buffer_idx_by_name(bufs, &name)
+                        .ok_or_else(|| format!("layout references missing buffer '{name}'"))?;
+                    let mut resolved_tabs = Vec::new();
+                    for tab in tabs {
+                        let buffer_idx =
+                            buffer_idx_by_name(bufs, &tab.buffer_name).ok_or_else(|| {
+                                format!(
+                                    "layout tab '{}' references missing buffer '{}'",
+                                    tab.label, tab.buffer_name
+                                )
+                            })?;
+                        resolved_tabs.push(TileBufferTab {
+                            label: tab.label,
+                            buffer_idx,
+                        });
+                    }
+                    if !resolved_tabs.is_empty()
+                        && !resolved_tabs.iter().any(|tab| tab.buffer_idx == buf_idx)
+                    {
+                        return Err(format!(
+                            "tabs for '{name}' must include the primary :buf buffer"
+                        ));
+                    }
                     let id = *next_id;
                     *next_id += 1;
                     let mut leaf = TileLeaf::new(id, buf_idx);
+                    if !resolved_tabs.is_empty() {
+                        let tab_buffer_indices = resolved_tabs
+                            .iter()
+                            .map(|tab| tab.buffer_idx)
+                            .collect::<Vec<_>>();
+                        let preserved = previous_tabbed_leaves.get(path).and_then(|previous| {
+                            (previous.tab_buffer_indices == tab_buffer_indices)
+                                .then_some(previous.selected_buffer_idx)
+                                .flatten()
+                        });
+                        let selected_tab = preserved
+                            .and_then(|selected_buffer_idx| {
+                                resolved_tabs
+                                    .iter()
+                                    .position(|tab| tab.buffer_idx == selected_buffer_idx)
+                            })
+                            .or_else(|| {
+                                resolved_tabs
+                                    .iter()
+                                    .position(|tab| tab.buffer_idx == buf_idx)
+                            })
+                            .unwrap_or(0);
+                        leaf.buffer_idx = resolved_tabs[selected_tab].buffer_idx;
+                        leaf.tabs = resolved_tabs;
+                        leaf.selected_tab = Some(selected_tab);
+                    }
                     leaf.show_status = !hide_status;
                     leaf.show_border = !borderless;
                     leaf.border_width_px = border_width_px;
@@ -884,14 +996,26 @@ impl Editor {
                     leaf.min_height = min_height;
                     leaf.max_width = max_width;
                     leaf.max_height = max_height;
-                    TileNode::Leaf(leaf)
+                    Ok(TileNode::Leaf(leaf))
                 }
-                LayoutSpec::Rows { gap, panes } => {
-                    build_split(panes, SplitDir::Horizontal, gap, bufs, fallback, next_id)
-                }
-                LayoutSpec::Cols { gap, panes } => {
-                    build_split(panes, SplitDir::Vertical, gap, bufs, fallback, next_id)
-                }
+                LayoutSpec::Rows { gap, panes } => build_split(
+                    panes,
+                    SplitDir::Horizontal,
+                    gap,
+                    bufs,
+                    next_id,
+                    path,
+                    previous_tabbed_leaves,
+                ),
+                LayoutSpec::Cols { gap, panes } => build_split(
+                    panes,
+                    SplitDir::Vertical,
+                    gap,
+                    bufs,
+                    next_id,
+                    path,
+                    previous_tabbed_leaves,
+                ),
             }
         }
 
@@ -900,20 +1024,38 @@ impl Editor {
             dir: SplitDir,
             gap: f32,
             bufs: &[Buf],
-            fallback: usize,
             next_id: &mut TileId,
-        ) -> TileNode {
+            path: &mut Vec<usize>,
+            previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
+        ) -> Result<TileNode, String> {
             assert!(!panes.is_empty());
             if panes.len() == 1 {
-                return build(panes.into_iter().next().unwrap().1, bufs, fallback, next_id);
+                return build(
+                    panes.into_iter().next().unwrap().1,
+                    bufs,
+                    next_id,
+                    path,
+                    previous_tabbed_leaves,
+                );
             }
             let mut iter = panes.into_iter();
             let (ratio, first_spec) = iter.next().unwrap();
             let rest: Vec<(f32, LayoutSpec)> = iter.collect();
 
-            let child_a = build(first_spec, bufs, fallback, next_id);
+            path.push(0);
+            let child_a = build(first_spec, bufs, next_id, path, previous_tabbed_leaves)?;
+            path.pop();
             let child_b = if rest.len() == 1 {
-                build(rest.into_iter().next().unwrap().1, bufs, fallback, next_id)
+                path.push(1);
+                let child = build(
+                    rest.into_iter().next().unwrap().1,
+                    bufs,
+                    next_id,
+                    path,
+                    previous_tabbed_leaves,
+                )?;
+                path.pop();
+                child
             } else {
                 let rest_total: f32 = rest.iter().map(|(r, _)| r).sum();
                 let rescaled: Vec<(f32, LayoutSpec)> = if rest_total > 0.0 {
@@ -921,22 +1063,47 @@ impl Editor {
                 } else {
                     rest
                 };
-                build_split(rescaled, dir, gap, bufs, fallback, next_id)
+                path.push(1);
+                let child = build_split(
+                    rescaled,
+                    dir,
+                    gap,
+                    bufs,
+                    next_id,
+                    path,
+                    previous_tabbed_leaves,
+                )?;
+                path.pop();
+                child
             };
 
             let split_id = *next_id;
             *next_id += 1;
-            TileNode::Split(TileSplit {
+            Ok(TileNode::Split(TileSplit {
                 id: split_id,
                 dir,
                 ratio,
                 gap,
                 a: Box::new(child_a),
                 b: Box::new(child_b),
-            })
+            }))
         }
 
-        let new_root = build(spec, &self.buffers, fallback_buf, &mut self.next_tile_id);
+        let mut path = Vec::new();
+        let new_root = match build(
+            spec,
+            &self.buffers,
+            &mut self.next_tile_id,
+            &mut path,
+            &previous_tabbed_leaves,
+        ) {
+            Ok(root) => root,
+            Err(error) => {
+                self.minibuffer = Some(format!("set-layout: {error}"));
+                self.mark_needs_redraw();
+                return;
+            }
+        };
         self.tile_root = new_root;
         self.tile_outer_gap = outer_gap;
         // Enforce min-size constraints on initial ratios
@@ -1127,6 +1294,22 @@ impl Editor {
             return;
         }
 
+        if let Some(tile_id) = self.active_tab_mouse_capture
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+        {
+            if self.tile_root.find_leaf(tile_id).is_some() && self.active_tile != tile_id {
+                let viewport = self.tile_content_layout_viewport(tile_id, border_inset);
+                self.switch_active_tile_with_viewport(tile_id, viewport);
+            }
+            if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+                self.active_tab_mouse_capture = None;
+            }
+            return;
+        }
+
         if matches!(
             mouse.kind,
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
@@ -1271,6 +1454,16 @@ impl Editor {
             }
         }
 
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some((tile_id, tab_index)) =
+                self.tile_tab_hit_at_screen(precise_col, precise_row)
+        {
+            self.tile_root.clear_focus_except(tile_id);
+            self.select_tile_tab(tile_id, tab_index, border_inset);
+            self.active_tab_mouse_capture = Some(tile_id);
+            return;
+        }
+
         // Find which tile this mouse event targets
         let target_tile = if force_active {
             Some(self.active_tile)
@@ -1409,7 +1602,7 @@ impl Editor {
         tile_id: TileId,
         border_inset: u16,
     ) -> Option<(u16, u16, u16, u16)> {
-        let rect = self.tile_rect(tile_id)?;
+        let rect = self.tile_body_rect(tile_id)?;
         let show_status = self.tile_effective_show_status(tile_id)?;
         let (border_col, border_row) = self.tile_content_border_insets(tile_id, border_inset);
 
@@ -1444,7 +1637,7 @@ impl Editor {
         tile_id: TileId,
         border_inset: u16,
     ) -> Option<(f32, f32)> {
-        let rect = self.tile_rect(tile_id)?;
+        let rect = self.tile_body_rect(tile_id)?;
         if border_inset != 0 {
             return self
                 .tile_content_area(tile_id, border_inset)
@@ -1473,7 +1666,7 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> Option<(f32, f32)> {
-        let rect = self.tile_rect(tile_id)?;
+        let rect = self.tile_body_rect(tile_id)?;
         let (border_col, border_row) = self.tile_content_border_insets(tile_id, border_inset);
         let content_col_f = rect.col + border_col;
         let content_row_f = rect.row + border_row;
@@ -1525,10 +1718,77 @@ impl Editor {
         })
     }
 
+    fn tile_tab_hit_at_screen(
+        &self,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<(TileId, usize)> {
+        self.cached_tile_rects
+            .iter()
+            .rev()
+            .find_map(|(tile_id, rect)| {
+                let leaf = self.tile_root.find_leaf(*tile_id)?;
+                tile_tab_layouts(*rect, &leaf.tabs, leaf.selected_tab)
+                    .into_iter()
+                    .find(|tab| {
+                        precise_col >= tab.rect.col
+                            && precise_col < tab.rect.col + tab.rect.width
+                            && precise_row >= tab.rect.row
+                            && precise_row < tab.rect.row + tab.rect.height
+                    })
+                    .map(|tab| (*tile_id, tab.index))
+            })
+    }
+
+    fn invalidate_leaf_for_buffer_switch(leaf: &mut TileLeaf) {
+        leaf.cached_layout = None;
+        leaf.cached_inactive_frame = None;
+        leaf.hit_grid_cache = None;
+        leaf.highlight_cache = None;
+        leaf.widget_scroll_top = 0.0;
+        leaf.widget_scroll_left = 0.0;
+        leaf.dirty_widget_ids.clear();
+    }
+
+    fn select_tile_tab(&mut self, tile_id: TileId, tab_index: usize, border_inset: u16) -> bool {
+        let Some(new_buffer_idx) = self
+            .tile_root
+            .find_leaf(tile_id)
+            .and_then(|leaf| leaf.tabs.get(tab_index))
+            .map(|tab| tab.buffer_idx)
+        else {
+            return false;
+        };
+        if tile_id != self.active_tile {
+            let viewport = self.tile_content_layout_viewport(tile_id, border_inset);
+            self.switch_active_tile_with_viewport(tile_id, viewport);
+        }
+        if self.active_buffer_idx() != new_buffer_idx {
+            self.save_current_widget_tree();
+            {
+                let leaf = self.active_leaf_mut();
+                leaf.buffer_idx = new_buffer_idx;
+                leaf.selected_tab = Some(tab_index);
+                Self::invalidate_leaf_for_buffer_switch(leaf);
+            }
+            if widget_only_scratch_buffer_should_show_ui(&self.buffers[new_buffer_idx]) {
+                self.buffers[new_buffer_idx].view_mode = ViewMode::UiOnly;
+            }
+            self.record_buffer_access_by_idx(new_buffer_idx);
+            self.sync_runtime_context();
+            self.restore_buffer_widget_tree();
+            self.refresh_inactive_tile_layouts_for_buffer(new_buffer_idx);
+        } else {
+            self.active_leaf_mut().selected_tab = Some(tab_index);
+        }
+        self.mark_needs_redraw();
+        true
+    }
+
     fn tile_status_toggle_hit(&self, tile_id: TileId, precise_col: f32, precise_row: f32) -> bool {
         const STATUS_TOGGLE_WIDTH: f32 = 4.0;
 
-        let Some(rect) = self.tile_rect(tile_id) else {
+        let Some(rect) = self.tile_body_rect(tile_id) else {
             return false;
         };
         let Some(leaf) = self.tile_root.find_leaf(tile_id) else {
@@ -2630,7 +2890,12 @@ impl Editor {
         self.save_current_widget_tree();
         self.buffers.push(buffer);
         let new_idx = self.buffers.len() - 1;
-        self.active_leaf_mut().buffer_idx = new_idx;
+        {
+            let leaf = self.active_leaf_mut();
+            leaf.buffer_idx = new_idx;
+            leaf.selected_tab = None;
+            Self::invalidate_leaf_for_buffer_switch(leaf);
+        }
         self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
@@ -2743,7 +3008,12 @@ impl Editor {
         self.save_current_widget_tree();
         self.buffers.push(buffer);
         let new_idx = self.buffers.len() - 1;
-        self.active_leaf_mut().buffer_idx = new_idx;
+        {
+            let leaf = self.active_leaf_mut();
+            leaf.buffer_idx = new_idx;
+            leaf.selected_tab = None;
+            Self::invalidate_leaf_for_buffer_switch(leaf);
+        }
         self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
@@ -2783,7 +3053,12 @@ impl Editor {
         self.save_current_widget_tree();
         self.buffers.push(buffer);
         let new_idx = self.buffers.len() - 1;
-        self.active_leaf_mut().buffer_idx = new_idx;
+        {
+            let leaf = self.active_leaf_mut();
+            leaf.buffer_idx = new_idx;
+            leaf.selected_tab = None;
+            Self::invalidate_leaf_for_buffer_switch(leaf);
+        }
         self.track_new_buffer(id, true);
         self.sync_runtime_context();
         self.completion = None;
@@ -2836,17 +3111,13 @@ impl Editor {
             }
             if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(cur) {
                 leaf.buffer_idx = new;
+                leaf.selected_tab = leaf.tabs.iter().position(|tab| tab.buffer_idx == new);
                 if widget_only_scratch_buffer_should_show_ui(&self.buffers[new]) {
                     self.buffers[new].view_mode = ViewMode::UiOnly;
                 }
                 // Invalidate all cached rendering state so the new buffer
                 // renders immediately instead of showing the old widget tree.
-                leaf.cached_layout = None;
-                leaf.cached_inactive_frame = None;
-                leaf.hit_grid_cache = None;
-                leaf.highlight_cache = None;
-                leaf.widget_scroll_top = 0.0;
-                leaf.widget_scroll_left = 0.0;
+                Self::invalidate_leaf_for_buffer_switch(leaf);
                 if swapping_active_tile {
                     self.record_buffer_access_by_idx(new);
                     self.sync_runtime_context();
@@ -2917,6 +3188,14 @@ impl Editor {
                 if leaf.buffer_idx > removed_idx {
                     leaf.buffer_idx -= 1;
                 }
+                for tab in &mut leaf.tabs {
+                    if tab.buffer_idx > removed_idx {
+                        tab.buffer_idx -= 1;
+                    }
+                }
+                leaf.selected_tab = leaf
+                    .selected_tab
+                    .filter(|index| leaf.tabs.get(*index).is_some());
             }
             crate::tile::TileNode::Split(s) => {
                 Self::fix_leaf_indices(&mut s.a, removed_idx);
@@ -2928,7 +3207,12 @@ impl Editor {
     pub fn set_active_buffer(&mut self, id: BufferId) {
         if let Some(index) = self.buffers.iter().position(|buffer| buffer.id == id) {
             self.save_current_widget_tree();
-            self.active_leaf_mut().buffer_idx = index;
+            {
+                let leaf = self.active_leaf_mut();
+                leaf.buffer_idx = index;
+                leaf.selected_tab = leaf.tabs.iter().position(|tab| tab.buffer_idx == index);
+                Self::invalidate_leaf_for_buffer_switch(leaf);
+            }
             self.record_buffer_access_by_idx(index);
             self.mark_needs_redraw();
             self.sync_runtime_context();
@@ -4653,7 +4937,7 @@ impl Editor {
                     .unwrap_or(leaf.show_status);
                 let (cols, rows) = match rect {
                     Some(r) => metal_tile_content_viewport(
-                        r,
+                        &tile_body_rect(*r, !leaf.tabs.is_empty()),
                         show_status,
                         leaf.show_border,
                         leaf.border_width_px,
@@ -4768,7 +5052,7 @@ impl Editor {
                     .unwrap_or(leaf.show_status);
                 let (cols, rows) = match rect {
                     Some(r) => metal_tile_content_viewport(
-                        r,
+                        &tile_body_rect(*r, !leaf.tabs.is_empty()),
                         show_status,
                         leaf.show_border,
                         leaf.border_width_px,
@@ -5277,7 +5561,12 @@ impl Editor {
         if let Some(name) = self.runtime.take_pending_switch_buffer() {
             if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                 self.save_current_widget_tree();
-                self.active_leaf_mut().buffer_idx = idx;
+                {
+                    let leaf = self.active_leaf_mut();
+                    leaf.buffer_idx = idx;
+                    leaf.selected_tab = leaf.tabs.iter().position(|tab| tab.buffer_idx == idx);
+                    Self::invalidate_leaf_for_buffer_switch(leaf);
+                }
                 self.record_buffer_access_by_idx(idx);
                 self.mark_needs_redraw();
                 self.sync_runtime_context();
@@ -5678,7 +5967,13 @@ impl Editor {
                 crate::runtime::TileOp::SetWindowBuffer(name) => {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                         self.save_current_widget_tree();
-                        self.active_leaf_mut().buffer_idx = idx;
+                        {
+                            let leaf = self.active_leaf_mut();
+                            leaf.buffer_idx = idx;
+                            leaf.selected_tab =
+                                leaf.tabs.iter().position(|tab| tab.buffer_idx == idx);
+                            Self::invalidate_leaf_for_buffer_switch(leaf);
+                        }
                         self.record_buffer_access_by_idx(idx);
                         self.sync_runtime_context();
                         self.restore_buffer_widget_tree();
