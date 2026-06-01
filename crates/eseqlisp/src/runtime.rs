@@ -1490,6 +1490,7 @@ impl Runtime {
             "hslider",
             "vslider",
             "toggle",
+            "matrix",
             "knob",
             "knob-number",
             "adsr-editor",
@@ -3213,7 +3214,7 @@ fn layout_node_at_path<'a>(node: &'a LayoutNode, path: &[usize]) -> Option<&'a L
 fn collect_shader_widget_ids_recursive(node: &LayoutNode, ids: &mut Vec<u64>) {
     if matches!(
         node.widget_type.as_str(),
-        "slider" | "hslider" | "vslider" | "toggle" | "knob"
+        "slider" | "hslider" | "vslider" | "toggle" | "matrix" | "knob"
     ) {
         ids.push(node.widget_id);
     }

@@ -540,6 +540,10 @@ impl Editor {
         })
     }
 
+    pub(crate) fn pending_key_prompt(&self) -> Option<String> {
+        self.pending_key.map(|key| format!("{} -", key_str(key)))
+    }
+
     // ── Tile accessors ─────────────────────────────────────────────────────
 
     pub fn active_leaf(&self) -> &TileLeaf {
@@ -630,7 +634,9 @@ impl Editor {
             .filter_map(|(tile_id, rect)| {
                 let leaf = self.tile_root.find_leaf(*tile_id)?;
                 let buffer = self.buffers.get(leaf.buffer_idx)?;
-                let show_status = leaf.show_status || buffer.view_mode != ViewMode::UiOnly;
+                let show_status = self
+                    .tile_effective_show_status(*tile_id)
+                    .unwrap_or(leaf.show_status || buffer.view_mode != ViewMode::UiOnly);
                 Some((
                     *tile_id,
                     metal_tile_content_viewport_height_exact(
@@ -1501,7 +1507,15 @@ impl Editor {
     pub(crate) fn tile_effective_show_status(&self, tile_id: TileId) -> Option<bool> {
         let leaf = self.tile_root.find_leaf(tile_id)?;
         let buffer = self.buffers.get(leaf.buffer_idx)?;
-        Some(leaf.show_status || buffer.view_mode != ViewMode::UiOnly)
+        Some(
+            leaf.show_status
+                || buffer.view_mode != ViewMode::UiOnly
+                || (tile_id == self.active_tile && self.active_status_input_is_pending()),
+        )
+    }
+
+    fn active_status_input_is_pending(&self) -> bool {
+        self.pending_key.is_some() || self.minibuffer_input.is_some() || self.save_prompt.is_some()
     }
 
     fn status_toggle_tile_at_screen(&self, precise_col: f32, precise_row: f32) -> Option<TileId> {

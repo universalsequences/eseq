@@ -518,6 +518,8 @@ fn build_active_status_row(
         build_message_status_row(&format!(" {prompt}"), viewport_width)
     } else if let Some(prompt) = editor.prompt_text() {
         build_message_status_row(&prompt, viewport_width)
+    } else if let Some(prompt) = editor.pending_key_prompt() {
+        build_message_status_row(&format!(" {prompt}"), viewport_width)
     } else if let Some(msg) = &editor.minibuffer {
         build_message_status_row(&format!(" {msg}"), viewport_width)
     } else {

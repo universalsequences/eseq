@@ -2852,7 +2852,11 @@ pub(crate) fn build_effects_value(
                 .iter()
                 .enumerate()
                 .filter_map(|(param_idx, pdesc)| {
-                    if is_source_param(pdesc.node_param_idx)
+                    if (is_source_param(pdesc.node_param_idx)
+                        && !matches!(
+                            pdesc.host_control,
+                            Some(sequencer::effects::HostControl::FxSidechain { .. })
+                        ))
                         || is_mod_param(&pdesc.name)
                         || is_generated_host_mod_param(&pdesc.name)
                         || is_hidden_dgen_mod_param(&pdesc.name)
@@ -9573,9 +9577,7 @@ mod tests {
         state.pattern.effect_chains[0][0]
             .defaults
             .set(cutoff_idx, 5000.0);
-        state.pattern.effect_chains[0][0]
-            .plocks
-            .set(3, cutoff_idx, 1200.0);
+        state.pattern.effect_chains[0][0].set_plock(3, cutoff_idx, 1200.0);
         let descriptors = vec![vec![desc.clone()]];
         let field = track_effect_param_value_field(0, 0, cutoff_idx, &desc.params[cutoff_idx].name);
         let mut runtime = Runtime::new();
@@ -9605,6 +9607,143 @@ mod tests {
         assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(5000.0));
     }
 
+    #[test]
+    fn instrument_panel_restores_value_field_after_selection_clears() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(cutoff_idx, 5000.0);
+        app.state.pattern.instrument_slots[0].set_plock(3, cutoff_idx, 1200.0);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let value_field =
+            instrument_param_value_field(0, cutoff_idx, &desc.params[cutoff_idx].name);
+
+        let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number(&default_panel, "cutoff"),
+            Some(5000.0),
+            "unselected instrument panel should show the default value"
+        );
+        assert!(
+            value_param_has_value_field(&default_panel, "cutoff", &value_field),
+            "unselected instrument panel should bind cutoff to its default value field"
+        );
+
+        selected_steps.lock().unwrap().insert(3);
+        let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number(&selected_panel, "cutoff"),
+            Some(1200.0),
+            "selected instrument panel should show the selected step p-lock"
+        );
+        assert!(
+            !value_param_has_key(&selected_panel, "cutoff", "value-field"),
+            "selected p-lock panel should not keep editing the default value field"
+        );
+
+        selected_steps.lock().unwrap().clear();
+        let cleared_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number(&cleared_panel, "cutoff"),
+            Some(5000.0),
+            "cleared selection should return the panel to default values"
+        );
+        assert!(
+            value_param_has_value_field(&cleared_panel, "cutoff", &value_field),
+            "cleared selection should restore default value binding"
+        );
+    }
+
+    #[test]
+    fn sampler_panel_restores_value_field_after_selection_clears() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let attack_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "attack")
+            .expect("sampler descriptor should include attack");
+        let app = test_app_with_sampler_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(attack_idx, 40.0);
+        app.state.pattern.instrument_slots[0].set_plock(3, attack_idx, 120.0);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let value_field =
+            instrument_param_value_field(0, attack_idx, &desc.params[attack_idx].name);
+
+        let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number_by_idx(&default_panel, "attack", attack_idx),
+            Some(40.0),
+            "unselected sampler panel should show the default attack value"
+        );
+        assert!(
+            value_param_has_value_field_by_idx(&default_panel, "attack", attack_idx, &value_field),
+            "unselected sampler panel should bind attack to its default value field"
+        );
+
+        selected_steps.lock().unwrap().insert(3);
+        let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number_by_idx(&selected_panel, "attack", attack_idx),
+            Some(120.0),
+            "selected sampler panel should show the selected step p-lock"
+        );
+        assert!(
+            !value_param_has_key_by_idx(&selected_panel, "attack", attack_idx, "value-field"),
+            "selected sampler p-lock panel should not keep editing the default value field"
+        );
+
+        selected_steps.lock().unwrap().clear();
+        let cleared_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number_by_idx(&cleared_panel, "attack", attack_idx),
+            Some(40.0),
+            "cleared selection should return sampler attack to its default value"
+        );
+        assert!(
+            value_param_has_value_field_by_idx(&cleared_panel, "attack", attack_idx, &value_field),
+            "cleared selection should restore sampler attack default value binding"
+        );
+    }
+
+    fn test_app_with_instrument_descriptor(desc: sequencer::effects::EffectDescriptor) -> ui::App {
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = ui::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            ui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.graph.instrument_descriptors = vec![desc];
+        app
+    }
+
+    fn test_app_with_sampler_descriptor(desc: sequencer::effects::EffectDescriptor) -> ui::App {
+        let mut app = test_app_with_instrument_descriptor(desc);
+        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Sampler];
+        app
+    }
+
     fn reactive_number(runtime: &Runtime, namespace: &str, field: &str) -> Option<f64> {
         let namespace = runtime.global_value(namespace)?;
         let Value::Map(map) = namespace else {
@@ -9612,6 +9751,145 @@ mod tests {
         };
         map.get(field).and_then(|value| match &*value.borrow() {
             Value::Number(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    fn value_param_number(value: &Value, name: &str) -> Option<f64> {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .find_map(|item| value_param_number(&item.borrow(), name));
+            }
+            return None;
+        };
+        if value_map_string(map, "name").as_deref() == Some(name) {
+            return map.get("value").and_then(|value| match &*value.borrow() {
+                Value::Number(value) => Some(*value),
+                _ => None,
+            });
+        }
+        map.values()
+            .find_map(|value| value_param_number(&value.borrow(), name))
+    }
+
+    fn value_param_has_value_field(value: &Value, name: &str, expected_field: &str) -> bool {
+        value_param_string(value, name, "value-field").as_deref() == Some(expected_field)
+    }
+
+    fn value_param_number_by_idx(value: &Value, name: &str, idx: usize) -> Option<f64> {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .find_map(|item| value_param_number_by_idx(&item.borrow(), name, idx));
+            }
+            return None;
+        };
+        if value_map_matches_name_idx(map, name, idx) {
+            return map.get("value").and_then(|value| match &*value.borrow() {
+                Value::Number(value) => Some(*value),
+                _ => None,
+            });
+        }
+        map.values()
+            .find_map(|value| value_param_number_by_idx(&value.borrow(), name, idx))
+    }
+
+    fn value_param_has_value_field_by_idx(
+        value: &Value,
+        name: &str,
+        idx: usize,
+        expected_field: &str,
+    ) -> bool {
+        value_param_string_by_idx(value, name, idx, "value-field").as_deref()
+            == Some(expected_field)
+    }
+
+    fn value_param_has_key(value: &Value, name: &str, key: &str) -> bool {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .any(|item| value_param_has_key(&item.borrow(), name, key));
+            }
+            return false;
+        };
+        if value_map_string(map, "name").as_deref() == Some(name) {
+            return map.contains_key(key);
+        }
+        map.values()
+            .any(|value| value_param_has_key(&value.borrow(), name, key))
+    }
+
+    fn value_param_has_key_by_idx(value: &Value, name: &str, idx: usize, key: &str) -> bool {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .any(|item| value_param_has_key_by_idx(&item.borrow(), name, idx, key));
+            }
+            return false;
+        };
+        if value_map_matches_name_idx(map, name, idx) {
+            return map.contains_key(key);
+        }
+        map.values()
+            .any(|value| value_param_has_key_by_idx(&value.borrow(), name, idx, key))
+    }
+
+    fn value_param_string(value: &Value, name: &str, key: &str) -> Option<String> {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .find_map(|item| value_param_string(&item.borrow(), name, key));
+            }
+            return None;
+        };
+        if value_map_string(map, "name").as_deref() == Some(name) {
+            return value_map_string(map, key);
+        }
+        map.values()
+            .find_map(|value| value_param_string(&value.borrow(), name, key))
+    }
+
+    fn value_param_string_by_idx(
+        value: &Value,
+        name: &str,
+        idx: usize,
+        key: &str,
+    ) -> Option<String> {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .find_map(|item| value_param_string_by_idx(&item.borrow(), name, idx, key));
+            }
+            return None;
+        };
+        if value_map_matches_name_idx(map, name, idx) {
+            return value_map_string(map, key);
+        }
+        map.values()
+            .find_map(|value| value_param_string_by_idx(&value.borrow(), name, idx, key))
+    }
+
+    fn value_map_matches_name_idx(
+        map: &HashMap<String, Rc<RefCell<Value>>>,
+        name: &str,
+        idx: usize,
+    ) -> bool {
+        value_map_string(map, "name").as_deref() == Some(name)
+            && map.get("idx").is_some_and(
+                |value| matches!(&*value.borrow(), Value::Number(value) if *value as usize == idx),
+            )
+    }
+
+    fn value_map_string(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<String> {
+        map.get(key).and_then(|value| match &*value.borrow() {
+            Value::String(value) => Some(value.clone()),
             _ => None,
         })
     }
@@ -17952,6 +18230,95 @@ mod tests {
                 &format!("mods toggle {} should flip state", toggle_idx + 1),
             );
         }
+    }
+
+    #[test]
+    fn effect_sidechain_host_control_survives_effects_value_param_filter() {
+        fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow())
+        }
+
+        let desc = sequencer::effects::EffectDescriptor {
+            name: "sidechain".to_string(),
+            input_channels: 7,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                sequencer::effects::ParamDescriptor {
+                    name: "threshold".to_string(),
+                    min: -80.0,
+                    max: -2.0,
+                    default: -20.0,
+                    kind: sequencer::effects::ParamKind::Continuous { unit: None },
+                    scaling: sequencer::effects::ParamScaling::Linear,
+                    node_param_idx: 0,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                sequencer::effects::ParamDescriptor {
+                    name: "sidechain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: sequencer::effects::ParamKind::Enum {
+                        labels: vec!["off".to_string(), "Track 2".to_string()],
+                    },
+                    scaling: sequencer::effects::ParamScaling::Linear,
+                    node_param_idx: u32::MAX,
+                    node_param_span: 1,
+                    host_control: Some(sequencer::effects::HostControl::FxSidechain {
+                        input_channel: 6,
+                    }),
+                    ui_metadata: None,
+                },
+            ],
+        };
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+
+        let effects = build_effects_value(&state, 0, &[vec![desc]], &selected);
+
+        let Value::List(slots) = effects else {
+            panic!("effects value should be a list");
+        };
+        let first_slot = slots
+            .first()
+            .expect("descriptor should produce an effect slot")
+            .borrow();
+        let params = map_get(&first_slot, "params").expect("effect should expose params");
+        let Value::List(params) = &*params else {
+            panic!("params should be a list: {params:?}");
+        };
+        let sidechain = params
+            .iter()
+            .find(|param| {
+                map_get(&param.borrow(), "name")
+                    .map(|name| matches!(&*name, Value::String(name) if name == "sidechain"))
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("sidechain param should survive filter: {params:?}"))
+            .borrow();
+        let options = map_get(&sidechain, "options").expect("sidechain should expose options");
+        let Value::List(options) = &*options else {
+            panic!("sidechain options should be a list: {options:?}");
+        };
+        let labels = options
+            .iter()
+            .map(|value| match &*value.borrow() {
+                Value::String(label) => label.clone(),
+                other => panic!("sidechain option should be a string, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["off".to_string(), "Track 2".to_string()]);
     }
 
     #[test]

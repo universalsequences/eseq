@@ -282,8 +282,43 @@ fn swing_delay_samples(
     resolution: SwingResolution,
 ) -> f64 {
     let samples_per_quarter = sample_rate * 60.0 / bpm;
+    swing_delay_samples_from_quarter(samples_per_quarter, swing_pct, resolution)
+}
+
+fn swing_delay_samples_from_quarter(
+    samples_per_quarter: f64,
+    swing_pct: f32,
+    resolution: SwingResolution,
+) -> f64 {
     let resolution_samples = resolution.step_beats() * samples_per_quarter;
     ((swing_pct as f64 / 100.0) - 0.5) * 2.0 * resolution_samples
+}
+
+fn swung_network_sample_time(
+    snapshot: &SequencerSnapshot,
+    event: &StepEvent,
+    sample_time: u64,
+    event_beats: f64,
+    samples_per_quarter: f64,
+) -> u64 {
+    let Some(track) = snapshot.tracks.get(event.track) else {
+        return sample_time;
+    };
+    let swing_pct = track.params.swing;
+    if swing_pct <= 50.0 {
+        return sample_time;
+    }
+    let swing_step = swing_bucket_index(event_beats, track.params.swing_resolution);
+    if swing_step % 2 == 0 {
+        return sample_time;
+    }
+    let swing_delay = swing_delay_samples_from_quarter(
+        samples_per_quarter,
+        swing_pct,
+        track.params.swing_resolution,
+    )
+    .round();
+    sample_time.saturating_add(swing_delay.max(0.0) as u64)
 }
 
 fn step_delay_samples(step_params: &[f32], samples_per_step: f32) -> u64 {
@@ -295,11 +330,7 @@ fn step_delay_samples(step_params: &[f32], samples_per_step: f32) -> u64 {
     (delay as f64 * samples_per_step.max(0.0) as f64).round() as u64
 }
 
-fn slot_param_identity(
-    node_id: u32,
-    modulator_node_id: u32,
-    raw_idx: u32,
-) -> Option<ParamNodeId> {
+fn slot_param_identity(node_id: u32, modulator_node_id: u32, raw_idx: u32) -> Option<ParamNodeId> {
     if raw_idx == u32::MAX {
         return None;
     }
@@ -2002,6 +2033,52 @@ fn schedule_live_midi_fx(
     live_active
 }
 
+fn sample_time_to_beats(
+    chunk_start_beats: f64,
+    chunk_start_sample: u64,
+    sample_time: u64,
+    samples_per_quarter: f64,
+) -> f64 {
+    let sample_delta = sample_time.saturating_sub(chunk_start_sample) as f64;
+    chunk_start_beats + sample_delta / samples_per_quarter.max(1.0)
+}
+
+fn process_neural_boundaries_until(
+    neural_runtime: &mut NeuralRuntime,
+    cursor_beats: &mut f64,
+    cursor_sample: &mut u64,
+    target_beats: f64,
+    target_sample: u64,
+    samples_per_quarter: f64,
+    out: &mut Vec<(u64, StepEvent)>,
+) {
+    if target_beats <= *cursor_beats + 1e-9 {
+        return;
+    }
+    neural_runtime.process_boundaries(
+        *cursor_beats,
+        target_beats,
+        *cursor_sample,
+        samples_per_quarter,
+        out,
+    );
+    *cursor_beats = target_beats;
+    *cursor_sample = target_sample;
+}
+
+fn should_reload_neural_runtime(
+    loaded_networks: &Option<Vec<crate::neural::ProjectNeuralNetwork>>,
+    snapshot_networks: &[crate::neural::ProjectNeuralNetwork],
+    last_pattern: usize,
+    pattern: usize,
+) -> bool {
+    last_pattern != pattern
+        || loaded_networks
+            .as_deref()
+            .map(|networks| networks != snapshot_networks)
+            .unwrap_or(true)
+}
+
 pub fn spawn_scheduler_thread(
     state: Arc<SequencerState>,
     sample_rate: u32,
@@ -2025,7 +2102,7 @@ pub fn spawn_scheduler_thread(
             let mut live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
                 std::array::from_fn(|_| LiveMidiFxTrackState::default());
             let mut neural_runtime = NeuralRuntime::default();
-            let mut neural_snapshot_version = u64::MAX;
+            let mut loaded_neural_networks: Option<Vec<crate::neural::ProjectNeuralNetwork>> = None;
             let mut last_live_midi_fx_active = false;
             let mut scratch_source_version = u64::MAX;
             let mut scratch_runtime = None;
@@ -2034,7 +2111,6 @@ pub fn spawn_scheduler_thread(
 
             loop {
                 let snapshot = state.latest_scheduler_snapshot();
-                let snapshot_version = state.scheduler_snapshot_version();
                 let playing = snapshot.transport.playing;
                 let pattern = snapshot.transport.current_pattern;
                 let pattern_epoch = snapshot.transport.pattern_epoch;
@@ -2143,12 +2219,15 @@ pub fn spawn_scheduler_thread(
                 }
                 let samples_per_quarter =
                     sample_rate as f64 * 60.0 / snapshot.transport.bpm.max(1) as f64;
-                if snapshot_version != neural_snapshot_version
-                    || last_pattern_epoch != pattern_epoch
-                    || last_pattern != pattern
+                if should_reload_neural_runtime(
+                    &loaded_neural_networks,
+                    &snapshot.neural_networks,
+                    last_pattern,
+                    pattern,
+                )
                 {
                     neural_runtime.load_from_networks(&snapshot.neural_networks, clock.total_beats);
-                    neural_snapshot_version = snapshot_version;
+                    loaded_neural_networks = Some(snapshot.neural_networks.clone());
                 }
                 let scheduled_ahead_beats =
                     scheduled_until_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
@@ -2293,8 +2372,48 @@ pub fn spawn_scheduler_thread(
                     let triggers = clock.process_chunk(scheduler_block_size, &snapshot, &state);
                     let chunk_end_beats = clock.total_beats;
                     let mut neural_events = Vec::new();
+                    let mut neural_cursor_beats = chunk_start_beats;
+                    let mut neural_cursor_sample = scheduled_until_sample;
                     let mut chunk_enqueued = true;
+                    let mut neural_reset_groups: Vec<(usize, f64)> = Vec::new();
+                    for trigger in &triggers {
+                        let step = &snapshot.tracks[trigger.track].steps[trigger.step];
+                        if !step.active || !step.neural_reset {
+                            continue;
+                        }
+                        let is_new_group =
+                            neural_reset_groups.last().map_or(true, |(offset, beats)| {
+                                *offset != trigger.offset
+                                    || (*beats - trigger.absolute_beats).abs() > 1e-9
+                            });
+                        if is_new_group {
+                            neural_reset_groups.push((trigger.offset, trigger.absolute_beats));
+                        }
+                    }
+                    let mut neural_reset_group_idx = 0;
                     for trigger in triggers {
+                        let trigger_sample_time = scheduled_until_sample + trigger.offset as u64;
+                        process_neural_boundaries_until(
+                            &mut neural_runtime,
+                            &mut neural_cursor_beats,
+                            &mut neural_cursor_sample,
+                            trigger.absolute_beats,
+                            trigger_sample_time,
+                            samples_per_quarter,
+                            &mut neural_events,
+                        );
+                        if let Some((reset_offset, reset_beats)) =
+                            neural_reset_groups.get(neural_reset_group_idx).copied()
+                        {
+                            if reset_offset == trigger.offset
+                                && (reset_beats - trigger.absolute_beats).abs() <= 1e-9
+                            {
+                                neural_runtime.reset_state(reset_beats);
+                                neural_cursor_beats = reset_beats;
+                                neural_cursor_sample = trigger_sample_time;
+                                neural_reset_group_idx += 1;
+                            }
+                        }
                         if !snapshot.tracks[trigger.track].steps[trigger.step].active {
                             let sample_time = scheduled_until_sample + trigger.offset as u64;
                             chunk_enqueued &= enqueue_instrument_param_change(
@@ -2332,9 +2451,6 @@ pub fn spawn_scheduler_thread(
                             }
                         }
                         let step_snapshot = &track.steps[trigger.step];
-                        if step_snapshot.neural_reset {
-                            neural_runtime.reset_state(trigger.absolute_beats);
-                        }
                         let swing_pct = step_snapshot.swing_override.unwrap_or(track.params.swing);
                         let swing_resolution = step_snapshot
                             .swing_resolution_override
@@ -2696,7 +2812,13 @@ pub fn spawn_scheduler_thread(
                                         sample_time,
                                         step_event.clone(),
                                     );
-                                    neural_runtime.process_seed(&step_event);
+                                    let seed_beats = sample_time_to_beats(
+                                        chunk_start_beats,
+                                        scheduled_until_sample,
+                                        sample_time,
+                                        samples_per_quarter as f64,
+                                    );
+                                    neural_runtime.process_seed_at(&step_event, seed_beats);
                                     if !ok {
                                         chunk_enqueued = false;
                                         break;
@@ -2721,7 +2843,13 @@ pub fn spawn_scheduler_thread(
                                     sample_time,
                                     step_event.clone(),
                                 );
-                                neural_runtime.process_seed(&step_event);
+                                let seed_beats = sample_time_to_beats(
+                                    chunk_start_beats,
+                                    scheduled_until_sample,
+                                    sample_time,
+                                    samples_per_quarter as f64,
+                                );
+                                neural_runtime.process_seed_at(&step_event, seed_beats);
                                 if !ok {
                                     chunk_enqueued = false;
                                     break;
@@ -2736,12 +2864,27 @@ pub fn spawn_scheduler_thread(
                         break;
                     }
                     neural_runtime.process_boundaries(
-                        chunk_start_beats,
+                        neural_cursor_beats,
                         chunk_end_beats,
-                        scheduled_until_sample,
+                        neural_cursor_sample,
                         samples_per_quarter,
                         &mut neural_events,
                     );
+                    for (sample_time, event) in &mut neural_events {
+                        let event_beats = sample_time_to_beats(
+                            chunk_start_beats,
+                            scheduled_until_sample,
+                            *sample_time,
+                            samples_per_quarter,
+                        );
+                        *sample_time = swung_network_sample_time(
+                            &snapshot,
+                            event,
+                            *sample_time,
+                            event_beats,
+                            samples_per_quarter,
+                        );
+                    }
                     neural_events.sort_by_key(|(sample_time, event)| {
                         let neuron = match event.source {
                             EventSource::Network { neuron, .. } => neuron,
@@ -2789,8 +2932,9 @@ mod tests {
     use super::{
         apply_neuron_output_overrides, delayed_step_sample_time, enqueue_resolved_trigger,
         midi_fx_window_events_from_step, quantized_live_tick_sample, resolve_effect_params,
-        resolve_instrument_plocks, resolve_sampler_params, track_active_note_spans_at_beat,
-        track_note_spans_for_trigger, SnapshotSequencerClock,
+        resolve_instrument_plocks, resolve_sampler_params, should_reload_neural_runtime,
+        swung_network_sample_time, track_active_note_spans_at_beat, track_note_spans_for_trigger,
+        SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
@@ -2803,7 +2947,9 @@ mod tests {
         ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
         ScheduledSamplerParams, StepEvent,
     };
-    use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
+    use crate::sequencer::{
+        default_empty_effect_chain, SequencerState, StepParam, SwingResolution,
+    };
 
     fn test_resolved_step() -> ResolvedStep {
         ResolvedStep {
@@ -2884,6 +3030,75 @@ mod tests {
         assert_eq!(first.sample_time, 1_000);
         assert_eq!(second.sample_time, 4_000);
         assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn network_trigger_uses_target_track_swing() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.pattern.track_params[0].set_swing(75.0);
+        state.pattern.track_params[0].set_swing_resolution(SwingResolution::Sixteenth);
+        let snapshot = state.publish_scheduler_snapshot();
+        let event = StepEvent {
+            track: 0,
+            samples_per_step: 12_000.0,
+            resolved: test_resolved_step(),
+            chord: ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            source: EventSource::Network {
+                seed: Some((0, 0)),
+                neuron: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+
+        assert_eq!(
+            swung_network_sample_time(&snapshot, &event, 12_000, 0.25, 48_000.0),
+            18_000
+        );
+        assert_eq!(
+            swung_network_sample_time(&snapshot, &event, 24_000, 0.5, 48_000.0),
+            24_000
+        );
+    }
+
+    #[test]
+    fn neural_runtime_reload_ignores_non_network_snapshot_edits() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.id = 1;
+        network.num_neurons = 1;
+        network.neurons.truncate(1);
+        network.weights = vec![vec![0.0]];
+
+        let loaded = Some(vec![network.clone()]);
+        assert!(!should_reload_neural_runtime(
+            &loaded,
+            &[network.clone()],
+            0,
+            0
+        ));
+        assert!(should_reload_neural_runtime(
+            &loaded,
+            &[network.clone()],
+            0,
+            1
+        ));
+
+        let mut edited_network = network;
+        edited_network.neurons[0].threshold = 0.5;
+        assert!(should_reload_neural_runtime(
+            &loaded,
+            &[edited_network],
+            0,
+            0
+        ));
     }
 
     #[test]
@@ -3027,14 +3242,17 @@ mod tests {
             .apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
         let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
         let mut neuron = ProjectNeuron::default();
-        neuron.output_overrides.instrument.push(ProjectParamOverride {
-            param_id: ParamNodeId {
-                logical_id: 12,
-                node_param_idx: crate::sampler::PARAM_SPEED as u32,
-            },
-            param_index: 12,
-            value: 2.5,
-        });
+        neuron
+            .output_overrides
+            .instrument
+            .push(ProjectParamOverride {
+                param_id: ParamNodeId {
+                    logical_id: 12,
+                    node_param_idx: crate::sampler::PARAM_SPEED as u32,
+                },
+                param_index: 12,
+                value: 2.5,
+            });
         snapshot.neural_networks = vec![ProjectNeuralNetwork {
             id: 1,
             name: "test".to_string(),
@@ -3079,11 +3297,13 @@ mod tests {
         );
 
         let mut stale_snapshot = snapshot.clone();
-        stale_snapshot.neural_networks[0].neurons[0].output_overrides.instrument[0].param_id =
-            ParamNodeId {
-                logical_id: 99,
-                node_param_idx: crate::sampler::PARAM_SPEED as u32,
-            };
+        stale_snapshot.neural_networks[0].neurons[0]
+            .output_overrides
+            .instrument[0]
+            .param_id = ParamNodeId {
+            logical_id: 99,
+            node_param_idx: crate::sampler::PARAM_SPEED as u32,
+        };
         let mut stale_event = event.clone();
         stale_event.instrument_params.clear();
         stale_event.sampler_params = ScheduledSamplerParams::default();
@@ -3177,11 +3397,13 @@ mod tests {
         );
 
         let mut stale_snapshot = snapshot.clone();
-        stale_snapshot.neural_networks[0].neurons[0].output_overrides.effects[0].param_id =
-            ParamNodeId {
-                logical_id: 42,
-                node_param_idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
-            };
+        stale_snapshot.neural_networks[0].neurons[0]
+            .output_overrides
+            .effects[0]
+            .param_id = ParamNodeId {
+            logical_id: 42,
+            node_param_idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+        };
         event.effect_params.clear();
 
         apply_neuron_output_overrides(&stale_snapshot, 0, &mut event);

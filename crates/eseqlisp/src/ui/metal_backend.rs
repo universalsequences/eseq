@@ -8040,7 +8040,7 @@ fragment float4 waveform_frag(
                 is_background,
             } => {
                 let local_right_ndc = -1.0 + (layout_width * cell_w / vp_w) * 2.0;
-                if (instance.ndc_max[0] - local_right_ndc).abs() <= 0.002 {
+                if is_background && (instance.ndc_max[0] - local_right_ndc).abs() <= 0.002 {
                     let old_width = instance.ndc_max[0] - instance.ndc_min[0];
                     instance.ndc_max[0] += (extra_cols * cell_w / vp_w) * 2.0;
                     let new_width = instance.ndc_max[0] - instance.ndc_min[0];

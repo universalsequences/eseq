@@ -1331,6 +1331,31 @@ fn apply_ui_invalidations(
                 );
                 if track == current_track_idx {
                     if fx_visible {
+                        rt.set_reactive(
+                            "SEQ",
+                            "effects",
+                            build_effects_value(
+                                state,
+                                track,
+                                &app.graph.effect_descriptors,
+                                selected_steps,
+                            ),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "midi-effects",
+                            build_midi_effects_value(state, track, selected_steps),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "instrument-panel",
+                            build_instrument_panel_value(app, track, selected_steps),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "bus-effects",
+                            build_bus_effects_value_for_selection(app, Some(selected_steps)),
+                        );
                         sync_track_params(rt, app, state, track, selected_steps);
                         needs_reactive_cycle = true;
                     }
@@ -4645,7 +4670,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             value: stored,
                                         },
                                     );
-                                    sync_instrument_param_value_field(
+                                    let mut ui_dirty = sync_instrument_param_value_field(
                                         editor.runtime_mut(),
                                         &app,
                                         track,
@@ -4653,12 +4678,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         None,
                                     );
                                     if param_idx == 2 || param_idx == 3 {
-                                        sync_sampler_selection_time_fields(
+                                        ui_dirty |= sync_sampler_selection_time_fields(
                                             editor.runtime_mut(),
                                             &app,
                                             track,
                                             selected_steps.lock().unwrap().iter().copied().min(),
                                         );
+                                    }
+                                    if ui_dirty {
+                                        editor.mark_needs_redraw();
                                     }
                                     if param_change_needs_fx_rebuild(&desc) {
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -4710,13 +4738,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 value: next,
                                             },
                                         );
-                                        sync_instrument_param_value_field(
+                                        if sync_instrument_param_value_field(
                                             editor.runtime_mut(),
                                             &app,
                                             track,
                                             param_idx,
                                             None,
-                                        );
+                                        ) {
+                                            editor.mark_needs_redraw();
+                                        }
                                     } else {
                                         ui::apply_command(
                                             &mut app,
@@ -4774,7 +4804,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: clamped,
                                     },
                                 );
-                                sync_track_effect_param_value_field(
+                                if sync_track_effect_param_value_field(
                                     editor.runtime_mut(),
                                     &state,
                                     &app.graph.effect_descriptors,
@@ -4782,7 +4812,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     slot_idx,
                                     param_idx,
                                     None,
-                                );
+                                ) {
+                                    editor.mark_needs_redraw();
+                                }
                                 if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -4855,13 +4887,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         app.publish_bus_gate_runtime();
                                                         *bus_state.lock().unwrap() =
                                                             app.buses.clone();
-                                                        sync_bus_effect_param_value_field(
+                                                        if sync_bus_effect_param_value_field(
                                                             editor.runtime_mut(),
                                                             &app,
                                                             bus_idx,
                                                             slot_idx,
                                                             param_idx,
-                                                        );
+                                                        ) {
+                                                            editor.mark_needs_redraw();
+                                                        }
                                                     }
                                                     Err(error) => {
                                                         editor.handle_host_event(
@@ -4919,14 +4953,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                             if selected.is_empty() {
                                                 slot.defaults.set(param_idx, next);
-                                                sync_midi_fx_param_value_field(
+                                                if sync_midi_fx_param_value_field(
                                                     editor.runtime_mut(),
                                                     &state,
                                                     track,
                                                     slot_idx,
                                                     param_idx,
                                                     None,
-                                                );
+                                                ) {
+                                                    editor.mark_needs_redraw();
+                                                }
                                             } else {
                                                 for step in selected {
                                                     slot.set_plock(step, param_idx, next);
@@ -4974,7 +5010,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     value: next,
                                                 },
                                             );
-                                            sync_track_effect_param_value_field(
+                                            if sync_track_effect_param_value_field(
                                                 editor.runtime_mut(),
                                                 &state,
                                                 &app.graph.effect_descriptors,
@@ -4982,7 +5018,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 slot_idx,
                                                 param_idx,
                                                 None,
-                                            );
+                                            ) {
+                                                editor.mark_needs_redraw();
+                                            }
                                         } else {
                                             ui::apply_command(
                                                 &mut app,
@@ -5072,13 +5110,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             value: stored,
                                         },
                                     );
+                                    let display_step = displayed_plock_step(
+                                        &state,
+                                        track,
+                                        selected_plock_step(&selected_steps),
+                                    );
+                                    let mut ui_dirty = sync_instrument_param_value_field(
+                                        editor.runtime_mut(),
+                                        &app,
+                                        track,
+                                        param_idx,
+                                        display_step,
+                                    );
                                     if param_idx == 2 || param_idx == 3 {
-                                        sync_sampler_selection_time_fields(
+                                        ui_dirty |= sync_sampler_selection_time_fields(
                                             editor.runtime_mut(),
                                             &app,
                                             track,
-                                            selected_steps.lock().unwrap().iter().copied().min(),
+                                            display_step,
                                         );
+                                    }
+                                    if ui_dirty {
+                                        editor.mark_needs_redraw();
                                     }
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);

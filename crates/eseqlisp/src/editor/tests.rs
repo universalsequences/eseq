@@ -3177,6 +3177,142 @@ fn mouse_drag_updates_slider_via_bind_shorthand() {
 }
 
 #[test]
+fn mouse_drag_updates_matrix_via_bind_shorthand() {
+    fn find_widget<'a>(
+        node: &'a crate::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(12, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def weights (state (list (list 0 0.25) (list 0.5 0.75))))
+                (effect
+                  (matrix
+                    :rows 2
+                    :cols 2
+                    :min 0
+                    :max 1
+                    :width 4
+                    :height 4
+                    :bind weights))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(12, 8);
+
+    let layout = editor.runtime.current_layout.as_ref().expect("layout");
+    let matrix = find_widget(layout, "matrix").expect("matrix layout node");
+    assert!(matrix.rect.width > 0.0 && matrix.rect.height > 0.0);
+    assert!(matrix.rect.width.is_finite() && matrix.rect.height.is_finite());
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 2),
+        1,
+        1,
+        12,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 1),
+        1,
+        1,
+        12,
+        8,
+    );
+
+    let value = editor.runtime.eval_str("weights").unwrap().unwrap();
+    let Value::List(rows) = value else {
+        panic!("expected matrix rows");
+    };
+    let Value::List(first_row) = &*rows[0].borrow() else {
+        panic!("expected first matrix row");
+    };
+    assert_eq!(*first_row[0].borrow(), Value::Number(0.0));
+    assert_eq!(*first_row[1].borrow(), Value::Number(0.75));
+}
+
+#[test]
+fn mouse_drag_updates_matrix_via_on_change() {
+    fn find_widget<'a>(
+        node: &'a crate::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(12, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def weights (state (list (list 0 0.25) (list 0.5 0.75))))
+                (effect
+                  (matrix
+                    :rows 2
+                    :cols 2
+                    :min 0
+                    :max 1
+                    :width 4
+                    :height 4
+                    :value weights
+                    :on-change (lambda (next-weights)
+                      (set! weights next-weights))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(12, 8);
+
+    let layout = editor.runtime.current_layout.as_ref().expect("layout");
+    let matrix = find_widget(layout, "matrix").expect("matrix layout node");
+    assert!(matrix.rect.width > 0.0 && matrix.rect.height > 0.0);
+    assert!(matrix.rect.width.is_finite() && matrix.rect.height.is_finite());
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 2),
+        1,
+        1,
+        12,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 1),
+        1,
+        1,
+        12,
+        8,
+    );
+
+    let value = editor.runtime.eval_str("weights").unwrap().unwrap();
+    let Value::List(rows) = value else {
+        panic!("expected matrix rows");
+    };
+    let Value::List(first_row) = &*rows[0].borrow() else {
+        panic!("expected first matrix row");
+    };
+    assert_eq!(*first_row[0].borrow(), Value::Number(0.0));
+    assert_eq!(*first_row[1].borrow(), Value::Number(0.75));
+}
+
+#[test]
 fn widget_mouse_hit_testing_ignores_layout_aspect_scaling() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -5584,6 +5720,65 @@ fn ui_only_buffer_can_still_hide_status_bar() {
 
     let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 20, 9);
 
+    assert!(!frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
+}
+
+#[test]
+fn hidden_ui_only_status_bar_reappears_for_chord_and_minibuffer_input() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.active_leaf_mut().show_status = false;
+    let tile_id = editor.active_tile;
+
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    assert!(!frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    let status: String = frame.tiles[0]
+        .frame
+        .status_cells
+        .iter()
+        .map(|cell| cell.ch)
+        .collect();
+    assert!(frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 7);
+    assert!(status.contains("C-x -"));
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    let status: String = frame.tiles[0]
+        .frame
+        .status_cells
+        .iter()
+        .map(|cell| cell.ch)
+        .collect();
+    assert!(frame.tiles[0].show_status);
+    assert!(status.contains("Find file: "));
+
+    editor.minibuffer_input = Some(super::MinibufferMode::FindFile {
+        input: "demo".to_string(),
+        selected: 0,
+    });
+    assert_eq!(
+        editor.minibuffer_prompt().as_deref(),
+        Some("Find file: demo  [font-demo.lisp]")
+    );
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    let status: String = frame.tiles[0]
+        .frame
+        .status_cells
+        .iter()
+        .map(|cell| cell.ch)
+        .collect();
+    assert!(frame.tiles[0].show_status);
+    assert!(status.contains("Find file: demo"), "{status}");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
     assert!(!frame.tiles[0].show_status);
     assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
 }

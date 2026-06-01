@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::accumulator::ResolvedStep;
 use crate::audiograph::{self, LiveGraph, NodeVTable};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
+use crate::neural::{ProjectNeuralNetwork, ProjectNeuron, NUM_NEURONS};
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
@@ -3603,6 +3604,238 @@ fn register_sequencer_natives(
     );
 }
 
+pub fn register_neural_authoring_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+) {
+    let state_for_neural_list = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-list",
+        "(neural-list)",
+        "Return the current pattern's neural network definitions.",
+        move |_args, _ctx| {
+            Ok(lisp_list(
+                state_for_neural_list
+                    .current_neural_networks()
+                    .iter()
+                    .map(neural_network_to_value)
+                    .collect(),
+            ))
+        },
+    );
+
+    let state_for_neural_create = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-create",
+        "(neural-create :name \"name\" :neurons n [:enabled true] [:weights matrix])",
+        "Create a neural network in the current pattern and return its structured description.",
+        move |args, ctx| {
+            let options = parse_neural_create_args(&args)?;
+            let created = state_for_neural_create.edit_current_neural_networks(|networks| {
+                let mut network = ProjectNeuralNetwork {
+                    id: next_neural_network_id(networks),
+                    name: options.name.clone(),
+                    enabled: options.enabled,
+                    num_neurons: options.num_neurons,
+                    weights: options.weights.clone().unwrap_or_else(|| {
+                        vec![vec![0.0; options.num_neurons]; options.num_neurons]
+                    }),
+                    neurons: vec![ProjectNeuron::default(); options.num_neurons],
+                    ..ProjectNeuralNetwork::default()
+                };
+                normalize_project_neural_network_shape(&mut network)?;
+                networks.push(network.clone());
+                Ok(network)
+            })?;
+            ctx.set_status(format!("created neural network '{}'", created.name));
+            Ok(neural_network_to_value(&created))
+        },
+    );
+
+    let state_for_neural_describe = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-describe",
+        "(neural-describe id-or-name)",
+        "Return one neural network definition from the current pattern.",
+        move |args, _ctx| {
+            let reference = parse_neural_network_ref(
+                args.first()
+                    .ok_or_else(|| "neural-describe expects network id or name".to_string())?,
+            )?;
+            let networks = state_for_neural_describe.current_neural_networks();
+            let idx = neural_network_index(&networks, &reference)?;
+            Ok(neural_network_to_value(&networks[idx]))
+        },
+    );
+
+    let state_for_neural_delete = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-delete",
+        "(neural-delete id-or-name)",
+        "Delete one neural network from the current pattern.",
+        move |args, ctx| {
+            let reference = parse_neural_network_ref(
+                args.first()
+                    .ok_or_else(|| "neural-delete expects network id or name".to_string())?,
+            )?;
+            let deleted = state_for_neural_delete.edit_current_neural_networks(|networks| {
+                let idx = neural_network_index(networks, &reference)?;
+                Ok(networks.remove(idx))
+            })?;
+            ctx.set_status(format!("deleted neural network '{}'", deleted.name));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_neural_enable = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-enable",
+        "(neural-enable id-or-name true)",
+        "Enable or disable one neural network in the current pattern.",
+        move |args, ctx| {
+            if args.len() != 2 {
+                return Err("neural-enable expects network id/name and bool".to_string());
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let enabled = parse_bool_value(&args[1], "neural-enable")?;
+            let updated = state_for_neural_enable.edit_current_neural_networks(|networks| {
+                let idx = neural_network_index(networks, &reference)?;
+                networks[idx].enabled = enabled;
+                Ok(networks[idx].clone())
+            })?;
+            ctx.set_status(format!(
+                "neural network '{}' enabled={}",
+                updated.name, updated.enabled
+            ));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
+    let state_for_neural_set = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-set",
+        "(neural-set id-or-name :reset-bars 4 :energy-decay 0.994 :max-poly 2)",
+        "Set global neural network options.",
+        move |args, ctx| {
+            if args.is_empty() {
+                return Err("neural-set expects network id/name".to_string());
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let edits = parse_neural_set_args(&args[1..])?;
+            let updated = state_for_neural_set.edit_current_neural_networks(|networks| {
+                let idx = neural_network_index(networks, &reference)?;
+                apply_neural_set_edits(&mut networks[idx], &edits)?;
+                Ok(networks[idx].clone())
+            })?;
+            ctx.set_status(format!("updated neural network '{}'", updated.name));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
+    let state_for_neural_neuron = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-neuron",
+        "(neural-neuron id-or-name index :route track :resolution :16 :threshold 0.8 :delay 2 :quantize :8 :transpose 0)",
+        "Set one neuron's route, clock, threshold, delay, quantize, transpose, and dampening options.",
+        move |args, ctx| {
+            if args.len() < 2 {
+                return Err("neural-neuron expects network id/name and neuron index".to_string());
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
+            let edits = parse_neural_neuron_args(&args[2..])?;
+            let track_count = state_for_neural_neuron.active_track_count();
+            let updated = state_for_neural_neuron.edit_current_neural_networks(|networks| {
+                let idx = neural_network_index(networks, &reference)?;
+                if neuron_idx >= networks[idx].num_neurons {
+                    return Err("neuron index out of range".to_string());
+                }
+                apply_neural_neuron_edits(
+                    &mut networks[idx].neurons[neuron_idx],
+                    &edits,
+                    track_count,
+                )?;
+                Ok(networks[idx].clone())
+            })?;
+            ctx.set_status(format!(
+                "updated neural network '{}' neuron {}",
+                updated.name, neuron_idx
+            ));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
+    let state_for_neural_weights = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-weights",
+        "(neural-weights id-or-name '((0 1) (0 0)))",
+        "Replace a neural network's full NxN weight matrix. Rows are from-neuron, columns are to-neuron.",
+        move |args, ctx| {
+            if args.len() != 2 {
+                return Err("neural-weights expects network id/name and matrix".to_string());
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let updated = state_for_neural_weights.edit_current_neural_networks(|networks| {
+                let idx = neural_network_index(networks, &reference)?;
+                networks[idx].weights =
+                    parse_neural_weight_matrix(&args[1], networks[idx].num_neurons)?;
+                Ok(networks[idx].clone())
+            })?;
+            ctx.set_status(format!("updated neural network '{}' weights", updated.name));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
+    let state_for_neural_weight = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-weight",
+        "(neural-weight id-or-name :from 0 :to 1 :value 0.8)",
+        "Set one matrix cell. Rows are from-neuron, columns are to-neuron.",
+        move |args, ctx| {
+            if args.is_empty() {
+                return Err("neural-weight expects network id/name".to_string());
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let edit = parse_neural_weight_args(&args[1..])?;
+            let updated = state_for_neural_weight.edit_current_neural_networks(|networks| {
+                let idx = neural_network_index(networks, &reference)?;
+                let n = networks[idx].num_neurons;
+                if edit.from >= n || edit.to >= n {
+                    return Err("neural-weight from/to index out of range".to_string());
+                }
+                normalize_project_neural_network_shape(&mut networks[idx])?;
+                networks[idx].weights[edit.from][edit.to] = edit.value;
+                Ok(networks[idx].clone())
+            })?;
+            ctx.set_status(format!(
+                "updated neural network '{}' weight {} -> {}",
+                updated.name, edit.from, edit.to
+            ));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
+    let state_for_neural_reset_step = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-reset-step",
+        "(neural-reset-step :track 0 :step 0 true) | (neural-reset-step track step true)",
+        "Set or clear the dedicated neural reset flag for a step.",
+        move |args, ctx| {
+            let reset = parse_neural_reset_step_args(&args)?;
+            state_for_neural_reset_step.set_neural_reset_step(
+                reset.track,
+                reset.step,
+                reset.enabled,
+            )?;
+            ctx.set_status(format!(
+                "track {} step {} neural-reset={}",
+                reset.track, reset.step, reset.enabled
+            ));
+            Ok(EValue::Bool(reset.enabled))
+        },
+    );
+}
+
 fn register_sequencer_natives_with_accumulators(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
@@ -3948,6 +4181,8 @@ fn register_sequencer_natives_with_accumulators(
             ))
         },
     );
+
+    register_neural_authoring_natives(runtime, Arc::clone(&state));
 
     let state_for_set_midi_fx_param = Arc::clone(&state);
     let context_for_set_midi_fx_param = Arc::clone(&context);
@@ -6824,6 +7059,594 @@ fn midi_fx_param_descriptor_for_slot(
     }
 }
 
+#[derive(Clone, Debug)]
+enum NeuralNetworkRef {
+    Id(u64),
+    Name(String),
+}
+
+#[derive(Clone, Debug)]
+struct NeuralCreateOptions {
+    name: String,
+    num_neurons: usize,
+    enabled: bool,
+    weights: Option<Vec<Vec<f32>>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NeuralSetEdits {
+    name: Option<String>,
+    reset_interval_bars: Option<f32>,
+    energy_decay: Option<f32>,
+    max_poly: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NeuralNeuronEdits {
+    route: Option<Option<usize>>,
+    resolution: Option<Timebase>,
+    threshold: Option<f32>,
+    delay_steps: Option<u32>,
+    quantize: Option<Option<Timebase>>,
+    transpose: Option<f32>,
+    dampening_amount: Option<f32>,
+    dampening_recovery: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NeuralWeightEdit {
+    from: usize,
+    to: usize,
+    value: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NeuralResetStepEdit {
+    track: usize,
+    step: usize,
+    enabled: bool,
+}
+
+fn parse_neural_network_ref(value: &EValue) -> Result<NeuralNetworkRef, String> {
+    match value {
+        EValue::Number(id) if id.is_finite() && *id >= 0.0 && id.fract() == 0.0 => {
+            Ok(NeuralNetworkRef::Id(*id as u64))
+        }
+        EValue::String(name) | EValue::Keyword(name) | EValue::Symbol(name) => {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                Err("neural network name cannot be empty".to_string())
+            } else {
+                Ok(NeuralNetworkRef::Name(name))
+            }
+        }
+        _ => Err("expected neural network id or name".to_string()),
+    }
+}
+
+fn neural_network_index(
+    networks: &[ProjectNeuralNetwork],
+    reference: &NeuralNetworkRef,
+) -> Result<usize, String> {
+    match reference {
+        NeuralNetworkRef::Id(id) => networks
+            .iter()
+            .position(|network| network.id == *id)
+            .ok_or_else(|| format!("unknown neural network id {id}")),
+        NeuralNetworkRef::Name(name) => {
+            let matches = networks
+                .iter()
+                .enumerate()
+                .filter(|(_, network)| network.name.eq_ignore_ascii_case(name))
+                .map(|(idx, _)| idx)
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [idx] => Ok(*idx),
+                [] => Err(format!("unknown neural network '{name}'")),
+                _ => Err(format!("ambiguous neural network name '{name}'")),
+            }
+        }
+    }
+}
+
+fn next_neural_network_id(networks: &[ProjectNeuralNetwork]) -> u64 {
+    networks
+        .iter()
+        .map(|network| network.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(1)
+}
+
+fn parse_nonnegative_usize(value: &EValue, label: &str) -> Result<usize, String> {
+    match value {
+        EValue::Number(value)
+            if value.is_finite()
+                && *value >= 0.0
+                && value.fract() == 0.0
+                && *value <= usize::MAX as f64 =>
+        {
+            Ok(*value as usize)
+        }
+        _ => Err(format!("{label} must be a non-negative integer")),
+    }
+}
+
+fn parse_positive_neuron_count(value: &EValue) -> Result<usize, String> {
+    let count = parse_nonnegative_usize(value, "neuron count")?;
+    if count == 0 || count > NUM_NEURONS {
+        return Err(format!("neuron count must be 1..={NUM_NEURONS}"));
+    }
+    Ok(count)
+}
+
+fn parse_u32_value(value: &EValue, label: &str) -> Result<u32, String> {
+    match value {
+        EValue::Number(value)
+            if value.is_finite()
+                && *value >= 0.0
+                && value.fract() == 0.0
+                && *value <= u32::MAX as f64 =>
+        {
+            Ok(*value as u32)
+        }
+        _ => Err(format!("{label} must be a non-negative integer")),
+    }
+}
+
+fn parse_f32_value(value: &EValue, label: &str) -> Result<f32, String> {
+    match value {
+        EValue::Number(value)
+            if value.is_finite() && *value >= f32::MIN as f64 && *value <= f32::MAX as f64 =>
+        {
+            Ok(*value as f32)
+        }
+        _ => Err(format!("{label} must be finite numeric")),
+    }
+}
+
+fn parse_bool_value(value: &EValue, label: &str) -> Result<bool, String> {
+    match value {
+        EValue::Bool(value) => Ok(*value),
+        EValue::Nil => Ok(false),
+        EValue::Number(value) if value.is_finite() => Ok(*value != 0.0),
+        _ => Err(format!("{label} expects a boolean")),
+    }
+}
+
+fn parse_timebase_value(value: &EValue) -> Result<Timebase, String> {
+    parse_timebase_arg(std::slice::from_ref(value), 0)
+}
+
+fn neural_attr_name(value: &EValue) -> Option<String> {
+    match value {
+        EValue::Keyword(name) => Some(name.to_ascii_lowercase()),
+        EValue::Symbol(name) | EValue::String(name)
+            if name.starts_with(':') || name.starts_with('@') =>
+        {
+            Some(
+                name.trim_start_matches(':')
+                    .trim_start_matches('@')
+                    .to_ascii_lowercase(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn parse_neural_create_args(args: &[EValue]) -> Result<NeuralCreateOptions, String> {
+    let mut name: Option<String> = None;
+    let mut num_neurons: Option<usize> = None;
+    let mut enabled = true;
+    let mut weights_value: Option<EValue> = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let attr = neural_attr_name(&args[idx])
+            .ok_or_else(|| "neural-create expects keyword arguments".to_string())?;
+        idx += 1;
+        let value = args
+            .get(idx)
+            .ok_or_else(|| format!("neural-create :{attr} expects a value"))?;
+        match attr.as_str() {
+            "name" => {
+                name = match value {
+                    EValue::String(value) | EValue::Keyword(value) | EValue::Symbol(value) => {
+                        Some(value.trim().to_string())
+                    }
+                    _ => return Err("neural-create :name expects string/symbol".to_string()),
+                };
+            }
+            "neurons" | "num-neurons" => num_neurons = Some(parse_positive_neuron_count(value)?),
+            "enabled" => enabled = parse_bool_value(value, "neural-create :enabled")?,
+            "weights" => weights_value = Some(value.clone()),
+            other => return Err(format!("neural-create unknown argument :{other}")),
+        }
+        idx += 1;
+    }
+    let name = name.ok_or_else(|| "neural-create requires :name".to_string())?;
+    if name.is_empty() {
+        return Err("neural-create :name cannot be empty".to_string());
+    }
+    let num_neurons = num_neurons.ok_or_else(|| "neural-create requires :neurons".to_string())?;
+    let weights = weights_value
+        .as_ref()
+        .map(|value| parse_neural_weight_matrix(value, num_neurons))
+        .transpose()?;
+    Ok(NeuralCreateOptions {
+        name,
+        num_neurons,
+        enabled,
+        weights,
+    })
+}
+
+fn parse_neural_set_args(args: &[EValue]) -> Result<NeuralSetEdits, String> {
+    let mut edits = NeuralSetEdits::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let attr = neural_attr_name(&args[idx])
+            .ok_or_else(|| "neural-set expects keyword arguments".to_string())?;
+        idx += 1;
+        let value = args
+            .get(idx)
+            .ok_or_else(|| format!("neural-set :{attr} expects a value"))?;
+        match attr.as_str() {
+            "name" => {
+                edits.name = match value {
+                    EValue::String(value) | EValue::Keyword(value) | EValue::Symbol(value) => {
+                        Some(value.trim().to_string())
+                    }
+                    _ => return Err("neural-set :name expects string/symbol".to_string()),
+                };
+            }
+            "reset-bars" | "reset-interval-bars" => {
+                edits.reset_interval_bars = Some(parse_f32_value(value, "reset bars")?)
+            }
+            "energy-decay" => edits.energy_decay = Some(parse_f32_value(value, "energy decay")?),
+            "max-poly" => edits.max_poly = Some(parse_u32_value(value, "max-poly")?),
+            other => return Err(format!("neural-set unknown argument :{other}")),
+        }
+        idx += 1;
+    }
+    Ok(edits)
+}
+
+fn parse_neural_neuron_args(args: &[EValue]) -> Result<NeuralNeuronEdits, String> {
+    let mut edits = NeuralNeuronEdits::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let attr = neural_attr_name(&args[idx])
+            .ok_or_else(|| "neural-neuron expects keyword arguments".to_string())?;
+        idx += 1;
+        let value = args
+            .get(idx)
+            .ok_or_else(|| format!("neural-neuron :{attr} expects a value"))?;
+        match attr.as_str() {
+            "route" => {
+                edits.route = Some(match value {
+                    EValue::Nil | EValue::Bool(false) => None,
+                    _ => Some(parse_nonnegative_usize(value, "route")?),
+                });
+            }
+            "resolution" | "clock" => edits.resolution = Some(parse_timebase_value(value)?),
+            "threshold" => edits.threshold = Some(parse_f32_value(value, "threshold")?.max(0.0)),
+            "delay" | "delay-steps" => edits.delay_steps = Some(parse_u32_value(value, "delay")?),
+            "quantize" => {
+                edits.quantize = Some(match value {
+                    EValue::Nil | EValue::Bool(false) => None,
+                    _ => Some(parse_timebase_value(value)?),
+                });
+            }
+            "transpose" => edits.transpose = Some(parse_f32_value(value, "transpose")?),
+            "dampening" | "dampening-amount" => {
+                edits.dampening_amount = Some(parse_f32_value(value, "dampening")?)
+            }
+            "dampening-recovery" | "recovery" => {
+                edits.dampening_recovery = Some(parse_f32_value(value, "dampening recovery")?)
+            }
+            other => return Err(format!("neural-neuron unknown argument :{other}")),
+        }
+        idx += 1;
+    }
+    Ok(edits)
+}
+
+fn parse_neural_weight_args(args: &[EValue]) -> Result<NeuralWeightEdit, String> {
+    let mut from = None;
+    let mut to = None;
+    let mut value = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let attr = neural_attr_name(&args[idx])
+            .ok_or_else(|| "neural-weight expects keyword arguments".to_string())?;
+        idx += 1;
+        let arg = args
+            .get(idx)
+            .ok_or_else(|| format!("neural-weight :{attr} expects a value"))?;
+        match attr.as_str() {
+            "from" => from = Some(parse_nonnegative_usize(arg, "from")?),
+            "to" => to = Some(parse_nonnegative_usize(arg, "to")?),
+            "value" | "amount" => value = Some(parse_f32_value(arg, "weight")?),
+            other => return Err(format!("neural-weight unknown argument :{other}")),
+        }
+        idx += 1;
+    }
+    Ok(NeuralWeightEdit {
+        from: from.ok_or_else(|| "neural-weight requires :from".to_string())?,
+        to: to.ok_or_else(|| "neural-weight requires :to".to_string())?,
+        value: value.ok_or_else(|| "neural-weight requires :value".to_string())?,
+    })
+}
+
+fn parse_neural_reset_step_args(args: &[EValue]) -> Result<NeuralResetStepEdit, String> {
+    if args.len() == 3 && matches!(args[0], EValue::Number(_)) {
+        return Ok(NeuralResetStepEdit {
+            track: parse_nonnegative_usize(&args[0], "track")?,
+            step: parse_step_arg(args, 1)?,
+            enabled: parse_bool_value(&args[2], "neural-reset-step")?,
+        });
+    }
+
+    let mut track = None;
+    let mut step = None;
+    let mut enabled = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        if let Some(attr) = neural_attr_name(&args[idx]) {
+            idx += 1;
+            let value = args
+                .get(idx)
+                .ok_or_else(|| format!("neural-reset-step :{attr} expects a value"))?;
+            match attr.as_str() {
+                "track" => track = Some(parse_nonnegative_usize(value, "track")?),
+                "step" => step = Some(parse_step_arg(args, idx)?),
+                "enabled" | "value" => {
+                    enabled = Some(parse_bool_value(value, "neural-reset-step")?)
+                }
+                other => return Err(format!("neural-reset-step unknown argument :{other}")),
+            }
+            idx += 1;
+        } else {
+            enabled = Some(parse_bool_value(&args[idx], "neural-reset-step")?);
+            idx += 1;
+        }
+    }
+    Ok(NeuralResetStepEdit {
+        track: track.ok_or_else(|| "neural-reset-step requires :track".to_string())?,
+        step: step.ok_or_else(|| "neural-reset-step requires :step".to_string())?,
+        enabled: enabled.ok_or_else(|| "neural-reset-step requires enabled bool".to_string())?,
+    })
+}
+
+fn parse_neural_weight_matrix(
+    value: &EValue,
+    expected_size: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    let EValue::List(rows) = value else {
+        return Err("neural weight matrix must be a list of rows".to_string());
+    };
+    let mut matrix = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row = row.borrow();
+        let EValue::List(cells) = &*row else {
+            return Err("neural weight matrix rows must be lists".to_string());
+        };
+        let mut parsed_row = Vec::with_capacity(cells.len());
+        for cell in cells {
+            let cell = cell.borrow();
+            match &*cell {
+                EValue::Number(value)
+                    if value.is_finite()
+                        && *value >= f32::MIN as f64
+                        && *value <= f32::MAX as f64 =>
+                {
+                    parsed_row.push(*value as f32)
+                }
+                _ => return Err("neural weight matrix cells must be numbers".to_string()),
+            }
+        }
+        matrix.push(parsed_row);
+    }
+    validate_neural_matrix_shape(&matrix, expected_size)?;
+    Ok(matrix)
+}
+
+fn validate_neural_matrix_shape(matrix: &[Vec<f32>], expected_size: usize) -> Result<(), String> {
+    if matrix.len() != expected_size {
+        return Err(format!(
+            "neural weight matrix must have {expected_size} rows"
+        ));
+    }
+    if matrix.iter().any(|row| row.len() != expected_size) {
+        return Err(format!(
+            "neural weight matrix must be {expected_size}x{expected_size}"
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_project_neural_network_shape(
+    network: &mut ProjectNeuralNetwork,
+) -> Result<(), String> {
+    if network.num_neurons == 0 || network.num_neurons > NUM_NEURONS {
+        return Err(format!("neural network size must be 1..={NUM_NEURONS}"));
+    }
+    network
+        .neurons
+        .resize_with(network.num_neurons, ProjectNeuron::default);
+    network.neurons.truncate(network.num_neurons);
+    if network.weights.len() != network.num_neurons
+        || network
+            .weights
+            .iter()
+            .any(|row| row.len() != network.num_neurons)
+    {
+        let mut normalized = vec![vec![0.0; network.num_neurons]; network.num_neurons];
+        for (row_idx, row) in network.weights.iter().enumerate().take(network.num_neurons) {
+            for (col_idx, value) in row.iter().enumerate().take(network.num_neurons) {
+                normalized[row_idx][col_idx] = *value;
+            }
+        }
+        network.weights = normalized;
+    }
+    Ok(())
+}
+
+fn apply_neural_set_edits(
+    network: &mut ProjectNeuralNetwork,
+    edits: &NeuralSetEdits,
+) -> Result<(), String> {
+    if let Some(name) = &edits.name {
+        if name.is_empty() {
+            return Err("neural-set :name cannot be empty".to_string());
+        }
+        network.name = name.clone();
+    }
+    if let Some(reset_interval_bars) = edits.reset_interval_bars {
+        network.reset_interval_bars = reset_interval_bars.max(0.25);
+    }
+    if let Some(energy_decay) = edits.energy_decay {
+        network.energy_decay = energy_decay.clamp(0.0, 1.0);
+    }
+    if let Some(max_poly) = edits.max_poly {
+        network.max_poly = max_poly.max(1);
+    }
+    Ok(())
+}
+
+fn apply_neural_neuron_edits(
+    neuron: &mut ProjectNeuron,
+    edits: &NeuralNeuronEdits,
+    track_count: usize,
+) -> Result<(), String> {
+    if let Some(route) = edits.route {
+        if let Some(track) = route {
+            if track >= track_count {
+                return Err("route track out of range".to_string());
+            }
+        }
+        neuron.route = route;
+    }
+    if let Some(resolution) = edits.resolution {
+        neuron.resolution = resolution as u8;
+    }
+    if let Some(threshold) = edits.threshold {
+        neuron.threshold = threshold.max(0.0);
+    }
+    if let Some(delay_steps) = edits.delay_steps {
+        neuron.delay_steps = delay_steps;
+    }
+    if let Some(quantize) = edits.quantize {
+        neuron.quantize = quantize.map(|timebase| timebase as u8);
+    }
+    if let Some(transpose) = edits.transpose {
+        neuron.transpose = transpose;
+    }
+    if let Some(dampening_amount) = edits.dampening_amount {
+        neuron.dampening_amount = dampening_amount.clamp(0.0, 1.0);
+    }
+    if let Some(dampening_recovery) = edits.dampening_recovery {
+        neuron.dampening_recovery = dampening_recovery.clamp(0.0, 1.0);
+    }
+    Ok(())
+}
+
+fn neural_network_to_value(network: &ProjectNeuralNetwork) -> EValue {
+    let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
+    map.insert("id".to_string(), lisp_number(network.id as f64));
+    map.insert("name".to_string(), lisp_string(network.name.clone()));
+    map.insert("enabled".to_string(), lisp_bool(network.enabled));
+    map.insert(
+        "num-neurons".to_string(),
+        lisp_number(network.num_neurons as f64),
+    );
+    map.insert(
+        "reset-bars".to_string(),
+        lisp_number(network.reset_interval_bars as f64),
+    );
+    map.insert(
+        "energy-decay".to_string(),
+        lisp_number(network.energy_decay as f64),
+    );
+    map.insert("max-poly".to_string(), lisp_number(network.max_poly as f64));
+    map.insert(
+        "weights".to_string(),
+        lisp_value(lisp_list(
+            network
+                .weights
+                .iter()
+                .map(|row| {
+                    lisp_list(
+                        row.iter()
+                            .map(|value| EValue::Number(*value as f64))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        )),
+    );
+    map.insert(
+        "neurons".to_string(),
+        lisp_value(lisp_list(
+            network
+                .neurons
+                .iter()
+                .enumerate()
+                .map(|(idx, neuron)| neural_neuron_to_value(idx, neuron))
+                .collect(),
+        )),
+    );
+    EValue::Map(map)
+}
+
+fn neural_neuron_to_value(idx: usize, neuron: &ProjectNeuron) -> EValue {
+    let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
+    map.insert("index".to_string(), lisp_number(idx as f64));
+    map.insert(
+        "route".to_string(),
+        lisp_value(
+            neuron
+                .route
+                .map(|track| EValue::Number(track as f64))
+                .unwrap_or(EValue::Nil),
+        ),
+    );
+    map.insert(
+        "resolution".to_string(),
+        lisp_value(EValue::Keyword(
+            neuron.resolution_timebase().label().to_string(),
+        )),
+    );
+    map.insert("delay".to_string(), lisp_number(neuron.delay_steps as f64));
+    map.insert(
+        "threshold".to_string(),
+        lisp_number(neuron.threshold as f64),
+    );
+    map.insert(
+        "transpose".to_string(),
+        lisp_number(neuron.transpose as f64),
+    );
+    map.insert(
+        "quantize".to_string(),
+        lisp_value(
+            neuron
+                .quantize_timebase()
+                .map(|timebase| EValue::Keyword(timebase.label().to_string()))
+                .unwrap_or(EValue::Nil),
+        ),
+    );
+    map.insert(
+        "dampening".to_string(),
+        lisp_number(neuron.dampening_amount as f64),
+    );
+    map.insert(
+        "dampening-recovery".to_string(),
+        lisp_number(neuron.dampening_recovery as f64),
+    );
+    EValue::Map(map)
+}
+
 fn lisp_string(value: impl Into<String>) -> Rc<RefCell<EValue>> {
     Rc::new(RefCell::new(EValue::String(value.into())))
 }
@@ -8437,6 +9260,372 @@ mod tests {
     }
 
     use std::sync::Arc;
+
+    fn neural_test_runtime(track_count: usize) -> (Arc<SequencerState>, Runtime) {
+        let state = Arc::new(SequencerState::new(
+            track_count,
+            (0..track_count)
+                .map(|_| default_empty_effect_chain())
+                .collect(),
+        ));
+        let mut runtime = Runtime::new();
+        register_sequencer_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            new_eval_context(0, 0),
+            shared_native_metadata(
+                fallback_effect_descriptors(track_count),
+                fallback_instrument_descriptors(track_count),
+            ),
+        );
+        (state, runtime)
+    }
+
+    #[test]
+    fn neural_lisp_create_list_describe_delete() {
+        let (state, mut runtime) = neural_test_runtime(1);
+
+        let created = runtime
+            .eval_str("(neural-create :name \"drums\" :neurons 3)")
+            .unwrap();
+        assert!(matches!(created, Some(Value::Map(_))));
+
+        let networks = state.current_neural_networks();
+        assert_eq!(networks.len(), 1);
+        assert_eq!(networks[0].id, 1);
+        assert_eq!(networks[0].name, "drums");
+        assert_eq!(networks[0].num_neurons, 3);
+        assert_eq!(networks[0].neurons.len(), 3);
+        assert_eq!(networks[0].weights, vec![vec![0.0; 3]; 3]);
+
+        let listed = runtime.eval_str("(neural-list)").unwrap();
+        match listed {
+            Some(Value::List(items)) => assert_eq!(items.len(), 1),
+            other => panic!("expected neural-list to return list, got {other:?}"),
+        }
+
+        let described = runtime.eval_str("(neural-describe \"drums\")").unwrap();
+        assert!(matches!(described, Some(Value::Map(_))));
+
+        let deleted = runtime.eval_str("(neural-delete \"drums\")").unwrap();
+        assert_eq!(deleted, Some(Value::Bool(true)));
+        assert!(state.current_neural_networks().is_empty());
+    }
+
+    #[test]
+    fn neural_lisp_enable_set_and_neuron_edit() {
+        let (state, mut runtime) = neural_test_runtime(2);
+        runtime
+            .eval_str("(neural-create :name \"drums\" :neurons 2 :enabled false)")
+            .unwrap();
+
+        let enabled = runtime.eval_str("(neural-enable \"drums\" true)").unwrap();
+        assert!(matches!(enabled, Some(Value::Map(_))));
+
+        runtime
+            .eval_str(
+                "(neural-set \"drums\" :reset-bars 2 :energy-decay 0.5 :max-poly 4 :name \"kit\")",
+            )
+            .unwrap();
+        runtime
+            .eval_str(
+                "(neural-neuron \"kit\" 1 :route 1 :resolution :8 :threshold 0.75 :delay 3 :quantize :16 :transpose -12 :dampening 0.2 :recovery 0.9)",
+            )
+            .unwrap();
+
+        let networks = state.current_neural_networks();
+        let network = &networks[0];
+        assert_eq!(network.name, "kit");
+        assert!(network.enabled);
+        assert_eq!(network.reset_interval_bars, 2.0);
+        assert_eq!(network.energy_decay, 0.5);
+        assert_eq!(network.max_poly, 4);
+
+        let neuron = &network.neurons[1];
+        assert_eq!(neuron.route, Some(1));
+        assert_eq!(
+            neuron.resolution_timebase(),
+            crate::sequencer::Timebase::Eighth
+        );
+        assert_eq!(neuron.threshold, 0.75);
+        assert_eq!(neuron.delay_steps, 3);
+        assert_eq!(
+            neuron.quantize_timebase(),
+            Some(crate::sequencer::Timebase::Sixteenth)
+        );
+        assert_eq!(neuron.transpose, -12.0);
+        assert_eq!(neuron.dampening_amount, 0.2);
+        assert_eq!(neuron.dampening_recovery, 0.9);
+    }
+
+    #[test]
+    fn neural_lisp_weights_matrix_and_single_cell() {
+        let (state, mut runtime) = neural_test_runtime(1);
+        runtime
+            .eval_str("(neural-create :name \"drums\" :neurons 3)")
+            .unwrap();
+
+        runtime
+            .eval_str("(neural-weights \"drums\" '((0 0.5 0) (0 0 0.25) (1 0 0)))")
+            .unwrap();
+        let networks = state.current_neural_networks();
+        assert_eq!(
+            networks[0].weights,
+            vec![
+                vec![0.0, 0.5, 0.0],
+                vec![0.0, 0.0, 0.25],
+                vec![1.0, 0.0, 0.0],
+            ]
+        );
+
+        let updated = runtime
+            .eval_str("(neural-weight \"drums\" :from 0 :to 2 :value 0.9)")
+            .unwrap();
+        assert!(matches!(updated, Some(Value::Map(_))));
+        assert_eq!(state.current_neural_networks()[0].weights[0][2], 0.9);
+    }
+
+    #[test]
+    fn neural_lisp_track_router_script_is_idempotent_and_routes_tracks() {
+        let (state, mut runtime) = neural_test_runtime(8);
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/neural-8x8-track-router.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read neural router script");
+
+        let first = runtime.eval_str(&source).unwrap();
+        let first_status = runtime.take_status_message();
+        assert!(
+            matches!(first, Some(Value::Map(_))),
+            "expected first script eval to return map, got {first:?}; status {first_status:?}"
+        );
+        let second = runtime.eval_str(&source).unwrap();
+        assert!(
+            matches!(second, Some(Value::Map(_))),
+            "expected second script eval to return map, got {second:?}"
+        );
+
+        let networks = state.current_neural_networks();
+        assert_eq!(networks.len(), 1);
+        let network = &networks[0];
+        assert_eq!(network.name, "8x8-track-router2");
+        assert_eq!(network.num_neurons, 8);
+        assert_eq!(
+            network.weights,
+            vec![
+                vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        );
+        let routes = network
+            .neurons
+            .iter()
+            .map(|neuron| neuron.route)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            routes,
+            vec![
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5),
+                Some(6),
+                Some(7),
+            ]
+        );
+        assert_eq!(
+            network
+                .neurons
+                .iter()
+                .map(|neuron| neuron.delay_steps)
+                .collect::<Vec<_>>(),
+            vec![1, 1, 1, 1, 1, 1, 1, 1]
+        );
+        assert!(network
+            .neurons
+            .iter()
+            .all(|neuron| neuron.quantize_timebase().is_none()));
+        assert!(state.pattern.neural_reset_patterns[0].is_active(0));
+    }
+
+    #[test]
+    fn neural_lisp_track_router_reuses_existing_named_network() {
+        let (state, mut runtime) = neural_test_runtime(8);
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/neural-8x8-track-router.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read neural router script");
+
+        runtime.eval_str(&source).unwrap();
+        let initial = state.current_neural_networks();
+        assert_eq!(initial.len(), 1);
+        let id = initial[0].id;
+
+        runtime
+            .eval_str(&format!("(neural-weight {id} :from 0 :to 1 :value 0.25)"))
+            .unwrap();
+        runtime
+            .eval_str(&format!(
+                "(neural-neuron {id} 1 :route 7 :delay 4 :quantize :4)"
+            ))
+            .unwrap();
+
+        let second = runtime.eval_str(&source).unwrap();
+        assert!(
+            matches!(second, Some(Value::Map(_))),
+            "expected router script to describe reused network, got {second:?}"
+        );
+
+        let networks = state.current_neural_networks();
+        assert_eq!(networks.len(), 1);
+        let network = &networks[0];
+        assert_eq!(network.id, id);
+        assert_eq!(network.name, "8x8-track-router2");
+        assert_eq!(network.weights[0][1], 0.25);
+        assert_eq!(network.neurons[1].route, Some(7));
+        assert_eq!(network.neurons[1].delay_steps, 4);
+        assert_eq!(
+            network.neurons[1].quantize_timebase(),
+            Some(crate::sequencer::Timebase::Quarter)
+        );
+    }
+
+    #[test]
+    fn neural_lisp_track_router_controls_align_with_matrix_rows() {
+        fn collect_widgets<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == widget_type {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_widgets(child, widget_type, out);
+            }
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+        }
+
+        let (_state, mut runtime) = neural_test_runtime(8);
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/neural-8x8-track-router.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read neural router script");
+
+        runtime.eval_str(&source).unwrap();
+        let pending = runtime.take_pending_buffer_widget_trees();
+        let tree = pending
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("router script should publish widget tree");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 18.0)))
+            .expect("router widget tree should lay out");
+
+        let mut matrices = Vec::new();
+        collect_widgets(&layout, "matrix", &mut matrices);
+        assert_eq!(matrices.len(), 1, "expected one matrix widget");
+        let matrix = matrices[0];
+        assert_measured(matrix);
+
+        let mut dropdowns = Vec::new();
+        collect_widgets(&layout, "dropdown", &mut dropdowns);
+        assert_eq!(dropdowns.len(), 16, "expected route and quantize dropdowns");
+        for dropdown in &dropdowns {
+            assert_measured(dropdown);
+        }
+
+        let mut pickers = Vec::new();
+        collect_widgets(&layout, "number-picker", &mut pickers);
+        assert_eq!(pickers.len(), 8, "expected one delay picker per neuron");
+        pickers.sort_by(|left, right| {
+            left.rect
+                .row
+                .total_cmp(&right.rect.row)
+                .then(left.rect.col.total_cmp(&right.rect.col))
+        });
+        for picker in &pickers {
+            assert_measured(picker);
+        }
+
+        let matrix_row_height = matrix.rect.height / 8.0;
+        for (idx, picker) in pickers.iter().enumerate() {
+            let expected_center = matrix.rect.row + matrix_row_height * (idx as f32 + 0.5);
+            let actual_center = picker.rect.row + picker.rect.height * 0.5;
+            assert!(
+                (actual_center - expected_center).abs() <= 0.05,
+                "delay picker {idx} center {actual_center} should align with matrix row center {expected_center}; picker={:?} matrix={:?}",
+                picker.rect,
+                matrix.rect
+            );
+        }
+    }
+
+    #[test]
+    fn neural_lisp_reset_step_sets_dedicated_flag() {
+        let (state, mut runtime) = neural_test_runtime(1);
+
+        let enabled = runtime
+            .eval_str("(neural-reset-step :track 0 :step 4 true)")
+            .unwrap();
+        assert_eq!(enabled, Some(Value::Bool(true)));
+        assert!(state.pattern.neural_reset_patterns[0].is_active(4));
+
+        let disabled = runtime.eval_str("(neural-reset-step 0 4 false)").unwrap();
+        assert_eq!(disabled, Some(Value::Bool(false)));
+        assert!(!state.pattern.neural_reset_patterns[0].is_active(4));
+    }
+
+    #[test]
+    fn neural_lisp_rejects_bad_matrix_shape() {
+        let (state, mut runtime) = neural_test_runtime(1);
+
+        let result = runtime
+            .eval_str("(neural-create :name \"bad\" :neurons 2 :weights '((0 1)))")
+            .unwrap();
+
+        assert_eq!(result, Some(Value::Bool(false)));
+        assert!(state.current_neural_networks().is_empty());
+    }
+
+    #[test]
+    fn neural_lisp_rejects_ambiguous_name_lookup() {
+        let (state, mut runtime) = neural_test_runtime(1);
+        runtime
+            .eval_str("(neural-create :name \"same\" :neurons 1)")
+            .unwrap();
+        runtime
+            .eval_str("(neural-create :name \"same\" :neurons 1)")
+            .unwrap();
+
+        let result = runtime.eval_str("(neural-describe \"same\")").unwrap();
+
+        assert_eq!(result, Some(Value::Bool(false)));
+        assert_eq!(state.current_neural_networks().len(), 2);
+    }
 
     #[test]
     fn seq_step_returns_map_value() {

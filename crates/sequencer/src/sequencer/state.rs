@@ -1274,6 +1274,56 @@ impl SequencerState {
         snapshot
     }
 
+    pub fn current_neural_networks(&self) -> Vec<ProjectNeuralNetwork> {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        self.pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|snapshot| snapshot.neural_networks.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn edit_current_neural_networks<F, R>(&self, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ProjectNeuralNetwork>) -> Result<R, String>,
+    {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let result = {
+            let mut bank = self
+                .pattern
+                .pattern_bank
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let snapshot = bank
+                .get_mut(current_pattern)
+                .ok_or_else(|| "current pattern out of range".to_string())?;
+            edit(&mut snapshot.neural_networks)?
+        };
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        Ok(result)
+    }
+
+    pub fn set_neural_reset_step(
+        &self,
+        track: usize,
+        step: usize,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        if track >= self.active_track_count() {
+            return Err("track out of range".to_string());
+        }
+        if step >= MAX_STEPS {
+            return Err("step out of range".to_string());
+        }
+        self.pattern.neural_reset_patterns[track].set_step_active(step, enabled);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        Ok(enabled)
+    }
+
     pub fn request_track_delete_boundary(&self, track_idx: usize) -> u64 {
         let request_id = self
             .transport
@@ -2079,10 +2129,7 @@ impl SequencerState {
         }
 
         self.pattern.patterns[track].set_step_active(step, snapshot.active);
-        self.pattern.neural_reset_patterns[track].set_step_active(
-            step,
-            snapshot.neural_reset,
-        );
+        self.pattern.neural_reset_patterns[track].set_step_active(step, snapshot.neural_reset);
 
         self.pattern.chord_data[track].clear_step(step);
         for (idx, &transpose) in snapshot.chord.iter().enumerate() {
@@ -2209,10 +2256,7 @@ impl SequencerState {
             let active = self.pattern.patterns[track].is_active(src);
             self.pattern.patterns[track].set_step_active(step, active);
             let neural_reset = self.pattern.neural_reset_patterns[track].is_active(src);
-            self.pattern.neural_reset_patterns[track].set_step_active(
-                step,
-                neural_reset,
-            );
+            self.pattern.neural_reset_patterns[track].set_step_active(step, neural_reset);
         }
 
         for step in num_steps..new_len {

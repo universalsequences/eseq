@@ -231,6 +231,7 @@ pub(crate) fn init_runtime(
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) -> RuntimeInit {
     let mut runtime = Runtime::new();
+    sequencer::lisp_effect::register_neural_authoring_natives(&mut runtime, Arc::clone(&state));
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
