@@ -2228,6 +2228,7 @@ pub fn spawn_scheduler_thread(
                 {
                     neural_runtime.load_from_networks(&snapshot.neural_networks, clock.total_beats);
                     loaded_neural_networks = Some(snapshot.neural_networks.clone());
+                    state.set_neural_visualization(neural_runtime.visualization_snapshot());
                 }
                 let scheduled_ahead_beats =
                     scheduled_until_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
@@ -2255,6 +2256,7 @@ pub fn spawn_scheduler_thread(
                     pending_accum_reset = [false; MAX_TRACKS];
                     accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
                     neural_runtime.reset_state(0.0);
+                    state.set_neural_visualization(neural_runtime.visualization_snapshot());
                     thread::sleep(Duration::from_millis(if live_active { 1 } else { 2 }));
                     continue;
                 }
@@ -2267,6 +2269,7 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                     neural_runtime.reset_state(clock.total_beats);
+                    state.set_neural_visualization(neural_runtime.visualization_snapshot());
                     if ready_edit < requested_edit {
                         state
                             .transport
@@ -2325,6 +2328,7 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                     neural_runtime.reset_state(clock.total_beats);
+                    state.set_neural_visualization(neural_runtime.visualization_snapshot());
                 } else if last_topology_epoch != topology_epoch {
                     let previous_scheduled_until = scheduled_until_sample;
                     queue.clear();
@@ -2332,6 +2336,7 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                     neural_runtime.reset_state(clock.total_beats);
+                    state.set_neural_visualization(neural_runtime.visualization_snapshot());
                 } else if last_pattern_epoch != pattern_epoch {
                     // Track topology edits bump pattern_epoch without changing the
                     // pattern index. Rebuild the scheduler horizon immediately so
@@ -2342,6 +2347,7 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                     neural_runtime.reset_state(clock.total_beats);
+                    state.set_neural_visualization(neural_runtime.visualization_snapshot());
                 } else if last_pattern != pattern {
                     // Pattern switches should replace future scheduled content without
                     // disturbing the current musical phase.
@@ -2351,6 +2357,7 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                     neural_runtime.reset_state(clock.total_beats);
+                    state.set_neural_visualization(neural_runtime.visualization_snapshot());
                 }
 
                 schedule_live_midi_fx(
@@ -2870,6 +2877,7 @@ pub fn spawn_scheduler_thread(
                         samples_per_quarter,
                         &mut neural_events,
                     );
+                    state.set_neural_visualization(neural_runtime.visualization_snapshot());
                     for (sample_time, event) in &mut neural_events {
                         let event_beats = sample_time_to_beats(
                             chunk_start_beats,

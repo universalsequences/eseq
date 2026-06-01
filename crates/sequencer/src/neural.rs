@@ -205,6 +205,25 @@ impl DelayQueue {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeuralVisualizationSnapshot {
+    pub active: bool,
+    pub network_id: u64,
+    pub num_neurons: usize,
+    pub dampening: [[f32; NUM_NEURONS]; NUM_NEURONS],
+}
+
+impl Default for NeuralVisualizationSnapshot {
+    fn default() -> Self {
+        Self {
+            active: false,
+            network_id: 0,
+            num_neurons: 0,
+            dampening: [[0.0; NUM_NEURONS]; NUM_NEURONS],
+        }
+    }
+}
+
 pub struct NeuralRuntime {
     active: bool,
     network_id: u64,
@@ -213,7 +232,8 @@ pub struct NeuralRuntime {
     neurons: [NeuronConfig; NUM_NEURONS],
     energy: [f32; NUM_NEURONS],
     pending: [DelayQueue; NUM_NEURONS],
-    dampening_level: [f32; NUM_NEURONS],
+    dampening: [[f32; NUM_NEURONS]; NUM_NEURONS],
+    incoming_triggers: [[f32; NUM_NEURONS]; NUM_NEURONS],
     source_events: [Option<StepEvent>; NUM_NEURONS],
     seed_on_reset: [f32; NUM_NEURONS],
     energy_decay: f32,
@@ -234,7 +254,8 @@ impl Default for NeuralRuntime {
             neurons: [NeuronConfig::default(); NUM_NEURONS],
             energy: [0.0; NUM_NEURONS],
             pending: std::array::from_fn(|_| DelayQueue::default()),
-            dampening_level: [0.0; NUM_NEURONS],
+            dampening: [[0.0; NUM_NEURONS]; NUM_NEURONS],
+            incoming_triggers: [[0.0; NUM_NEURONS]; NUM_NEURONS],
             source_events: std::array::from_fn(|_| None),
             seed_on_reset: [0.0; NUM_NEURONS],
             energy_decay: default_energy_decay(),
@@ -250,6 +271,15 @@ impl Default for NeuralRuntime {
 impl NeuralRuntime {
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    pub fn visualization_snapshot(&self) -> NeuralVisualizationSnapshot {
+        NeuralVisualizationSnapshot {
+            active: self.active,
+            network_id: self.network_id,
+            num_neurons: self.num_neurons,
+            dampening: self.dampening,
+        }
     }
 
     pub fn load_from_networks(&mut self, networks: &[ProjectNeuralNetwork], total_beats: f64) {
@@ -320,7 +350,8 @@ impl NeuralRuntime {
 
     pub fn reset_state(&mut self, total_beats: f64) {
         self.energy = [0.0; NUM_NEURONS];
-        self.dampening_level = [0.0; NUM_NEURONS];
+        self.dampening = [[0.0; NUM_NEURONS]; NUM_NEURONS];
+        self.incoming_triggers = [[0.0; NUM_NEURONS]; NUM_NEURONS];
         for queue in &mut self.pending {
             queue.clear();
         }
@@ -512,12 +543,14 @@ impl NeuralRuntime {
         self.pending[neuron_idx].entries = keep;
 
         for event in propagated {
-            let scale = 1.0 - self.dampening_level[neuron_idx];
             for target in 0..self.num_neurons {
-                let amount = self.weights[neuron_idx][target] * scale;
-                if amount == 0.0 {
+                let amount = (self.weights[neuron_idx][target]
+                    - self.dampening[neuron_idx][target])
+                    .max(0.0);
+                if amount <= 0.0 {
                     continue;
                 }
+                self.incoming_triggers[neuron_idx][target] = 1.0;
                 if target == neuron_idx || (due_at_boundary[target] && target > neuron_idx) {
                     self.energy[target] += amount;
                     self.source_events[target] = Some(event.clone());
@@ -560,11 +593,22 @@ impl NeuralRuntime {
                 });
             }
             self.energy[neuron_idx] = 0.0;
-            self.dampening_level[neuron_idx] = (self.dampening_level[neuron_idx]
-                + self.neurons[neuron_idx].dampening_amount)
-                .min(1.0);
+            for source in 0..self.num_neurons {
+                let trigger = self.incoming_triggers[source][neuron_idx];
+                if trigger > 0.0 {
+                    self.dampening[source][neuron_idx] = (self.dampening[source][neuron_idx]
+                        + trigger * self.neurons[neuron_idx].dampening_amount)
+                        .min(1.0);
+                }
+            }
+        } else {
+            for source in 0..self.num_neurons {
+                self.dampening[source][neuron_idx] *= self.neurons[neuron_idx].dampening_recovery;
+            }
         }
-        self.dampening_level[neuron_idx] *= self.neurons[neuron_idx].dampening_recovery;
+        for source in 0..self.num_neurons {
+            self.incoming_triggers[source][neuron_idx] = 0.0;
+        }
     }
 
     fn quantized_fire_timing(
@@ -985,6 +1029,64 @@ mod tests {
             .map(|(sample, event)| (*sample, event.track, output_neuron(event)))
             .collect::<Vec<_>>();
         assert_eq!(observed, vec![(12_000, 1, 1), (36_000, 2, 2)]);
+    }
+
+    #[test]
+    fn dampening_matrix_suppresses_the_specific_triggered_edge() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 2;
+        network.weights = vec![vec![0.0, 1.0], vec![0.0, 0.0]];
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.neurons[1].route = Some(1);
+        network.neurons[1].threshold = 0.5;
+        network.neurons[1].dampening_amount = 1.0;
+        network.neurons[1].dampening_recovery = 1.0;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed_at(&test_event(0), 0.0);
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 1.0, 0, 48_000.0, &mut out);
+        let observed = out
+            .iter()
+            .map(|(sample, event)| (*sample, event.track, output_neuron(event)))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![(12_000, 1, 1)]);
+        assert_eq!(runtime.visualization_snapshot().dampening[0][1], 1.0);
+
+        out.clear();
+        runtime.process_seed_at(&test_event(0), 1.0);
+        runtime.process_boundaries(1.0, 1.25, 48_000, 48_000.0, &mut out);
+
+        assert!(
+            out.is_empty(),
+            "fully damped edge 0->1 should not retrigger neuron 1"
+        );
+    }
+
+    #[test]
+    fn reset_clears_dampening_visualization_state() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 2;
+        network.weights = vec![vec![0.0, 1.0], vec![0.0, 0.0]];
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.neurons[1].route = Some(1);
+        network.neurons[1].threshold = 0.5;
+        network.neurons[1].dampening_amount = 1.0;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed_at(&test_event(0), 0.0);
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 1.0, 0, 48_000.0, &mut out);
+        assert!(runtime.visualization_snapshot().dampening[0][1] > 0.0);
+
+        runtime.reset_state(1.0);
+        assert_eq!(runtime.visualization_snapshot().dampening[0][1], 0.0);
     }
 
     #[test]

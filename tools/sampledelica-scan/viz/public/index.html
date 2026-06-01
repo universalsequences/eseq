@@ -1,0 +1,1060 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sampledelica — region explorer</title>
+    <style>
+      :root {
+        --bg: #0e1014;
+        --panel: #161922;
+        --panel2: #1d2230;
+        --line: #2a3040;
+        --text: #e6e9f0;
+        --dim: #8a93a6;
+        --break: #e8833a;
+        --chord: #4a90d9;
+        --stab: #3fb567;
+        --accent: #b07cf6;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        overflow: hidden;
+      }
+      header {
+        display: flex; align-items: center; gap: 18px;
+        padding: 10px 16px; border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+      header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+      header h1 span { color: var(--accent); }
+      .stats { display: flex; gap: 16px; color: var(--dim); font-size: 12px; }
+      .stats b { color: var(--text); font-variant-numeric: tabular-nums; }
+      .legend { display: flex; gap: 12px; margin-left: auto; font-size: 12px; }
+      .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+      .main { flex: 1; display: grid; grid-template-columns: 280px 1fr 340px; min-height: 0; }
+      .col { overflow-y: auto; min-height: 0; }
+      .sidebar { border-right: 1px solid var(--line); background: var(--panel); }
+      .detail { border-left: 1px solid var(--line); background: var(--panel); padding: 14px; }
+      .center { padding: 16px 20px; }
+
+      .album { padding: 10px 12px 4px; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); }
+      .srcitem { display: flex; gap: 9px; align-items: center; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #1b1f29; }
+      .srcitem:hover { background: var(--panel2); }
+      .srcitem.active { background: #232a3c; box-shadow: inset 3px 0 0 var(--accent); }
+      .srcitem img { width: 34px; height: 34px; border-radius: 4px; object-fit: cover; background: #222; flex: 0 0 auto; }
+      .srcitem .t { font-size: 12px; line-height: 1.25; }
+      .srcitem .m { color: var(--dim); font-size: 11px; }
+      .dots { display: flex; gap: 3px; margin-top: 2px; }
+      .dot { width: 7px; height: 7px; border-radius: 50%; }
+
+      .srchead { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+      .srchead img { width: 72px; height: 72px; border-radius: 6px; object-fit: cover; background: #222; }
+      .srchead h2 { margin: 0 0 4px; font-size: 17px; }
+      .srchead .meta { color: var(--dim); font-size: 12px; }
+      .chip { display: inline-block; background: var(--panel2); border: 1px solid var(--line); border-radius: 20px; padding: 2px 9px; margin-right: 6px; font-size: 11px; }
+
+      #waveform { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+      .ribbon { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+      .rb { display: flex; flex-direction: column; gap: 1px; padding: 5px 8px; border-radius: 6px; cursor: pointer; border: 1px solid var(--line); background: var(--panel); min-width: 64px; }
+      .rb:hover { background: var(--panel2); }
+      .rb.active { outline: 2px solid var(--accent); }
+      .rb .lbl { font-size: 12px; font-weight: 600; }
+      .rb .sub { font-size: 10px; color: var(--dim); }
+      .rb .bar { height: 3px; border-radius: 2px; margin-top: 3px; }
+
+      .placeholder { color: var(--dim); padding: 40px; text-align: center; }
+
+      .detail h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--dim); margin: 0 0 8px; }
+      .dlabel { font-size: 22px; font-weight: 650; margin: 0; }
+      .dkind { font-size: 12px; color: var(--dim); margin-bottom: 12px; }
+      .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12px; margin: 10px 0; }
+      .kv .k { color: var(--dim); }
+      .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+      .piano { display: flex; gap: 2px; margin: 10px 0; }
+      .pk { flex: 1; text-align: center; font-size: 9px; padding: 6px 0 4px; border-radius: 3px; background: #20242f; color: #555c6e; border: 1px solid transparent; }
+      .pk.on { background: var(--accent); color: #15101f; font-weight: 700; }
+      .pk.root { box-shadow: 0 0 0 2px #fff inset; }
+
+      button.play { background: var(--accent); color: #15101f; border: none; border-radius: 6px; padding: 7px 14px; font-weight: 650; cursor: pointer; font-size: 12px; }
+      button.play:hover { filter: brightness(1.1); }
+      .toggles { display: flex; gap: 14px; margin: 12px 0 6px; font-size: 12px; color: var(--dim); }
+      .toggles label { cursor: pointer; user-select: none; }
+
+      .nbr { display: flex; gap: 8px; align-items: center; padding: 6px; border-radius: 6px; cursor: pointer; }
+      .nbr:hover { background: var(--panel2); }
+      .nbr img { width: 30px; height: 30px; border-radius: 4px; object-fit: cover; background: #222; flex: 0 0 auto; }
+      .nbr .info { flex: 1; min-width: 0; }
+      .nbr .nl { font-size: 12px; font-weight: 600; }
+      .nbr .ns { font-size: 10px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .simbar { width: 46px; height: 5px; border-radius: 3px; background: #2a3040; overflow: hidden; flex: 0 0 auto; }
+      .simbar > i { display: block; height: 100%; background: var(--accent); }
+      .simval { font-size: 10px; color: var(--dim); width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+      .miniplay { font-size: 14px; cursor: pointer; opacity: .6; }
+      .miniplay:hover { opacity: 1; }
+
+      /* ---- mode toggle + kit ---- */
+      .toolbar { display: flex; gap: 8px; align-items: center; margin: 14px 0 4px; }
+      .modebtn { background: var(--panel2); color: var(--dim); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+      .modebtn.active { background: var(--accent); color: #15101f; border-color: var(--accent); font-weight: 650; }
+      .toolbar .hint { color: var(--dim); font-size: 11px; margin-left: auto; }
+
+      .keyboard { margin-top: 12px; user-select: none; }
+      .krow { display: flex; gap: 5px; margin-bottom: 5px; }
+      .krow.r2 { margin-left: 14px; }
+      .krow.r3 { margin-left: 24px; }
+      .krow.r4 { margin-left: 36px; }
+      .pad {
+        position: relative; flex: 1 1 0; min-width: 0; height: 56px;
+        border-radius: 7px; border: 1px solid var(--line); background: var(--panel2);
+        overflow: hidden; cursor: pointer; transition: transform .04s, box-shadow .08s;
+        display: flex; flex-direction: column; justify-content: flex-end;
+      }
+      .pad .pcover { position: absolute; inset: 0; background-size: cover; background-position: center; opacity: .28; }
+      .pad.neighbor .pcover { opacity: .44; }
+      .pad .pgrad { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(14,16,20,.05), rgba(14,16,20,.88)); }
+      .pad .pkey { position: absolute; top: 2px; left: 5px; font-size: 10px; font-weight: 700; color: var(--text); opacity: .85; z-index: 2; text-shadow: 0 1px 2px #000; }
+      .pad .pkind { position: absolute; top: 4px; right: 5px; width: 7px; height: 7px; border-radius: 50%; z-index: 2; box-shadow: 0 0 0 1px #0008; }
+      .pad .porigin { position: absolute; top: 3px; right: 16px; font-size: 8px; color: #d7def0; z-index: 2; text-shadow: 0 1px 2px #000; }
+      .pad .plabel { position: relative; z-index: 2; padding: 2px 5px 4px; font-size: 11px; font-weight: 650; line-height: 1.1; text-shadow: 0 1px 3px #000; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .pad .psub { font-size: 8px; color: #c0c8db; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .pad.empty { opacity: .22; cursor: default; }
+      .pad.empty .pgrad, .pad.empty .pcover { display: none; }
+      .pad.loading::after { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(45deg,#0000,#0000 6px,#ffffff0e 6px,#ffffff0e 12px); z-index: 1; }
+      .pad.active { transform: translateY(2px); box-shadow: 0 0 0 2px var(--accent), 0 0 16px 2px #b07cf688; }
+      .pad.active .pcover { opacity: .6; }
+      .pad.src-edge { box-shadow: inset 0 0 0 2px #4a90d955; }
+
+      /* ---- dub looper ---- */
+      #dub { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+      .dubbar { display: flex; gap: 10px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+      .dubbtn { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px 13px; font-size: 12px; cursor: pointer; }
+      .dubbtn:hover { background: #28304200; border-color: var(--accent); }
+      .dubbtn.rec { background: #e8556a; color: #fff; border-color: #e8556a; font-weight: 650; }
+      .dubbtn.rec.armed { animation: pulse 1.4s infinite; }
+      @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+      .dubbar .hint { color: var(--dim); font-size: 11px; }
+      #capWrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+      .capstage { position: relative; }
+      #capCanvas { display: block; width: 100%; height: 96px; border-radius: 6px; background: #0c0e13; cursor: crosshair; }
+      .capsel { position: absolute; top: 0; height: 96px; background: #b07cf633; border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); pointer-events: none; }
+      .caphead { position: absolute; top: 0; height: 96px; width: 2px; margin-left: -1px; background: #ffe08a; box-shadow: 0 0 8px #ffe08a; pointer-events: none; z-index: 3; }
+      #capProv { position: relative; height: 20px; margin-top: 4px; }
+      .provseg { position: absolute; height: 16px; top: 2px; border-radius: 3px; font-size: 9px; line-height: 16px; padding: 0 4px; color: #fff; overflow: hidden; white-space: nowrap; text-shadow: 0 1px 2px #000; box-shadow: inset 0 0 0 1px #fff2; }
+
+      .xfader { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px; margin-bottom: 8px; }
+      .xfader .xlab { font-size: 11px; font-weight: 700; letter-spacing: .6px; color: var(--dim); white-space: nowrap; }
+      .xfader .xlab.loops { color: var(--stab); }
+      .xfader .xlab.trigs { color: var(--accent); }
+      .xfader input[type=range] {
+        flex: 1; -webkit-appearance: none; appearance: none; height: 8px; border-radius: 5px;
+        background: linear-gradient(90deg, var(--stab), #2a3040 45%, #2a3040 55%, var(--accent));
+        outline: none;
+      }
+      .xfader input[type=range]::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none; width: 18px; height: 28px; border-radius: 4px;
+        background: #e6e9f0; border: 1px solid #0008; cursor: ew-resize; box-shadow: 0 1px 4px #000a;
+      }
+      .xfader input[type=range]::-moz-range-thumb {
+        width: 18px; height: 28px; border-radius: 4px; background: #e6e9f0; border: 1px solid #0008; cursor: ew-resize;
+      }
+
+      #loops { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .loopcard { width: 150px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); padding: 8px; cursor: pointer; position: relative; }
+      .loopcard.on { box-shadow: 0 0 0 2px var(--stab), 0 0 16px 1px #3fb56766; border-color: var(--stab); }
+      .loopcard .ln { font-size: 12px; font-weight: 650; display: flex; align-items: center; gap: 6px; }
+      .loopcard .ld { font-size: 10px; color: var(--dim); margin: 2px 0 5px; }
+      .loopcard .lprov { font-size: 9px; color: #aab2c6; line-height: 1.3; max-height: 38px; overflow: hidden; }
+      .loopcard .lx { position: absolute; top: 6px; right: 8px; color: var(--dim); font-size: 12px; }
+      .loopcard .lx:hover { color: #e8556a; }
+      .loopcard .ldot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
+      .loopcard.on .ldot { background: var(--stab); box-shadow: 0 0 8px var(--stab); }
+      .lwave { width: 100%; height: 30px; display: block; margin-bottom: 4px; border-radius: 4px; background: #0c0e13; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>🎛️ <span>sampledelica</span> region explorer</h1>
+      <div class="stats" id="stats"></div>
+      <div class="legend">
+        <span><i style="background: var(--break)"></i>break</span>
+        <span><i style="background: var(--chord)"></i>chord</span>
+        <span><i style="background: var(--stab)"></i>stab</span>
+      </div>
+    </header>
+    <div class="main">
+      <div class="col sidebar" id="sidebar"></div>
+      <div class="col center">
+        <div id="srchead"></div>
+        <div id="waveform"></div>
+        <div class="toolbar" id="toolbar" style="display:none">
+          <button class="modebtn active" id="modeExplore">explore</button>
+          <button class="modebtn" id="modeKit">🎹 play as kit</button>
+          <span class="hint" id="kitHint"></span>
+        </div>
+        <div class="ribbon" id="ribbon"></div>
+        <div class="keyboard" id="kit" style="display:none"></div>
+
+        <div id="dub" style="display:none">
+          <div class="xfader">
+            <span class="xlab loops">◼ LOOPS</span>
+            <input type="range" id="xfade" min="0" max="100" value="50" />
+            <span class="xlab trigs">TRIGGERS ▶</span>
+          </div>
+          <div class="dubbar">
+            <button class="dubbtn rec armed" id="capBtn">● capture last 30s</button>
+            <span class="hint" id="capInfo">always recording the master output — capture, slice, and dub loops over your playing</span>
+          </div>
+          <div id="capWrap" style="display:none">
+            <div class="capstage">
+              <canvas id="capCanvas"></canvas>
+              <div class="capsel" id="capSel" style="display:none"></div>
+              <div class="caphead" id="capHead" style="display:none"></div>
+            </div>
+            <div id="capProv"></div>
+            <div class="dubbar">
+              <button class="dubbtn" id="capPlayBtn">▶ preview loop</button>
+              <button class="dubbtn" id="makeLoopBtn">▲ upgrade selection → loop</button>
+              <button class="dubbtn" id="capHideBtn">✕ hide</button>
+              <span class="hint" id="selInfo">drag on the waveform to select</span>
+            </div>
+          </div>
+          <div id="loops"></div>
+        </div>
+
+        <div class="placeholder" id="centerPlaceholder">← pick a source file</div>
+      </div>
+      <div class="col detail" id="detail">
+        <div class="placeholder">click a region to inspect it<br />and find its neighbors</div>
+      </div>
+    </div>
+
+    <audio id="nbrAudio"></audio>
+
+    <script type="module">
+      import WaveSurfer from "https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js";
+      import RegionsPlugin from "https://unpkg.com/wavesurfer.js@7/dist/plugins/regions.esm.js";
+
+      const PITCH = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+      const KIND_COLOR = { break: "#e8833a", chord: "#4a90d9", stab: "#3fb567" };
+      const audioURL = (p) => "/audio?path=" + encodeURIComponent(p);
+      const coverURL = (p) => (p ? "/cover?path=" + encodeURIComponent(p) : "");
+
+      let INDEX = null;
+      let curSource = null;
+      let curSlice = null;
+      let ws = null;
+      let regions = null;
+      const regionByUid = new Map();
+
+      // ---- kit / playable keyboard ----
+      const KEY_ROWS = [
+        "1234567890-=".split(""),
+        "qwertyuiop[]".split(""),
+        "asdfghjkl;'".split(""),
+        "zxcvbnm,./".split(""),
+      ];
+      const N_PADS = KEY_ROWS.reduce((n, r) => n + r.length, 0);
+      let mode = "explore";
+      let actx = null;
+      let voice = null; // single choke group: { src, gain, key, el }
+      const kitByKey = new Map(); // key -> { pad, buffer, offset, el }
+      const KEYCAP = { "-": "−", "=": "=", "[": "[", "]": "]", ";": ";", "'": "'", ",": ",", ".": ".", "/": "/" };
+
+      // ---- dub looper state ----
+      const REC_SECONDS = 30;
+      let masterGain = null,
+        trigBus = null, // keyboard voices
+        loopBus = null, // dub loops
+        crossfade = 0.5, // 0 = loops only, 1 = triggers only
+        recNode = null,
+        recReady = false,
+        workletURL = null;
+      const playLog = []; // {label, kind, album, tStart, tEnd}  — provenance timeline (AudioContext clock)
+      let captureBuffer = null,
+        captureStartT = 0; // actx-time of captured buffer's sample 0
+      let sel = null; // {s, e} seconds within captureBuffer
+      let capPreviewNode = null,
+        previewRAF = null,
+        previewStartT = 0,
+        previewRange = null;
+      const loops = []; // {id, name, buffer, provenance, node, gain, playing, el}
+      let loopSeq = 0;
+
+      async function boot() {
+        const r = await fetch("/api/index").then((x) => x.json());
+        INDEX = r;
+        document.getElementById("stats").innerHTML =
+          `<span><b>${r.stats.sources}</b> sources</span>` +
+          `<span><b>${r.stats.slices}</b> regions</span>` +
+          `<span><b>${r.stats.embedded}</b> embedded</span>` +
+          `<span><b>${r.stats.albums.length}</b> albums</span>`;
+        renderSidebar();
+        document.getElementById("modeExplore").onclick = () => setMode("explore");
+        document.getElementById("modeKit").onclick = () => setMode("kit");
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        document.getElementById("capBtn").onclick = captureDub;
+        document.getElementById("capPlayBtn").onclick = previewSelection;
+        document.getElementById("makeLoopBtn").onclick = makeLoop;
+        document.getElementById("capHideBtn").onclick = () => {
+          stopPreview();
+          document.getElementById("capWrap").style.display = "none";
+        };
+        document.getElementById("xfade").oninput = (e) => setCrossfade(e.target.value / 100);
+        setupCanvasSelection();
+      }
+
+      function kindCounts(s) {
+        const c = { break: 0, chord: 0, stab: 0 };
+        for (const sl of s.slices) c[sl.kind] = (c[sl.kind] || 0) + 1;
+        return c;
+      }
+
+      function renderSidebar() {
+        const sb = document.getElementById("sidebar");
+        sb.innerHTML = "";
+        const byAlbum = new Map();
+        for (const s of INDEX.sources) {
+          if (!byAlbum.has(s.album)) byAlbum.set(s.album, []);
+          byAlbum.get(s.album).push(s);
+        }
+        for (const [album, srcs] of byAlbum) {
+          const h = document.createElement("div");
+          h.className = "album";
+          h.textContent = album;
+          sb.appendChild(h);
+          for (const s of srcs) {
+            const c = kindCounts(s);
+            const el = document.createElement("div");
+            el.className = "srcitem";
+            el.dataset.id = s.id;
+            el.innerHTML =
+              `<img src="${coverURL(s.cover_path)}" onerror="this.style.visibility='hidden'"/>` +
+              `<div><div class="t">${s.title}</div>` +
+              `<div class="m">${s.key_label ?? "?"} · ${s.bpm ? s.bpm.toFixed(0) + " bpm" : "—"} · ${s.slices.length} regions</div>` +
+              `<div class="dots">` +
+              `<span class="dot" style="background:${KIND_COLOR.break}" title="${c.break} breaks"></span>`.repeat(Math.min(c.break, 8)) +
+              `<span class="dot" style="background:${KIND_COLOR.chord}"></span>`.repeat(Math.min(c.chord, 14)) +
+              `<span class="dot" style="background:${KIND_COLOR.stab}"></span>`.repeat(Math.min(c.stab, 14)) +
+              `</div></div>`;
+            el.onclick = () => selectSource(s.id);
+            sb.appendChild(el);
+          }
+        }
+      }
+
+      function selectSource(id) {
+        const s = INDEX.sources.find((x) => x.id === id);
+        if (!s) return;
+        curSource = s;
+        curSlice = null;
+        document.querySelectorAll(".srcitem").forEach((e) =>
+          e.classList.toggle("active", e.dataset.id === id),
+        );
+        document.getElementById("centerPlaceholder").style.display = "none";
+        document.getElementById("toolbar").style.display = "flex";
+        renderSourceHead(s);
+        buildWave(s);
+        renderRibbon(s);
+        if (mode === "kit") buildKit(s);
+        document.getElementById("detail").innerHTML =
+          '<div class="placeholder">click a region to inspect it<br/>and find its neighbors</div>';
+      }
+
+      function renderSourceHead(s) {
+        document.getElementById("srchead").innerHTML =
+          `<div class="srchead">` +
+          `<img src="${coverURL(s.cover_path)}" onerror="this.style.visibility='hidden'"/>` +
+          `<div><h2>${s.title}</h2>` +
+          `<div class="meta">${s.album}</div>` +
+          `<div style="margin-top:8px">` +
+          `<span class="chip">${s.key_label ?? "key ?"}</span>` +
+          `<span class="chip">${s.bpm ? s.bpm.toFixed(1) + " bpm" : "bpm ?"}</span>` +
+          `<span class="chip">${(s.duration_ms / 1000).toFixed(1)}s</span>` +
+          `<span class="chip">${s.slices.length} regions</span>` +
+          `</div></div></div>`;
+      }
+
+      function buildWave(s) {
+        if (ws) { ws.destroy(); ws = null; }
+        regionByUid.clear();
+        regions = RegionsPlugin.create();
+        ws = WaveSurfer.create({
+          container: "#waveform",
+          height: 120,
+          waveColor: "#3a4252",
+          progressColor: "#556680",
+          cursorColor: "#b07cf6",
+          url: audioURL(s.source_path),
+          plugins: [regions],
+          normalize: true,
+        });
+        ws.on("decode", () => {
+          for (const sl of s.slices) {
+            const col = KIND_COLOR[sl.kind] || "#888";
+            const reg = regions.addRegion({
+              start: sl.start_ms / 1000,
+              end: Math.max(sl.end_ms, sl.start_ms + 60) / 1000,
+              color: hexA(col, 0.22),
+              drag: false,
+              resize: false,
+              content: sl.label || sl.kind,
+            });
+            reg._uid = sl.uid;
+            regionByUid.set(sl.uid, reg);
+          }
+        });
+        regions.on("region-clicked", (reg, e) => {
+          e.stopPropagation();
+          ws.play(reg.start, reg.end);
+          if (reg._uid) selectSlice(reg._uid);
+        });
+      }
+
+      function hexA(hex, a) {
+        const n = parseInt(hex.slice(1), 16);
+        return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+      }
+
+      function renderRibbon(s) {
+        const rb = document.getElementById("ribbon");
+        rb.innerHTML = "";
+        const order = ["break", "chord", "stab"];
+        const sorted = [...s.slices].sort(
+          (a, b) => a.start_ms - b.start_ms,
+        );
+        for (const sl of sorted) {
+          const col = KIND_COLOR[sl.kind] || "#888";
+          const el = document.createElement("div");
+          el.className = "rb";
+          el.dataset.uid = sl.uid;
+          el.innerHTML =
+            `<span class="lbl">${sl.label || "—"}</span>` +
+            `<span class="sub">${sl.kind} · ${(sl.start_ms / 1000).toFixed(1)}s</span>` +
+            `<span class="bar" style="background:${col}"></span>`;
+          el.onclick = () => {
+            if (ws && regionByUid.has(sl.uid)) {
+              const reg = regionByUid.get(sl.uid);
+              ws.play(reg.start, reg.end);
+            }
+            selectSlice(sl.uid);
+          };
+          rb.appendChild(el);
+        }
+      }
+
+      async function selectSlice(uid) {
+        const s = curSource;
+        const sl = s.slices.find((x) => x.uid === uid);
+        if (!sl) return;
+        curSlice = sl;
+        document.querySelectorAll(".rb").forEach((e) =>
+          e.classList.toggle("active", e.dataset.uid === uid),
+        );
+        renderDetail(sl);
+        loadNeighbors(uid);
+      }
+
+      function pianoHTML(pcSet, rootPc) {
+        let h = '<div class="piano">';
+        for (let i = 0; i < 12; i++) {
+          const on = (pcSet >> i) & 1;
+          const cls = "pk" + (on ? " on" : "") + (i === rootPc ? " root" : "");
+          h += `<div class="${cls}">${PITCH[i]}</div>`;
+        }
+        return h + "</div>";
+      }
+
+      function renderDetail(sl) {
+        const col = KIND_COLOR[sl.kind] || "#888";
+        const reg = regionByUid.get(sl.uid);
+        document.getElementById("detail").innerHTML =
+          `<h3>region</h3>` +
+          `<p class="dlabel">${sl.label || "(unpitched)"}</p>` +
+          `<div class="dkind"><span style="color:${col}">●</span> ${sl.kind}` +
+          (sl.quality ? ` · ${sl.quality}` : "") + `</div>` +
+          `<button class="play" id="playRegion">▶ play region</button>` +
+          (sl.pc_set ? `<h3 style="margin-top:16px">pitch classes</h3>` + pianoHTML(sl.pc_set, sl.root_pc) : "") +
+          `<div class="kv">` +
+          row("time", `${(sl.start_ms / 1000).toFixed(2)}–${(sl.end_ms / 1000).toFixed(2)}s`) +
+          row("length", `${(sl.end_ms - sl.start_ms)} ms`) +
+          row("root", sl.root_pc != null ? PITCH[sl.root_pc] : "—") +
+          row("bass", sl.bass_pc != null ? PITCH[sl.bass_pc] : "—") +
+          row("pc_set", String(sl.pc_set)) +
+          row("pc_set_norm", sl.pc_set_norm != null ? String(sl.pc_set_norm) : "—") +
+          row("notes", String(sl.note_count)) +
+          row("confidence", sl.chord_conf.toFixed(2)) +
+          row("embedded", sl.has_vec ? "yes (CLAP)" : "no") +
+          `</div>` +
+          `<h3 style="margin-top:8px">neighbors (CLAP)</h3>` +
+          `<div class="toggles">` +
+          `<label><input type="checkbox" id="tCross" checked/> cross-album only</label>` +
+          `<label><input type="checkbox" id="tKind" checked/> same kind</label>` +
+          `</div>` +
+          `<div id="nbrs"><div class="placeholder" style="padding:14px">…</div></div>`;
+
+        document.getElementById("playRegion").onclick = () => {
+          if (ws && reg) ws.play(reg.start, reg.end);
+        };
+        document.getElementById("tCross").onchange = () => loadNeighbors(sl.uid);
+        document.getElementById("tKind").onchange = () => loadNeighbors(sl.uid);
+      }
+
+      const row = (k, v) => `<div class="k">${k}</div><div class="v">${v}</div>`;
+
+      async function loadNeighbors(uid) {
+        const cross = document.getElementById("tCross")?.checked ? "1" : "0";
+        const kind = document.getElementById("tKind")?.checked ? "1" : "0";
+        const r = await fetch(
+          `/api/similar?uid=${encodeURIComponent(uid)}&crossAlbum=${cross}&sameKind=${kind}&k=18`,
+        ).then((x) => x.json());
+        const box = document.getElementById("nbrs");
+        if (!r.results.length) {
+          box.innerHTML = '<div class="placeholder" style="padding:14px">no neighbors</div>';
+          return;
+        }
+        box.innerHTML = "";
+        for (const n of r.results) {
+          const col = KIND_COLOR[n.kind] || "#888";
+          const el = document.createElement("div");
+          el.className = "nbr";
+          el.innerHTML =
+            `<div class="simval">${n.sim.toFixed(2)}</div>` +
+            `<div class="simbar"><i style="width:${Math.max(0, Math.min(100, n.sim * 100))}%"></i></div>` +
+            `<img src="${coverURL(n.cover_path)}" onerror="this.style.visibility='hidden'"/>` +
+            `<div class="info"><div class="nl"><span style="color:${col}">●</span> ${n.label || n.kind}</div>` +
+            `<div class="ns">${n.title} · ${n.album}</div></div>` +
+            `<span class="miniplay" title="preview">▶</span>`;
+          el.querySelector(".miniplay").onclick = (e) => {
+            e.stopPropagation();
+            previewNeighbor(n);
+          };
+          el.onclick = () => {
+            selectSource(n.sourceId);
+            setTimeout(() => selectSlice(n.uid), 350);
+          };
+          box.appendChild(el);
+        }
+      }
+
+      // Play a neighbor straight from its ORIGINAL mix (seek to its region).
+      function previewNeighbor(n) {
+        const src = INDEX.sources.find((s) => s.id === n.sourceId);
+        if (!src) return;
+        const a = document.getElementById("nbrAudio");
+        a.src = audioURL(src.source_path);
+        const start = n.start_ms / 1000,
+          end = n.end_ms / 1000;
+        const onCan = () => {
+          a.currentTime = start;
+          a.play();
+          a.removeEventListener("canplay", onCan);
+        };
+        a.addEventListener("canplay", onCan);
+        a.ontimeupdate = () => {
+          if (a.currentTime >= end) { a.pause(); a.ontimeupdate = null; }
+        };
+        a.load();
+      }
+
+      // ---- kit engine ----
+      function setMode(m) {
+        mode = m;
+        document.getElementById("modeExplore").classList.toggle("active", m === "explore");
+        document.getElementById("modeKit").classList.toggle("active", m === "kit");
+        document.getElementById("ribbon").style.display = m === "explore" ? "flex" : "none";
+        document.getElementById("kit").style.display = m === "kit" ? "block" : "none";
+        document.getElementById("dub").style.display = m === "kit" ? "block" : "none";
+        document.getElementById("kitHint").style.display = m === "kit" ? "inline" : "none";
+        if (m === "kit" && curSource) buildKit(curSource);
+      }
+
+      async function buildKit(source) {
+        await ensureAudio();
+        const kitEl = document.getElementById("kit");
+        kitEl.innerHTML = '<div class="placeholder">building kit…</div>';
+        const r = await fetch(
+          `/api/kit?source=${encodeURIComponent(source.id)}&pads=${N_PADS}`,
+        ).then((x) => x.json());
+        renderKit(r.pads);
+        const nSrc = r.pads.filter((p) => p.origin === "source").length;
+        const nN = r.pads.length - nSrc;
+        document.getElementById("kitHint").textContent =
+          `${nSrc} from this source + ${nN} neighbors · play with the keyboard · hold to sustain past the slice · one voice at a time`;
+        preloadKit();
+      }
+
+      function renderKit(pads) {
+        if (!actx) return;
+        kitByKey.clear();
+        const kitEl = document.getElementById("kit");
+        kitEl.innerHTML = "";
+        let idx = 0;
+        KEY_ROWS.forEach((row, ri) => {
+          const rowEl = document.createElement("div");
+          rowEl.className = "krow r" + (ri + 1);
+          row.forEach((key) => {
+            const pad = pads[idx++];
+            const el = document.createElement("div");
+            const cap = `<span class="pkey">${KEYCAP[key] || key.toUpperCase()}</span>`;
+            if (!pad) {
+              el.className = "pad empty";
+              el.innerHTML = cap;
+              rowEl.appendChild(el);
+              return;
+            }
+            const col = KIND_COLOR[pad.kind] || "#888";
+            el.className = "pad loading " + (pad.origin === "neighbor" ? "neighbor" : "src-edge");
+            el.innerHTML =
+              `<div class="pcover" style="background-image:url('${coverURL(pad.cover_path)}')"></div>` +
+              `<div class="pgrad"></div>` + cap +
+              `<span class="pkind" style="background:${col}"></span>` +
+              (pad.origin === "neighbor"
+                ? `<span class="porigin">${pad.scope === "album" ? "↻" : "↪"} ${pad.sim != null ? pad.sim.toFixed(2) : ""}</span>`
+                : "") +
+              `<div class="plabel">${pad.label || pad.kind}` +
+              `<div class="psub">${pad.origin === "neighbor" ? pad.album.slice(0, 20) : pad.kind}</div></div>`;
+            el.onmousedown = (ev) => {
+              ev.preventDefault();
+              noteOn(key);
+              if (pad.sourceId === curSource?.id) selectSlice(pad.uid);
+            };
+            el.onmouseup = () => noteOff(key);
+            el.onmouseleave = () => noteOff(key);
+            rowEl.appendChild(el);
+            kitByKey.set(key, { pad, buffer: null, offset: pad.start_ms / 1000, el });
+          });
+          kitEl.appendChild(rowEl);
+        });
+      }
+
+      // Decode each DISTINCT original-mix source once and share the buffer
+      // across every pad from that source — so a pad can sustain past its slice
+      // bounds (it plays the whole song from the slice offset while held).
+      async function preloadKit() {
+        const paths = [...new Set([...kitByKey.values()].map((e) => e.pad.source_path))];
+        const bufs = new Map();
+        await Promise.allSettled(
+          paths.map(async (p) => {
+            try {
+              const resp = await fetch(audioURL(p));
+              bufs.set(p, await actx.decodeAudioData(await resp.arrayBuffer()));
+            } catch (e) {
+              /* leave undefined — pads from this source won't fire */
+            }
+          }),
+        );
+        for (const [, entry] of kitByKey) {
+          entry.buffer = bufs.get(entry.pad.source_path) || null;
+          entry.el.classList.remove("loading");
+          if (!entry.buffer) entry.el.classList.add("empty");
+        }
+      }
+
+      function noteOn(key) {
+        const e = kitByKey.get(key);
+        if (!e || !e.buffer || !trigBus) return;
+        if (actx.state === "suspended") actx.resume();
+        releaseVoice(true); // fast-choke whatever is currently sounding
+        const src = actx.createBufferSource();
+        src.buffer = e.buffer;
+        const gain = actx.createGain();
+        gain.gain.value = 1;
+        src.connect(gain).connect(trigBus);
+        src.start(0, Math.min(e.offset, Math.max(0, e.buffer.duration - 0.05)));
+        const logEntry = {
+          label: e.pad.label || e.pad.kind,
+          kind: e.pad.kind,
+          album: e.pad.album,
+          tStart: actx.currentTime,
+          tEnd: Infinity,
+        };
+        logEvent(logEntry);
+        voice = { src, gain, key, el: e.el, logEntry };
+        e.el.classList.add("active");
+      }
+
+      function noteOff(key) {
+        if (voice && voice.key === key) releaseVoice(false);
+      }
+
+      function releaseVoice(fast) {
+        if (!voice) return;
+        const { src, gain, el, logEntry } = voice;
+        const t = actx.currentTime;
+        const rel = fast ? 0.012 : 0.08; // tiny fade so release doesn't click
+        try {
+          gain.gain.cancelScheduledValues(t);
+          gain.gain.setValueAtTime(gain.gain.value, t);
+          gain.gain.linearRampToValueAtTime(0.0001, t + rel);
+          src.stop(t + rel + 0.02);
+        } catch (_) {}
+        if (logEntry) logEntry.tEnd = t;
+        if (el) el.classList.remove("active");
+        voice = null;
+      }
+
+      function logEvent(entry) {
+        playLog.push(entry);
+        // prune events that have fully scrolled out of the 30s window
+        const cutoff = actx.currentTime - REC_SECONDS - 2;
+        while (playLog.length && playLog[0].tEnd < cutoff) playLog.shift();
+      }
+
+      function onKeyDown(ev) {
+        if (mode !== "kit") return;
+        const tag = (ev.target.tagName || "").toLowerCase();
+        if (tag === "input" || tag === "textarea") return;
+        if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+        if (ev.repeat) return; // ignore auto-repeat so a held key sustains, not retriggers
+        const key = ev.key.toLowerCase();
+        if (kitByKey.has(key)) {
+          ev.preventDefault();
+          noteOn(key);
+        }
+      }
+
+      function onKeyUp(ev) {
+        if (mode !== "kit") return;
+        const key = ev.key.toLowerCase();
+        if (kitByKey.has(key)) {
+          ev.preventDefault();
+          noteOff(key);
+        }
+      }
+
+      // ---- always-on 30s recorder (AudioWorklet ring buffer) ----
+      const WORKLET_SRC = `
+        class RecProcessor extends AudioWorkletProcessor {
+          constructor(opts) {
+            super();
+            this.len = opts.processorOptions.frames;
+            this.buf = [new Float32Array(this.len), new Float32Array(this.len)];
+            this.w = 0; this.filled = 0;
+            this.port.onmessage = (e) => {
+              if (e.data === 'dump') {
+                const n = this.filled;
+                const start = (this.w - n + this.len) % this.len;
+                const o0 = new Float32Array(n), o1 = new Float32Array(n);
+                for (let i = 0; i < n; i++) { const idx = (start + i) % this.len; o0[i] = this.buf[0][idx]; o1[i] = this.buf[1][idx]; }
+                this.port.postMessage({ type:'dump', ch0:o0, ch1:o1, sr:sampleRate, t:currentTime }, [o0.buffer, o1.buffer]);
+              }
+            };
+          }
+          process(inputs, outputs) {
+            const inp = inputs[0], out = outputs[0];
+            if (inp && inp.length) {
+              const L = inp[0], R = inp[1] || inp[0], n = L.length;
+              for (let i = 0; i < n; i++) { this.buf[0][this.w] = L[i]; this.buf[1][this.w] = R[i]; this.w = (this.w + 1) % this.len; }
+              this.filled = Math.min(this.len, this.filled + n);
+            }
+            if (out && out.length) for (let ch = 0; ch < out.length; ch++) { const s = inp && (inp[ch] || inp[0]); if (s) out[ch].set(s); }
+            return true;
+          }
+        }
+        registerProcessor('rec-processor', RecProcessor);
+      `;
+
+      async function ensureAudio() {
+        if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+        if (actx.state === "suspended") { try { await actx.resume(); } catch (_) {} }
+        if (!masterGain) { masterGain = actx.createGain(); masterGain.gain.value = 0.9; }
+        if (!trigBus) {
+          trigBus = actx.createGain();
+          loopBus = actx.createGain();
+          trigBus.connect(masterGain);
+          loopBus.connect(masterGain);
+          setCrossfade(crossfade);
+        }
+        if (!recReady) {
+          try {
+            if (!workletURL) workletURL = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
+            await actx.audioWorklet.addModule(workletURL);
+            const frames = Math.floor(REC_SECONDS * actx.sampleRate);
+            recNode = new AudioWorkletNode(actx, "rec-processor", {
+              numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+              processorOptions: { frames },
+            });
+            recNode.port.onmessage = onRecMessage;
+            masterGain.connect(recNode);
+            recNode.connect(actx.destination);
+            recReady = true;
+          } catch (e) {
+            console.warn("recorder worklet failed:", e);
+            masterGain.connect(actx.destination); // still play, just no capture
+            const b = document.getElementById("capBtn");
+            if (b) { b.disabled = true; b.textContent = "capture unavailable"; b.classList.remove("armed"); }
+          }
+        }
+      }
+
+      function captureDub() {
+        if (!recReady || !recNode) return;
+        recNode.port.postMessage("dump");
+      }
+
+      // equal-power crossfade between the loop bus and the trigger bus
+      function setCrossfade(p) {
+        crossfade = Math.min(1, Math.max(0, p));
+        if (!trigBus || !loopBus) return;
+        const t = actx.currentTime;
+        trigBus.gain.setTargetAtTime(Math.cos((1 - crossfade) * Math.PI / 2), t, 0.008);
+        loopBus.gain.setTargetAtTime(Math.cos(crossfade * Math.PI / 2), t, 0.008);
+      }
+
+      function onRecMessage(e) {
+        if (!e.data || e.data.type !== "dump") return;
+        const { ch0, ch1, sr, t } = e.data;
+        if (!ch0.length) return;
+        const ab = actx.createBuffer(2, ch0.length, sr);
+        ab.copyToChannel(ch0, 0);
+        ab.copyToChannel(ch1, 1);
+        captureBuffer = ab;
+        captureStartT = t - ch0.length / sr; // actx-time of buffer sample 0
+        sel = null;
+        showCapture();
+      }
+
+      function showCapture() {
+        stopPreview();
+        document.getElementById("capWrap").style.display = "block";
+        drawWaveform(document.getElementById("capCanvas"), captureBuffer, "#6f7ea0");
+        document.getElementById("capSel").style.display = "none";
+        renderProv();
+        document.getElementById("selInfo").textContent =
+          `${captureBuffer.duration.toFixed(1)}s captured · drag on the waveform to select a region`;
+      }
+
+      function drawWaveform(cv, buffer, color) {
+        const w = cv.clientWidth || 600, h = cv.clientHeight || 96;
+        const dpr = window.devicePixelRatio || 1;
+        cv.width = w * dpr; cv.height = h * dpr;
+        const ctx = cv.getContext("2d");
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, w, h);
+        const data = buffer.getChannelData(0);
+        const step = Math.max(1, Math.floor(data.length / w));
+        const mid = h / 2;
+        ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath();
+        for (let x = 0; x < w; x++) {
+          let min = 1, max = -1;
+          for (let i = 0; i < step; i++) { const v = data[x * step + i] || 0; if (v < min) min = v; if (v > max) max = v; }
+          ctx.moveTo(x + 0.5, mid + min * mid * 0.95);
+          ctx.lineTo(x + 0.5, mid + max * mid * 0.95);
+        }
+        ctx.stroke();
+      }
+
+      function renderProv() {
+        const box = document.getElementById("capProv");
+        box.innerHTML = "";
+        if (!captureBuffer) return;
+        const dur = captureBuffer.duration, t0 = captureStartT, t1 = t0 + dur;
+        for (const ev of playLog) {
+          const a = Math.max(ev.tStart, t0), b = Math.min(ev.tEnd === Infinity ? t1 : ev.tEnd, t1);
+          if (b <= a) continue;
+          const seg = document.createElement("div");
+          seg.className = "provseg";
+          seg.style.left = ((a - t0) / dur) * 100 + "%";
+          seg.style.width = Math.max(((b - a) / dur) * 100, 0.6) + "%";
+          seg.style.background = (KIND_COLOR[ev.kind] || "#9a86c6") + "cc";
+          seg.textContent = ev.label;
+          seg.title = `${ev.label} — ${ev.album}`;
+          box.appendChild(seg);
+        }
+      }
+
+      function setupCanvasSelection() {
+        const cv = document.getElementById("capCanvas");
+        let dragging = false, x0 = 0;
+        const xToSec = (clientX) => {
+          const r = cv.getBoundingClientRect();
+          const x = Math.min(r.width, Math.max(0, clientX - r.left));
+          return captureBuffer ? (x / r.width) * captureBuffer.duration : 0;
+        };
+        cv.addEventListener("mousedown", (ev) => {
+          if (!captureBuffer) return;
+          dragging = true; x0 = xToSec(ev.clientX); sel = { s: x0, e: x0 }; updateSelUI();
+        });
+        window.addEventListener("mousemove", (ev) => {
+          if (!dragging) return;
+          const x = xToSec(ev.clientX); sel = { s: Math.min(x0, x), e: Math.max(x0, x) }; updateSelUI();
+        });
+        window.addEventListener("mouseup", () => {
+          if (!dragging) return;
+          dragging = false;
+          if (sel && sel.e - sel.s < 0.05) sel = null;
+          updateSelUI();
+          // if a loop preview is running, restart it on the new bounds so you
+          // immediately hear the adjusted loop
+          if (capPreviewNode) { stopPreview(); previewSelection(); }
+        });
+      }
+
+      function updateSelUI() {
+        const selEl = document.getElementById("capSel");
+        if (!sel || !captureBuffer) {
+          selEl.style.display = "none";
+          document.getElementById("selInfo").textContent = "drag on the waveform to select a region";
+          return;
+        }
+        const dur = captureBuffer.duration;
+        selEl.style.display = "block";
+        selEl.style.left = (sel.s / dur) * 100 + "%";
+        selEl.style.width = ((sel.e - sel.s) / dur) * 100 + "%";
+        document.getElementById("selInfo").textContent =
+          `selection ${sel.s.toFixed(2)}–${sel.e.toFixed(2)}s (${(sel.e - sel.s).toFixed(2)}s)`;
+      }
+
+      // Loop the selection so you can hear whether the loop point is right.
+      // Toggles: press again (or "stop") to halt.
+      function previewSelection() {
+        if (capPreviewNode) { stopPreview(); return; }
+        if (!captureBuffer) return;
+        const s = sel ? sel.s : 0, e = sel ? sel.e : captureBuffer.duration;
+        if (e - s < 0.02) return;
+        const src = actx.createBufferSource();
+        src.buffer = captureBuffer;
+        src.loop = true;
+        src.loopStart = s;
+        src.loopEnd = e;
+        src.connect(actx.destination); // preview only — not routed to master, so not re-recorded
+        src.start(0, s);
+        capPreviewNode = src;
+        previewStartT = actx.currentTime;
+        previewRange = { s, e };
+        setPreviewBtn(true);
+        animatePlayhead();
+      }
+
+      function stopPreview() {
+        if (capPreviewNode) { try { capPreviewNode.stop(); } catch (_) {} capPreviewNode = null; }
+        if (previewRAF) { cancelAnimationFrame(previewRAF); previewRAF = null; }
+        previewRange = null;
+        const head = document.getElementById("capHead");
+        if (head) head.style.display = "none";
+        setPreviewBtn(false);
+      }
+
+      function setPreviewBtn(on) {
+        const b = document.getElementById("capPlayBtn");
+        if (!b) return;
+        b.textContent = on ? "■ stop preview" : "▶ preview loop";
+        b.classList.toggle("rec", on);
+      }
+
+      function animatePlayhead() {
+        const head = document.getElementById("capHead");
+        const dur = captureBuffer.duration;
+        const tick = () => {
+          if (!capPreviewNode || !previewRange) return;
+          const span = Math.max(0.001, previewRange.e - previewRange.s);
+          const pos = previewRange.s + ((actx.currentTime - previewStartT) % span);
+          head.style.display = "block";
+          head.style.left = (pos / dur) * 100 + "%";
+          previewRAF = requestAnimationFrame(tick);
+        };
+        tick();
+      }
+
+      function makeLoop() {
+        if (!captureBuffer) return;
+        const s = sel ? sel.s : 0, e = sel ? sel.e : captureBuffer.duration;
+        const sr = captureBuffer.sampleRate;
+        const a = Math.floor(s * sr), len = Math.max(1, Math.floor((e - s) * sr));
+        const buf = actx.createBuffer(2, len, sr);
+        for (let ch = 0; ch < 2; ch++) {
+          const srcCh = captureBuffer.getChannelData(Math.min(ch, captureBuffer.numberOfChannels - 1));
+          const dst = buf.getChannelData(ch);
+          for (let i = 0; i < len; i++) dst[i] = srcCh[a + i] || 0;
+        }
+        // provenance: which source regions were sounding inside this window
+        const winS = captureStartT + s, winE = captureStartT + e;
+        const provMap = new Map();
+        for (const ev of playLog) {
+          const ovA = Math.max(ev.tStart, winS), ovB = Math.min(ev.tEnd === Infinity ? winE : ev.tEnd, winE);
+          if (ovB <= ovA) continue;
+          const k = ev.label + "|" + ev.album;
+          if (!provMap.has(k)) provMap.set(k, { label: ev.label, album: ev.album, kind: ev.kind });
+        }
+        const loop = {
+          id: ++loopSeq, name: "dub " + loopSeq, buffer: buf,
+          provenance: [...provMap.values()], node: null, gain: null, playing: false, el: null,
+        };
+        loops.push(loop);
+        renderLoops();
+        startLoop(loop); // auto-play the freshly upgraded dub
+      }
+
+      function startLoop(loop) {
+        if (loop.playing) return;
+        const src = actx.createBufferSource();
+        src.buffer = loop.buffer; src.loop = true;
+        const g = actx.createGain(); g.gain.value = 0.9;
+        src.connect(g).connect(loopBus); // into loop bus → crossfaded, audible AND recorded
+        src.start();
+        loop.node = src; loop.gain = g; loop.playing = true;
+        loop.logEntry = { label: loop.name, kind: "loop", album: "dub", tStart: actx.currentTime, tEnd: Infinity };
+        logEvent(loop.logEntry);
+        updateLoopCard(loop);
+      }
+
+      function stopLoop(loop) {
+        if (!loop.playing) return;
+        try { loop.node.stop(); } catch (_) {}
+        if (loop.logEntry) loop.logEntry.tEnd = actx.currentTime;
+        loop.node = null; loop.playing = false;
+        updateLoopCard(loop);
+      }
+
+      function removeLoop(loop) {
+        stopLoop(loop);
+        const i = loops.indexOf(loop);
+        if (i >= 0) loops.splice(i, 1);
+        renderLoops();
+      }
+
+      function renderLoops() {
+        const box = document.getElementById("loops");
+        box.innerHTML = "";
+        for (const loop of loops) {
+          const card = document.createElement("div");
+          card.className = "loopcard" + (loop.playing ? " on" : "");
+          const prov = loop.provenance.length
+            ? loop.provenance.slice(0, 5).map((p) => p.label).join(" · ") + (loop.provenance.length > 5 ? " …" : "")
+            : "(silence — no triggers in window)";
+          card.innerHTML =
+            `<span class="lx" title="remove">✕</span>` +
+            `<canvas class="lwave"></canvas>` +
+            `<div class="ln"><span class="ldot"></span>${loop.name}</div>` +
+            `<div class="ld">${loop.buffer.duration.toFixed(2)}s loop · ${loop.playing ? "playing" : "stopped"}</div>` +
+            `<div class="lprov" title="${loop.provenance.map((p) => p.label + " — " + p.album).join("\n")}">from: ${prov}</div>`;
+          card.onclick = (ev) => {
+            if (ev.target.classList.contains("lx")) { removeLoop(loop); return; }
+            loop.playing ? stopLoop(loop) : startLoop(loop);
+          };
+          box.appendChild(card);
+          loop.el = card;
+          drawWaveform(card.querySelector(".lwave"), loop.buffer, "#3fb567");
+        }
+      }
+
+      function updateLoopCard(loop) {
+        if (!loop.el) return;
+        loop.el.classList.toggle("on", loop.playing);
+        const d = loop.el.querySelector(".ld");
+        if (d) d.textContent = `${loop.buffer.duration.toFixed(2)}s loop · ${loop.playing ? "playing" : "stopped"}`;
+      }
+
+      boot();
+    </script>
+  </body>
+</html>

@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
 };
-use crate::neural::{remap_neural_network_routes_after_track_delete, ProjectNeuralNetwork};
+use crate::neural::{
+    NeuralVisualizationSnapshot, ProjectNeuralNetwork,
+    remap_neural_network_routes_after_track_delete,
+};
 use crate::voice::MAX_VOICES;
 
 use super::data::{
@@ -1052,6 +1055,7 @@ pub struct SequencerState {
     pub runtime: RuntimeBindingState,
     scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     scheduler_snapshot_version: AtomicU64,
+    neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     scratch_source: Mutex<String>,
     scratch_source_version: AtomicU64,
     scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
@@ -1243,6 +1247,7 @@ impl SequencerState {
             },
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
+            neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
             scratch_effect_descriptors: Mutex::new(Vec::new()),
@@ -1263,6 +1268,15 @@ impl SequencerState {
     pub fn latest_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         self.scheduler_snapshot.lock().unwrap().clone()
     }
+
+    pub fn set_neural_visualization(&self, snapshot: NeuralVisualizationSnapshot) {
+        *self.neural_visualization.lock().unwrap() = snapshot;
+    }
+
+    pub fn neural_visualization(&self) -> NeuralVisualizationSnapshot {
+        self.neural_visualization.lock().unwrap().clone()
+    }
+
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         let snapshot = Arc::new(SequencerSnapshot::capture(self));
         {
@@ -1301,7 +1315,6 @@ impl SequencerState {
                 .ok_or_else(|| "current pattern out of range".to_string())?;
             edit(&mut snapshot.neural_networks)?
         };
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
         Ok(result)
     }

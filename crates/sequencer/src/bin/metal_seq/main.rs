@@ -11321,10 +11321,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
+            let matrix_visible = editor_has_visible_buffer(&editor, "*matrix*");
             let master_meter_visible = transport_visible || mixer_visible;
             let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
                 || editor_has_visible_buffer(&editor, "*piano-roll*");
             let current_track_playhead_changed = playhead != prev_playhead;
+            let mut meter_polled = false;
             if last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL {
                 cached_peak_l_level = meter_display_level(f32::from_bits(
                     state.transport.peak_l.load(Ordering::Relaxed),
@@ -11339,6 +11341,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (cached_modulator_phases, cached_modulator_levels) =
                     read_modulator_display_values(app.graph.lg, &app);
                 last_meter_poll_at = Instant::now();
+                meter_polled = true;
             }
             let mut needs_reactive_cycle = false;
             // Track switch — rebuild everything
@@ -11499,6 +11502,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 prev_bus_peak_levels = cached_bus_peak_levels.clone();
+            }
+            if matrix_visible && meter_polled {
+                needs_reactive_cycle |=
+                    sync_neural_dampening_matrix_field(editor.runtime_mut(), &state);
             }
             if cached_modulator_phases != prev_modulator_phases {
                 if fx_visible {

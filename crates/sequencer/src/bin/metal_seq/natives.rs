@@ -259,6 +259,10 @@ pub(crate) fn init_runtime(
                     Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
                 ),
                 ("neural-networks", build_neural_networks_value(&state)),
+                (
+                    "neural-dampening-matrix",
+                    build_neural_dampening_matrix_value(&state),
+                ),
                 ("auto-follow", Value::Bool(true)),
                 ("playhead", Value::Number(0.0)),
                 ("transport-playhead", Value::Number(0.0)),

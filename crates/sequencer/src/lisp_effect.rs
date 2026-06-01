@@ -9273,7 +9273,10 @@ mod tests {
         let mut runtime = Runtime::new();
         runtime.register_reactive(
             "SEQ",
-            vec![("neural-networks", Value::List(Vec::new()))],
+            vec![
+                ("neural-networks", Value::List(Vec::new())),
+                ("neural-dampening-matrix", Value::List(Vec::new())),
+            ],
             true,
         );
         register_sequencer_natives(
@@ -9363,6 +9366,41 @@ mod tests {
         assert_eq!(neuron.transpose, -12.0);
         assert_eq!(neuron.dampening_amount, 0.2);
         assert_eq!(neuron.dampening_recovery, 0.9);
+    }
+
+    #[test]
+    fn neural_lisp_network_edits_do_not_bump_pattern_epoch() {
+        let (state, mut runtime) = neural_test_runtime(2);
+        let created = runtime
+            .eval_str("(neural-create :name \"router\" :neurons 2)")
+            .unwrap()
+            .unwrap();
+        let Value::Map(created) = created else {
+            panic!("expected created network map");
+        };
+        let id = match created.get("id").map(|value| value.borrow().clone()) {
+            Some(Value::Number(id)) => id as u64,
+            other => panic!("expected created network id, got {other:?}"),
+        };
+        let epoch_before = state.transport.pattern_epoch.load(Ordering::Relaxed);
+
+        runtime
+            .eval_str(&format!(
+                "(neural-neuron {id} 1 :route 1 :delay 3 :dampening 0.5)"
+            ))
+            .unwrap();
+        runtime
+            .eval_str(&format!("(neural-weight {id} :from 0 :to 1 :value 0.75)"))
+            .unwrap();
+        runtime
+            .eval_str(&format!("(neural-set {id} :reset-bars 2 :max-poly 4)"))
+            .unwrap();
+
+        assert_eq!(
+            state.transport.pattern_epoch.load(Ordering::Relaxed),
+            epoch_before,
+            "neural network authoring should publish a scheduler snapshot without forcing a pattern-epoch reset"
+        );
     }
 
     #[test]
@@ -9473,7 +9511,7 @@ mod tests {
             .neurons
             .iter()
             .all(|neuron| (neuron.dampening_recovery - 0.98).abs() < f32::EPSILON));
-        assert!(state.pattern.neural_reset_patterns[0].is_active(0));
+        assert!(!state.pattern.neural_reset_patterns[0].is_active(0));
     }
 
     #[test]
@@ -9681,9 +9719,19 @@ mod tests {
 
         let mut matrices = Vec::new();
         collect_widgets(&layout, "matrix", &mut matrices);
-        assert_eq!(matrices.len(), 1, "expected one matrix widget");
+        assert_eq!(matrices.len(), 2, "expected weight and dampening matrix widgets");
+        matrices.sort_by(|left, right| left.rect.col.total_cmp(&right.rect.col));
         let matrix = matrices[0];
+        let dampening_matrix = matrices[1];
         assert_measured(matrix);
+        assert_measured(dampening_matrix);
+        assert!(
+            (matrix.rect.row - dampening_matrix.rect.row).abs() <= 0.05
+                && (matrix.rect.height - dampening_matrix.rect.height).abs() <= 0.05,
+            "dampening matrix should align with weight matrix; weight={:?} dampening={:?}",
+            matrix.rect,
+            dampening_matrix.rect
+        );
 
         let mut dropdowns = Vec::new();
         collect_widgets(&layout, "dropdown", &mut dropdowns);

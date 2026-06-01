@@ -5,6 +5,7 @@
 
 (def neural-8x8-track-router-name "8x8-track-router2")
 (def neural-8x8-track-router-row-height 1.5)
+(def neural-8x8-track-router-matrix-width 20)
 (def neural-8x8-track-router-matrix-height 12)
 (defstate neural-8x8-track-router-id 0)
 (defstate neural-8x8-track-router-reset-bars 4)
@@ -27,6 +28,38 @@
     (list 0 0 0 0 0 0 1 0)
     (list 0 0 0 0 0 0 0 1)
     (list 1 0 0 0 0 0 0 0)))
+
+(def neural-8x8-track-router-zero-row ()
+  (list 0 0 0 0 0 0 0 0))
+
+(def neural-8x8-track-router-zero-matrix ()
+  (list
+    (neural-8x8-track-router-zero-row)
+    (neural-8x8-track-router-zero-row)
+    (neural-8x8-track-router-zero-row)
+    (neural-8x8-track-router-zero-row)
+    (neural-8x8-track-router-zero-row)
+    (neural-8x8-track-router-zero-row)
+    (neural-8x8-track-router-zero-row)
+    (neural-8x8-track-router-zero-row)))
+
+(def neural-8x8-track-router-visible-row (row)
+  (if (> (len row) 7)
+    (list (nth row 0) (nth row 1) (nth row 2) (nth row 3) (nth row 4) (nth row 5) (nth row 6) (nth row 7))
+    (neural-8x8-track-router-zero-row)))
+
+(def neural-8x8-track-router-visible-matrix (matrix)
+  (if (> (len matrix) 7)
+    (list
+      (neural-8x8-track-router-visible-row (nth matrix 0))
+      (neural-8x8-track-router-visible-row (nth matrix 1))
+      (neural-8x8-track-router-visible-row (nth matrix 2))
+      (neural-8x8-track-router-visible-row (nth matrix 3))
+      (neural-8x8-track-router-visible-row (nth matrix 4))
+      (neural-8x8-track-router-visible-row (nth matrix 5))
+      (neural-8x8-track-router-visible-row (nth matrix 6))
+      (neural-8x8-track-router-visible-row (nth matrix 7)))
+    (neural-8x8-track-router-zero-matrix)))
 
 (defstate neural-8x8-track-router-route-0 "Track 1")
 (defstate neural-8x8-track-router-route-1 "Track 2")
@@ -449,10 +482,10 @@
         (neural-8x8-track-router-apply-neuron-4)
         (neural-8x8-track-router-apply-neuron-5)
         (neural-8x8-track-router-apply-neuron-6)
-        (neural-8x8-track-router-apply-neuron-7)
-        (neural-describe id)))))
+	        (neural-8x8-track-router-apply-neuron-7)
+	        (neural-describe id)))))
 
-(neural-reset-step :track 0 :step 0 true)
+(neural-reset-step :track 0 :step 0 false)
 
 (def neural-8x8-track-router-panel (reactive-networks)
   (let ((reactive-network-count (len reactive-networks)))
@@ -543,7 +576,7 @@
           (matrix
             :rows 8
             :cols 8
-            :width 24
+            :width neural-8x8-track-router-matrix-width
             :height neural-8x8-track-router-matrix-height
             :min 0
             :max 1
@@ -551,7 +584,15 @@
             :on-change (lambda (weights)
               (do
                 (set! neural-8x8-track-router-weights weights)
-                (neural-weights neural-8x8-track-router-id weights)))))))))))
+                (neural-weights neural-8x8-track-router-id weights))))
+          (matrix
+            :rows 8
+            :cols 8
+            :width neural-8x8-track-router-matrix-width
+            :height neural-8x8-track-router-matrix-height
+            :min 0
+            :max 1
+            :value (neural-8x8-track-router-visible-matrix SEQ.neural-dampening-matrix)))))))))
 
 (effect-buffer "*matrix*" (neural-8x8-track-router-panel SEQ.neural-networks))
 

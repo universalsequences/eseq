@@ -2353,6 +2353,18 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
     effects_dirty
 }
 
+pub(crate) fn sync_neural_dampening_matrix_field(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+) -> bool {
+    rt.set_reactive(
+        "SEQ",
+        "neural-dampening-matrix",
+        build_neural_dampening_matrix_value(state),
+    )
+    .effects_dirty
+}
+
 pub(crate) fn sync_bus_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
     let mut effects_dirty = false;
     for (idx, &level) in levels.iter().enumerate() {
@@ -2591,6 +2603,11 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
     );
     rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
+    rt.set_reactive(
+        "SEQ",
+        "neural-dampening-matrix",
+        build_neural_dampening_matrix_value(state),
+    );
 }
 
 pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value {
@@ -2600,6 +2617,26 @@ pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value 
             .iter()
             .map(neural_network_value)
             .map(|network| Rc::new(RefCell::new(network)))
+            .collect(),
+    )
+}
+
+pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -> Value {
+    let snapshot = state.neural_visualization();
+    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    Value::List(
+        (0..size)
+            .map(|row| {
+                Rc::new(RefCell::new(Value::List(
+                    (0..size)
+                        .map(|col| {
+                            Rc::new(RefCell::new(Value::Number(
+                                snapshot.dampening[row][col] as f64,
+                            )))
+                        })
+                        .collect(),
+                )))
+            })
             .collect(),
     )
 }
@@ -5566,6 +5603,30 @@ mod tests {
             neuron.get("quantize").map(|value| value.borrow().clone()),
             Some(Value::Keyword("8".to_string()))
         );
+    }
+
+    #[test]
+    fn neural_dampening_matrix_value_reflects_runtime_snapshot() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut snapshot = sequencer::neural::NeuralVisualizationSnapshot::default();
+        snapshot.active = true;
+        snapshot.network_id = 7;
+        snapshot.num_neurons = 2;
+        snapshot.dampening[0][1] = 0.625;
+        state.set_neural_visualization(snapshot);
+
+        let Value::List(rows) = build_neural_dampening_matrix_value(&state) else {
+            panic!("expected dampening matrix rows");
+        };
+        assert_eq!(rows.len(), 2);
+        let Value::List(first_row) = &*rows[0].borrow() else {
+            panic!("expected first dampening row");
+        };
+        assert_eq!(first_row.len(), 2);
+        assert_eq!(*first_row[1].borrow(), Value::Number(0.625));
     }
 
     #[test]

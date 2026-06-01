@@ -1,0 +1,33 @@
+[project]
+name = "sampledelica-scan"
+version = "0.1.0"
+description = "Prototype scanner: mine an album library for breaks, stabs, and chords (sidecar output, no DB yet)"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "numpy>=1.26,<2",
+    "soundfile>=0.12",
+    "librosa>=0.10",
+    "demucs>=4.0",
+    "torchcodec>=0.1",
+    "basic-pitch>=0.4",
+    "onnxruntime>=1.17",
+    "matplotlib>=3.8",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# Heavier extras — install when you want them:
+#   uv sync --extra clap   (text<->audio similarity search)
+#   uv sync --extra app    (streamlit audition UI)
+clap = ["laion-clap>=1.1.6", "torchvision>=0.15"]
+app = ["streamlit>=1.30"]
+
+[project.scripts]
+scan = "sampledelica_scan.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sampledelica_scan"]
