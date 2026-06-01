@@ -5,12 +5,17 @@
 
 (def neural-8x8-track-router-name "8x8-track-router2")
 (def neural-8x8-track-router-row-height 1.5)
-(def neural-8x8-track-router-matrix-width 20)
+(def neural-8x8-track-router-matrix-width 26)
 (def neural-8x8-track-router-matrix-height 12)
 (defstate neural-8x8-track-router-id 0)
 (defstate neural-8x8-track-router-reset-bars 4)
 (defstate neural-8x8-track-router-energy-decay 0.994)
 (defstate neural-8x8-track-router-max-poly 2)
+(defstate neural-8x8-track-router-max-poly-selection "deterministic")
+(defstate neural-8x8-track-router-threshold 1)
+
+(def neural-8x8-track-router-max-poly-selection-options
+  (list "deterministic" "propagation" "random"))
 
 (def neural-8x8-track-router-route-options
   (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8" "Off"))
@@ -32,6 +37,9 @@
 (def neural-8x8-track-router-zero-row ()
   (list 0 0 0 0 0 0 0 0))
 
+(def neural-8x8-track-router-zero-column-row ()
+  (list 0))
+
 (def neural-8x8-track-router-zero-matrix ()
   (list
     (neural-8x8-track-router-zero-row)
@@ -42,6 +50,17 @@
     (neural-8x8-track-router-zero-row)
     (neural-8x8-track-router-zero-row)
     (neural-8x8-track-router-zero-row)))
+
+(def neural-8x8-track-router-zero-column-matrix ()
+  (list
+    (neural-8x8-track-router-zero-column-row)
+    (neural-8x8-track-router-zero-column-row)
+    (neural-8x8-track-router-zero-column-row)
+    (neural-8x8-track-router-zero-column-row)
+    (neural-8x8-track-router-zero-column-row)
+    (neural-8x8-track-router-zero-column-row)
+    (neural-8x8-track-router-zero-column-row)
+    (neural-8x8-track-router-zero-column-row)))
 
 (def neural-8x8-track-router-visible-row (row)
   (if (> (len row) 7)
@@ -60,6 +79,24 @@
       (neural-8x8-track-router-visible-row (nth matrix 6))
       (neural-8x8-track-router-visible-row (nth matrix 7)))
     (neural-8x8-track-router-zero-matrix)))
+
+(def neural-8x8-track-router-visible-column-row (row)
+  (if (> (len row) 0)
+    (list (nth row 0))
+    (neural-8x8-track-router-zero-column-row)))
+
+(def neural-8x8-track-router-visible-column-matrix (matrix)
+  (if (> (len matrix) 7)
+    (list
+      (neural-8x8-track-router-visible-column-row (nth matrix 0))
+      (neural-8x8-track-router-visible-column-row (nth matrix 1))
+      (neural-8x8-track-router-visible-column-row (nth matrix 2))
+      (neural-8x8-track-router-visible-column-row (nth matrix 3))
+      (neural-8x8-track-router-visible-column-row (nth matrix 4))
+      (neural-8x8-track-router-visible-column-row (nth matrix 5))
+      (neural-8x8-track-router-visible-column-row (nth matrix 6))
+      (neural-8x8-track-router-visible-column-row (nth matrix 7)))
+    (neural-8x8-track-router-zero-column-matrix)))
 
 (defstate neural-8x8-track-router-route-0 "Track 1")
 (defstate neural-8x8-track-router-route-1 "Track 2")
@@ -190,11 +227,35 @@
     false
     quantize))
 
-(def neural-8x8-track-router-apply-network (network reset-bars energy-decay max-poly)
+(def neural-8x8-track-router-max-poly-selection-label (selection)
+  (let ((s (str selection)))
+    (if (= s ":random")
+      "random"
+      (if (= s "random")
+        "random"
+        (if (= s ":propagation")
+          "propagation"
+          (if (= s "propagation")
+            "propagation"
+            "deterministic"))))))
+
+(def neural-8x8-track-router-apply-network (network reset-bars energy-decay max-poly max-poly-selection)
   (neural-set network
     :reset-bars reset-bars
     :energy-decay energy-decay
-    :max-poly max-poly))
+    :max-poly max-poly
+    :max-poly-selection max-poly-selection))
+
+(def neural-8x8-track-router-apply-threshold (network threshold)
+  (do
+    (neural-neuron network 0 :threshold threshold)
+    (neural-neuron network 1 :threshold threshold)
+    (neural-neuron network 2 :threshold threshold)
+    (neural-neuron network 3 :threshold threshold)
+    (neural-neuron network 4 :threshold threshold)
+    (neural-neuron network 5 :threshold threshold)
+    (neural-neuron network 6 :threshold threshold)
+    (neural-neuron network 7 :threshold threshold)))
 
 (def neural-8x8-track-router-apply-neuron (network idx route delay quantize transpose dampening recovery)
   (neural-neuron network idx
@@ -221,6 +282,8 @@
       (set! neural-8x8-track-router-reset-bars (get network :reset-bars))
       (set! neural-8x8-track-router-energy-decay (get network :energy-decay))
       (set! neural-8x8-track-router-max-poly (get network :max-poly))
+      (set! neural-8x8-track-router-max-poly-selection (neural-8x8-track-router-max-poly-selection-label (get network :max-poly-selection)))
+      (set! neural-8x8-track-router-threshold (get (nth neurons 0) :threshold))
       (set! neural-8x8-track-router-route-0 (neural-8x8-track-router-route-label (get (nth neurons 0) :route)))
       (set! neural-8x8-track-router-route-1 (neural-8x8-track-router-route-label (get (nth neurons 1) :route)))
       (set! neural-8x8-track-router-route-2 (neural-8x8-track-router-route-label (get (nth neurons 2) :route)))
@@ -286,6 +349,8 @@
     (set! neural-8x8-track-router-reset-bars 4)
     (set! neural-8x8-track-router-energy-decay 0.994)
     (set! neural-8x8-track-router-max-poly 2)
+    (set! neural-8x8-track-router-max-poly-selection "deterministic")
+    (set! neural-8x8-track-router-threshold 1)
     (set! neural-8x8-track-router-route-0 "Track 1")
     (set! neural-8x8-track-router-route-1 "Track 2")
     (set! neural-8x8-track-router-route-2 "Track 3")
@@ -347,7 +412,7 @@
       :on-change (lambda (reset-bars)
         (do
           (set! neural-8x8-track-router-reset-bars reset-bars)
-          (neural-8x8-track-router-apply-network neural-8x8-track-router-id reset-bars neural-8x8-track-router-energy-decay neural-8x8-track-router-max-poly)))
+          (neural-8x8-track-router-apply-network neural-8x8-track-router-id reset-bars neural-8x8-track-router-energy-decay neural-8x8-track-router-max-poly neural-8x8-track-router-max-poly-selection)))
       :width 4.8
       :height 1.2
       :font-size 9)
@@ -361,7 +426,7 @@
       :on-change (lambda (energy-decay)
         (do
           (set! neural-8x8-track-router-energy-decay energy-decay)
-          (neural-8x8-track-router-apply-network neural-8x8-track-router-id neural-8x8-track-router-reset-bars energy-decay neural-8x8-track-router-max-poly)))
+          (neural-8x8-track-router-apply-network neural-8x8-track-router-id neural-8x8-track-router-reset-bars energy-decay neural-8x8-track-router-max-poly neural-8x8-track-router-max-poly-selection)))
       :width 4.8
       :height 1.2
       :font-size 9)
@@ -375,8 +440,33 @@
       :on-change (lambda (max-poly)
         (do
           (set! neural-8x8-track-router-max-poly max-poly)
-          (neural-8x8-track-router-apply-network neural-8x8-track-router-id neural-8x8-track-router-reset-bars neural-8x8-track-router-energy-decay max-poly)))
+          (neural-8x8-track-router-apply-network neural-8x8-track-router-id neural-8x8-track-router-reset-bars neural-8x8-track-router-energy-decay max-poly neural-8x8-track-router-max-poly-selection)))
       :width 4.2
+      :height 1.2
+      :font-size 9)
+    (label "pick" :width 2.8 :height 1.2 :font-size 9 :color :dim)
+    (dropdown
+      :value neural-8x8-track-router-max-poly-selection
+      :options neural-8x8-track-router-max-poly-selection-options
+      :on-change (lambda (max-poly-selection)
+        (do
+          (set! neural-8x8-track-router-max-poly-selection max-poly-selection)
+          (neural-8x8-track-router-apply-network neural-8x8-track-router-id neural-8x8-track-router-reset-bars neural-8x8-track-router-energy-decay neural-8x8-track-router-max-poly max-poly-selection)))
+      :width 9.2
+      :height 1.2
+      :font-size 9)
+    (label "thresh" :width 4.2 :height 1.2 :font-size 9 :color :dim)
+    (number-picker
+      :value neural-8x8-track-router-threshold
+      :min 0
+      :max 4
+      :step 0.01
+      :decimals 2
+      :on-change (lambda (threshold)
+        (do
+          (set! neural-8x8-track-router-threshold threshold)
+          (neural-8x8-track-router-apply-threshold neural-8x8-track-router-id threshold)))
+      :width 4.8
       :height 1.2
       :font-size 9)))
 
@@ -474,7 +564,8 @@
               :weights neural-8x8-track-router-weights)))
       (let ((id (get network :id)))
         (set! neural-8x8-track-router-id id)
-        (neural-8x8-track-router-apply-network id neural-8x8-track-router-reset-bars neural-8x8-track-router-energy-decay neural-8x8-track-router-max-poly)
+        (neural-8x8-track-router-apply-network id neural-8x8-track-router-reset-bars neural-8x8-track-router-energy-decay neural-8x8-track-router-max-poly neural-8x8-track-router-max-poly-selection)
+        (neural-8x8-track-router-apply-threshold id neural-8x8-track-router-threshold)
         (neural-8x8-track-router-apply-neuron-0)
         (neural-8x8-track-router-apply-neuron-1)
         (neural-8x8-track-router-apply-neuron-2)
@@ -505,7 +596,7 @@
         (let ((id (get network :id)))
           (set! neural-8x8-track-router-id id)
 
-      (v-stack :gap 0.5
+      (v-stack :gap 0.5 :padding 1
         (neural-8x8-track-router-global-controls)
         (h-stack :gap 1 :align :start
           (v-stack :gap 0
@@ -575,6 +666,22 @@
               (lambda (recovery) (do (set! neural-8x8-track-router-recovery-7 recovery) (neural-8x8-track-router-apply-neuron-7)))))
           (matrix
             :rows 8
+            :cols 1
+            :width 1
+            :height neural-8x8-track-router-matrix-height
+            :min 0
+            :max 1
+            :value (neural-8x8-track-router-visible-column-matrix SEQ.neural-trigger-matrix))
+          (matrix
+            :rows 8
+            :cols 1
+            :width 0.8
+            :height neural-8x8-track-router-matrix-height
+            :min 0
+            :max 4
+            :value (neural-8x8-track-router-visible-column-matrix SEQ.neural-energy-matrix))
+          (matrix
+            :rows 8
             :cols 8
             :width neural-8x8-track-router-matrix-width
             :height neural-8x8-track-router-matrix-height
@@ -588,8 +695,8 @@
           (matrix
             :rows 8
             :cols 8
-            :width neural-8x8-track-router-matrix-width
-            :height neural-8x8-track-router-matrix-height
+            :width 8
+            :height 4
             :min 0
             :max 1
             :value (neural-8x8-track-router-visible-matrix SEQ.neural-dampening-matrix)))))))))

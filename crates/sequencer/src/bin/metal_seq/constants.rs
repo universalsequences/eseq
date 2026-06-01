@@ -3,6 +3,7 @@ use std::time::Duration;
 pub(crate) const PAGE_SIZE: usize = 16;
 pub(crate) const AUTO_FOLLOW_COOLDOWN: Duration = Duration::from_secs(5);
 pub(crate) const METER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const NEURAL_VISUALIZATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const CPU_UI_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub(crate) const VOICE_COUNT_LOG_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const METER_LEVEL_STEPS: f64 = 48.0;

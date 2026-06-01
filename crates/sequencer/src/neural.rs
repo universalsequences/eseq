@@ -6,6 +6,26 @@ use crate::sequencer::Timebase;
 
 pub const NUM_NEURONS: usize = 16;
 pub const NEURAL_DELAY_QUEUE_CAPACITY: usize = 8;
+const TRIGGER_VISUAL_HOLD_BEATS: f64 = 0.25;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NeuralMaxPolySelection {
+    #[default]
+    Deterministic,
+    Propagation,
+    Random,
+}
+
+impl NeuralMaxPolySelection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deterministic => "deterministic",
+            Self::Propagation => "propagation",
+            Self::Random => "random",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ParamNodeId {
@@ -76,6 +96,8 @@ pub struct ProjectNeuralNetwork {
     pub energy_decay: f32,
     #[serde(default = "default_max_poly")]
     pub max_poly: u32,
+    #[serde(default = "default_max_poly_selection")]
+    pub max_poly_selection: NeuralMaxPolySelection,
     #[serde(default)]
     pub seed_on_reset: Vec<f32>,
 }
@@ -108,6 +130,7 @@ impl Default for ProjectNeuralNetwork {
             reset_interval_bars: default_reset_interval_bars(),
             energy_decay: default_energy_decay(),
             max_poly: default_max_poly(),
+            max_poly_selection: default_max_poly_selection(),
             seed_on_reset: vec![0.0; NUM_NEURONS],
         }
     }
@@ -205,11 +228,21 @@ impl DelayQueue {
     }
 }
 
+#[derive(Clone, Debug)]
+struct NeuralFiringCandidate {
+    neuron_idx: usize,
+    fire_sample: u64,
+    fire_beats: f64,
+    event: StepEvent,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NeuralVisualizationSnapshot {
     pub active: bool,
     pub network_id: u64,
     pub num_neurons: usize,
+    pub energy: [f32; NUM_NEURONS],
+    pub trigger_activity: [f32; NUM_NEURONS],
     pub dampening: [[f32; NUM_NEURONS]; NUM_NEURONS],
 }
 
@@ -219,6 +252,8 @@ impl Default for NeuralVisualizationSnapshot {
             active: false,
             network_id: 0,
             num_neurons: 0,
+            energy: [0.0; NUM_NEURONS],
+            trigger_activity: [0.0; NUM_NEURONS],
             dampening: [[0.0; NUM_NEURONS]; NUM_NEURONS],
         }
     }
@@ -231,6 +266,8 @@ pub struct NeuralRuntime {
     weights: [[f32; NUM_NEURONS]; NUM_NEURONS],
     neurons: [NeuronConfig; NUM_NEURONS],
     energy: [f32; NUM_NEURONS],
+    trigger_activity: [f32; NUM_NEURONS],
+    trigger_visual_until_beats: [f64; NUM_NEURONS],
     pending: [DelayQueue; NUM_NEURONS],
     dampening: [[f32; NUM_NEURONS]; NUM_NEURONS],
     incoming_triggers: [[f32; NUM_NEURONS]; NUM_NEURONS],
@@ -238,6 +275,8 @@ pub struct NeuralRuntime {
     seed_on_reset: [f32; NUM_NEURONS],
     energy_decay: f32,
     max_poly: u32,
+    max_poly_selection: NeuralMaxPolySelection,
+    random_state: u64,
     reset_interval_beats: f64,
     next_reset_beat: f64,
     last_eval_indices: [u64; NUM_NEURONS],
@@ -253,6 +292,8 @@ impl Default for NeuralRuntime {
             weights: [[0.0; NUM_NEURONS]; NUM_NEURONS],
             neurons: [NeuronConfig::default(); NUM_NEURONS],
             energy: [0.0; NUM_NEURONS],
+            trigger_activity: [0.0; NUM_NEURONS],
+            trigger_visual_until_beats: [0.0; NUM_NEURONS],
             pending: std::array::from_fn(|_| DelayQueue::default()),
             dampening: [[0.0; NUM_NEURONS]; NUM_NEURONS],
             incoming_triggers: [[0.0; NUM_NEURONS]; NUM_NEURONS],
@@ -260,6 +301,8 @@ impl Default for NeuralRuntime {
             seed_on_reset: [0.0; NUM_NEURONS],
             energy_decay: default_energy_decay(),
             max_poly: default_max_poly(),
+            max_poly_selection: default_max_poly_selection(),
+            random_state: default_neural_random_state(),
             reset_interval_beats: default_reset_interval_bars() as f64 * 4.0,
             next_reset_beat: 0.0,
             last_eval_indices: [0; NUM_NEURONS],
@@ -278,6 +321,8 @@ impl NeuralRuntime {
             active: self.active,
             network_id: self.network_id,
             num_neurons: self.num_neurons,
+            energy: self.energy,
+            trigger_activity: self.trigger_activity,
             dampening: self.dampening,
         }
     }
@@ -327,8 +372,10 @@ impl NeuralRuntime {
         }
         self.energy_decay = network.energy_decay.clamp(0.0, 1.0);
         self.max_poly = network.max_poly.max(1);
+        self.max_poly_selection = network.max_poly_selection;
         self.reset_interval_beats = (network.reset_interval_bars.max(0.25) as f64) * 4.0;
         if should_reset_state {
+            self.random_state = neural_random_seed(network.id);
             self.reset_state(total_beats);
         } else {
             self.realign_timing_to_config(total_beats);
@@ -350,6 +397,8 @@ impl NeuralRuntime {
 
     pub fn reset_state(&mut self, total_beats: f64) {
         self.energy = [0.0; NUM_NEURONS];
+        self.trigger_activity = [0.0; NUM_NEURONS];
+        self.trigger_visual_until_beats = [0.0; NUM_NEURONS];
         self.dampening = [[0.0; NUM_NEURONS]; NUM_NEURONS];
         self.incoming_triggers = [[0.0; NUM_NEURONS]; NUM_NEURONS];
         for queue in &mut self.pending {
@@ -440,17 +489,54 @@ impl NeuralRuntime {
                 if due_at_boundary[neuron_idx] {
                     let next_index = self.last_eval_indices[neuron_idx].saturating_add(1);
                     self.last_eval_indices[neuron_idx] = next_index;
-                    self.evaluate_neuron(
+                    self.apply_due_propagations(
+                        neuron_idx,
+                        boundary_beats,
+                        &due_at_boundary,
+                        &mut deferred_energy,
+                        &mut deferred_source_events,
+                    );
+                }
+            }
+            let mut candidates = Vec::new();
+            for neuron_idx in 0..self.num_neurons {
+                if due_at_boundary[neuron_idx] {
+                    if let Some(candidate) = self.firing_candidate(
                         neuron_idx,
                         boundary_beats,
                         sample_time,
                         samples_per_quarter,
-                        &due_at_boundary,
-                        &mut deferred_energy,
-                        &mut deferred_source_events,
-                        out,
-                    );
+                    ) {
+                        candidates.push(candidate);
+                    }
                 }
+            }
+            candidates.sort_by_key(|candidate| (candidate.fire_sample, candidate.neuron_idx));
+            let accepted = self.select_firing_candidates(&candidates);
+            let mut rejected = [false; NUM_NEURONS];
+            for candidate in &candidates {
+                if !accepted[candidate.neuron_idx] {
+                    rejected[candidate.neuron_idx] = true;
+                }
+            }
+            for candidate in candidates {
+                if accepted[candidate.neuron_idx] {
+                    self.commit_firing(candidate, out);
+                }
+            }
+            for neuron_idx in 0..self.num_neurons {
+                if !due_at_boundary[neuron_idx] {
+                    continue;
+                }
+                if accepted[neuron_idx] {
+                    continue;
+                }
+                if rejected[neuron_idx] {
+                    self.drop_firing(neuron_idx);
+                } else {
+                    self.recover_non_firing_neuron(neuron_idx);
+                }
+                self.clear_incoming_triggers(neuron_idx);
             }
             self.apply_energy_decay(boundary_beats);
             for idx in 0..self.num_neurons {
@@ -468,6 +554,7 @@ impl NeuralRuntime {
             self.reset_state(self.next_reset_beat);
         }
         self.apply_energy_decay(end_beats);
+        self.refresh_trigger_activity(end_beats);
     }
 
     fn next_eval_boundary(&mut self, start_beats: f64, end_beats: f64) -> Option<f64> {
@@ -514,16 +601,13 @@ impl NeuralRuntime {
         (total_beats / finest.max(1e-9)).floor() as u64
     }
 
-    fn evaluate_neuron(
+    fn apply_due_propagations(
         &mut self,
         neuron_idx: usize,
         boundary_beats: f64,
-        sample_time: u64,
-        samples_per_quarter: f64,
         due_at_boundary: &[bool; NUM_NEURONS],
         deferred_energy: &mut [f32; NUM_NEURONS],
         deferred_source_events: &mut [Option<StepEvent>; NUM_NEURONS],
-        out: &mut Vec<(u64, StepEvent)>,
     ) {
         let mut propagated = Vec::new();
         for pending in &mut self.pending[neuron_idx].entries {
@@ -560,54 +644,98 @@ impl NeuralRuntime {
                 }
             }
         }
+    }
 
-        if self.energy[neuron_idx] >= self.neurons[neuron_idx].threshold {
-            let source = self.source_events[neuron_idx].clone();
-            if let Some(mut event) = source {
-                event.resolved = ResolvedStep {
-                    transpose: event.resolved.transpose + self.neurons[neuron_idx].transpose,
-                    ..event.resolved
-                };
-                event.source = EventSource::Network {
-                    seed: match event.source {
-                        EventSource::Step { track, step, .. } => Some((track, step)),
-                        EventSource::Network { seed, .. } => seed,
-                    },
-                    neuron: neuron_idx,
-                    instrument_fingerprint: 0,
-                };
-                let (fire_sample, fire_beats) = self.quantized_fire_timing(
-                    neuron_idx,
-                    boundary_beats,
-                    sample_time,
-                    samples_per_quarter,
-                );
-                if let Some(route) = self.neurons[neuron_idx].route {
-                    event.track = route;
-                    out.push((fire_sample, event.clone()));
-                }
-                self.pending[neuron_idx].push(DelayedPropagation {
-                    remaining_steps: self.neurons[neuron_idx].delay_steps.max(1),
-                    ready_after_beats: fire_beats,
-                    event,
-                });
-            }
-            self.energy[neuron_idx] = 0.0;
-            for source in 0..self.num_neurons {
-                let trigger = self.incoming_triggers[source][neuron_idx];
-                if trigger > 0.0 {
-                    self.dampening[source][neuron_idx] = (self.dampening[source][neuron_idx]
-                        + trigger * self.neurons[neuron_idx].dampening_amount)
-                        .min(1.0);
-                }
-            }
-        } else {
-            for source in 0..self.num_neurons {
-                self.dampening[source][neuron_idx] *= self.neurons[neuron_idx].dampening_recovery;
+    fn firing_candidate(
+        &self,
+        neuron_idx: usize,
+        boundary_beats: f64,
+        sample_time: u64,
+        samples_per_quarter: f64,
+    ) -> Option<NeuralFiringCandidate> {
+        if self.energy[neuron_idx] < self.neurons[neuron_idx].threshold {
+            return None;
+        }
+        let mut event = self.source_events[neuron_idx].clone()?;
+        event.resolved = ResolvedStep {
+            transpose: event.resolved.transpose + self.neurons[neuron_idx].transpose,
+            ..event.resolved
+        };
+        event.source = EventSource::Network {
+            seed: match event.source {
+                EventSource::Step { track, step, .. } => Some((track, step)),
+                EventSource::Network { seed, .. } => seed,
+            },
+            neuron: neuron_idx,
+            instrument_fingerprint: 0,
+        };
+        let (fire_sample, fire_beats) = self.quantized_fire_timing(
+            neuron_idx,
+            boundary_beats,
+            sample_time,
+            samples_per_quarter,
+        );
+        Some(NeuralFiringCandidate {
+            neuron_idx,
+            fire_sample,
+            fire_beats,
+            event,
+        })
+    }
+
+    fn commit_firing(
+        &mut self,
+        mut candidate: NeuralFiringCandidate,
+        out: &mut Vec<(u64, StepEvent)>,
+    ) {
+        let neuron_idx = candidate.neuron_idx;
+        if let Some(route) = self.neurons[neuron_idx].route {
+            candidate.event.track = route;
+            out.push((candidate.fire_sample, candidate.event.clone()));
+        }
+        self.pending[neuron_idx].push(DelayedPropagation {
+            remaining_steps: self.neurons[neuron_idx].delay_steps.max(1),
+            ready_after_beats: candidate.fire_beats,
+            event: candidate.event,
+        });
+        self.trigger_activity[neuron_idx] = 1.0;
+        self.trigger_visual_until_beats[neuron_idx] = self.trigger_visual_until_beats[neuron_idx]
+            .max(candidate.fire_beats + TRIGGER_VISUAL_HOLD_BEATS);
+        self.energy[neuron_idx] = 0.0;
+        for source in 0..self.num_neurons {
+            let trigger = self.incoming_triggers[source][neuron_idx];
+            if trigger > 0.0 {
+                self.dampening[source][neuron_idx] = (self.dampening[source][neuron_idx]
+                    + trigger * self.neurons[neuron_idx].dampening_amount)
+                    .min(1.0);
             }
         }
+        self.clear_incoming_triggers(neuron_idx);
+    }
+
+    fn drop_firing(&mut self, neuron_idx: usize) {
+        self.energy[neuron_idx] = 0.0;
+    }
+
+    fn recover_non_firing_neuron(&mut self, neuron_idx: usize) {
+        for source in 0..self.num_neurons {
+            self.dampening[source][neuron_idx] *= self.neurons[neuron_idx].dampening_recovery;
+        }
+    }
+
+    fn clear_incoming_triggers(&mut self, neuron_idx: usize) {
         for source in 0..self.num_neurons {
             self.incoming_triggers[source][neuron_idx] = 0.0;
+        }
+    }
+
+    fn refresh_trigger_activity(&mut self, total_beats: f64) {
+        for idx in 0..self.num_neurons {
+            self.trigger_activity[idx] = if total_beats <= self.trigger_visual_until_beats[idx] {
+                1.0
+            } else {
+                0.0
+            };
         }
     }
 
@@ -635,6 +763,81 @@ impl NeuralRuntime {
             .max(0.0) as u64;
         let quantized_sample = sample_time.saturating_add(offset_samples);
         (quantized_sample, quantized_beats)
+    }
+
+    fn select_firing_candidates(
+        &mut self,
+        candidates: &[NeuralFiringCandidate],
+    ) -> [bool; NUM_NEURONS] {
+        let accepted_count = candidates.len().min(self.max_poly as usize);
+        let mut accepted = [false; NUM_NEURONS];
+        if accepted_count == candidates.len() {
+            for candidate in candidates {
+                accepted[candidate.neuron_idx] = true;
+            }
+            return accepted;
+        }
+
+        match self.max_poly_selection {
+            NeuralMaxPolySelection::Deterministic => {
+                for candidate in candidates.iter().take(accepted_count) {
+                    accepted[candidate.neuron_idx] = true;
+                }
+            }
+            NeuralMaxPolySelection::Propagation => {
+                let mut indices = (0..candidates.len()).collect::<Vec<_>>();
+                indices.sort_by(|left, right| {
+                    let left_candidate = &candidates[*left];
+                    let right_candidate = &candidates[*right];
+                    self.propagation_selection_score(right_candidate.neuron_idx)
+                        .total_cmp(&self.propagation_selection_score(left_candidate.neuron_idx))
+                        .then(left_candidate.fire_sample.cmp(&right_candidate.fire_sample))
+                        .then(left_candidate.neuron_idx.cmp(&right_candidate.neuron_idx))
+                });
+                for candidate_idx in indices.into_iter().take(accepted_count) {
+                    accepted[candidates[candidate_idx].neuron_idx] = true;
+                }
+            }
+            NeuralMaxPolySelection::Random => {
+                let mut indices = (0..candidates.len()).collect::<Vec<_>>();
+                for pos in 0..accepted_count {
+                    let selected = pos + self.random_index(indices.len() - pos);
+                    indices.swap(pos, selected);
+                }
+                for candidate_idx in indices.into_iter().take(accepted_count) {
+                    accepted[candidates[candidate_idx].neuron_idx] = true;
+                }
+            }
+        }
+        accepted
+    }
+
+    fn propagation_selection_score(&self, source: usize) -> f32 {
+        let mut score = 0.0;
+        for target in 0..self.num_neurons {
+            let amount = (self.weights[source][target] - self.dampening[source][target]).max(0.0);
+            if amount <= 0.0 {
+                continue;
+            }
+            let threshold = self.neurons[target].threshold.max(1e-6);
+            let projected = self.energy[target] + amount;
+            if projected >= threshold {
+                score += 1_000.0 + (projected - threshold);
+            } else {
+                score += amount / threshold;
+            }
+        }
+        score
+    }
+
+    fn random_index(&mut self, upper: usize) -> usize {
+        debug_assert!(upper > 0);
+        (self.next_random_u64() % upper as u64) as usize
+    }
+
+    fn next_random_u64(&mut self) -> u64 {
+        self.random_state = self.random_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        splitmix64(self.random_state)
     }
 }
 
@@ -668,6 +871,29 @@ fn default_energy_decay() -> f32 {
 
 fn default_max_poly() -> u32 {
     2
+}
+
+fn default_max_poly_selection() -> NeuralMaxPolySelection {
+    NeuralMaxPolySelection::Deterministic
+}
+
+fn default_neural_random_state() -> u64 {
+    0xA076_1D64_78BD_642F
+}
+
+fn neural_random_seed(network_id: u64) -> u64 {
+    let seed = splitmix64(network_id ^ default_neural_random_state());
+    if seed == 0 {
+        default_neural_random_state()
+    } else {
+        seed
+    }
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
 }
 
 #[cfg(test)]
@@ -1087,6 +1313,28 @@ mod tests {
 
         runtime.reset_state(1.0);
         assert_eq!(runtime.visualization_snapshot().dampening[0][1], 0.0);
+        assert_eq!(runtime.visualization_snapshot().trigger_activity[0], 0.0);
+        assert_eq!(runtime.visualization_snapshot().energy[0], 0.0);
+    }
+
+    #[test]
+    fn accepted_firing_sets_trigger_visualization_activity() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 1;
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.energy[0] = 1.0;
+        runtime.source_events[0] = Some(test_event(0));
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 0.25, 0, 48_000.0, &mut out);
+
+        let snapshot = runtime.visualization_snapshot();
+        assert_eq!(snapshot.trigger_activity[0], 1.0);
+        assert_eq!(snapshot.energy[0], 0.0);
     }
 
     #[test]
@@ -1160,6 +1408,140 @@ mod tests {
             .map(|(sample, event)| (*sample, event.track, output_neuron(event)))
             .collect::<Vec<_>>();
         assert_eq!(observed, vec![(48_000, 1, 1), (60_000, 2, 2)]);
+    }
+
+    #[test]
+    fn max_poly_caps_same_boundary_firings_and_drops_rejected_candidates() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 3;
+        network.max_poly = 1;
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.neurons[1].route = Some(1);
+        network.neurons[1].threshold = 0.5;
+        network.neurons[2].route = Some(2);
+        network.neurons[2].threshold = 0.5;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        for idx in 0..3 {
+            runtime.energy[idx] = 1.0;
+            runtime.source_events[idx] = Some(test_event(idx));
+        }
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 0.25, 0, 48_000.0, &mut out);
+
+        let observed = out
+            .iter()
+            .map(|(sample, event)| (*sample, event.track, output_neuron(event)))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![(12_000, 0, 0)]);
+        assert_eq!(runtime.pending[0].entries.len(), 1);
+        assert!(runtime.pending[1].entries.is_empty());
+        assert!(runtime.pending[2].entries.is_empty());
+        assert_eq!(runtime.energy[1], 0.0);
+        assert_eq!(runtime.energy[2], 0.0);
+
+        out.clear();
+        runtime.process_boundaries(0.25, 0.5, 12_000, 48_000.0, &mut out);
+        assert!(
+            out.is_empty(),
+            "rejected max_poly candidates should be dropped instead of firing later"
+        );
+    }
+
+    #[test]
+    fn max_poly_accepts_earliest_quantized_sample_then_neuron_index() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 2;
+        network.max_poly = 1;
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.neurons[0].quantize = Some(Timebase::Quarter as u8);
+        network.neurons[1].route = Some(1);
+        network.neurons[1].threshold = 0.5;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.energy[0] = 1.0;
+        runtime.energy[1] = 1.0;
+        runtime.source_events[0] = Some(test_event(0));
+        runtime.source_events[1] = Some(test_event(1));
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 0.25, 0, 48_000.0, &mut out);
+
+        let observed = out
+            .iter()
+            .map(|(sample, event)| (*sample, event.track, output_neuron(event)))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![(12_000, 1, 1)]);
+        assert!(runtime.pending[0].entries.is_empty());
+        assert_eq!(runtime.pending[1].entries.len(), 1);
+    }
+
+    #[test]
+    fn max_poly_random_selection_can_accept_non_first_candidate() {
+        let mut runtime = NeuralRuntime {
+            max_poly: 1,
+            max_poly_selection: NeuralMaxPolySelection::Random,
+            random_state: 0,
+            ..NeuralRuntime::default()
+        };
+        let candidates = (0..4)
+            .map(|neuron_idx| NeuralFiringCandidate {
+                neuron_idx,
+                fire_sample: 0,
+                fire_beats: 0.0,
+                event: test_event(neuron_idx),
+            })
+            .collect::<Vec<_>>();
+
+        let accepted = runtime.select_firing_candidates(&candidates);
+
+        assert!(accepted[3], "fixed random state should choose neuron 3");
+        assert!(
+            !accepted[0],
+            "random mode should not always choose the first candidate"
+        );
+    }
+
+    #[test]
+    fn max_poly_propagation_selection_prioritizes_effective_downstream_trigger() {
+        let mut runtime = NeuralRuntime {
+            num_neurons: 4,
+            max_poly: 1,
+            max_poly_selection: NeuralMaxPolySelection::Propagation,
+            ..NeuralRuntime::default()
+        };
+        for idx in 0..4 {
+            runtime.neurons[idx].threshold = 0.5;
+        }
+        runtime.weights[0][3] = 1.0;
+        runtime.dampening[0][3] = 1.0;
+        runtime.weights[1][3] = 0.2;
+        runtime.weights[2][3] = 0.6;
+        runtime.weights[3][3] = 0.1;
+        let candidates = (0..4)
+            .map(|neuron_idx| NeuralFiringCandidate {
+                neuron_idx,
+                fire_sample: 0,
+                fire_beats: 0.0,
+                event: test_event(neuron_idx),
+            })
+            .collect::<Vec<_>>();
+
+        let accepted = runtime.select_firing_candidates(&candidates);
+
+        assert!(
+            accepted[2],
+            "propagation mode should choose the candidate most likely to trigger downstream"
+        );
+        assert!(
+            !accepted[0],
+            "fully damped outgoing edges should not win propagation priority"
+        );
     }
 
     #[test]

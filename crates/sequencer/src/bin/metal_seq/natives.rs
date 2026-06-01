@@ -260,6 +260,14 @@ pub(crate) fn init_runtime(
                 ),
                 ("neural-networks", build_neural_networks_value(&state)),
                 (
+                    "neural-energy-matrix",
+                    build_neural_energy_matrix_value(&state),
+                ),
+                (
+                    "neural-trigger-matrix",
+                    build_neural_trigger_matrix_value(&state),
+                ),
+                (
                     "neural-dampening-matrix",
                     build_neural_dampening_matrix_value(&state),
                 ),

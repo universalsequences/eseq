@@ -3512,6 +3512,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut cached_modulator_phases, mut cached_modulator_levels) =
         read_modulator_display_values(app.graph.lg, &app);
     let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
+    let mut last_neural_visualization_poll_at =
+        Instant::now() - NEURAL_VISUALIZATION_POLL_INTERVAL;
     let mut last_cpu_ui_poll_at = Instant::now() - CPU_UI_POLL_INTERVAL;
     let mut last_voice_count_log_at = Instant::now() - VOICE_COUNT_LOG_INTERVAL;
     let log_voice_counts = std::env::var_os("TINYSEQ_LOG_VOICE_COUNTS").is_some();
@@ -11326,7 +11328,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
                 || editor_has_visible_buffer(&editor, "*piano-roll*");
             let current_track_playhead_changed = playhead != prev_playhead;
-            let mut meter_polled = false;
             if last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL {
                 cached_peak_l_level = meter_display_level(f32::from_bits(
                     state.transport.peak_l.load(Ordering::Relaxed),
@@ -11341,7 +11342,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (cached_modulator_phases, cached_modulator_levels) =
                     read_modulator_display_values(app.graph.lg, &app);
                 last_meter_poll_at = Instant::now();
-                meter_polled = true;
             }
             let mut needs_reactive_cycle = false;
             // Track switch — rebuild everything
@@ -11503,9 +11503,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 prev_bus_peak_levels = cached_bus_peak_levels.clone();
             }
-            if matrix_visible && meter_polled {
+            if matrix_visible
+                && last_neural_visualization_poll_at.elapsed()
+                    >= NEURAL_VISUALIZATION_POLL_INTERVAL
+            {
+                last_neural_visualization_poll_at = Instant::now();
                 needs_reactive_cycle |=
-                    sync_neural_dampening_matrix_field(editor.runtime_mut(), &state);
+                    sync_neural_visualization_fields(editor.runtime_mut(), &state);
             }
             if cached_modulator_phases != prev_modulator_phases {
                 if fx_visible {

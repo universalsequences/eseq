@@ -2353,16 +2353,32 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
     effects_dirty
 }
 
-pub(crate) fn sync_neural_dampening_matrix_field(
+pub(crate) fn sync_neural_visualization_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
 ) -> bool {
-    rt.set_reactive(
-        "SEQ",
-        "neural-dampening-matrix",
-        build_neural_dampening_matrix_value(state),
-    )
-    .effects_dirty
+    let mut effects_dirty = rt
+        .set_reactive(
+            "SEQ",
+            "neural-energy-matrix",
+            build_neural_energy_matrix_value(state),
+        )
+        .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "neural-trigger-matrix",
+            build_neural_trigger_matrix_value(state),
+        )
+        .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "neural-dampening-matrix",
+            build_neural_dampening_matrix_value(state),
+        )
+        .effects_dirty;
+    effects_dirty
 }
 
 pub(crate) fn sync_bus_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
@@ -2605,6 +2621,16 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
     rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
     rt.set_reactive(
         "SEQ",
+        "neural-energy-matrix",
+        build_neural_energy_matrix_value(state),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "neural-trigger-matrix",
+        build_neural_trigger_matrix_value(state),
+    );
+    rt.set_reactive(
+        "SEQ",
         "neural-dampening-matrix",
         build_neural_dampening_matrix_value(state),
     );
@@ -2631,7 +2657,7 @@ pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -
                     (0..size)
                         .map(|col| {
                             Rc::new(RefCell::new(Value::Number(
-                                snapshot.dampening[row][col] as f64,
+                                neural_dampening_display_value(snapshot.dampening[row][col]),
                             )))
                         })
                         .collect(),
@@ -2639,6 +2665,48 @@ pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -
             })
             .collect(),
     )
+}
+
+pub(crate) fn build_neural_energy_matrix_value(state: &Arc<SequencerState>) -> Value {
+    let snapshot = state.neural_visualization();
+    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    neural_column_matrix_value((0..size).map(|idx| {
+        neural_energy_display_value(snapshot.energy[idx])
+    }))
+}
+
+pub(crate) fn build_neural_trigger_matrix_value(state: &Arc<SequencerState>) -> Value {
+    let snapshot = state.neural_visualization();
+    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    neural_column_matrix_value((0..size).map(|idx| {
+        neural_trigger_display_value(snapshot.trigger_activity[idx])
+    }))
+}
+
+fn neural_column_matrix_value(values: impl Iterator<Item = f64>) -> Value {
+    Value::List(
+        values
+            .map(|value| {
+                Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(
+                    Value::Number(value),
+                ))])))
+            })
+            .collect(),
+    )
+}
+
+fn neural_energy_display_value(value: f32) -> f64 {
+    let value = value.clamp(0.0, 4.0) as f64;
+    (value * 100.0).round() / 100.0
+}
+
+fn neural_trigger_display_value(value: f32) -> f64 {
+    value.clamp(0.0, 1.0) as f64
+}
+
+fn neural_dampening_display_value(value: f32) -> f64 {
+    let value = value.clamp(0.0, 1.0) as f64;
+    (value * 100.0).round() / 100.0
 }
 
 fn neural_network_value(network: &sequencer::neural::ProjectNeuralNetwork) -> Value {
@@ -2672,6 +2740,12 @@ fn neural_network_value(network: &sequencer::neural::ProjectNeuralNetwork) -> Va
     map.insert(
         "max-poly".to_string(),
         Rc::new(RefCell::new(Value::Number(network.max_poly as f64))),
+    );
+    map.insert(
+        "max-poly-selection".to_string(),
+        Rc::new(RefCell::new(Value::String(
+            network.max_poly_selection.as_str().to_string(),
+        ))),
     );
     map.insert(
         "weights".to_string(),
@@ -5547,6 +5621,7 @@ mod tests {
                 network.reset_interval_bars = 3.0;
                 network.energy_decay = 0.5;
                 network.max_poly = 5;
+                network.max_poly_selection = sequencer::neural::NeuralMaxPolySelection::Random;
                 network.neurons[1].route = Some(1);
                 network.neurons[1].delay_steps = 4;
                 network.neurons[1].quantize = Some(Timebase::Eighth as u8);
@@ -5581,6 +5656,12 @@ mod tests {
         assert_eq!(
             network.get("max-poly").map(|value| value.borrow().clone()),
             Some(Value::Number(5.0))
+        );
+        assert_eq!(
+            network
+                .get("max-poly-selection")
+                .map(|value| value.borrow().clone()),
+            Some(Value::String("random".to_string()))
         );
         let Some(neurons) = network.get("neurons") else {
             panic!("expected neurons");
@@ -5626,7 +5707,50 @@ mod tests {
             panic!("expected first dampening row");
         };
         assert_eq!(first_row.len(), 2);
-        assert_eq!(*first_row[1].borrow(), Value::Number(0.625));
+        assert_eq!(*first_row[1].borrow(), Value::Number(0.63));
+    }
+
+    #[test]
+    fn neural_energy_and_trigger_matrix_values_reflect_runtime_snapshot() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut snapshot = sequencer::neural::NeuralVisualizationSnapshot::default();
+        snapshot.active = true;
+        snapshot.network_id = 7;
+        snapshot.num_neurons = 2;
+        snapshot.energy[0] = 0.625;
+        snapshot.energy[1] = 8.0;
+        snapshot.trigger_activity[1] = 1.0;
+        state.set_neural_visualization(snapshot);
+
+        let Value::List(energy_rows) = build_neural_energy_matrix_value(&state) else {
+            panic!("expected energy matrix rows");
+        };
+        assert_eq!(energy_rows.len(), 2);
+        let Value::List(first_energy_row) = &*energy_rows[0].borrow() else {
+            panic!("expected first energy row");
+        };
+        assert_eq!(first_energy_row.len(), 1);
+        assert_eq!(*first_energy_row[0].borrow(), Value::Number(0.63));
+        let Value::List(second_energy_row) = &*energy_rows[1].borrow() else {
+            panic!("expected second energy row");
+        };
+        assert_eq!(*second_energy_row[0].borrow(), Value::Number(4.0));
+
+        let Value::List(trigger_rows) = build_neural_trigger_matrix_value(&state) else {
+            panic!("expected trigger matrix rows");
+        };
+        assert_eq!(trigger_rows.len(), 2);
+        let Value::List(first_trigger_row) = &*trigger_rows[0].borrow() else {
+            panic!("expected first trigger row");
+        };
+        let Value::List(second_trigger_row) = &*trigger_rows[1].borrow() else {
+            panic!("expected second trigger row");
+        };
+        assert_eq!(*first_trigger_row[0].borrow(), Value::Number(0.0));
+        assert_eq!(*second_trigger_row[0].borrow(), Value::Number(1.0));
     }
 
     #[test]

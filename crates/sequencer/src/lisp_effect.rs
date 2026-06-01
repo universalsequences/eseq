@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::accumulator::ResolvedStep;
 use crate::audiograph::{self, LiveGraph, NodeVTable};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
-use crate::neural::{ProjectNeuralNetwork, ProjectNeuron, NUM_NEURONS};
+use crate::neural::{NUM_NEURONS, NeuralMaxPolySelection, ProjectNeuralNetwork, ProjectNeuron};
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
@@ -7079,6 +7079,7 @@ struct NeuralSetEdits {
     reset_interval_bars: Option<f32>,
     energy_decay: Option<f32>,
     max_poly: Option<u32>,
+    max_poly_selection: Option<NeuralMaxPolySelection>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -7219,6 +7220,27 @@ fn parse_timebase_value(value: &EValue) -> Result<Timebase, String> {
     parse_timebase_arg(std::slice::from_ref(value), 0)
 }
 
+fn parse_neural_max_poly_selection(value: &EValue) -> Result<NeuralMaxPolySelection, String> {
+    let name = match value {
+        EValue::String(value) | EValue::Keyword(value) | EValue::Symbol(value) => {
+            value.trim().trim_start_matches(':').to_ascii_lowercase()
+        }
+        _ => {
+            return Err(
+                "max-poly selection expects deterministic, propagation, or random".to_string(),
+            )
+        }
+    };
+    match name.as_str() {
+        "deterministic" | "ordered" | "first" => Ok(NeuralMaxPolySelection::Deterministic),
+        "propagation" | "propagate" | "productive" | "impact" => {
+            Ok(NeuralMaxPolySelection::Propagation)
+        }
+        "random" | "rand" => Ok(NeuralMaxPolySelection::Random),
+        _ => Err("max-poly selection expects deterministic, propagation, or random".to_string()),
+    }
+}
+
 fn neural_attr_name(value: &EValue) -> Option<String> {
     match value {
         EValue::Keyword(name) => Some(name.to_ascii_lowercase()),
@@ -7305,6 +7327,9 @@ fn parse_neural_set_args(args: &[EValue]) -> Result<NeuralSetEdits, String> {
             }
             "energy-decay" => edits.energy_decay = Some(parse_f32_value(value, "energy decay")?),
             "max-poly" => edits.max_poly = Some(parse_u32_value(value, "max-poly")?),
+            "max-poly-selection" | "max-poly-mode" | "poly-selection" | "poly-mode" => {
+                edits.max_poly_selection = Some(parse_neural_max_poly_selection(value)?)
+            }
             other => return Err(format!("neural-set unknown argument :{other}")),
         }
         idx += 1;
@@ -7512,6 +7537,9 @@ fn apply_neural_set_edits(
     if let Some(max_poly) = edits.max_poly {
         network.max_poly = max_poly.max(1);
     }
+    if let Some(max_poly_selection) = edits.max_poly_selection {
+        network.max_poly_selection = max_poly_selection;
+    }
     Ok(())
 }
 
@@ -7570,6 +7598,10 @@ fn neural_network_to_value(network: &ProjectNeuralNetwork) -> EValue {
         lisp_number(network.energy_decay as f64),
     );
     map.insert("max-poly".to_string(), lisp_number(network.max_poly as f64));
+    map.insert(
+        "max-poly-selection".to_string(),
+        lisp_string(network.max_poly_selection.as_str().to_string()),
+    );
     map.insert(
         "weights".to_string(),
         lisp_value(lisp_list(
@@ -8644,6 +8676,7 @@ mod tests {
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
+    use crate::neural::NeuralMaxPolySelection;
     use crate::scheduled_event::{
         ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
     };
@@ -9275,6 +9308,8 @@ mod tests {
             "SEQ",
             vec![
                 ("neural-networks", Value::List(Vec::new())),
+                ("neural-energy-matrix", Value::List(Vec::new())),
+                ("neural-trigger-matrix", Value::List(Vec::new())),
                 ("neural-dampening-matrix", Value::List(Vec::new())),
             ],
             true,
@@ -9334,7 +9369,7 @@ mod tests {
 
         runtime
             .eval_str(
-                "(neural-set \"drums\" :reset-bars 2 :energy-decay 0.5 :max-poly 4 :name \"kit\")",
+                "(neural-set \"drums\" :reset-bars 2 :energy-decay 0.5 :max-poly 4 :max-poly-selection :random :name \"kit\")",
             )
             .unwrap();
         runtime
@@ -9350,6 +9385,7 @@ mod tests {
         assert_eq!(network.reset_interval_bars, 2.0);
         assert_eq!(network.energy_decay, 0.5);
         assert_eq!(network.max_poly, 4);
+        assert_eq!(network.max_poly_selection, NeuralMaxPolySelection::Random);
 
         let neuron = &network.neurons[1];
         assert_eq!(neuron.route, Some(1));
@@ -9366,6 +9402,14 @@ mod tests {
         assert_eq!(neuron.transpose, -12.0);
         assert_eq!(neuron.dampening_amount, 0.2);
         assert_eq!(neuron.dampening_recovery, 0.9);
+
+        runtime
+            .eval_str("(neural-set \"kit\" :max-poly-selection :propagation)")
+            .unwrap();
+        assert_eq!(
+            state.current_neural_networks()[0].max_poly_selection,
+            NeuralMaxPolySelection::Propagation
+        );
     }
 
     #[test]
@@ -9460,6 +9504,10 @@ mod tests {
         assert_eq!(network.energy_decay, 0.994);
         assert_eq!(network.max_poly, 2);
         assert_eq!(
+            network.max_poly_selection,
+            NeuralMaxPolySelection::Deterministic
+        );
+        assert_eq!(
             network.weights,
             vec![
                 vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -9503,6 +9551,7 @@ mod tests {
             .iter()
             .all(|neuron| neuron.quantize_timebase().is_none()));
         assert!(network.neurons.iter().all(|neuron| neuron.transpose == 0.0));
+        assert!(network.neurons.iter().all(|neuron| neuron.threshold == 1.0));
         assert!(network
             .neurons
             .iter()
@@ -9533,12 +9582,12 @@ mod tests {
             .unwrap();
         runtime
             .eval_str(&format!(
-                "(neural-set {id} :reset-bars 2 :energy-decay 0.5 :max-poly 4)"
+                "(neural-set {id} :reset-bars 2 :energy-decay 0.5 :max-poly 4 :max-poly-selection :random)"
             ))
             .unwrap();
         runtime
             .eval_str(&format!(
-                "(neural-neuron {id} 1 :route 7 :delay 4 :quantize :4 :transpose -7 :dampening 0.25 :recovery 0.75)"
+                "(neural-neuron {id} 1 :route 7 :threshold 1.5 :delay 4 :quantize :4 :transpose -7 :dampening 0.25 :recovery 0.75)"
             ))
             .unwrap();
 
@@ -9556,8 +9605,10 @@ mod tests {
         assert_eq!(network.reset_interval_bars, 2.0);
         assert_eq!(network.energy_decay, 0.5);
         assert_eq!(network.max_poly, 4);
+        assert_eq!(network.max_poly_selection, NeuralMaxPolySelection::Random);
         assert_eq!(network.weights[0][1], 0.25);
         assert_eq!(network.neurons[1].route, Some(7));
+        assert_eq!(network.neurons[1].threshold, 1.5);
         assert_eq!(network.neurons[1].delay_steps, 4);
         assert_eq!(
             network.neurons[1].quantize_timebase(),
@@ -9590,8 +9641,11 @@ mod tests {
                 network.reset_interval_bars = 3.0;
                 network.energy_decay = 0.5;
                 network.max_poly = 5;
+                network.max_poly_selection = NeuralMaxPolySelection::Random;
                 network.weights[0][1] = 0.75;
+                network.neurons[0].threshold = 1.75;
                 network.neurons[1].route = Some(6);
+                network.neurons[1].threshold = 2.5;
                 network.neurons[1].delay_steps = 5;
                 network.neurons[1].quantize = Some(crate::sequencer::Timebase::Eighth as u8);
                 network.neurons[1].transpose = 12.0;
@@ -9633,6 +9687,18 @@ mod tests {
         assert_eq!(
             runtime.eval_str("neural-8x8-track-router-max-poly").unwrap(),
             Some(Value::Number(5.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("neural-8x8-track-router-max-poly-selection")
+                .unwrap(),
+            Some(Value::String("random".to_string()))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("neural-8x8-track-router-threshold")
+                .unwrap(),
+            Some(Value::Number(1.75))
         );
         assert_eq!(
             runtime.eval_str("neural-8x8-track-router-route-1").unwrap(),
@@ -9719,23 +9785,33 @@ mod tests {
 
         let mut matrices = Vec::new();
         collect_widgets(&layout, "matrix", &mut matrices);
-        assert_eq!(matrices.len(), 2, "expected weight and dampening matrix widgets");
-        matrices.sort_by(|left, right| left.rect.col.total_cmp(&right.rect.col));
-        let matrix = matrices[0];
-        let dampening_matrix = matrices[1];
-        assert_measured(matrix);
-        assert_measured(dampening_matrix);
-        assert!(
-            (matrix.rect.row - dampening_matrix.rect.row).abs() <= 0.05
-                && (matrix.rect.height - dampening_matrix.rect.height).abs() <= 0.05,
-            "dampening matrix should align with weight matrix; weight={:?} dampening={:?}",
-            matrix.rect,
-            dampening_matrix.rect
+        assert_eq!(
+            matrices.len(),
+            4,
+            "expected trigger, energy, weight, and dampening matrix widgets"
         );
+        matrices.sort_by(|left, right| left.rect.col.total_cmp(&right.rect.col));
+        for matrix in &matrices {
+            assert_measured(matrix);
+        }
+        let matrix = matrices[2];
+        for (idx, visualization_matrix) in matrices.iter().enumerate() {
+            assert!(
+                (matrix.rect.row - visualization_matrix.rect.row).abs() <= 0.05
+                    && (matrix.rect.height - visualization_matrix.rect.height).abs() <= 0.05,
+                "visualization matrix {idx} should align with weight matrix; weight={:?} visualization={:?}",
+                matrix.rect,
+                visualization_matrix.rect
+            );
+        }
 
         let mut dropdowns = Vec::new();
         collect_widgets(&layout, "dropdown", &mut dropdowns);
-        assert_eq!(dropdowns.len(), 16, "expected route and quantize dropdowns");
+        assert_eq!(
+            dropdowns.len(),
+            17,
+            "expected one global max-poly dropdown plus route and quantize dropdowns"
+        );
         for dropdown in &dropdowns {
             assert_measured(dropdown);
         }
@@ -9744,8 +9820,8 @@ mod tests {
         collect_widgets(&layout, "number-picker", &mut pickers);
         assert_eq!(
             pickers.len(),
-            35,
-            "expected three global pickers and four pickers per neuron"
+            36,
+            "expected four global pickers and four pickers per neuron"
         );
         for picker in &pickers {
             assert_measured(picker);
