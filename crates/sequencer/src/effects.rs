@@ -252,7 +252,11 @@ fn param_kinds_are_compatible(old: &ParamKind, new: &ParamKind) -> bool {
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use super::{EffectDescriptor, EffectSlotState, ParamDescriptor, ParamKind, ParamScaling};
+    use super::{
+        EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
+        ParamScaling,
+    };
+    use crate::neural::ParamNodeId;
 
     #[test]
     fn denormalize_boolean_snaps_to_zero_or_one() {
@@ -326,6 +330,60 @@ mod tests {
         assert_eq!(slot.defaults.get(149), 7.5);
         assert_eq!(slot.plocks.get(3, 149), Some(-4.25));
         assert_eq!(slot.resolve_node_idx(149), 1_149);
+    }
+
+    #[test]
+    fn sync_to_descriptor_rebinds_loaded_plock_ids_to_live_node_id() {
+        let desc = EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![ParamDescriptor {
+                name: "cutoff".to_string(),
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 15,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+        };
+        let mut snapshot = EffectSlotSnapshot {
+            node_id: 10,
+            modulator_node_id: 0,
+            num_params: 1,
+            defaults: vec![0.2],
+            plocks: (0..crate::sequencer::MAX_STEPS)
+                .map(|_| vec![None])
+                .collect(),
+            plock_param_ids: (0..crate::sequencer::MAX_STEPS)
+                .map(|_| vec![None])
+                .collect(),
+            param_node_indices: vec![15],
+            param_node_spans: vec![1],
+            ir: None,
+        };
+        snapshot.plocks[3][0] = Some(0.9);
+        snapshot.plock_param_ids[3][0] = Some(ParamNodeId {
+            logical_id: 10,
+            node_param_idx: 15,
+        });
+
+        snapshot.sync_to_descriptor(&desc, 42);
+
+        assert_eq!(snapshot.plocks[3][0], Some(0.9));
+        assert_eq!(
+            snapshot.plock_param_ids[3][0],
+            Some(ParamNodeId {
+                logical_id: 42,
+                node_param_idx: 15,
+            })
+        );
     }
 
     #[test]
@@ -3505,7 +3563,6 @@ impl EffectSlotSnapshot {
         let new_np = desc.params.len();
         let old_defaults = self.defaults.clone();
         let old_plocks = self.plocks.clone();
-        let old_plock_param_ids = self.plock_param_ids.clone();
 
         self.node_id = node_id;
         self.modulator_node_id = modulator_node_id;
@@ -3528,11 +3585,13 @@ impl EffectSlotSnapshot {
             if let Some(saved_step) = old_plocks.get(step) {
                 for param_idx in 0..preserve.min(saved_step.len()) {
                     self.plocks[step][param_idx] = saved_step[param_idx];
-                    self.plock_param_ids[step][param_idx] = old_plock_param_ids
-                        .get(step)
-                        .and_then(|ids| ids.get(param_idx))
+                    self.plock_param_ids[step][param_idx] = self
+                        .param_node_indices
+                        .get(param_idx)
                         .copied()
-                        .flatten();
+                        .and_then(|raw_idx| {
+                            ParamNodeId::from_slot_param(node_id, modulator_node_id, raw_idx)
+                        });
                 }
             }
         }

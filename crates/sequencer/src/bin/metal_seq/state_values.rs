@@ -5405,6 +5405,12 @@ fn plock_entry_with_label(
             "source".to_string(),
             Rc::new(RefCell::new(Value::String(source.to_string()))),
         );
+        if source == "neuron" {
+            map.insert(
+                "neuron-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(step as f64))),
+            );
+        }
     }
     if let Some(target_track) = target_track {
         map.insert(
@@ -10465,6 +10471,13 @@ mod tests {
         );
         assert_eq!(value_map_string(map, "group").as_deref(), Some("T1 inst"));
         assert_eq!(value_map_string(map, "name").as_deref(), Some("resonance"));
+        assert_eq!(value_map_number(map, "network-id"), Some(11.0));
+        assert_eq!(value_map_number(map, "neuron-idx"), Some(0.0));
+        assert_eq!(value_map_number(map, "target-track"), Some(0.0));
+        assert_eq!(
+            value_map_number(map, "param-idx"),
+            Some(resonance_idx as f64)
+        );
         let value = map.get("value").and_then(|value| match &*value.borrow() {
             Value::Number(value) => Some(*value),
             _ => None,
@@ -10755,6 +10768,13 @@ mod tests {
     fn value_map_string(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<String> {
         map.get(key).and_then(|value| match &*value.borrow() {
             Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+    }
+
+    fn value_map_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<f64> {
+        map.get(key).and_then(|value| match &*value.borrow() {
+            Value::Number(value) => Some(*value),
             _ => None,
         })
     }
@@ -12393,8 +12413,24 @@ mod tests {
             Rc::new(RefCell::new(Value::Number(0.0))),
         );
         plock.insert(
+            "neuron-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        plock.insert(
             "target".to_string(),
             Rc::new(RefCell::new(Value::String("neural-instrument".to_string()))),
+        );
+        plock.insert(
+            "network-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(11.0))),
+        );
+        plock.insert(
+            "target-track".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        plock.insert(
+            "param-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(3.0))),
         );
         plock.insert(
             "group".to_string(),
@@ -12435,6 +12471,44 @@ mod tests {
             .expect("selected neuron p-lock label should render");
 
         assert_finite_nonzero_rect(label, "selected neuron p-lock label");
+
+        let clear = find_layout_node_by_text(&layout, "x")
+            .expect("selected neuron p-lock clear button should render");
+        assert_eq!(clear.widget_type, "button");
+        assert_finite_nonzero_rect(clear, "selected neuron p-lock clear button");
+
+        let _ = editor.drain_host_commands();
+        let callback = clear
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("selected neuron p-lock clear button on-click");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke selected neuron p-lock clear button");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "clear-track-plock-entry");
+                let Value::Map(payload) = payload else {
+                    panic!("expected clear-track-plock-entry map payload, got {payload:?}");
+                };
+                assert_eq!(
+                    value_map_string(payload, "target").as_deref(),
+                    Some("neural-instrument")
+                );
+                assert_eq!(value_map_number(payload, "network-id"), Some(11.0));
+                assert_eq!(value_map_number(payload, "neuron-idx"), Some(0.0));
+                assert_eq!(value_map_number(payload, "target-track"), Some(0.0));
+                assert_eq!(value_map_number(payload, "param-idx"), Some(3.0));
+            }
+            other => panic!("expected clear-track-plock-entry host command, got {other:?}"),
+        }
     }
 
     #[test]

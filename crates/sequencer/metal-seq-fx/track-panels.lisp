@@ -53,7 +53,10 @@
       (dict :target (get p :target)
             :step-idx (get p :step-idx)
             :slot-idx (get p :slot-idx)
-            :param-idx (get p :param-idx)))))
+            :param-idx (get p :param-idx)
+            :target-track (get p :target-track)
+            :network-id (get p :network-id)
+            :neuron-idx (get p :neuron-idx)))))
 
 (def fx-plock-row (p idx)
   (subtree :key (str "track-plock-" idx "-" (get p :target) "-" (get p :step-idx) "-"
@@ -76,12 +79,10 @@
               :noui true :font-size 10 :text-color :dim
               :on-change (lambda (v) (fx-plock-set-value p v))
               :width 4.5 :height 1.05)))
-        (if (= (get p :source) "neuron")
-          (label "" :width 1.35 :font-size 9 :color :dim :bg :transparent)
-          (button "x"
-            :width 1.35 :height 1.05 :padding 0 :font-size 9
-            :background-color :dark-gray :color :dim
-            :on-click |x y r| (fx-plock-clear p)))))))
+        (button "x"
+          :width 1.35 :height 1.05 :padding 0 :font-size 9
+          :background-color :dark-gray :color :dim
+          :on-click |x y r| (fx-plock-clear p))))))
 
 (def fx-track-plocks-panel ()
   (box :debug-name "track-plocks-panel" :padding 0.75

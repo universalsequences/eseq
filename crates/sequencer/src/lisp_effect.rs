@@ -8025,13 +8025,14 @@ fn clear_neural_instrument_plock(
     neuron_idx: usize,
     target_track: usize,
     param_index: usize,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let neuron = neural_neuron_mut(network, neuron_idx)?;
+    let before = neuron.output_overrides.instrument.len();
     neuron
         .output_overrides
         .instrument
         .retain(|entry| !(entry.target_track == target_track && entry.param_index == param_index));
-    Ok(())
+    Ok(neuron.output_overrides.instrument.len() != before)
 }
 
 fn clear_neural_effect_plock(
@@ -8040,14 +8041,46 @@ fn clear_neural_effect_plock(
     target_track: usize,
     slot_index: usize,
     param_index: usize,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let neuron = neural_neuron_mut(network, neuron_idx)?;
+    let before = neuron.output_overrides.effects.len();
     neuron.output_overrides.effects.retain(|entry| {
         !(entry.target_track == target_track
             && entry.slot_index == slot_index
             && entry.param_index == param_index)
     });
-    Ok(())
+    Ok(neuron.output_overrides.effects.len() != before)
+}
+
+pub fn clear_neural_instrument_plock_by_network_id(
+    state: &crate::sequencer::SequencerState,
+    network_id: u64,
+    neuron_idx: usize,
+    target_track: usize,
+    param_idx: usize,
+) -> Result<bool, String> {
+    state.edit_current_neural_networks(|networks| {
+        let Some(network) = networks.iter_mut().find(|network| network.id == network_id) else {
+            return Err("selected neural network was not found in the current pattern".to_string());
+        };
+        clear_neural_instrument_plock(network, neuron_idx, target_track, param_idx)
+    })
+}
+
+pub fn clear_neural_effect_plock_by_network_id(
+    state: &crate::sequencer::SequencerState,
+    network_id: u64,
+    neuron_idx: usize,
+    target_track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+) -> Result<bool, String> {
+    state.edit_current_neural_networks(|networks| {
+        let Some(network) = networks.iter_mut().find(|network| network.id == network_id) else {
+            return Err("selected neural network was not found in the current pattern".to_string());
+        };
+        clear_neural_effect_plock(network, neuron_idx, target_track, slot_idx, param_idx)
+    })
 }
 
 pub fn set_selected_neural_instrument_plocks(
@@ -9390,6 +9423,7 @@ pub fn run_instrument_editor_flow(
 #[cfg(test)]
 mod tests {
     use super::{
+        clear_neural_effect_plock_by_network_id, clear_neural_instrument_plock_by_network_id,
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
         new_eval_context, parse_manifest, read_eseqlisp_init_source, register_sequencer_natives,
@@ -10294,6 +10328,44 @@ mod tests {
     }
 
     #[test]
+    fn neural_plock_clear_helpers_remove_single_network_entry() {
+        let (state, mut runtime) = neural_test_runtime(2);
+        let sampler_desc = EffectDescriptor::builtin_sampler();
+        let speed_param_idx = sampler_desc
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("sampler speed param");
+        state.pattern.instrument_slots[1].apply_descriptor(&sampler_desc, 12);
+        state.pattern.effect_chains[1][0].apply_descriptor(&EffectDescriptor::builtin_filter(), 42);
+
+        runtime
+            .eval_str("(neural-create :name \"router\" :neurons 2)")
+            .unwrap();
+        runtime
+            .eval_str(&format!(
+                "(neural-plock-instrument \"router\" 0 1 {speed_param_idx} 1.5)"
+            ))
+            .unwrap();
+        runtime
+            .eval_str("(neural-plock-effect \"router\" 0 1 0 0 800.0)")
+            .unwrap();
+
+        assert!(
+            clear_neural_instrument_plock_by_network_id(&state, 1, 0, 1, speed_param_idx).unwrap()
+        );
+        assert!(clear_neural_effect_plock_by_network_id(&state, 1, 0, 1, 0, 0).unwrap());
+        assert!(
+            !clear_neural_instrument_plock_by_network_id(&state, 1, 0, 1, speed_param_idx).unwrap()
+        );
+
+        let networks = state.current_neural_networks();
+        let neuron = &networks[0].neurons[0];
+        assert!(neuron.output_overrides.instrument.is_empty());
+        assert!(neuron.output_overrides.effects.is_empty());
+    }
+
+    #[test]
     fn neural_lisp_plock_authoring_targets_tracks_and_devices() {
         let (state, mut runtime) = neural_test_runtime(2);
         let sampler_desc = EffectDescriptor::builtin_sampler();
@@ -10454,6 +10526,55 @@ mod tests {
             .iter()
             .all(|neuron| (neuron.dampening_recovery - 0.98).abs() < f32::EPSILON));
         assert!(!state.pattern.neural_reset_patterns[0].is_active(0));
+    }
+
+    #[test]
+    fn neural_lisp_track_router_route_dropdown_supports_track_16() {
+        let (state, mut runtime) = neural_test_runtime(16);
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/neural-8x8-track-router.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read neural router script");
+
+        runtime.eval_str(&source).unwrap();
+        let options = runtime
+            .eval_str("neural-8x8-track-router-route-options")
+            .unwrap()
+            .expect("route options");
+        let Value::List(options) = options else {
+            panic!("expected route options list, got {options:?}");
+        };
+        assert!(
+            options.iter().any(
+                |option| matches!(&*option.borrow(), Value::String(value) if value == "Track 16")
+            ),
+            "route dropdown should include Track 16"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(neural-8x8-track-router-route-index \"Track 16\")")
+                .unwrap(),
+            Some(Value::Number(15.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(neural-8x8-track-router-route-label 15)")
+                .unwrap(),
+            Some(Value::String("Track 16".to_string()))
+        );
+
+        runtime
+            .eval_str(
+                "(do
+                  (set! neural-8x8-track-router-route-0 \"Track 16\")
+                  (neural-8x8-track-router-apply-neuron-0))",
+            )
+            .unwrap();
+        assert_eq!(
+            state.current_neural_networks()[0].neurons[0].route,
+            Some(15)
+        );
     }
 
     #[test]

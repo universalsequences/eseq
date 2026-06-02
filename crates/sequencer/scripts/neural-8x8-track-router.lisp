@@ -26,7 +26,12 @@
   (list "deterministic" "propagation" "random"))
 
 (def neural-8x8-track-router-route-options
-  (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8" "Off"))
+  (list
+    "Track 1" "Track 2" "Track 3" "Track 4"
+    "Track 5" "Track 6" "Track 7" "Track 8"
+    "Track 9" "Track 10" "Track 11" "Track 12"
+    "Track 13" "Track 14" "Track 15" "Track 16"
+    "Off"))
 
 (def neural-8x8-track-router-quantize-options
   (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
@@ -177,7 +182,23 @@
                 5
                 (if (= route "Track 7")
                   6
-                  7)))))))))
+                  (if (= route "Track 8")
+                    7
+                    (if (= route "Track 9")
+                      8
+                      (if (= route "Track 10")
+                        9
+                        (if (= route "Track 11")
+                          10
+                          (if (= route "Track 12")
+                            11
+                            (if (= route "Track 13")
+                              12
+                              (if (= route "Track 14")
+                                13
+                                (if (= route "Track 15")
+                                  14
+                                  15)))))))))))))))))
 
 (def neural-8x8-track-router-route-label (route)
   (if (= route 0)
@@ -196,7 +217,23 @@
                 "Track 7"
                 (if (= route 7)
                   "Track 8"
-                  "Off")))))))))
+                  (if (= route 8)
+                    "Track 9"
+                    (if (= route 9)
+                      "Track 10"
+                      (if (= route 10)
+                        "Track 11"
+                        (if (= route 11)
+                          "Track 12"
+                          (if (= route 12)
+                            "Track 13"
+                            (if (= route 13)
+                              "Track 14"
+                              (if (= route 14)
+                                "Track 15"
+                                (if (= route 15)
+                                  "Track 16"
+                                  "Off")))))))))))))))))
 
 (def neural-8x8-track-router-quantize-label (quantize)
   (if (not quantize)

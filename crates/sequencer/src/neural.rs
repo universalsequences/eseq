@@ -33,6 +33,37 @@ pub struct ParamNodeId {
     pub node_param_idx: u32,
 }
 
+impl ParamNodeId {
+    pub fn from_slot_param(
+        node_id: u32,
+        modulator_node_id: u32,
+        raw_param_idx: u32,
+    ) -> Option<Self> {
+        if raw_param_idx == u32::MAX {
+            return None;
+        }
+        if raw_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+            let logical_id = modulator_node_id as u64;
+            if logical_id == 0 {
+                return None;
+            }
+            Some(Self {
+                logical_id,
+                node_param_idx: raw_param_idx - crate::voice_modulator::MOD_PARAM_BASE,
+            })
+        } else {
+            let logical_id = node_id as u64;
+            if logical_id == 0 {
+                return None;
+            }
+            Some(Self {
+                logical_id,
+                node_param_idx: raw_param_idx,
+            })
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectParamOverride {
     pub target_track: usize,

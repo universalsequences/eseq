@@ -7500,24 +7500,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            if let (Some(target), Some(step)) = (target, step) {
+                            let target_track =
+                                map.get("target-track")
+                                    .and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) => Some(*n as usize),
+                                        _ => None,
+                                    });
+                            let network_id =
+                                map.get("network-id")
+                                    .and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) => Some(*n as u64),
+                                        _ => None,
+                                    });
+                            let neuron_idx =
+                                map.get("neuron-idx")
+                                    .and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) => Some(*n as usize),
+                                        _ => None,
+                                    });
+                            if let Some(target) = target {
                                 let track = current_track.load(Ordering::Relaxed);
+                                let mut changed = false;
                                 match target.as_str() {
-                                    "timebase" => state.pattern.timebase_plocks[track].clear(step),
-                                    "swing" => state.pattern.swing_plocks[track].clear(step),
+                                    "timebase" => {
+                                        if let Some(step) = step {
+                                            state.pattern.timebase_plocks[track].clear(step);
+                                        }
+                                    }
+                                    "swing" => {
+                                        if let Some(step) = step {
+                                            state.pattern.swing_plocks[track].clear(step);
+                                        }
+                                    }
                                     "swing-resolution" => {
-                                        state.pattern.swing_resolution_plocks[track].clear(step)
+                                        if let Some(step) = step {
+                                            state.pattern.swing_resolution_plocks[track].clear(step)
+                                        }
                                     }
                                     "instrument" => {
-                                        if let Some(param_idx) = param_idx {
+                                        if let (Some(step), Some(param_idx)) = (step, param_idx) {
                                             state.pattern.instrument_slots[track]
                                                 .plocks
                                                 .clear_param(step, param_idx);
                                         }
                                     }
                                     "effect" => {
-                                        if let (Some(slot_idx), Some(param_idx)) =
-                                            (slot_idx, param_idx)
+                                        if let (Some(step), Some(slot_idx), Some(param_idx)) =
+                                            (step, slot_idx, param_idx)
                                         {
                                             if let Some(slot) = state
                                                 .pattern
@@ -7530,8 +7559,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     "midi-fx" => {
-                                        if let (Some(slot_idx), Some(param_idx)) =
-                                            (slot_idx, param_idx)
+                                        if let (Some(step), Some(slot_idx), Some(param_idx)) =
+                                            (step, slot_idx, param_idx)
                                         {
                                             if let Some(slot) = state
                                                 .pattern
@@ -7543,11 +7572,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    "neural-instrument" => {
+                                        if let (
+                                            Some(network_id),
+                                            Some(neuron_idx),
+                                            Some(target_track),
+                                            Some(param_idx),
+                                        ) = (network_id, neuron_idx, target_track, param_idx)
+                                        {
+                                            match sequencer::lisp_effect::clear_neural_instrument_plock_by_network_id(
+                                                &state,
+                                                network_id,
+                                                neuron_idx,
+                                                target_track,
+                                                param_idx,
+                                            ) {
+                                                Ok(removed) => changed |= removed,
+                                                Err(error) => editor.handle_host_event(
+                                                    HostEvent::Status(format!(
+                                                        "Error clearing neuron instrument p-lock: {error}"
+                                                    )),
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    "neural-effect" => {
+                                        if let (
+                                            Some(network_id),
+                                            Some(neuron_idx),
+                                            Some(target_track),
+                                            Some(slot_idx),
+                                            Some(param_idx),
+                                        ) = (
+                                            network_id,
+                                            neuron_idx,
+                                            target_track,
+                                            slot_idx,
+                                            param_idx,
+                                        ) {
+                                            match sequencer::lisp_effect::clear_neural_effect_plock_by_network_id(
+                                                &state,
+                                                network_id,
+                                                neuron_idx,
+                                                target_track,
+                                                slot_idx,
+                                                param_idx,
+                                            ) {
+                                                Ok(removed) => changed |= removed,
+                                                Err(error) => editor.handle_host_event(
+                                                    HostEvent::Status(format!(
+                                                        "Error clearing neuron effect p-lock: {error}"
+                                                    )),
+                                                ),
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
-                                state.publish_scheduler_snapshot();
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                if changed {
+                                    let selection = selected_neural_neurons.lock().unwrap().clone();
+                                    sync_track_plocks_for_neural_selection(
+                                        editor.runtime_mut(),
+                                        &app,
+                                        &state,
+                                        track,
+                                        &selected_steps,
+                                        &selection,
+                                    );
+                                    editor.runtime_mut().run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    editor.mark_needs_redraw();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                } else if step.is_some() {
+                                    state.publish_scheduler_snapshot();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
                     }

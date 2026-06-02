@@ -5,6 +5,7 @@ use std::time::Instant;
 use crossterm::event::KeyCode;
 
 use crate::effects::{EffectDescriptor, BUILTIN_SLOT_COUNT};
+use crate::neural::ParamNodeId;
 use crate::project::{
     self, chord_snapshot_from_steps_durations_and_delays, project_file_version, ProjectBusChannel,
     ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
@@ -34,6 +35,87 @@ fn project_slot_into_synced_snapshot_with_modulator(
     let mut snapshot = slot.into_snapshot_with_node_ids(node_id, modulator_node_id);
     snapshot.sync_to_descriptor_with_modulator(desc, node_id, modulator_node_id);
     snapshot
+}
+
+fn slot_param_node_relative_idx(raw_idx: u32) -> Option<u32> {
+    if raw_idx == u32::MAX {
+        return None;
+    }
+    Some(if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        raw_idx - crate::voice_modulator::MOD_PARAM_BASE
+    } else {
+        raw_idx
+    })
+}
+
+fn refreshed_slot_param_id(
+    slot: &crate::effects::EffectSlotSnapshot,
+    saved_param_idx: usize,
+    saved_param_id: ParamNodeId,
+) -> Option<(usize, ParamNodeId)> {
+    let live_param_id = |param_idx: usize| {
+        let raw_idx = slot.param_node_indices.get(param_idx).copied()?;
+        let node_relative_idx = slot_param_node_relative_idx(raw_idx)?;
+        (node_relative_idx == saved_param_id.node_param_idx)
+            .then(|| ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw_idx))?
+    };
+
+    if let Some(param_id) = live_param_id(saved_param_idx) {
+        return Some((saved_param_idx, param_id));
+    }
+
+    let matches = slot
+        .param_node_indices
+        .iter()
+        .enumerate()
+        .filter_map(|(param_idx, raw_idx)| {
+            let node_relative_idx = slot_param_node_relative_idx(*raw_idx)?;
+            (node_relative_idx == saved_param_id.node_param_idx).then(|| {
+                ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, *raw_idx)
+                    .map(|param_id| (param_idx, param_id))
+            })?
+        })
+        .collect::<Vec<_>>();
+
+    (matches.len() == 1).then(|| matches[0])
+}
+
+fn refresh_neural_output_override_param_ids(snapshot: &mut PatternSnapshot) {
+    for network in &mut snapshot.neural_networks {
+        for neuron in &mut network.neurons {
+            for override_param in &mut neuron.output_overrides.instrument {
+                let Some(slot) = snapshot.instrument_slots.get(override_param.target_track) else {
+                    continue;
+                };
+                if let Some((param_index, param_id)) = refreshed_slot_param_id(
+                    slot,
+                    override_param.param_index,
+                    override_param.param_id,
+                ) {
+                    override_param.param_index = param_index;
+                    override_param.param_id = param_id;
+                }
+            }
+
+            for override_param in &mut neuron.output_overrides.effects {
+                let Some(slot) = snapshot
+                    .effect_slots
+                    .get(override_param.target_track)
+                    .and_then(|slots| slots.get(override_param.slot_index))
+                else {
+                    continue;
+                };
+                if let Some((param_index, param_id)) = refreshed_slot_param_id(
+                    slot,
+                    override_param.param_index,
+                    override_param.param_id,
+                ) {
+                    override_param.param_index = param_index;
+                    override_param.param_id = param_id;
+                }
+            }
+        }
+    }
 }
 
 fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffectSlot {
@@ -356,6 +438,9 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     let mut plocks = (0..MAX_STEPS)
         .map(|_| vec![None; new_np])
         .collect::<Vec<_>>();
+    let mut plock_param_ids = (0..MAX_STEPS)
+        .map(|_| vec![None; new_np])
+        .collect::<Vec<_>>();
     for step in 0..MAX_STEPS {
         for (new_idx, param) in desc.params.iter().enumerate() {
             let Some(old_idx) = old_idx_for(new_idx, param) else {
@@ -369,6 +454,8 @@ fn project_custom_instrument_slot_into_synced_snapshot(
                 .flatten()
             {
                 plocks[step][new_idx] = Some(value);
+                plock_param_ids[step][new_idx] =
+                    ParamNodeId::from_slot_param(node_id, modulator_node_id, param.node_param_idx);
             }
         }
     }
@@ -379,7 +466,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         num_params: new_np as u32,
         defaults,
         plocks,
-        plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; new_np]).collect(),
+        plock_param_ids,
         param_node_indices: desc.params.iter().map(|p| p.node_param_idx).collect(),
         param_node_spans: desc
             .params
@@ -1947,6 +2034,7 @@ impl App {
             neural_networks,
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
+        refresh_neural_output_override_param_ids(&mut snapshot);
 
         Ok((snapshot, bus_patterns, fallback_count))
     }
@@ -2057,6 +2145,116 @@ mod tests {
         );
         assert_eq!(resolve_project_current_track(None, 3, None), 0);
         assert_eq!(resolve_project_current_track(None, 0, Some(&track_bits)), 0);
+    }
+
+    fn test_slot_snapshot(
+        node_id: u32,
+        modulator_node_id: u32,
+        param_node_indices: Vec<u32>,
+    ) -> crate::effects::EffectSlotSnapshot {
+        let num_params = param_node_indices.len();
+        crate::effects::EffectSlotSnapshot {
+            node_id,
+            modulator_node_id,
+            num_params: num_params as u32,
+            defaults: vec![0.0; num_params],
+            plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+            plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+            param_node_indices,
+            param_node_spans: vec![1; num_params],
+            ir: None,
+        }
+    }
+
+    #[test]
+    fn project_load_refreshes_neuron_plock_ids_to_live_slot_nodes() {
+        let mut snapshot = PatternSnapshot::new_default(2, &[Vec::new(), Vec::new()]);
+        snapshot.instrument_slots[1] = test_slot_snapshot(200, 0, vec![6, 15]);
+        snapshot.effect_slots[1] = vec![test_slot_snapshot(300, 0, vec![2])];
+
+        let mut network = crate::neural::ProjectNeuralNetwork {
+            id: 1,
+            num_neurons: 1,
+            neurons: vec![crate::neural::ProjectNeuron::default()],
+            ..crate::neural::ProjectNeuralNetwork::default()
+        };
+        network.neurons[0].output_overrides.instrument =
+            vec![crate::neural::ProjectParamOverride {
+                target_track: 1,
+                param_id: ParamNodeId {
+                    logical_id: 10,
+                    node_param_idx: 15,
+                },
+                param_index: 1,
+                value: 0.75,
+            }];
+        network.neurons[0].output_overrides.effects =
+            vec![crate::neural::ProjectEffectParamOverride {
+                target_track: 1,
+                slot_index: 0,
+                param_id: ParamNodeId {
+                    logical_id: 11,
+                    node_param_idx: 2,
+                },
+                param_index: 0,
+                value: 0.25,
+            }];
+        snapshot.neural_networks = vec![network];
+
+        refresh_neural_output_override_param_ids(&mut snapshot);
+
+        let neuron = &snapshot.neural_networks[0].neurons[0];
+        assert_eq!(
+            neuron.output_overrides.instrument[0].param_id,
+            ParamNodeId {
+                logical_id: 200,
+                node_param_idx: 15,
+            }
+        );
+        assert_eq!(
+            neuron.output_overrides.effects[0].param_id,
+            ParamNodeId {
+                logical_id: 300,
+                node_param_idx: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn project_load_remaps_neuron_plock_param_index_by_node_identity() {
+        let mut snapshot = PatternSnapshot::new_default(1, &[Vec::new()]);
+        snapshot.instrument_slots[0] = test_slot_snapshot(200, 0, vec![6, 7, 15]);
+        let mut network = crate::neural::ProjectNeuralNetwork {
+            id: 1,
+            num_neurons: 1,
+            neurons: vec![crate::neural::ProjectNeuron::default()],
+            ..crate::neural::ProjectNeuralNetwork::default()
+        };
+        network.neurons[0].output_overrides.instrument =
+            vec![crate::neural::ProjectParamOverride {
+                target_track: 0,
+                param_id: ParamNodeId {
+                    logical_id: 10,
+                    node_param_idx: 15,
+                },
+                param_index: 1,
+                value: 0.75,
+            }];
+        snapshot.neural_networks = vec![network];
+
+        refresh_neural_output_override_param_ids(&mut snapshot);
+
+        let override_param = &snapshot.neural_networks[0].neurons[0]
+            .output_overrides
+            .instrument[0];
+        assert_eq!(override_param.param_index, 2);
+        assert_eq!(
+            override_param.param_id,
+            ParamNodeId {
+                logical_id: 200,
+                node_param_idx: 15,
+            }
+        );
     }
 
     #[test]

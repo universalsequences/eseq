@@ -16,6 +16,14 @@ pub struct ScheduledChordData {
     pub step_transpose: f32,
 }
 
+pub fn resolved_chord_transpose(
+    chord_transpose: f32,
+    step_transpose: f32,
+    resolved_transpose: f32,
+) -> f32 {
+    chord_transpose + (resolved_transpose - step_transpose)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScheduledEffectParam {
     pub logical_id: u64,

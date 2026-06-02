@@ -20,9 +20,9 @@ use crate::sampler::{
     PARAM_WARP_ONSET_TABLE_PTR_LO, PARAM_WARP_PROJECT_BPM, PARAM_WARP_RATIO, PARAM_WARP_SAMPLE_BPM,
 };
 use crate::scheduled_event::{
-    ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
-    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
-    ScheduledSamplerParams, TimedEvent,
+    resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
+    ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+    ScheduledInstrumentParams, ScheduledSamplerParams, TimedEvent,
 };
 use crate::sequencer::{
     sync_beats, BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState,
@@ -1281,6 +1281,22 @@ fn custom_pitch_hz(transpose: f32, base_note_offset: f32) -> f32 {
     440.0 * 2f32.powf((transpose + base_note_offset) / 12.0)
 }
 
+fn track_accepts_scheduled_trigger(state: &SequencerState, track_idx: usize) -> bool {
+    let Some(track_params) = state.pattern.track_params.get(track_idx) else {
+        return false;
+    };
+    if track_params.is_muted() {
+        return false;
+    }
+    let has_solo = state
+        .pattern
+        .track_params
+        .iter()
+        .take(state.active_track_count())
+        .any(|params| params.is_solo());
+    !has_solo || track_params.is_solo()
+}
+
 fn resolve_live_keyboard_transpose(
     state: &SequencerState,
     accumulator_state: crate::accumulator::AccumulatorRuntimeState,
@@ -1356,14 +1372,6 @@ fn take_active_keyboard_note(
         }
     }
     None
-}
-
-fn resolved_chord_transpose(
-    chord_transpose: f32,
-    step_transpose: f32,
-    resolved_transpose: f32,
-) -> f32 {
-    chord_transpose + (resolved_transpose - step_transpose)
 }
 
 fn track_engine_id(state: &SequencerState, track_idx: usize) -> Option<usize> {
@@ -2183,6 +2191,9 @@ fn fire_resolved(
     instrument_fingerprint: u64,
     scheduled_sampler_params: Option<ScheduledSamplerParams>,
 ) {
+    if !track_accepts_scheduled_trigger(&data.state, track_idx) {
+        return;
+    }
     let tp = &data.state.pattern.track_params[track_idx];
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
@@ -2308,19 +2319,6 @@ fn fire_resolved(
         }
     }
 
-    // Fit to Scale: quantize the final transpose to the nearest scale degree.
-    // Keep the pre-FTS value so chord notes can be individually quantized.
-    let fts = tp.get_fts_scale();
-    let pre_fts_transpose = resolved.transpose;
-    let resolved = if fts > 0 {
-        crate::accumulator::ResolvedStep {
-            transpose: crate::scale::quantize_transpose(resolved.transpose, fts),
-            ..resolved
-        }
-    } else {
-        resolved
-    };
-
     if is_modulator {
         let lid = data.state.runtime.modulator_lids[track_idx].load(Ordering::Acquire);
         if lid == 0 {
@@ -2368,13 +2366,8 @@ fn fire_resolved(
                 total_gate
             };
             let note_chop_gate = note_total_gate / chop as f32;
-            // Apply accumulator offset using pre-FTS transpose, then FTS-quantize each note.
-            let raw = resolved_chord_transpose(chord.notes[n], step_transpose, pre_fts_transpose);
-            let transpose = if fts > 0 {
-                crate::scale::quantize_transpose(raw, fts)
-            } else {
-                raw
-            };
+            let transpose =
+                resolved_chord_transpose(chord.notes[n], step_transpose, resolved.transpose);
             if is_custom {
                 let Some(engine_id) = engine_id else {
                     continue;
@@ -3794,8 +3787,9 @@ mod tests {
     use super::{
         bus_gate_target_at, instrument_sound_fingerprint, resolve_live_keyboard_transpose,
         resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
-        select_output_config, swing_delay_samples, CustomEnginePool, GateOffTracker,
-        OutputDeviceConfig, OutputFormatRange, FALLBACK_SAMPLE_RATE,
+        select_output_config, swing_delay_samples, track_accepts_scheduled_trigger,
+        CustomEnginePool, GateOffTracker, OutputDeviceConfig, OutputFormatRange,
+        FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::AccumulatorRuntimeState;
     use crate::analysis::{pack_ptr, OnsetTableShared};
@@ -4342,5 +4336,24 @@ mod tests {
         );
 
         assert_eq!(resolved, 4.0);
+    }
+
+    #[test]
+    fn scheduled_triggers_respect_track_mute() {
+        let state = SequencerState::new(2, Vec::new());
+        state.pattern.track_params[1].set_mute(true);
+
+        assert!(track_accepts_scheduled_trigger(&state, 0));
+        assert!(!track_accepts_scheduled_trigger(&state, 1));
+    }
+
+    #[test]
+    fn scheduled_triggers_respect_solo_mutes() {
+        let state = SequencerState::new(3, Vec::new());
+        state.pattern.track_params[0].set_solo(true);
+
+        assert!(track_accepts_scheduled_trigger(&state, 0));
+        assert!(!track_accepts_scheduled_trigger(&state, 1));
+        assert!(!track_accepts_scheduled_trigger(&state, 2));
     }
 }
