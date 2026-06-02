@@ -5,6 +5,14 @@
 
 (def neural-8x8-track-router-name "8x8-track-router2")
 (def neural-8x8-track-router-row-height 1.5)
+(def neural-8x8-track-router-control-gap 0.4)
+(def neural-8x8-track-router-row-label-width 1.2)
+(def neural-8x8-track-router-route-width 7.68)
+(def neural-8x8-track-router-delay-width 5.04)
+(def neural-8x8-track-router-quantize-width 5.76)
+(def neural-8x8-track-router-transpose-width 5.04)
+(def neural-8x8-track-router-dampening-width 5.04)
+(def neural-8x8-track-router-recovery-width 5.04)
 (def neural-8x8-track-router-matrix-width 26)
 (def neural-8x8-track-router-matrix-height 12)
 (defstate neural-8x8-track-router-id 0)
@@ -479,6 +487,25 @@
       :height 1.2
       :font-size 9)))
 
+(def neural-8x8-track-router-column-label (key text width)
+  (label text
+    :key key
+    :width width
+    :height 1.0
+    :font-size 8
+    :h-align :center
+    :color :dim))
+
+(def neural-8x8-track-router-control-header ()
+  (h-stack :gap neural-8x8-track-router-control-gap :align :center
+    (neural-8x8-track-router-column-label "neural-router-column-label-index" "" neural-8x8-track-router-row-label-width)
+    (neural-8x8-track-router-column-label "neural-router-column-label-route" "route" neural-8x8-track-router-route-width)
+    (neural-8x8-track-router-column-label "neural-router-column-label-delay" "delay" neural-8x8-track-router-delay-width)
+    (neural-8x8-track-router-column-label "neural-router-column-label-quantize" "quant" neural-8x8-track-router-quantize-width)
+    (neural-8x8-track-router-column-label "neural-router-column-label-transpose" "transp" neural-8x8-track-router-transpose-width)
+    (neural-8x8-track-router-column-label "neural-router-column-label-dampening" "damp" neural-8x8-track-router-dampening-width)
+    (neural-8x8-track-router-column-label "neural-router-column-label-recovery" "recov" neural-8x8-track-router-recovery-width)))
+
 (def neural-8x8-track-router-control-row (row-label selected route delay quantize transpose dampening recovery on-select on-route on-delay on-quantize on-transpose on-dampening on-recovery)
   (box
     :key (str "neural-router-row-" row-label)
@@ -487,15 +514,15 @@
     :background-color :transparent
     :selected-background-color :fx-panel-header-selected-bg
     :corner-radius 4
-    (h-stack :gap 0.4 :align :center
+    (h-stack :gap neural-8x8-track-router-control-gap :align :center
       (box
         :key (str "neural-router-row-label-" row-label)
-        :width 1.2
+        :width neural-8x8-track-router-row-label-width
         :height 1.2
         :padding 0
         :on-click on-select
         (label row-label
-          :width 1.2
+          :width neural-8x8-track-router-row-label-width
           :height 1.2
           :font-size 9
           :h-align :center
@@ -504,7 +531,7 @@
         :value route
         :options neural-8x8-track-router-route-options
         :on-change on-route
-        :width 6.4
+        :width neural-8x8-track-router-route-width
         :height 1.2
         :font-size 9)
       (number-picker
@@ -514,14 +541,14 @@
         :step 1
         :decimals 0
         :on-change on-delay
-        :width 4.2
+        :width neural-8x8-track-router-delay-width
         :height 1.2
         :font-size 9)
       (dropdown
         :value quantize
         :options neural-8x8-track-router-quantize-options
         :on-change on-quantize
-        :width 4.8
+        :width neural-8x8-track-router-quantize-width
         :height 1.2
         :font-size 9)
       (number-picker
@@ -531,7 +558,7 @@
         :step 1
         :decimals 0
         :on-change on-transpose
-        :width 4.2
+        :width neural-8x8-track-router-transpose-width
         :height 1.2
         :font-size 9)
       (number-picker
@@ -541,7 +568,7 @@
         :step 0.01
         :decimals 2
         :on-change on-dampening
-        :width 4.2
+        :width neural-8x8-track-router-dampening-width
         :height 1.2
         :font-size 9)
       (number-picker
@@ -551,7 +578,7 @@
         :step 0.01
         :decimals 2
         :on-change on-recovery
-        :width 4.2
+        :width neural-8x8-track-router-recovery-width
         :height 1.2
         :font-size 9))))
 
@@ -632,8 +659,10 @@
         (box :on-click (lambda (event) (neural-8x8-track-router-clear-selection))
           (v-stack :gap 0.5 :padding 1
             (neural-8x8-track-router-global-controls)
-            (h-stack :gap 1 :align :start
-              (v-stack :gap 0
+            (v-stack :gap 0
+              (neural-8x8-track-router-control-header)
+              (h-stack :gap 1 :align :start
+                (v-stack :gap 0
             (neural-8x8-track-router-control-row
               "1" (bind-seq (neural-8x8-track-router-selected-field current-pattern id 0)) neural-8x8-track-router-route-0 neural-8x8-track-router-delay-0 neural-8x8-track-router-quantize-0 neural-8x8-track-router-transpose-0 neural-8x8-track-router-dampening-0 neural-8x8-track-router-recovery-0
               (lambda (event) (neural-8x8-track-router-select-neuron 0))
@@ -744,7 +773,7 @@
             :control :grid
             :background :transparent
             :fill :white
-            :value (neural-8x8-track-router-visible-matrix SEQ.neural-dampening-matrix)))))))))
+            :value (neural-8x8-track-router-visible-matrix SEQ.neural-dampening-matrix))))))))))
 
 (effect-buffer "*matrix*" (neural-8x8-track-router-panel SEQ.neural-networks SEQ.current-pattern))
 

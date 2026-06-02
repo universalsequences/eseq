@@ -10669,6 +10669,14 @@ mod tests {
                 .find_map(|child| find_by_stable_key(child, key))
         }
 
+        fn assert_width(node: &eseqlisp::layout::LayoutNode, expected: f32, label: &str) {
+            assert!(
+                (node.rect.width - expected).abs() <= 0.05,
+                "{label} should measure to width {expected}, got {:?}",
+                node.rect
+            );
+        }
+
         let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
             "{}/scripts/neural-8x8-track-router.lisp",
@@ -10689,6 +10697,25 @@ mod tests {
         let layout = runtime
             .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 18.0)))
             .expect("router widget tree should lay out");
+
+        for (key, text, width) in [
+            ("neural-router-column-label-route", "route", 7.68),
+            ("neural-router-column-label-delay", "delay", 5.04),
+            ("neural-router-column-label-quantize", "quant", 5.76),
+            ("neural-router-column-label-transpose", "transp", 5.04),
+            ("neural-router-column-label-dampening", "damp", 5.04),
+            ("neural-router-column-label-recovery", "recov", 5.04),
+        ] {
+            let label = find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("{key}"));
+            assert_eq!(label.widget_type, "label", "{key}");
+            assert_eq!(
+                label.props.get("text"),
+                Some(&Value::String(text.to_string())),
+                "{key}"
+            );
+            assert_measured(label);
+            assert_width(label, width, key);
+        }
 
         let mut matrices = Vec::new();
         collect_widgets(&layout, "matrix", &mut matrices);
@@ -10729,6 +10756,28 @@ mod tests {
             Some(Value::Bool(true))
         );
         let row_3 = find_by_stable_key(&layout, "neural-router-row-3").expect("selected row 3");
+        let mut row_3_dropdowns = Vec::new();
+        collect_widgets(row_3, "dropdown", &mut row_3_dropdowns);
+        assert_eq!(
+            row_3_dropdowns.len(),
+            2,
+            "row 3 should contain route and quantize dropdowns"
+        );
+        row_3_dropdowns.sort_by(|left, right| left.rect.col.total_cmp(&right.rect.col));
+        assert_width(row_3_dropdowns[0], 7.68, "row route dropdown");
+        assert_width(row_3_dropdowns[1], 5.76, "row quantize dropdown");
+
+        let mut row_3_pickers = Vec::new();
+        collect_widgets(row_3, "number-picker", &mut row_3_pickers);
+        assert_eq!(
+            row_3_pickers.len(),
+            4,
+            "row 3 should contain delay, transpose, dampening, and recovery pickers"
+        );
+        for picker in row_3_pickers {
+            assert_width(picker, 5.04, "row number picker");
+        }
+
         let expected_selected_field = format!(
             "neural-neuron-selected-0-{}-2",
             state.current_neural_networks()[0].id
