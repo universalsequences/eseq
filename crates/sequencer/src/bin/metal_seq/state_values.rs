@@ -930,6 +930,45 @@ pub(crate) fn sync_instrument_param_value_field(
     false
 }
 
+pub(crate) fn sync_instrument_param_value_field_with_neural_selection(
+    rt: &mut Runtime,
+    app: &ui::App,
+    track: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) -> bool {
+    if let Some((name, value)) = app
+        .graph
+        .instrument_descriptors
+        .get(track)
+        .and_then(|desc| desc.params.get(param_idx))
+        .and_then(|pdesc| {
+            app.state.pattern.instrument_slots.get(track).map(|slot| {
+                let stored = selected_neural_neurons
+                    .and_then(|selection| {
+                        sequencer::lisp_effect::selected_neural_instrument_plock_value(
+                            &app.state, selection, track, param_idx,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        slot_param_stored_value(slot, pdesc, param_idx, display_step)
+                    });
+                (pdesc.name.clone(), pdesc.stored_to_user(stored))
+            })
+        })
+    {
+        return reactive_set_needs_ui(rt.set_reactive(
+            "SEQ",
+            &instrument_param_value_field(track, param_idx, &name),
+            Value::Number(value as f64),
+        ));
+    }
+    false
+}
+
 pub(crate) fn sync_sampler_selection_time_fields(
     rt: &mut Runtime,
     app: &ui::App,
@@ -1021,6 +1060,51 @@ pub(crate) fn sync_track_effect_param_value_field(
     false
 }
 
+pub(crate) fn sync_track_effect_param_value_field_with_neural_selection(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) -> bool {
+    if let Some((name, value)) = descriptors
+        .get(track)
+        .and_then(|slots| slots.get(slot_idx))
+        .and_then(|desc| desc.params.get(param_idx).map(|p| (&desc.name, p)))
+        .and_then(|(_, pdesc)| {
+            state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+                .map(|slot| {
+                    let stored = selected_neural_neurons
+                        .and_then(|selection| {
+                            sequencer::lisp_effect::selected_neural_effect_plock_value(
+                                state, selection, track, slot_idx, param_idx,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            slot_param_stored_value(slot, pdesc, param_idx, display_step)
+                        });
+                    (pdesc.name.clone(), stored)
+                })
+        })
+    {
+        return reactive_set_needs_ui(rt.set_reactive(
+            "SEQ",
+            &track_effect_param_value_field(track, slot_idx, param_idx, &name),
+            Value::Number(value as f64),
+        ));
+    }
+    false
+}
+
 pub(crate) fn sync_midi_fx_param_value_field(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1094,6 +1178,19 @@ pub(crate) fn sync_fx_param_binding_fields(
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> bool {
+    sync_fx_param_binding_fields_with_neural_selection(rt, app, state, track, selected_steps, None)
+}
+
+pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) -> bool {
     let mut needs_ui = false;
     if track < app.tracks.len() {
         let selected_step = selected_plock_step(selected_steps);
@@ -1103,8 +1200,14 @@ pub(crate) fn sync_fx_param_binding_fields(
         if let Some(desc) = app.graph.instrument_descriptors.get(track) {
             for (param_idx, pdesc) in desc.params.iter().enumerate() {
                 if param_supports_value_binding(pdesc) {
-                    needs_ui |=
-                        sync_instrument_param_value_field(rt, app, track, param_idx, display_step);
+                    needs_ui |= sync_instrument_param_value_field_with_neural_selection(
+                        rt,
+                        app,
+                        track,
+                        param_idx,
+                        display_step,
+                        selected_neural_neurons,
+                    );
                 }
             }
         }
@@ -1112,7 +1215,7 @@ pub(crate) fn sync_fx_param_binding_fields(
             for (slot_idx, desc) in slots.iter().enumerate() {
                 for (param_idx, pdesc) in desc.params.iter().enumerate() {
                     if param_supports_value_binding(pdesc) {
-                        needs_ui |= sync_track_effect_param_value_field(
+                        needs_ui |= sync_track_effect_param_value_field_with_neural_selection(
                             rt,
                             state,
                             &app.graph.effect_descriptors,
@@ -1120,6 +1223,7 @@ pub(crate) fn sync_fx_param_binding_fields(
                             slot_idx,
                             param_idx,
                             display_step,
+                            selected_neural_neurons,
                         );
                     }
                 }
@@ -2656,9 +2760,9 @@ pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -
                 Rc::new(RefCell::new(Value::List(
                     (0..size)
                         .map(|col| {
-                            Rc::new(RefCell::new(Value::Number(
-                                neural_dampening_display_value(snapshot.dampening[row][col]),
-                            )))
+                            Rc::new(RefCell::new(Value::Number(neural_dampening_display_value(
+                                snapshot.dampening[row][col],
+                            ))))
                         })
                         .collect(),
                 )))
@@ -2670,17 +2774,17 @@ pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -
 pub(crate) fn build_neural_energy_matrix_value(state: &Arc<SequencerState>) -> Value {
     let snapshot = state.neural_visualization();
     let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
-    neural_column_matrix_value((0..size).map(|idx| {
-        neural_energy_display_value(snapshot.energy[idx])
-    }))
+    neural_column_matrix_value(
+        (0..size).map(|idx| neural_energy_display_value(snapshot.energy[idx])),
+    )
 }
 
 pub(crate) fn build_neural_trigger_matrix_value(state: &Arc<SequencerState>) -> Value {
     let snapshot = state.neural_visualization();
     let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
-    neural_column_matrix_value((0..size).map(|idx| {
-        neural_trigger_display_value(snapshot.trigger_activity[idx])
-    }))
+    neural_column_matrix_value(
+        (0..size).map(|idx| neural_trigger_display_value(snapshot.trigger_activity[idx])),
+    )
 }
 
 fn neural_column_matrix_value(values: impl Iterator<Item = f64>) -> Value {
@@ -3052,28 +3156,22 @@ pub(crate) fn build_effects_value(
                                     })
                                 })
                                 .unwrap_or(source_current),
-                            source_value_field: target.source_param_idx.and_then(
-                                |source_param_idx| {
-                                    plock_step.is_none().then(|| {
-                                        let source_desc = &desc.params[source_param_idx];
-                                        track_effect_param_value_field(
-                                            track,
-                                            slot_idx,
-                                            source_param_idx,
-                                            &source_desc.name,
-                                        )
-                                    })
-                                },
-                            ),
-                            depth_value: depth_desc.stored_to_user(depth_current),
-                            depth_value_field: plock_step.is_none().then(|| {
+                            source_value_field: target.source_param_idx.map(|source_param_idx| {
+                                let source_desc = &desc.params[source_param_idx];
                                 track_effect_param_value_field(
                                     track,
                                     slot_idx,
-                                    target.depth_param_idx,
-                                    &depth_desc.name,
+                                    source_param_idx,
+                                    &source_desc.name,
                                 )
                             }),
+                            depth_value: depth_desc.stored_to_user(depth_current),
+                            depth_value_field: Some(track_effect_param_value_field(
+                                track,
+                                slot_idx,
+                                target.depth_param_idx,
+                                &depth_desc.name,
+                            )),
                             depth_min: target.depth_min,
                             depth_max: target.depth_max,
                             depth_unit: target.depth_unit.clone(),
@@ -3153,7 +3251,7 @@ pub(crate) fn build_effects_value(
                                 "boolean".to_string(),
                                 Rc::new(RefCell::new(Value::Bool(true))),
                             );
-                            if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                            if param_supports_value_binding(pdesc) {
                                 insert_string_prop(
                                     &mut pmap,
                                     "value-field",
@@ -3184,6 +3282,18 @@ pub(crate) fn build_effects_value(
                                 "options".to_string(),
                                 Rc::new(RefCell::new(Value::List(option_values))),
                             );
+                            if param_supports_value_binding(pdesc) {
+                                insert_string_prop(
+                                    &mut pmap,
+                                    "value-field",
+                                    track_effect_param_value_field(
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        &pdesc.name,
+                                    ),
+                                );
+                            }
                         }
                         ParamKind::Continuous { .. } => {
                             if desc.name == "Delay" && param_idx == 2 && delay_synced {
@@ -3217,7 +3327,8 @@ pub(crate) fn build_effects_value(
                                         (SyncDivision::ALL.len() - 1) as f64,
                                     ))),
                                 );
-                            } else if plock_step.is_none() {
+                            }
+                            if param_supports_value_binding(pdesc) {
                                 insert_string_prop(
                                     &mut pmap,
                                     "value-field",
@@ -3326,13 +3437,11 @@ pub(crate) fn build_effects_value(
                         }
                         ParamKind::Continuous { .. } => {}
                     }
-                    if plock_step.is_none() {
-                        insert_string_prop(
-                            &mut pmap,
-                            "value-field",
-                            track_effect_param_value_field(track, slot_idx, param_idx, &pdesc.name),
-                        );
-                    }
+                    insert_string_prop(
+                        &mut pmap,
+                        "value-field",
+                        track_effect_param_value_field(track, slot_idx, param_idx, &pdesc.name),
+                    );
                     let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
                     if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
                         == Some("source")
@@ -3512,7 +3621,7 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                         "boolean".to_string(),
                                         Rc::new(RefCell::new(Value::Bool(true))),
                                     );
-                                    if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                                    if param_supports_value_binding(pdesc) {
                                         insert_string_prop(
                                             &mut pmap,
                                             "value-field",
@@ -3543,9 +3652,21 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                         "options".to_string(),
                                         Rc::new(RefCell::new(Value::List(option_values))),
                                     );
+                                    if param_supports_value_binding(pdesc) {
+                                        insert_string_prop(
+                                            &mut pmap,
+                                            "value-field",
+                                            bus_effect_param_value_field(
+                                                bus_idx,
+                                                slot_idx,
+                                                param_idx,
+                                                &pdesc.name,
+                                            ),
+                                        );
+                                    }
                                 }
                                 ParamKind::Continuous { .. } => {
-                                    if plock_step.is_none() {
+                                    if param_supports_value_binding(pdesc) {
                                         insert_string_prop(
                                             &mut pmap,
                                             "value-field",
@@ -3666,7 +3787,7 @@ pub(crate) fn build_midi_effects_value(
                                 "boolean".to_string(),
                                 Rc::new(RefCell::new(Value::Bool(true))),
                             );
-                            if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                            if param_supports_value_binding(pdesc) {
                                 insert_string_prop(
                                     &mut pmap,
                                     "value-field",
@@ -3697,9 +3818,21 @@ pub(crate) fn build_midi_effects_value(
                                 "options".to_string(),
                                 Rc::new(RefCell::new(Value::List(option_values))),
                             );
+                            if param_supports_value_binding(pdesc) {
+                                insert_string_prop(
+                                    &mut pmap,
+                                    "value-field",
+                                    midi_fx_param_value_field(
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        &pdesc.name,
+                                    ),
+                                );
+                            }
                         }
                         ParamKind::Continuous { .. } => {
-                            if plock_step.is_none() {
+                            if param_supports_value_binding(pdesc) {
                                 insert_string_prop(
                                     &mut pmap,
                                     "value-field",
@@ -3911,20 +4044,16 @@ pub(crate) fn build_sampler_panel_value(
                                 .map(|source_desc| source_desc.stored_to_user(source_current))
                         })
                         .unwrap_or(source_current),
-                    source_value_field: target.source_param_idx.and_then(|source_param_idx| {
-                        plock_step.is_none().then(|| {
-                            let source_desc = &desc.params[source_param_idx];
-                            instrument_param_value_field(track, source_param_idx, &source_desc.name)
-                        })
+                    source_value_field: target.source_param_idx.map(|source_param_idx| {
+                        let source_desc = &desc.params[source_param_idx];
+                        instrument_param_value_field(track, source_param_idx, &source_desc.name)
                     }),
                     depth_value: depth_desc.stored_to_user(depth_current),
-                    depth_value_field: plock_step.is_none().then(|| {
-                        instrument_param_value_field(
-                            track,
-                            target.depth_param_idx,
-                            &depth_desc.name,
-                        )
-                    }),
+                    depth_value_field: Some(instrument_param_value_field(
+                        track,
+                        target.depth_param_idx,
+                        &depth_desc.name,
+                    )),
                     depth_min,
                     depth_max,
                     depth_unit: target.depth_unit.clone(),
@@ -4024,7 +4153,7 @@ pub(crate) fn build_sampler_panel_value(
                     "boolean".to_string(),
                     Rc::new(RefCell::new(Value::Bool(true))),
                 );
-                if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                if param_supports_value_binding(pdesc) {
                     insert_string_prop(
                         &mut pmap,
                         "value-field",
@@ -4050,9 +4179,16 @@ pub(crate) fn build_sampler_panel_value(
                     "options".to_string(),
                     Rc::new(RefCell::new(Value::List(option_values))),
                 );
+                if param_supports_value_binding(pdesc) {
+                    insert_string_prop(
+                        &mut pmap,
+                        "value-field",
+                        instrument_param_value_field(track, param_idx, &pdesc.name),
+                    );
+                }
             }
             sequencer::effects::ParamKind::Continuous { .. } => {
-                if plock_step.is_none() {
+                if param_supports_value_binding(pdesc) {
                     insert_string_prop(
                         &mut pmap,
                         "value-field",
@@ -4517,20 +4653,16 @@ pub(crate) fn build_instrument_panel_value(
                                 .map(|source_desc| source_desc.stored_to_user(source_current))
                         })
                         .unwrap_or(source_current),
-                    source_value_field: target.source_param_idx.and_then(|source_param_idx| {
-                        plock_step.is_none().then(|| {
-                            let source_desc = &desc.params[source_param_idx];
-                            instrument_param_value_field(track, source_param_idx, &source_desc.name)
-                        })
+                    source_value_field: target.source_param_idx.map(|source_param_idx| {
+                        let source_desc = &desc.params[source_param_idx];
+                        instrument_param_value_field(track, source_param_idx, &source_desc.name)
                     }),
                     depth_value: depth_desc.stored_to_user(depth_current),
-                    depth_value_field: plock_step.is_none().then(|| {
-                        instrument_param_value_field(
-                            track,
-                            target.depth_param_idx,
-                            &depth_desc.name,
-                        )
-                    }),
+                    depth_value_field: Some(instrument_param_value_field(
+                        track,
+                        target.depth_param_idx,
+                        &depth_desc.name,
+                    )),
                     depth_min,
                     depth_max,
                     depth_unit: target.depth_unit.clone(),
@@ -4591,9 +4723,7 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                plock_step
-                    .is_none()
-                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
                 None,
             );
@@ -4607,9 +4737,7 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                plock_step
-                    .is_none()
-                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 modulation_targets.get(&param_idx),
                 pdesc.ui_metadata.as_ref(),
             );
@@ -4650,9 +4778,7 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                plock_step
-                    .is_none()
-                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
                 None,
             );
@@ -5153,6 +5279,30 @@ pub(crate) fn sync_track_params(
     );
 }
 
+pub(crate) fn sync_track_params_with_neural_selection(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) {
+    sync_track_params(rt, app, state, track, selected);
+    rt.set_reactive(
+        "SEQ",
+        "track-plocks",
+        build_track_plocks_value_with_neural_selection(
+            app,
+            state,
+            track,
+            selected,
+            selected_neural_neurons,
+        ),
+    );
+}
+
 fn plock_entry(
     step: usize,
     target: &str,
@@ -5165,9 +5315,47 @@ fn plock_entry(
     param_idx: Option<usize>,
     options: Option<Vec<String>>,
 ) -> Rc<RefCell<Value>> {
+    plock_entry_with_label(
+        &format!("S{}", step + 1),
+        step,
+        target,
+        group,
+        name,
+        value,
+        min,
+        max,
+        slot_idx,
+        param_idx,
+        options,
+        None,
+        None,
+        None,
+    )
+}
+
+fn plock_entry_with_label(
+    label: &str,
+    step: usize,
+    target: &str,
+    group: &str,
+    name: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    slot_idx: Option<usize>,
+    param_idx: Option<usize>,
+    options: Option<Vec<String>>,
+    source: Option<&str>,
+    target_track: Option<usize>,
+    network_id: Option<u64>,
+) -> Rc<RefCell<Value>> {
     use std::collections::HashMap;
 
     let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    map.insert(
+        "label".to_string(),
+        Rc::new(RefCell::new(Value::String(label.to_string()))),
+    );
     map.insert(
         "step".to_string(),
         Rc::new(RefCell::new(Value::Number((step + 1) as f64))),
@@ -5212,6 +5400,24 @@ fn plock_entry(
             Rc::new(RefCell::new(Value::Number(param_idx as f64))),
         );
     }
+    if let Some(source) = source {
+        map.insert(
+            "source".to_string(),
+            Rc::new(RefCell::new(Value::String(source.to_string()))),
+        );
+    }
+    if let Some(target_track) = target_track {
+        map.insert(
+            "target-track".to_string(),
+            Rc::new(RefCell::new(Value::Number(target_track as f64))),
+        );
+    }
+    if let Some(network_id) = network_id {
+        map.insert(
+            "network-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(network_id as f64))),
+        );
+    }
     if let Some(options) = options {
         let selected = options
             .get(value.round().max(0.0) as usize)
@@ -5232,6 +5438,142 @@ fn plock_entry(
         );
     }
     Rc::new(RefCell::new(Value::Map(map)))
+}
+
+pub(crate) fn build_track_plocks_value_with_neural_selection(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) -> Value {
+    let Some(selection) = selected_neural_neurons else {
+        return build_track_plocks_value(app, state, track, selected);
+    };
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    if !selection
+        .iter()
+        .any(|selected| selected.pattern_idx == current_pattern)
+    {
+        return build_track_plocks_value(app, state, track, selected);
+    }
+    build_selected_neural_plocks_value(app, state, selection)
+}
+
+fn build_selected_neural_plocks_value(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    selection: &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+) -> Value {
+    use sequencer::effects::ParamKind;
+
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let networks = state.current_neural_networks();
+    let mut items = Vec::new();
+
+    for selected in selection
+        .iter()
+        .filter(|selected| selected.pattern_idx == current_pattern)
+    {
+        let Some(network) = networks
+            .iter()
+            .find(|network| network.id == selected.network_id)
+        else {
+            continue;
+        };
+        let Some(neuron) = network.neurons.get(selected.neuron_idx) else {
+            continue;
+        };
+        let label = format!("N{}", selected.neuron_idx + 1);
+
+        for override_param in &neuron.output_overrides.instrument {
+            let target_track = override_param.target_track;
+            let Some(desc) = app.graph.instrument_descriptors.get(target_track) else {
+                continue;
+            };
+            let Some(param) = desc.params.get(override_param.param_index) else {
+                continue;
+            };
+            let Some(slot) = state.pattern.instrument_slots.get(target_track) else {
+                continue;
+            };
+            if slot.param_node_id(override_param.param_index) != Some(override_param.param_id) {
+                continue;
+            }
+            let options = match &param.kind {
+                ParamKind::Enum { labels } => Some(labels.clone()),
+                ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                ParamKind::Continuous { .. } => None,
+            };
+            items.push(plock_entry_with_label(
+                &label,
+                selected.neuron_idx,
+                "neural-instrument",
+                &format!("T{} inst", target_track + 1),
+                &param.name,
+                param.stored_to_user(override_param.value),
+                param.stored_to_user(param.min),
+                param.stored_to_user(param.max),
+                None,
+                Some(override_param.param_index),
+                options,
+                Some("neuron"),
+                Some(target_track),
+                Some(network.id),
+            ));
+        }
+
+        for override_param in &neuron.output_overrides.effects {
+            let target_track = override_param.target_track;
+            let Some(desc) = app
+                .graph
+                .effect_descriptors
+                .get(target_track)
+                .and_then(|descs| descs.get(override_param.slot_index))
+            else {
+                continue;
+            };
+            let Some(param) = desc.params.get(override_param.param_index) else {
+                continue;
+            };
+            let Some(slot) = state
+                .pattern
+                .effect_chains
+                .get(target_track)
+                .and_then(|chain| chain.get(override_param.slot_index))
+            else {
+                continue;
+            };
+            if slot.param_node_id(override_param.param_index) != Some(override_param.param_id) {
+                continue;
+            }
+            let options = match &param.kind {
+                ParamKind::Enum { labels } => Some(labels.clone()),
+                ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                ParamKind::Continuous { .. } => None,
+            };
+            items.push(plock_entry_with_label(
+                &label,
+                selected.neuron_idx,
+                "neural-effect",
+                &format!("T{} {}", target_track + 1, desc.name),
+                &param.name,
+                override_param.value,
+                param.min,
+                param.max,
+                Some(override_param.slot_index),
+                Some(override_param.param_index),
+                options,
+                Some("neuron"),
+                Some(target_track),
+                Some(network.id),
+            ));
+        }
+    }
+
+    Value::List(items)
 }
 
 pub(crate) fn build_track_plocks_value(
@@ -9999,6 +10341,138 @@ mod tests {
     }
 
     #[test]
+    fn sync_instrument_param_value_field_uses_selected_neuron_plock_value() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let resonance_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "resonance")
+            .expect("filter descriptor should include resonance");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(resonance_idx, 0.2);
+        app.state
+            .edit_current_neural_networks(|networks| {
+                let mut network = sequencer::neural::ProjectNeuralNetwork {
+                    id: 11,
+                    name: "router".to_string(),
+                    num_neurons: 1,
+                    ..sequencer::neural::ProjectNeuralNetwork::default()
+                };
+                network.neurons[0].output_overrides.instrument =
+                    vec![sequencer::neural::ProjectParamOverride {
+                        target_track: 0,
+                        param_id: sequencer::neural::ParamNodeId {
+                            logical_id: 17,
+                            node_param_idx: desc.params[resonance_idx].node_param_idx,
+                        },
+                        param_index: resonance_idx,
+                        value: 0.75,
+                    }];
+                networks.push(network);
+                Ok(())
+            })
+            .unwrap();
+        let selection =
+            std::collections::BTreeSet::from([sequencer::lisp_effect::SelectedNeuralNeuron {
+                pattern_idx: 0,
+                network_id: 11,
+                neuron_idx: 0,
+            }]);
+        let field =
+            instrument_param_value_field(0, resonance_idx, &desc.params[resonance_idx].name);
+        let mut runtime = Runtime::new();
+
+        sync_instrument_param_value_field_with_neural_selection(
+            &mut runtime,
+            &app,
+            0,
+            resonance_idx,
+            None,
+            Some(&selection),
+        );
+
+        assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(0.75));
+    }
+
+    #[test]
+    fn track_plocks_value_shows_selected_neuron_plocks() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let resonance_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "resonance")
+            .expect("filter descriptor should include resonance");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
+        app.state.pattern.instrument_slots[0].set_plock(2, resonance_idx, 0.25);
+        app.state
+            .edit_current_neural_networks(|networks| {
+                let mut network = sequencer::neural::ProjectNeuralNetwork {
+                    id: 11,
+                    name: "router".to_string(),
+                    num_neurons: 1,
+                    ..sequencer::neural::ProjectNeuralNetwork::default()
+                };
+                network.neurons[0].output_overrides.instrument =
+                    vec![sequencer::neural::ProjectParamOverride {
+                        target_track: 0,
+                        param_id: sequencer::neural::ParamNodeId {
+                            logical_id: 17,
+                            node_param_idx: desc.params[resonance_idx].node_param_idx,
+                        },
+                        param_index: resonance_idx,
+                        value: 0.75,
+                    }];
+                networks.push(network);
+                Ok(())
+            })
+            .unwrap();
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([2])));
+        let selection =
+            std::collections::BTreeSet::from([sequencer::lisp_effect::SelectedNeuralNeuron {
+                pattern_idx: 0,
+                network_id: 11,
+                neuron_idx: 0,
+            }]);
+
+        let Value::List(items) = build_track_plocks_value_with_neural_selection(
+            &app,
+            &app.state,
+            0,
+            &selected_steps,
+            Some(&selection),
+        ) else {
+            panic!("track p-locks should be a list");
+        };
+
+        assert_eq!(
+            items.len(),
+            1,
+            "selected neuron p-locks should replace selected-step p-lock display"
+        );
+        let item = items[0].borrow();
+        let Value::Map(map) = &*item else {
+            panic!("track p-lock item should be a map");
+        };
+        assert_eq!(value_map_string(map, "label").as_deref(), Some("N1"));
+        assert_eq!(value_map_string(map, "source").as_deref(), Some("neuron"));
+        assert_eq!(
+            value_map_string(map, "target").as_deref(),
+            Some("neural-instrument")
+        );
+        assert_eq!(value_map_string(map, "group").as_deref(), Some("T1 inst"));
+        assert_eq!(value_map_string(map, "name").as_deref(), Some("resonance"));
+        let value = map.get("value").and_then(|value| match &*value.borrow() {
+            Value::Number(value) => Some(*value),
+            _ => None,
+        });
+        assert_eq!(value, Some(0.75));
+    }
+
+    #[test]
     fn instrument_panel_restores_value_field_after_selection_clears() {
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
         let cutoff_idx = desc
@@ -10034,8 +10508,8 @@ mod tests {
             "selected instrument panel should show the selected step p-lock"
         );
         assert!(
-            !value_param_has_key(&selected_panel, "cutoff", "value-field"),
-            "selected p-lock panel should not keep editing the default value field"
+            value_param_has_value_field(&selected_panel, "cutoff", &value_field),
+            "selected p-lock panel should keep a reactive display value field"
         );
 
         selected_steps.lock().unwrap().clear();
@@ -10087,8 +10561,8 @@ mod tests {
             "selected sampler panel should show the selected step p-lock"
         );
         assert!(
-            !value_param_has_key_by_idx(&selected_panel, "attack", attack_idx, "value-field"),
-            "selected sampler p-lock panel should not keep editing the default value field"
+            value_param_has_value_field_by_idx(&selected_panel, "attack", attack_idx, &value_field),
+            "selected sampler p-lock panel should keep a reactive display value field"
         );
 
         selected_steps.lock().unwrap().clear();
@@ -10527,6 +11001,7 @@ mod tests {
                 ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
+                ("selected-neural-neurons", test_list(vec![])),
                 ("steps", steps.clone()),
                 ("velocities", step_numbers.clone()),
                 ("durations", test_number_list(&[1.0; 16])),
@@ -11903,6 +12378,63 @@ mod tests {
             "empty fx fallback should fit viewport without scroll overflow; bottom={:.3}",
             layout_bottom(&layout)
         );
+    }
+
+    #[test]
+    fn metal_seq_track_panel_renders_selected_neuron_plock_rows() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut plock = HashMap::new();
+        plock.insert(
+            "label".to_string(),
+            Rc::new(RefCell::new(Value::String("N1".to_string()))),
+        );
+        plock.insert(
+            "step-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        plock.insert(
+            "target".to_string(),
+            Rc::new(RefCell::new(Value::String("neural-instrument".to_string()))),
+        );
+        plock.insert(
+            "group".to_string(),
+            Rc::new(RefCell::new(Value::String("T1 inst".to_string()))),
+        );
+        plock.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("resonance".to_string()))),
+        );
+        plock.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.75))),
+        );
+        plock.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
+        plock.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(1.0))));
+        plock.insert(
+            "source".to_string(),
+            Rc::new(RefCell::new(Value::String("neuron".to_string()))),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plocks",
+            Value::List(vec![Rc::new(RefCell::new(Value::Map(plock)))]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
+        editor.set_layout_viewport(80, 20);
+        let layout = editor.widget_layout().expect("track panel layout");
+        let label = find_layout_node_by_text(&layout, "N1")
+            .expect("selected neuron p-lock label should render");
+
+        assert_finite_nonzero_rect(label, "selected neuron p-lock label");
     }
 
     #[test]

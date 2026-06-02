@@ -11,7 +11,7 @@ use crate::accumulator::{
     ACCUMULATOR_REGISTRY,
 };
 use crate::lisp_effect::{self, AccumulatorNoteSpan};
-use crate::neural::{NeuralRuntime, ParamNodeId};
+use crate::neural::{NeuralOutput, NeuralRuntime, ParamNodeId};
 use crate::scheduled_event::{
     EventSource, ScheduledChordData, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
@@ -1189,6 +1189,169 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
     }
 }
 
+fn midi_fx_step_for_step_event(snapshot: &SequencerSnapshot, event: &StepEvent) -> usize {
+    let step = match event.source {
+        EventSource::Step { step, .. } => step,
+        EventSource::Network {
+            seed: Some((_, step)),
+            ..
+        } => step,
+        EventSource::Network { .. } => 0,
+    };
+    midi_fx_event_step_for_track(snapshot, event.track, step)
+}
+
+fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    snapshot: &SequencerSnapshot,
+    runtime: Option<&mut lisp_effect::ScratchControlRuntime>,
+    pattern_epoch: u64,
+    sample_time: u64,
+    samples_per_quarter: f32,
+    arp_phase_beats: f32,
+    mut event: StepEvent,
+    debug_accum: bool,
+) -> bool {
+    if event.track >= snapshot.tracks.len() {
+        return false;
+    }
+    let run_midi_fx = snapshot.tracks[event.track].params.midi_fx_position
+        == MidiFxPosition::PostAccumulator
+        && !snapshot.tracks[event.track].params.midi_fx_chain.is_empty();
+    let Some(runtime) = runtime else {
+        return enqueue_step_event(queue, snapshot, pattern_epoch, sample_time, event);
+    };
+    if !run_midi_fx {
+        return enqueue_step_event(queue, snapshot, pattern_epoch, sample_time, event);
+    }
+    if let EventSource::Network { seed, neuron, .. } = event.source.clone() {
+        normalize_network_event_destination(snapshot, neuron, seed, &mut event);
+    }
+
+    let step = midi_fx_step_for_step_event(snapshot, &event);
+    let step_beats = if samples_per_quarter > 0.0 {
+        event.samples_per_step / samples_per_quarter
+    } else {
+        0.0
+    };
+    let event =
+        midi_fx_event_from_step_event(snapshot, event, step, step_beats, 0.0, arp_phase_beats);
+    let events =
+        run_midi_fx_chain_for_track(runtime, snapshot, event.track, vec![event], 0, debug_accum);
+    enqueue_midi_fx_events(
+        queue,
+        snapshot,
+        pattern_epoch,
+        sample_time,
+        samples_per_quarter,
+        events,
+    )
+}
+
+fn enqueue_neuron_parameter_events<const QUEUE_CAP: usize>(
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    pattern_epoch: u64,
+    sample_time: u64,
+    parameter_events: NeuronParameterEvents,
+) -> bool {
+    let mut ok = true;
+    for (track, instrument_params) in parameter_events.instrument {
+        if instrument_params.is_empty() {
+            continue;
+        }
+        if queue
+            .push(ScheduledEvent {
+                pattern_epoch,
+                sample_time,
+                kind: ScheduledEventKind::InstrumentParams {
+                    track,
+                    instrument_params,
+                },
+            })
+            .is_err()
+        {
+            ok = false;
+            break;
+        }
+    }
+    if ok {
+        for (track, effect_params) in parameter_events.effects {
+            if effect_params.is_empty() {
+                continue;
+            }
+            if queue
+                .push(ScheduledEvent {
+                    pattern_epoch,
+                    sample_time,
+                    kind: ScheduledEventKind::EffectParams {
+                        track,
+                        effect_params,
+                    },
+                })
+                .is_err()
+            {
+                ok = false;
+                break;
+            }
+        }
+    }
+    ok
+}
+
+fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    snapshot: &SequencerSnapshot,
+    runtime: Option<&mut lisp_effect::ScratchControlRuntime>,
+    pattern_epoch: u64,
+    sample_time: u64,
+    samples_per_quarter: f32,
+    arp_phase_beats: f32,
+    output: NeuralOutput,
+    debug_accum: bool,
+) -> bool {
+    let mut event = output.event;
+    let (seed, neuron) = match event.source.clone() {
+        EventSource::Network { seed, neuron, .. } => (seed, neuron),
+        EventSource::Step { .. } => {
+            return output.emit_trigger
+                && enqueue_step_event_with_midi_fx(
+                    queue,
+                    snapshot,
+                    runtime,
+                    pattern_epoch,
+                    sample_time,
+                    samples_per_quarter,
+                    arp_phase_beats,
+                    event,
+                    debug_accum,
+                );
+        }
+    };
+    if output.emit_trigger {
+        normalize_network_event_destination(snapshot, neuron, seed, &mut event);
+    }
+    let trigger_track = output.emit_trigger.then_some(event.track);
+    let parameter_events =
+        apply_neuron_output_overrides(snapshot, neuron, trigger_track, &mut event);
+    if !enqueue_neuron_parameter_events(queue, pattern_epoch, sample_time, parameter_events) {
+        return false;
+    }
+    if !output.emit_trigger {
+        return true;
+    }
+    enqueue_step_event_with_midi_fx(
+        queue,
+        snapshot,
+        runtime,
+        pattern_epoch,
+        sample_time,
+        samples_per_quarter,
+        arp_phase_beats,
+        event,
+        debug_accum,
+    )
+}
+
 fn normalize_network_event_destination(
     snapshot: &SequencerSnapshot,
     neuron_idx: usize,
@@ -1200,7 +1363,6 @@ fn normalize_network_event_destination(
         event.instrument_params = resolve_instrument_defaults(snapshot, event.track);
         event.sampler_params = resolve_sampler_defaults(snapshot, event.track);
     }
-    apply_neuron_output_overrides(snapshot, neuron_idx, event);
 }
 
 fn resolve_sampler_defaults(
@@ -1234,78 +1396,179 @@ fn resolve_sampler_defaults(
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+struct NeuronParameterEvents {
+    instrument: Vec<(usize, ScheduledInstrumentParams)>,
+    effects: Vec<(usize, Vec<ScheduledEffectParam>)>,
+}
+
+fn push_target_instrument_param(
+    events: &mut Vec<(usize, ScheduledInstrumentParams)>,
+    track: usize,
+    param: ScheduledInstrumentParam,
+) {
+    if let Some((_, params)) = events
+        .iter_mut()
+        .find(|(event_track, _)| *event_track == track)
+    {
+        if let Some(existing) = params
+            .iter_mut()
+            .find(|existing| existing.target == param.target && existing.idx == param.idx)
+        {
+            *existing = param;
+        } else if !params.is_full() {
+            params.push(param);
+        }
+        return;
+    }
+    let mut params = ScheduledInstrumentParams::new();
+    params.push(param);
+    events.push((track, params));
+}
+
+fn push_target_effect_param(
+    events: &mut Vec<(usize, Vec<ScheduledEffectParam>)>,
+    track: usize,
+    param: ScheduledEffectParam,
+) {
+    if let Some((_, params)) = events
+        .iter_mut()
+        .find(|(event_track, _)| *event_track == track)
+    {
+        if let Some(existing) = params
+            .iter_mut()
+            .find(|existing| existing.logical_id == param.logical_id && existing.idx == param.idx)
+        {
+            *existing = param;
+        } else {
+            params.push(param);
+        }
+        return;
+    }
+    events.push((track, vec![param]));
+}
+
+fn resolve_neuron_instrument_override(
+    snapshot: &SequencerSnapshot,
+    override_param: &crate::neural::ProjectParamOverride,
+) -> Option<(ScheduledInstrumentParam, u64)> {
+    let track = snapshot.tracks.get(override_param.target_track)?;
+    let param_idx = override_param.param_index;
+    let raw_idx = track
+        .instrument_slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()?;
+    let expected_id = slot_param_identity(
+        track.instrument_slot.node_id,
+        track.instrument_slot.modulator_node_id,
+        raw_idx,
+    )?;
+    if expected_id != override_param.param_id {
+        return None;
+    }
+    let span = track
+        .instrument_slot
+        .param_node_spans
+        .get(param_idx)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        (
+            ScheduledInstrumentParamTarget::Modulator,
+            (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+        )
+    } else {
+        (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
+    };
+    Some((
+        ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value: override_param.value,
+        },
+        param_idx as u64,
+    ))
+}
+
+fn resolve_neuron_effect_override(
+    snapshot: &SequencerSnapshot,
+    override_param: &crate::neural::ProjectEffectParamOverride,
+) -> Option<ScheduledEffectParam> {
+    let track = snapshot.tracks.get(override_param.target_track)?;
+    let slot = track.effect_slots.get(override_param.slot_index)?;
+    let raw_idx = slot
+        .param_node_indices
+        .get(override_param.param_index)
+        .copied()?;
+    let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx)?;
+    if expected_id != override_param.param_id {
+        return None;
+    }
+    let (logical_id, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        if slot.modulator_node_id == 0 {
+            return None;
+        }
+        (
+            slot.modulator_node_id as u64,
+            raw_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
+        )
+    } else {
+        (slot.node_id as u64, raw_idx as u64)
+    };
+    if logical_id != override_param.param_id.logical_id {
+        return None;
+    }
+    Some(ScheduledEffectParam {
+        logical_id,
+        idx,
+        value: override_param.value,
+    })
+}
+
 fn apply_neuron_output_overrides(
     snapshot: &SequencerSnapshot,
     neuron_idx: usize,
+    trigger_track: Option<usize>,
     event: &mut StepEvent,
-) {
+) -> NeuronParameterEvents {
     let Some(network) = snapshot
         .neural_networks
         .iter()
         .find(|network| network.enabled && neuron_idx < network.neurons.len())
     else {
-        return;
+        return NeuronParameterEvents::default();
     };
     let Some(neuron) = network.neurons.get(neuron_idx) else {
-        return;
-    };
-    let Some(track) = snapshot.tracks.get(event.track) else {
-        return;
+        return NeuronParameterEvents::default();
     };
 
+    let mut parameter_events = NeuronParameterEvents::default();
     for override_param in &neuron.output_overrides.instrument {
-        let param_idx = override_param.param_index;
-        let Some(raw_idx) = track
-            .instrument_slot
-            .param_node_indices
-            .get(param_idx)
-            .copied()
+        let Some((param, param_idx)) = resolve_neuron_instrument_override(snapshot, override_param)
         else {
             continue;
         };
-        let expected_id = slot_param_identity(
-            track.instrument_slot.node_id,
-            track.instrument_slot.modulator_node_id,
-            raw_idx,
-        );
-        if expected_id != Some(override_param.param_id) {
-            continue;
-        }
-        let span = track
-            .instrument_slot
-            .param_node_spans
-            .get(param_idx)
-            .copied()
-            .unwrap_or(1)
-            .max(1);
-        let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
-            (
-                ScheduledInstrumentParamTarget::Modulator,
-                (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
-            )
+        if Some(override_param.target_track) == trigger_track {
+            if let Some(existing) = event
+                .instrument_params
+                .iter_mut()
+                .find(|existing| existing.target == param.target && existing.idx == param.idx)
+            {
+                *existing = param.clone();
+            } else if !event.instrument_params.is_full() {
+                event.instrument_params.push(param.clone());
+            }
+            if matches!(param.target, ScheduledInstrumentParamTarget::Synth) {
+                apply_sampler_param_override(&mut event.sampler_params, param_idx, param.value);
+            }
         } else {
-            (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
-        };
-        if let Some(existing) = event
-            .instrument_params
-            .iter_mut()
-            .find(|param| param.target == target && param.idx == idx)
-        {
-            existing.value = override_param.value;
-            existing.span = span;
-        } else {
-            event.instrument_params.push(ScheduledInstrumentParam {
-                target,
-                idx,
-                span,
-                value: override_param.value,
-            });
-        }
-        if matches!(target, ScheduledInstrumentParamTarget::Synth) {
-            apply_sampler_param_override(
-                &mut event.sampler_params,
-                param_idx as u64,
-                override_param.value,
+            push_target_instrument_param(
+                &mut parameter_events.instrument,
+                override_param.target_track,
+                param,
             );
         }
     }
@@ -1317,51 +1580,38 @@ fn apply_neuron_output_overrides(
         });
 
     for override_param in &neuron.output_overrides.effects {
-        let Some(slot) = track.effect_slots.get(override_param.slot_index) else {
+        let Some(param) = resolve_neuron_effect_override(snapshot, override_param) else {
             continue;
         };
-        let Some(raw_idx) = slot
-            .param_node_indices
-            .get(override_param.param_index)
-            .copied()
-        else {
-            continue;
-        };
-        let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
-        if expected_id != Some(override_param.param_id) {
-            continue;
-        }
-        let (logical_id, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
-            if slot.modulator_node_id == 0 {
-                continue;
+        if Some(override_param.target_track) == trigger_track {
+            if let Some(existing) = event.effect_params.iter_mut().find(|existing| {
+                existing.logical_id == param.logical_id && existing.idx == param.idx
+            }) {
+                *existing = param;
+            } else {
+                event.effect_params.push(param);
             }
-            (
-                slot.modulator_node_id as u64,
-                raw_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
-            )
         } else {
-            (slot.node_id as u64, raw_idx as u64)
-        };
-        if logical_id != override_param.param_id.logical_id {
-            continue;
-        }
-        if let Some(existing) = event
-            .effect_params
-            .iter_mut()
-            .find(|param| param.logical_id == logical_id && param.idx == idx)
-        {
-            existing.value = override_param.value;
-        } else {
-            event.effect_params.push(ScheduledEffectParam {
-                logical_id,
-                idx,
-                value: override_param.value,
-            });
+            push_target_effect_param(
+                &mut parameter_events.effects,
+                override_param.target_track,
+                param,
+            );
         }
     }
     event
         .effect_params
         .sort_by_key(|param| (param.logical_id, param.idx));
+    for (_, params) in &mut parameter_events.instrument {
+        params.sort_by_key(|param| match param.target {
+            ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+            ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+        });
+    }
+    for (_, params) in &mut parameter_events.effects {
+        params.sort_by_key(|param| (param.logical_id, param.idx));
+    }
+    parameter_events
 }
 
 fn apply_sampler_param_override(params: &mut ScheduledSamplerParams, idx: u64, value: f32) {
@@ -1483,6 +1733,8 @@ struct MidiFxEvent {
     arp_phase_beats: f32,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    sampler_params: ScheduledSamplerParams,
+    source: EventSource,
 }
 
 #[derive(Clone, Copy)]
@@ -1525,7 +1777,95 @@ fn midi_fx_event_from_step(
         arp_phase_beats,
         effect_params,
         instrument_params,
+        sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
+        source: EventSource::Step {
+            track: track_idx,
+            step: step_idx,
+            instrument_fingerprint: 0,
+        },
     }
+}
+
+fn midi_fx_event_step_for_track(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+) -> usize {
+    let step_count = snapshot
+        .tracks
+        .get(track_idx)
+        .map(|track| track.steps.len().min(track.params.num_steps.max(1)))
+        .unwrap_or(1)
+        .max(1);
+    step_idx.min(step_count.saturating_sub(1))
+}
+
+fn midi_fx_event_from_step_event(
+    snapshot: &SequencerSnapshot,
+    mut event: StepEvent,
+    step_idx: usize,
+    step_beats: f32,
+    offset_beats: f32,
+    arp_phase_beats: f32,
+) -> MidiFxEvent {
+    let step_idx = midi_fx_event_step_for_track(snapshot, event.track, step_idx);
+    let chord = event.chord.notes[..event.chord.count].to_vec();
+    let chord_durations = event.chord.durations[..event.chord.count].to_vec();
+    let chord_delays = event.chord.delays[..event.chord.count].to_vec();
+    event.sampler_params = match &event.source {
+        EventSource::Network { .. } => event.sampler_params,
+        EventSource::Step { .. } => resolve_sampler_params(snapshot, event.track, step_idx),
+    };
+    MidiFxEvent {
+        offset_beats,
+        track: event.track,
+        step: step_idx,
+        samples_per_step: event.samples_per_step,
+        step_beats,
+        resolved: event.resolved,
+        chord,
+        chord_durations,
+        chord_delays,
+        chord_step_transpose: event.chord.step_transpose,
+        note_spans: None,
+        arp_phase_beats,
+        effect_params: event.effect_params,
+        instrument_params: event.instrument_params,
+        sampler_params: event.sampler_params,
+        source: event.source,
+    }
+}
+
+fn rebind_midi_fx_event_to_track(
+    snapshot: &SequencerSnapshot,
+    mut event: MidiFxEvent,
+    target_track: usize,
+) -> Option<MidiFxEvent> {
+    if target_track >= snapshot.tracks.len() {
+        return None;
+    }
+    if event.track == target_track {
+        return Some(event);
+    }
+    let target_step = midi_fx_event_step_for_track(snapshot, target_track, event.step);
+    event.track = target_track;
+    event.step = target_step;
+    event.effect_params = resolve_effect_params(snapshot, target_track, target_step);
+    event.instrument_params = resolve_instrument_params(snapshot, target_track, target_step);
+    event.sampler_params = resolve_sampler_params(snapshot, target_track, target_step);
+    event.source = match event.source {
+        EventSource::Network { seed, neuron, .. } => EventSource::Network {
+            seed,
+            neuron,
+            instrument_fingerprint: 0,
+        },
+        EventSource::Step { .. } => EventSource::Step {
+            track: target_track,
+            step: target_step,
+            instrument_fingerprint: 0,
+        },
+    };
+    Some(event)
 }
 
 fn midi_fx_window_events_from_step(
@@ -1613,6 +1953,12 @@ fn midi_fx_window_events_from_step(
             arp_phase_beats: arp_phase_beats + window_start,
             effect_params: effect_params.clone(),
             instrument_params: instrument_params.clone(),
+            sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
+            source: EventSource::Step {
+                track: track_idx,
+                step: step_idx,
+                instrument_fingerprint: 0,
+            },
         });
     }
 
@@ -1723,7 +2069,7 @@ fn run_midi_fx_chain_for_track(
                         let chord_len = emitted.chord.len();
                         let routed = MidiFxEvent {
                             offset_beats: event.offset_beats + emitted.offset_beats,
-                            track: target_track,
+                            track: event.track,
                             step: event.step,
                             samples_per_step: event.samples_per_step,
                             step_beats: event.step_beats,
@@ -1738,10 +2084,14 @@ fn run_midi_fx_chain_for_track(
                             instrument_params: scheduled_instrument_params_from_vec(
                                 emitted.instrument_params,
                             ),
+                            sampler_params: event.sampler_params,
+                            source: event.source.clone(),
                         };
                         if target_track == source_track {
                             next.push(routed);
-                        } else {
+                        } else if let Some(routed) =
+                            rebind_midi_fx_event_to_track(snapshot, routed, target_track)
+                        {
                             next.extend(run_midi_fx_chain_for_track(
                                 runtime,
                                 snapshot,
@@ -1792,19 +2142,39 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
             event.resolved.duration,
             event.chord_step_transpose,
         );
-        if !enqueue_resolved_trigger(
-            queue,
-            snapshot,
-            pattern_epoch,
-            sample_time,
-            event.track,
-            event.step,
-            event.samples_per_step,
-            event.resolved,
-            chord,
-            event.effect_params,
-            event.instrument_params,
-        ) {
+        let instrument_fingerprint =
+            instrument_sound_fingerprint(snapshot, event.track, &event.instrument_params);
+        let enqueued = match event.source {
+            EventSource::Network { seed, neuron, .. } => enqueue_network_trigger(
+                queue,
+                pattern_epoch,
+                sample_time,
+                event.track,
+                neuron,
+                seed,
+                event.samples_per_step,
+                event.resolved,
+                chord,
+                event.effect_params,
+                event.instrument_params,
+                event.sampler_params,
+                instrument_fingerprint,
+            ),
+            EventSource::Step { .. } => enqueue_resolved_trigger(
+                queue,
+                snapshot,
+                pattern_epoch,
+                sample_time,
+                event.track,
+                event.step,
+                event.samples_per_step,
+                event.resolved,
+                chord,
+                event.effect_params,
+                event.instrument_params,
+            ),
+        };
+        if !enqueued {
             ok = false;
             break;
         }
@@ -2005,6 +2375,12 @@ fn schedule_live_midi_fx(
                 arp_phase_beats: (rendered_total_beats + tick_offset_beats) as f32,
                 effect_params: resolve_effect_params(snapshot, track_idx, step),
                 instrument_params: resolve_instrument_params(snapshot, track_idx, step),
+                sampler_params: resolve_sampler_params(snapshot, track_idx, step),
+                source: EventSource::Step {
+                    track: track_idx,
+                    step,
+                    instrument_fingerprint: 0,
+                },
             };
             let events = run_midi_fx_chain_for_track(
                 runtime,
@@ -2050,12 +2426,12 @@ fn process_neural_boundaries_until(
     target_beats: f64,
     target_sample: u64,
     samples_per_quarter: f64,
-    out: &mut Vec<(u64, StepEvent)>,
+    out: &mut Vec<NeuralOutput>,
 ) {
     if target_beats <= *cursor_beats + 1e-9 {
         return;
     }
-    neural_runtime.process_boundaries(
+    neural_runtime.process_boundaries_with_outputs(
         *cursor_beats,
         target_beats,
         *cursor_sample,
@@ -2638,6 +3014,16 @@ pub fn spawn_scheduler_thread(
                                                     scheduled_instrument_params_from_vec(
                                                         output.instrument_params.clone(),
                                                     ),
+                                                sampler_params: resolve_sampler_params(
+                                                    &snapshot,
+                                                    trigger.track,
+                                                    trigger.step,
+                                                ),
+                                                source: EventSource::Step {
+                                                    track: trigger.track,
+                                                    step: trigger.step,
+                                                    instrument_fingerprint: 0,
+                                                },
                                             });
                                         }
                                         for emitted in output.emitted {
@@ -2646,9 +3032,9 @@ pub fn spawn_scheduler_thread(
                                                 continue;
                                             }
                                             let chord_len = emitted.chord.len();
-                                            accumulator_events.push(MidiFxEvent {
+                                            let event = MidiFxEvent {
                                                 offset_beats: emitted.offset_beats,
-                                                track: target_track,
+                                                track: trigger.track,
                                                 step: trigger.step,
                                                 samples_per_step: trigger.samples_per_step,
                                                 step_beats,
@@ -2664,7 +3050,24 @@ pub fn spawn_scheduler_thread(
                                                     scheduled_instrument_params_from_vec(
                                                         emitted.instrument_params,
                                                     ),
-                                            });
+                                                sampler_params: resolve_sampler_params(
+                                                    &snapshot,
+                                                    trigger.track,
+                                                    trigger.step,
+                                                ),
+                                                source: EventSource::Step {
+                                                    track: trigger.track,
+                                                    step: trigger.step,
+                                                    instrument_fingerprint: 0,
+                                                },
+                                            };
+                                            if let Some(event) = rebind_midi_fx_event_to_track(
+                                                &snapshot,
+                                                event,
+                                                target_track,
+                                            ) {
+                                                accumulator_events.push(event);
+                                            }
                                         }
                                         for event in accumulator_events {
                                             if track_has_live_midi_fx_notes(
@@ -2870,7 +3273,7 @@ pub fn spawn_scheduler_thread(
                     if !chunk_enqueued {
                         break;
                     }
-                    neural_runtime.process_boundaries(
+                    neural_runtime.process_boundaries_with_outputs(
                         neural_cursor_beats,
                         chunk_end_beats,
                         neural_cursor_sample,
@@ -2878,43 +3281,68 @@ pub fn spawn_scheduler_thread(
                         &mut neural_events,
                     );
                     state.set_neural_visualization(neural_runtime.visualization_snapshot());
-                    for (sample_time, event) in &mut neural_events {
+                    for output in &mut neural_events {
+                        if !output.emit_trigger {
+                            continue;
+                        }
                         let event_beats = sample_time_to_beats(
                             chunk_start_beats,
                             scheduled_until_sample,
-                            *sample_time,
+                            output.sample_time,
                             samples_per_quarter,
                         );
-                        *sample_time = swung_network_sample_time(
+                        output.sample_time = swung_network_sample_time(
                             &snapshot,
-                            event,
-                            *sample_time,
+                            &output.event,
+                            output.sample_time,
                             event_beats,
                             samples_per_quarter,
                         );
                     }
-                    neural_events.sort_by_key(|(sample_time, event)| {
-                        let neuron = match event.source {
+                    neural_events.sort_by_key(|output| {
+                        let neuron = match output.event.source {
                             EventSource::Network { neuron, .. } => neuron,
                             EventSource::Step { .. } => 0,
                         };
-                        (*sample_time, event.track, neuron)
+                        (output.sample_time, output.event.track, neuron)
                     });
-                    let mut merged_neural_events: Vec<(u64, StepEvent)> = Vec::new();
-                    for (sample_time, event) in neural_events {
-                        if let Some((last_sample, last_event)) = merged_neural_events.last_mut() {
-                            if *last_sample == sample_time && last_event.track == event.track {
-                                last_event.resolved.velocity =
-                                    (last_event.resolved.velocity + event.resolved.velocity)
+                    let mut merged_neural_events: Vec<NeuralOutput> = Vec::new();
+                    for output in neural_events {
+                        if output.emit_trigger {
+                            if let Some(last_output) = merged_neural_events.last_mut() {
+                                if last_output.emit_trigger
+                                    && last_output.sample_time == output.sample_time
+                                    && last_output.event.track == output.event.track
+                                {
+                                    last_output.event.resolved.velocity =
+                                        (last_output.event.resolved.velocity
+                                            + output.event.resolved.velocity)
                                         .min(1.0);
-                                continue;
+                                    continue;
+                                }
                             }
                         }
-                        merged_neural_events.push((sample_time, event));
+                        merged_neural_events.push(output);
                     }
-                    for (sample_time, event) in merged_neural_events {
-                        if !enqueue_step_event(&queue, &snapshot, pattern_epoch, sample_time, event)
-                        {
+                    for output in merged_neural_events {
+                        let sample_time = output.sample_time;
+                        let event_beats = sample_time_to_beats(
+                            chunk_start_beats,
+                            scheduled_until_sample,
+                            sample_time,
+                            samples_per_quarter,
+                        ) as f32;
+                        if !enqueue_neural_output_with_midi_fx(
+                            &queue,
+                            &snapshot,
+                            scratch_runtime.as_mut(),
+                            pattern_epoch,
+                            sample_time,
+                            samples_per_quarter as f32,
+                            event_beats,
+                            output,
+                            debug_accum,
+                        ) {
                             chunk_enqueued = false;
                             break;
                         }
@@ -2939,25 +3367,28 @@ pub fn spawn_scheduler_thread(
 mod tests {
     use super::{
         apply_neuron_output_overrides, delayed_step_sample_time, enqueue_resolved_trigger,
-        midi_fx_window_events_from_step, quantized_live_tick_sample, resolve_effect_params,
-        resolve_instrument_plocks, resolve_sampler_params, should_reload_neural_runtime,
+        enqueue_step_event_with_midi_fx, midi_fx_window_events_from_step,
+        quantized_live_tick_sample, resolve_effect_params, resolve_instrument_plocks,
+        resolve_sampler_params, run_midi_fx_chain_for_track, should_reload_neural_runtime,
         swung_network_sample_time, track_active_note_spans_at_beat, track_note_spans_for_trigger,
-        SnapshotSequencerClock,
+        MidiFxEvent, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
+    use crate::lisp_effect;
     use crate::neural::{
-        ParamNodeId, ProjectEffectParamOverride, ProjectNeuralNetwork, ProjectNeuron,
+        NeuralOutput, ParamNodeId, ProjectEffectParamOverride, ProjectNeuralNetwork, ProjectNeuron,
         ProjectParamOverride,
     };
     use crate::scheduled_event::{
-        EventSource, ScheduledChordData, ScheduledEffectParam, ScheduledEventQueue,
-        ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
-        ScheduledSamplerParams, StepEvent,
+        EventSource, ScheduledChordData, ScheduledEffectParam, ScheduledEventKind,
+        ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+        ScheduledInstrumentParams, ScheduledSamplerParams, StepEvent,
     };
     use crate::sequencer::{
         default_empty_effect_chain, SequencerState, StepParam, SwingResolution,
     };
+    use std::sync::Arc;
 
     fn test_resolved_step() -> ResolvedStep {
         ResolvedStep {
@@ -3075,6 +3506,148 @@ mod tests {
             swung_network_sample_time(&snapshot, &event, 24_000, 0.5, 48_000.0),
             24_000
         );
+    }
+
+    #[test]
+    fn network_trigger_enqueue_runs_target_midi_fx_chain() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["octave".to_string()]);
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new()],
+            vec![EffectDescriptor::builtin_sampler()],
+            0,
+            0,
+        );
+        runtime
+            .eval(
+                r#"
+                (def-midi-fx "octave"
+                  (do
+                    (fx-suppress)
+                    (fx-emit 0 :transpose 12)))
+                "#,
+            )
+            .unwrap();
+        let queue = ScheduledEventQueue::<8>::new();
+        let event = StepEvent {
+            track: 0,
+            samples_per_step: 12_000.0,
+            resolved: test_resolved_step(),
+            chord: ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            source: EventSource::Network {
+                seed: None,
+                neuron: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+
+        assert!(enqueue_step_event_with_midi_fx(
+            &queue,
+            &snapshot,
+            Some(&mut runtime),
+            0,
+            1_000,
+            48_000.0,
+            0.0,
+            event,
+            false,
+        ));
+        let scheduled = queue.pop().expect("MIDI FX output event");
+        match scheduled.kind {
+            ScheduledEventKind::NetworkTrigger {
+                track,
+                resolved,
+                source_neuron,
+                ..
+            } => {
+                assert_eq!(track, 0);
+                assert_eq!(source_neuron, 0);
+                assert_eq!(resolved.transpose, 12.0);
+            }
+            other => panic!("expected network trigger, got {other:?}"),
+        }
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn midi_fx_track_send_rebinds_target_params_before_target_chain() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["send".to_string()]);
+        state.pattern.track_params[1].set_midi_fx_chain(vec!["octave".to_string()]);
+        state.pattern.instrument_slots[1]
+            .apply_descriptor(&EffectDescriptor::builtin_sampler(), 77);
+        state.pattern.instrument_slots[1].defaults.set(12, 2.5);
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new(), Vec::new()],
+            vec![
+                EffectDescriptor::builtin_sampler(),
+                EffectDescriptor::builtin_sampler(),
+            ],
+            0,
+            0,
+        );
+        runtime
+            .eval(
+                r#"
+                (def-midi-fx "send"
+                  (fx-emit 0 :track 1))
+
+                (def-midi-fx "octave"
+                  (do
+                    (fx-suppress)
+                    (fx-emit 0 :transpose 12)))
+                "#,
+            )
+            .unwrap();
+        let event = MidiFxEvent {
+            offset_beats: 0.0,
+            track: 0,
+            step: 0,
+            samples_per_step: 12_000.0,
+            step_beats: 0.25,
+            resolved: test_resolved_step(),
+            chord: Vec::new(),
+            chord_durations: Vec::new(),
+            chord_delays: Vec::new(),
+            chord_step_transpose: 0.0,
+            note_spans: None,
+            arp_phase_beats: 0.0,
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            source: EventSource::Step {
+                track: 0,
+                step: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+
+        let events = run_midi_fx_chain_for_track(&mut runtime, &snapshot, 0, vec![event], 0, false);
+        let target = events
+            .iter()
+            .find(|event| event.track == 1)
+            .expect("routed target event");
+        assert_eq!(target.resolved.transpose, 12.0);
+        assert!(target
+            .instrument_params
+            .iter()
+            .any(|param| param.idx == crate::sampler::PARAM_SPEED as u64 && param.value == 2.5));
     }
 
     #[test]
@@ -3254,6 +3827,7 @@ mod tests {
             .output_overrides
             .instrument
             .push(ProjectParamOverride {
+                target_track: track,
                 param_id: ParamNodeId {
                     logical_id: 12,
                     node_param_idx: crate::sampler::PARAM_SPEED as u32,
@@ -3291,7 +3865,10 @@ mod tests {
             },
         };
 
-        apply_neuron_output_overrides(&snapshot, 0, &mut event);
+        let parameter_events =
+            apply_neuron_output_overrides(&snapshot, 0, Some(event.track), &mut event);
+        assert!(parameter_events.instrument.is_empty());
+        assert!(parameter_events.effects.is_empty());
 
         assert_eq!(event.sampler_params.playback_speed, 2.5);
         assert_eq!(
@@ -3316,7 +3893,14 @@ mod tests {
         stale_event.instrument_params.clear();
         stale_event.sampler_params = ScheduledSamplerParams::default();
 
-        apply_neuron_output_overrides(&stale_snapshot, 0, &mut stale_event);
+        let parameter_events = apply_neuron_output_overrides(
+            &stale_snapshot,
+            0,
+            Some(stale_event.track),
+            &mut stale_event,
+        );
+        assert!(parameter_events.instrument.is_empty());
+        assert!(parameter_events.effects.is_empty());
 
         assert!(stale_event.instrument_params.is_empty());
         assert_eq!(stale_event.sampler_params.playback_speed, 1.0);
@@ -3355,6 +3939,7 @@ mod tests {
             .output_overrides
             .effects
             .push(ProjectEffectParamOverride {
+                target_track: track,
                 slot_index: 0,
                 param_id: ParamNodeId {
                     logical_id: 77,
@@ -3393,7 +3978,10 @@ mod tests {
             },
         };
 
-        apply_neuron_output_overrides(&snapshot, 0, &mut event);
+        let parameter_events =
+            apply_neuron_output_overrides(&snapshot, 0, Some(event.track), &mut event);
+        assert!(parameter_events.instrument.is_empty());
+        assert!(parameter_events.effects.is_empty());
 
         assert_eq!(
             event.effect_params,
@@ -3414,9 +4002,260 @@ mod tests {
         };
         event.effect_params.clear();
 
-        apply_neuron_output_overrides(&stale_snapshot, 0, &mut event);
+        let parameter_events =
+            apply_neuron_output_overrides(&stale_snapshot, 0, Some(event.track), &mut event);
+        assert!(parameter_events.instrument.is_empty());
+        assert!(parameter_events.effects.is_empty());
 
         assert!(event.effect_params.is_empty());
+    }
+
+    #[test]
+    fn hidden_neuron_emits_target_parameter_events_without_network_trigger() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        let sampler_desc = EffectDescriptor::builtin_sampler();
+        let sampler_speed_param_idx = sampler_desc
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("sampler speed param");
+        let sampler_speed_node_param_idx =
+            sampler_desc.params[sampler_speed_param_idx].node_param_idx;
+        state.pattern.instrument_slots[1].apply_descriptor(&sampler_desc, 12);
+        state.pattern.effect_chains[1][0].apply_descriptor(&EffectDescriptor::builtin_filter(), 42);
+        let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
+        let filter_param_idx = 0;
+        let filter_node_param_idx =
+            EffectDescriptor::builtin_filter().params[filter_param_idx].node_param_idx;
+        let mut neuron = ProjectNeuron::default();
+        neuron.route = None;
+        neuron
+            .output_overrides
+            .instrument
+            .push(ProjectParamOverride {
+                target_track: 1,
+                param_id: ParamNodeId {
+                    logical_id: 12,
+                    node_param_idx: sampler_speed_node_param_idx,
+                },
+                param_index: sampler_speed_param_idx,
+                value: 1.75,
+            });
+        neuron
+            .output_overrides
+            .effects
+            .push(ProjectEffectParamOverride {
+                target_track: 1,
+                slot_index: 0,
+                param_id: ParamNodeId {
+                    logical_id: 42,
+                    node_param_idx: filter_node_param_idx,
+                },
+                param_index: filter_param_idx,
+                value: 640.0,
+            });
+        snapshot.neural_networks = vec![ProjectNeuralNetwork {
+            id: 1,
+            name: "hidden".to_string(),
+            enabled: true,
+            num_neurons: 1,
+            weights: vec![vec![0.0]],
+            neurons: vec![neuron],
+            ..ProjectNeuralNetwork::default()
+        }];
+        let event = StepEvent {
+            track: 0,
+            samples_per_step: 1.0,
+            resolved: test_resolved_step(),
+            chord: ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            source: EventSource::Network {
+                seed: None,
+                neuron: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+        let queue = ScheduledEventQueue::<8>::new();
+
+        assert!(super::enqueue_neural_output_with_midi_fx(
+            &queue,
+            &snapshot,
+            None,
+            7,
+            1234,
+            48_000.0,
+            0.0,
+            NeuralOutput {
+                sample_time: 1234,
+                event,
+                emit_trigger: false,
+            },
+            false,
+        ));
+
+        let first = queue.pop().expect("instrument parameter event");
+        assert_eq!(first.pattern_epoch, 7);
+        assert_eq!(first.sample_time, 1234);
+        match first.kind {
+            ScheduledEventKind::InstrumentParams {
+                track,
+                instrument_params,
+            } => {
+                assert_eq!(track, 1);
+                assert_eq!(
+                    instrument_params.as_slice(),
+                    &[ScheduledInstrumentParam {
+                        target: ScheduledInstrumentParamTarget::Synth,
+                        idx: sampler_speed_node_param_idx as u64,
+                        span: 1,
+                        value: 1.75,
+                    }]
+                );
+            }
+            other => panic!("expected instrument params, got {other:?}"),
+        }
+
+        let second = queue.pop().expect("effect parameter event");
+        assert_eq!(second.pattern_epoch, 7);
+        assert_eq!(second.sample_time, 1234);
+        match second.kind {
+            ScheduledEventKind::EffectParams {
+                track,
+                effect_params,
+            } => {
+                assert_eq!(track, 1);
+                assert_eq!(
+                    effect_params,
+                    vec![ScheduledEffectParam {
+                        logical_id: 42,
+                        idx: filter_node_param_idx as u64,
+                        value: 640.0,
+                    }]
+                );
+            }
+            other => panic!("expected effect params, got {other:?}"),
+        }
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn routed_neuron_emits_cross_track_parameter_event_before_own_trigger() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        state.pattern.effect_chains[1][0].apply_descriptor(&EffectDescriptor::builtin_filter(), 42);
+        let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
+        let filter_param_idx = 0;
+        let filter_node_param_idx =
+            EffectDescriptor::builtin_filter().params[filter_param_idx].node_param_idx;
+        let mut neuron = ProjectNeuron::default();
+        neuron.route = Some(0);
+        neuron
+            .output_overrides
+            .effects
+            .push(ProjectEffectParamOverride {
+                target_track: 1,
+                slot_index: 0,
+                param_id: ParamNodeId {
+                    logical_id: 42,
+                    node_param_idx: filter_node_param_idx,
+                },
+                param_index: filter_param_idx,
+                value: 900.0,
+            });
+        snapshot.neural_networks = vec![ProjectNeuralNetwork {
+            id: 1,
+            name: "cross".to_string(),
+            enabled: true,
+            num_neurons: 1,
+            weights: vec![vec![0.0]],
+            neurons: vec![neuron],
+            ..ProjectNeuralNetwork::default()
+        }];
+        let event = StepEvent {
+            track: 0,
+            samples_per_step: 1.0,
+            resolved: test_resolved_step(),
+            chord: ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            source: EventSource::Network {
+                seed: Some((0, 0)),
+                neuron: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+        let queue = ScheduledEventQueue::<8>::new();
+
+        assert!(super::enqueue_neural_output_with_midi_fx(
+            &queue,
+            &snapshot,
+            None,
+            7,
+            1234,
+            48_000.0,
+            0.0,
+            NeuralOutput {
+                sample_time: 1234,
+                event,
+                emit_trigger: true,
+            },
+            false,
+        ));
+
+        let first = queue.pop().expect("cross-track effect parameter event");
+        match first.kind {
+            ScheduledEventKind::EffectParams {
+                track,
+                effect_params,
+            } => {
+                assert_eq!(track, 1);
+                assert_eq!(
+                    effect_params,
+                    vec![ScheduledEffectParam {
+                        logical_id: 42,
+                        idx: filter_node_param_idx as u64,
+                        value: 900.0,
+                    }]
+                );
+            }
+            other => panic!("expected cross-track effect params, got {other:?}"),
+        }
+
+        let second = queue.pop().expect("routed network trigger");
+        match second.kind {
+            ScheduledEventKind::NetworkTrigger {
+                track,
+                effect_params,
+                source_neuron,
+                ..
+            } => {
+                assert_eq!(track, 0);
+                assert_eq!(source_neuron, 0);
+                assert!(effect_params.is_empty());
+            }
+            other => panic!("expected routed network trigger, got {other:?}"),
+        }
+        assert!(queue.pop().is_none());
     }
 
     #[test]

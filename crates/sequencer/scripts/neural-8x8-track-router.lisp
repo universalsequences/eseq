@@ -741,6 +741,9 @@
             :height neural-8x8-track-router-matrix-height
             :min 0
             :max 1
+            :control :grid
+            :background :transparent
+            :fill :white
             :value (neural-8x8-track-router-visible-matrix SEQ.neural-dampening-matrix)))))))))
 
 (effect-buffer "*matrix*" (neural-8x8-track-router-panel SEQ.neural-networks SEQ.current-pattern))

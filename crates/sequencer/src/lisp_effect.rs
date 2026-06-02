@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 use crate::accumulator::ResolvedStep;
 use crate::audiograph::{self, LiveGraph, NodeVTable};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
-use crate::neural::{NeuralMaxPolySelection, ProjectNeuralNetwork, ProjectNeuron, NUM_NEURONS};
+use crate::neural::{
+    NeuralMaxPolySelection, ParamNodeId, ProjectEffectParamOverride, ProjectNeuralNetwork,
+    ProjectNeuron, ProjectParamOverride, NUM_NEURONS,
+};
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
@@ -3889,6 +3892,163 @@ pub fn register_neural_authoring_natives_with_selection(
         },
     );
 
+    let state_for_neural_plock_instrument = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-plock-instrument",
+        "(neural-plock-instrument id-or-name neuron track param value)",
+        "Set a target-track instrument parameter p-lock for one neuron using a stored engine value.",
+        move |args, ctx| {
+            if args.len() != 5 {
+                return Err(
+                    "neural-plock-instrument expects network, neuron, track, param, value"
+                        .to_string(),
+                );
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
+            let target_track = parse_nonnegative_usize(&args[2], "track")?;
+            let param_idx = parse_nonnegative_usize(&args[3], "instrument param")?;
+            let value = parse_value_arg(&args, 4, "instrument p-lock")?;
+            let param_id = neural_instrument_param_id(
+                &state_for_neural_plock_instrument,
+                target_track,
+                param_idx,
+            )?;
+            let updated = state_for_neural_plock_instrument.edit_current_neural_networks(
+                |networks| {
+                    let idx = neural_network_index(networks, &reference)?;
+                    upsert_neural_instrument_plock(
+                        &mut networks[idx],
+                        neuron_idx,
+                        target_track,
+                        param_idx,
+                        param_id,
+                        value,
+                    )?;
+                    Ok(networks[idx].clone())
+                },
+            )?;
+            ctx.set_status(format!(
+                "updated neural network '{}' neuron {} instrument p-lock",
+                updated.name, neuron_idx
+            ));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
+    let state_for_neural_plock_effect = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-plock-effect",
+        "(neural-plock-effect id-or-name neuron track slot param value)",
+        "Set a target-track audio effect parameter p-lock for one neuron using a stored engine value.",
+        move |args, ctx| {
+            if args.len() != 6 {
+                return Err(
+                    "neural-plock-effect expects network, neuron, track, slot, param, value"
+                        .to_string(),
+                );
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
+            let target_track = parse_nonnegative_usize(&args[2], "track")?;
+            let slot_idx = parse_nonnegative_usize(&args[3], "effect slot")?;
+            let param_idx = parse_nonnegative_usize(&args[4], "effect param")?;
+            let value = parse_value_arg(&args, 5, "effect p-lock")?;
+            let param_id =
+                neural_effect_param_id(&state_for_neural_plock_effect, target_track, slot_idx, param_idx)?;
+            let updated = state_for_neural_plock_effect.edit_current_neural_networks(|networks| {
+                let idx = neural_network_index(networks, &reference)?;
+                upsert_neural_effect_plock(
+                    &mut networks[idx],
+                    neuron_idx,
+                    target_track,
+                    slot_idx,
+                    param_idx,
+                    param_id,
+                    value,
+                )?;
+                Ok(networks[idx].clone())
+            })?;
+            ctx.set_status(format!(
+                "updated neural network '{}' neuron {} effect p-lock",
+                updated.name, neuron_idx
+            ));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
+    let state_for_neural_clear_instrument = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-clear-instrument-plock",
+        "(neural-clear-instrument-plock id-or-name neuron track param)",
+        "Clear a target-track instrument parameter p-lock from one neuron.",
+        move |args, ctx| {
+            if args.len() != 4 {
+                return Err(
+                    "neural-clear-instrument-plock expects network, neuron, track, param"
+                        .to_string(),
+                );
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
+            let target_track = parse_nonnegative_usize(&args[2], "track")?;
+            let param_idx = parse_nonnegative_usize(&args[3], "instrument param")?;
+            let updated =
+                state_for_neural_clear_instrument.edit_current_neural_networks(|networks| {
+                    let idx = neural_network_index(networks, &reference)?;
+                    clear_neural_instrument_plock(
+                        &mut networks[idx],
+                        neuron_idx,
+                        target_track,
+                        param_idx,
+                    )?;
+                    Ok(networks[idx].clone())
+                })?;
+            ctx.set_status(format!(
+                "cleared neural network '{}' neuron {} instrument p-lock",
+                updated.name, neuron_idx
+            ));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
+    let state_for_neural_clear_effect = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-clear-effect-plock",
+        "(neural-clear-effect-plock id-or-name neuron track slot param)",
+        "Clear a target-track audio effect parameter p-lock from one neuron.",
+        move |args, ctx| {
+            if args.len() != 5 {
+                return Err(
+                    "neural-clear-effect-plock expects network, neuron, track, slot, param"
+                        .to_string(),
+                );
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
+            let target_track = parse_nonnegative_usize(&args[2], "track")?;
+            let slot_idx = parse_nonnegative_usize(&args[3], "effect slot")?;
+            let param_idx = parse_nonnegative_usize(&args[4], "effect param")?;
+            let updated =
+                state_for_neural_clear_effect.edit_current_neural_networks(|networks| {
+                    let idx = neural_network_index(networks, &reference)?;
+                    clear_neural_effect_plock(
+                        &mut networks[idx],
+                        neuron_idx,
+                        target_track,
+                        slot_idx,
+                        param_idx,
+                    )?;
+                    Ok(networks[idx].clone())
+                })?;
+            ctx.set_status(format!(
+                "cleared neural network '{}' neuron {} effect p-lock",
+                updated.name, neuron_idx
+            ));
+            Ok(neural_network_to_value(&updated))
+        },
+    );
+
     let state_for_neural_weights = Arc::clone(&state);
     runtime.register_native_with_docs(
         "neural-weights",
@@ -7725,6 +7885,319 @@ fn apply_neural_neuron_edits(
     Ok(())
 }
 
+fn neural_instrument_param_id(
+    state: &crate::sequencer::SequencerState,
+    track: usize,
+    param_idx: usize,
+) -> Result<ParamNodeId, String> {
+    if track >= state.active_track_count() {
+        return Err("target track out of range".to_string());
+    }
+    let slot = state
+        .pattern
+        .instrument_slots
+        .get(track)
+        .ok_or_else(|| "target track instrument slot out of range".to_string())?;
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    if param_idx >= num_params {
+        return Err("instrument param out of range".to_string());
+    }
+    slot.param_node_id(param_idx)
+        .ok_or_else(|| "instrument param has no live node identity".to_string())
+}
+
+fn neural_effect_param_id(
+    state: &crate::sequencer::SequencerState,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+) -> Result<ParamNodeId, String> {
+    if track >= state.active_track_count() {
+        return Err("target track out of range".to_string());
+    }
+    let slot = state
+        .pattern
+        .effect_chains
+        .get(track)
+        .and_then(|chain| chain.get(slot_idx))
+        .ok_or_else(|| "effect slot out of range".to_string())?;
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    if param_idx >= num_params {
+        return Err("effect param out of range".to_string());
+    }
+    slot.param_node_id(param_idx)
+        .ok_or_else(|| "effect param has no live node identity".to_string())
+}
+
+fn neural_neuron_mut(
+    network: &mut ProjectNeuralNetwork,
+    neuron_idx: usize,
+) -> Result<&mut ProjectNeuron, String> {
+    normalize_project_neural_network_shape(network)?;
+    if neuron_idx >= network.num_neurons {
+        return Err("neuron index out of range".to_string());
+    }
+    network
+        .neurons
+        .get_mut(neuron_idx)
+        .ok_or_else(|| "neuron index out of range".to_string())
+}
+
+fn upsert_neural_instrument_plock(
+    network: &mut ProjectNeuralNetwork,
+    neuron_idx: usize,
+    target_track: usize,
+    param_index: usize,
+    param_id: ParamNodeId,
+    value: f32,
+) -> Result<(), String> {
+    let network_id = network.id;
+    let network_name = network.name.clone();
+    let neuron = neural_neuron_mut(network, neuron_idx)?;
+    if let Some(existing) = neuron
+        .output_overrides
+        .instrument
+        .iter_mut()
+        .find(|entry| entry.target_track == target_track && entry.param_index == param_index)
+    {
+        existing.param_id = param_id;
+        existing.value = value;
+    } else {
+        neuron
+            .output_overrides
+            .instrument
+            .push(ProjectParamOverride {
+                target_track,
+                param_id,
+                param_index,
+                value,
+            });
+    }
+    eprintln!(
+        "[neural-plock] instrument network={network_id} name={network_name:?} neuron={neuron_idx} target_track={target_track} param={param_index} logical_id={} node_param_idx={} value={value}",
+        param_id.logical_id,
+        param_id.node_param_idx,
+    );
+    Ok(())
+}
+
+fn upsert_neural_effect_plock(
+    network: &mut ProjectNeuralNetwork,
+    neuron_idx: usize,
+    target_track: usize,
+    slot_index: usize,
+    param_index: usize,
+    param_id: ParamNodeId,
+    value: f32,
+) -> Result<(), String> {
+    let network_id = network.id;
+    let network_name = network.name.clone();
+    let neuron = neural_neuron_mut(network, neuron_idx)?;
+    if let Some(existing) = neuron.output_overrides.effects.iter_mut().find(|entry| {
+        entry.target_track == target_track
+            && entry.slot_index == slot_index
+            && entry.param_index == param_index
+    }) {
+        existing.param_id = param_id;
+        existing.value = value;
+    } else {
+        neuron
+            .output_overrides
+            .effects
+            .push(ProjectEffectParamOverride {
+                target_track,
+                slot_index,
+                param_id,
+                param_index,
+                value,
+            });
+    }
+    eprintln!(
+        "[neural-plock] effect network={network_id} name={network_name:?} neuron={neuron_idx} target_track={target_track} slot={slot_index} param={param_index} logical_id={} node_param_idx={} value={value}",
+        param_id.logical_id,
+        param_id.node_param_idx,
+    );
+    Ok(())
+}
+
+fn clear_neural_instrument_plock(
+    network: &mut ProjectNeuralNetwork,
+    neuron_idx: usize,
+    target_track: usize,
+    param_index: usize,
+) -> Result<(), String> {
+    let neuron = neural_neuron_mut(network, neuron_idx)?;
+    neuron
+        .output_overrides
+        .instrument
+        .retain(|entry| !(entry.target_track == target_track && entry.param_index == param_index));
+    Ok(())
+}
+
+fn clear_neural_effect_plock(
+    network: &mut ProjectNeuralNetwork,
+    neuron_idx: usize,
+    target_track: usize,
+    slot_index: usize,
+    param_index: usize,
+) -> Result<(), String> {
+    let neuron = neural_neuron_mut(network, neuron_idx)?;
+    neuron.output_overrides.effects.retain(|entry| {
+        !(entry.target_track == target_track
+            && entry.slot_index == slot_index
+            && entry.param_index == param_index)
+    });
+    Ok(())
+}
+
+pub fn set_selected_neural_instrument_plocks(
+    state: &crate::sequencer::SequencerState,
+    selection: &BTreeSet<SelectedNeuralNeuron>,
+    target_track: usize,
+    param_idx: usize,
+    value: f32,
+) -> Result<bool, String> {
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let selected = selection
+        .iter()
+        .copied()
+        .filter(|selected| selected.pattern_idx == current_pattern)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Ok(false);
+    }
+    let param_id = neural_instrument_param_id(state, target_track, param_idx)?;
+    let applied = state.edit_current_neural_networks(|networks| {
+        let mut applied = 0_usize;
+        for selected in &selected {
+            let Some(network) = networks
+                .iter_mut()
+                .find(|network| network.id == selected.network_id)
+            else {
+                continue;
+            };
+            upsert_neural_instrument_plock(
+                network,
+                selected.neuron_idx,
+                target_track,
+                param_idx,
+                param_id,
+                value,
+            )?;
+            applied += 1;
+        }
+        Ok(applied)
+    })?;
+    if applied == 0 {
+        return Err("selected neural network was not found in the current pattern".to_string());
+    }
+    Ok(true)
+}
+
+pub fn set_selected_neural_effect_plocks(
+    state: &crate::sequencer::SequencerState,
+    selection: &BTreeSet<SelectedNeuralNeuron>,
+    target_track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    value: f32,
+) -> Result<bool, String> {
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let selected = selection
+        .iter()
+        .copied()
+        .filter(|selected| selected.pattern_idx == current_pattern)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Ok(false);
+    }
+    let param_id = neural_effect_param_id(state, target_track, slot_idx, param_idx)?;
+    let applied = state.edit_current_neural_networks(|networks| {
+        let mut applied = 0_usize;
+        for selected in &selected {
+            let Some(network) = networks
+                .iter_mut()
+                .find(|network| network.id == selected.network_id)
+            else {
+                continue;
+            };
+            upsert_neural_effect_plock(
+                network,
+                selected.neuron_idx,
+                target_track,
+                slot_idx,
+                param_idx,
+                param_id,
+                value,
+            )?;
+            applied += 1;
+        }
+        Ok(applied)
+    })?;
+    if applied == 0 {
+        return Err("selected neural network was not found in the current pattern".to_string());
+    }
+    Ok(true)
+}
+
+pub fn selected_neural_instrument_plock_value(
+    state: &crate::sequencer::SequencerState,
+    selection: &BTreeSet<SelectedNeuralNeuron>,
+    target_track: usize,
+    param_idx: usize,
+) -> Option<f32> {
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let param_id = neural_instrument_param_id(state, target_track, param_idx).ok()?;
+    let networks = state.current_neural_networks();
+    selection
+        .iter()
+        .filter(|selected| selected.pattern_idx == current_pattern)
+        .find_map(|selected| {
+            networks
+                .iter()
+                .find(|network| network.id == selected.network_id)
+                .and_then(|network| network.neurons.get(selected.neuron_idx))
+                .and_then(|neuron| {
+                    neuron.output_overrides.instrument.iter().find_map(|entry| {
+                        (entry.target_track == target_track
+                            && entry.param_index == param_idx
+                            && entry.param_id == param_id)
+                            .then_some(entry.value)
+                    })
+                })
+        })
+}
+
+pub fn selected_neural_effect_plock_value(
+    state: &crate::sequencer::SequencerState,
+    selection: &BTreeSet<SelectedNeuralNeuron>,
+    target_track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+) -> Option<f32> {
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let param_id = neural_effect_param_id(state, target_track, slot_idx, param_idx).ok()?;
+    let networks = state.current_neural_networks();
+    selection
+        .iter()
+        .filter(|selected| selected.pattern_idx == current_pattern)
+        .find_map(|selected| {
+            networks
+                .iter()
+                .find(|network| network.id == selected.network_id)
+                .and_then(|network| network.neurons.get(selected.neuron_idx))
+                .and_then(|neuron| {
+                    neuron.output_overrides.effects.iter().find_map(|entry| {
+                        (entry.target_track == target_track
+                            && entry.slot_index == slot_idx
+                            && entry.param_index == param_idx
+                            && entry.param_id == param_id)
+                            .then_some(entry.value)
+                    })
+                })
+        })
+}
+
 fn neural_network_to_value(network: &ProjectNeuralNetwork) -> EValue {
     let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
     map.insert("id".to_string(), lisp_number(network.id as f64));
@@ -7801,6 +8274,74 @@ pub fn selected_neural_neurons_to_value(selection: &BTreeSet<SelectedNeuralNeuro
     )
 }
 
+fn neural_instrument_overrides_to_value(overrides: &[ProjectParamOverride]) -> EValue {
+    lisp_list(
+        overrides
+            .iter()
+            .map(|override_param| {
+                let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
+                map.insert(
+                    "target-track".to_string(),
+                    lisp_number(override_param.target_track as f64),
+                );
+                map.insert(
+                    "param".to_string(),
+                    lisp_number(override_param.param_index as f64),
+                );
+                map.insert(
+                    "value".to_string(),
+                    lisp_number(override_param.value as f64),
+                );
+                map.insert(
+                    "logical-id".to_string(),
+                    lisp_number(override_param.param_id.logical_id as f64),
+                );
+                map.insert(
+                    "node-param-idx".to_string(),
+                    lisp_number(override_param.param_id.node_param_idx as f64),
+                );
+                EValue::Map(map)
+            })
+            .collect(),
+    )
+}
+
+fn neural_effect_overrides_to_value(overrides: &[ProjectEffectParamOverride]) -> EValue {
+    lisp_list(
+        overrides
+            .iter()
+            .map(|override_param| {
+                let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
+                map.insert(
+                    "target-track".to_string(),
+                    lisp_number(override_param.target_track as f64),
+                );
+                map.insert(
+                    "slot".to_string(),
+                    lisp_number(override_param.slot_index as f64),
+                );
+                map.insert(
+                    "param".to_string(),
+                    lisp_number(override_param.param_index as f64),
+                );
+                map.insert(
+                    "value".to_string(),
+                    lisp_number(override_param.value as f64),
+                );
+                map.insert(
+                    "logical-id".to_string(),
+                    lisp_number(override_param.param_id.logical_id as f64),
+                );
+                map.insert(
+                    "node-param-idx".to_string(),
+                    lisp_number(override_param.param_id.node_param_idx as f64),
+                );
+                EValue::Map(map)
+            })
+            .collect(),
+    )
+}
+
 fn neural_neuron_to_value(idx: usize, neuron: &ProjectNeuron) -> EValue {
     let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
     map.insert("index".to_string(), lisp_number(idx as f64));
@@ -7844,6 +8385,18 @@ fn neural_neuron_to_value(idx: usize, neuron: &ProjectNeuron) -> EValue {
     map.insert(
         "dampening-recovery".to_string(),
         lisp_number(neuron.dampening_recovery as f64),
+    );
+    map.insert(
+        "instrument-plocks".to_string(),
+        lisp_value(neural_instrument_overrides_to_value(
+            &neuron.output_overrides.instrument,
+        )),
+    );
+    map.insert(
+        "effect-plocks".to_string(),
+        lisp_value(neural_effect_overrides_to_value(
+            &neuron.output_overrides.effects,
+        )),
     );
     EValue::Map(map)
 }
@@ -8840,12 +9393,13 @@ mod tests {
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
         new_eval_context, parse_manifest, read_eseqlisp_init_source, register_sequencer_natives,
-        scratch_runtime_with_fallbacks, shared_native_metadata, AccumulatorNoteSpan, DGenParam,
-        DGenSidechainInput, ScratchControlRuntime,
+        scratch_runtime_with_fallbacks, selected_neural_instrument_plock_value,
+        set_selected_neural_instrument_plocks, shared_native_metadata, AccumulatorNoteSpan,
+        DGenParam, DGenSidechainInput, ScratchControlRuntime, SelectedNeuralNeuron,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
-    use crate::neural::NeuralMaxPolySelection;
+    use crate::neural::{NeuralMaxPolySelection, ParamNodeId};
     use crate::scheduled_event::{
         ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
     };
@@ -8854,6 +9408,7 @@ mod tests {
     use eseqlisp::vm::Value;
     use eseqlisp::{BufferMode, Editor, EditorConfig, Runtime};
     use std::cell::RefCell;
+    use std::collections::BTreeSet;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -9697,6 +10252,119 @@ mod tests {
             runtime.eval_str("(neural-selected-neurons)").unwrap(),
             Some(Value::List(vec![]))
         );
+    }
+
+    #[test]
+    fn selected_neural_instrument_plock_helper_records_current_pattern_selection() {
+        let (state, mut runtime) = neural_test_runtime(2);
+        let sampler_desc = EffectDescriptor::builtin_sampler();
+        let speed_param_idx = sampler_desc
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("sampler speed param");
+        state.pattern.instrument_slots[1].apply_descriptor(&sampler_desc, 12);
+
+        runtime
+            .eval_str("(neural-create :name \"router\" :neurons 2)")
+            .unwrap();
+
+        let mut selection = BTreeSet::new();
+        selection.insert(SelectedNeuralNeuron {
+            pattern_idx: 0,
+            network_id: 1,
+            neuron_idx: 0,
+        });
+
+        let wrote =
+            set_selected_neural_instrument_plocks(&state, &selection, 1, speed_param_idx, 1.25)
+                .unwrap();
+        assert!(wrote);
+        assert_eq!(
+            selected_neural_instrument_plock_value(&state, &selection, 1, speed_param_idx),
+            Some(1.25)
+        );
+        assert_eq!(
+            state.current_neural_networks()[0].neurons[0]
+                .output_overrides
+                .instrument[0]
+                .target_track,
+            1
+        );
+    }
+
+    #[test]
+    fn neural_lisp_plock_authoring_targets_tracks_and_devices() {
+        let (state, mut runtime) = neural_test_runtime(2);
+        let sampler_desc = EffectDescriptor::builtin_sampler();
+        let sampler_speed_param_idx = sampler_desc
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("sampler speed param");
+        let sampler_speed_node_param_idx =
+            sampler_desc.params[sampler_speed_param_idx].node_param_idx;
+        state.pattern.instrument_slots[1].apply_descriptor(&sampler_desc, 12);
+        state.pattern.effect_chains[1][0].apply_descriptor(&EffectDescriptor::builtin_filter(), 42);
+
+        runtime
+            .eval_str("(neural-create :name \"router\" :neurons 2)")
+            .unwrap();
+        runtime
+            .eval_str(&format!(
+                "(neural-plock-instrument \"router\" 0 1 {sampler_speed_param_idx} 1.5)"
+            ))
+            .unwrap();
+        runtime
+            .eval_str(&format!(
+                "(neural-plock-instrument \"router\" 0 1 {sampler_speed_param_idx} 2.0)"
+            ))
+            .unwrap();
+        runtime
+            .eval_str("(neural-plock-effect \"router\" 0 1 0 0 800.0)")
+            .unwrap();
+
+        let networks = state.current_neural_networks();
+        let neuron = &networks[0].neurons[0];
+        assert_eq!(
+            neuron.output_overrides.instrument,
+            vec![crate::neural::ProjectParamOverride {
+                target_track: 1,
+                param_id: ParamNodeId {
+                    logical_id: 12,
+                    node_param_idx: sampler_speed_node_param_idx,
+                },
+                param_index: sampler_speed_param_idx,
+                value: 2.0,
+            }]
+        );
+        assert_eq!(
+            neuron.output_overrides.effects,
+            vec![crate::neural::ProjectEffectParamOverride {
+                target_track: 1,
+                slot_index: 0,
+                param_id: ParamNodeId {
+                    logical_id: 42,
+                    node_param_idx: EffectDescriptor::builtin_filter().params[0].node_param_idx,
+                },
+                param_index: 0,
+                value: 800.0,
+            }]
+        );
+
+        runtime
+            .eval_str(&format!(
+                "(neural-clear-instrument-plock \"router\" 0 1 {sampler_speed_param_idx})"
+            ))
+            .unwrap();
+        runtime
+            .eval_str("(neural-clear-effect-plock \"router\" 0 1 0 0)")
+            .unwrap();
+
+        let networks = state.current_neural_networks();
+        let neuron = &networks[0].neurons[0];
+        assert!(neuron.output_overrides.instrument.is_empty());
+        assert!(neuron.output_overrides.effects.is_empty());
     }
 
     #[test]

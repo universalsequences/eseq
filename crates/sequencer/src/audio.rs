@@ -1829,6 +1829,9 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
         } => {
             dispatch_instrument_params_to_active_voices(data, track, &instrument_params);
         }
+        ScheduledEventKind::EffectParams { effect_params, .. } => unsafe {
+            dispatch_effect_chain_for_track(data.lg.0, &effect_params);
+        },
         ScheduledEventKind::NetworkTrigger {
             track,
             samples_per_step,

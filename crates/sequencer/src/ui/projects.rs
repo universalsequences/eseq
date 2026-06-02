@@ -22,8 +22,17 @@ fn project_slot_into_synced_snapshot(
     desc: &EffectDescriptor,
     node_id: u32,
 ) -> crate::effects::EffectSlotSnapshot {
-    let mut snapshot = slot.into_snapshot_with_node_id(node_id);
-    snapshot.sync_to_descriptor(desc, node_id);
+    project_slot_into_synced_snapshot_with_modulator(slot, desc, node_id, 0)
+}
+
+fn project_slot_into_synced_snapshot_with_modulator(
+    slot: project::ProjectEffectSlot,
+    desc: &EffectDescriptor,
+    node_id: u32,
+    modulator_node_id: u32,
+) -> crate::effects::EffectSlotSnapshot {
+    let mut snapshot = slot.into_snapshot_with_node_ids(node_id, modulator_node_id);
+    snapshot.sync_to_descriptor_with_modulator(desc, node_id, modulator_node_id);
     snapshot
 }
 
@@ -238,9 +247,15 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     slot: project::ProjectEffectSlot,
     desc: &crate::effects::EffectDescriptor,
     node_id: u32,
+    modulator_node_id: u32,
 ) -> crate::effects::EffectSlotSnapshot {
     if project_slot_matches_descriptor_param_layout(&slot, desc) {
-        let mut snapshot = project_slot_into_synced_snapshot(slot, desc, node_id);
+        let mut snapshot = project_slot_into_synced_snapshot_with_modulator(
+            slot,
+            desc,
+            node_id,
+            modulator_node_id,
+        );
         snapshot.recompute_modulation_active_params(desc);
         return snapshot;
     }
@@ -360,7 +375,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
 
     let mut snapshot = crate::effects::EffectSlotSnapshot {
         node_id,
-        modulator_node_id: 0,
+        modulator_node_id,
         num_params: new_np as u32,
         defaults,
         plocks,
@@ -1774,6 +1789,9 @@ impl App {
                     let node_id = self.state.pattern.instrument_slots[track_idx]
                         .node_id
                         .load(Ordering::Relaxed);
+                    let modulator_node_id = self.state.pattern.instrument_slots[track_idx]
+                        .modulator_node_id
+                        .load(Ordering::Relaxed);
                     if self.is_sampler_track(track_idx) {
                         let saved_slot =
                             instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
@@ -1791,7 +1809,12 @@ impl App {
                             // Sampler params already saved; sync to pick up params added after
                             // the project was written, such as enabled.
                             let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
-                            project_slot_into_synced_snapshot(saved_slot, &sampler_desc, 0)
+                            project_slot_into_synced_snapshot_with_modulator(
+                                saved_slot,
+                                &sampler_desc,
+                                node_id,
+                                modulator_node_id,
+                            )
                         } else {
                             // Old project: migrate attack/release from TrackParams
                             let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
@@ -1805,8 +1828,8 @@ impl App {
                             defaults[1] = release;
                             // start=0.0, end=1.0 already set from defaults
                             crate::effects::EffectSlotSnapshot {
-                                node_id: 0,
-                                modulator_node_id: 0,
+                                node_id,
+                                modulator_node_id,
                                 num_params: defaults.len() as u32,
                                 defaults,
                                 plocks: vec![Vec::new(); MAX_STEPS],
@@ -1846,7 +1869,10 @@ impl App {
                             // added after save, while remapping custom-instrument params across
                             // the inserted enabled slot.
                             project_custom_instrument_slot_into_synced_snapshot(
-                                slot, &desc, node_id,
+                                slot,
+                                &desc,
+                                node_id,
+                                modulator_node_id,
                             )
                         }
                     }
@@ -2238,7 +2264,7 @@ mod tests {
             ],
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.num_params, 5);
@@ -2295,7 +2321,7 @@ mod tests {
             ],
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
         assert_eq!(restored.defaults, vec![0.12, 0.34, 1.0, 5.0]);
         assert_eq!(restored.plocks[7][2], None);
@@ -2344,7 +2370,7 @@ mod tests {
             ],
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.num_params, 8);
@@ -2398,7 +2424,8 @@ mod tests {
             ir: None,
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
+        let restored =
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42, 0);
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.num_params, desc.params.len() as u32);
@@ -2446,7 +2473,8 @@ mod tests {
             ir: None,
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
+        let restored =
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42, 0);
 
         assert_eq!(restored.defaults[1], 7400.0);
         assert_eq!(restored.param_node_indices, vec![10, 14, 15, 16]);
@@ -2503,7 +2531,7 @@ mod tests {
         };
 
         let restored =
-            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &renamed_desc, 42);
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &renamed_desc, 42, 0);
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.defaults, vec![0.12, 1.0, 0.31, 2.0, -0.27]);

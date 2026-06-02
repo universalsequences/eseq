@@ -132,6 +132,10 @@ pub enum ScheduledEventKind {
         track: usize,
         instrument_params: ScheduledInstrumentParams,
     },
+    EffectParams {
+        track: usize,
+        effect_params: Vec<ScheduledEffectParam>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

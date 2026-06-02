@@ -3013,7 +3013,10 @@ impl EffectSlotState {
     }
 
     pub fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {
-        let raw_idx = self.param_node_indices.get(param_idx)?.load(Ordering::Relaxed);
+        let raw_idx = self
+            .param_node_indices
+            .get(param_idx)?
+            .load(Ordering::Relaxed);
         if raw_idx == u32::MAX {
             return None;
         }
@@ -3089,6 +3092,16 @@ impl EffectSlotState {
     /// Rebind this live slot to the current graph descriptor/node while
     /// preserving the stored defaults and p-locks as far as possible.
     pub fn sync_descriptor(&self, desc: &EffectDescriptor, node_id: u32) {
+        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
+        self.sync_descriptor_with_modulator(desc, node_id, modulator_node_id);
+    }
+
+    pub fn sync_descriptor_with_modulator(
+        &self,
+        desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
         let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
         let preserve = old_num_params.min(desc.params.len());
 
@@ -3110,7 +3123,6 @@ impl EffectSlotState {
             saved_plock_ids.push(step_ids);
         }
 
-        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
         self.apply_descriptor_with_modulator(desc, node_id, modulator_node_id);
 
         for param_idx in 0..preserve {
@@ -3144,6 +3156,22 @@ impl EffectSlotState {
         old_desc: &EffectDescriptor,
         new_desc: &EffectDescriptor,
         node_id: u32,
+    ) {
+        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
+        self.sync_descriptor_by_param_name_with_modulator(
+            old_desc,
+            new_desc,
+            node_id,
+            modulator_node_id,
+        );
+    }
+
+    pub fn sync_descriptor_by_param_name_with_modulator(
+        &self,
+        old_desc: &EffectDescriptor,
+        new_desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
     ) {
         let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
         let mut migrated = Vec::new();
@@ -3180,7 +3208,6 @@ impl EffectSlotState {
             migrated.push((new_idx, default, plocks));
         }
 
-        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
         self.apply_descriptor_with_modulator(new_desc, node_id, modulator_node_id);
         for step in 0..MAX_STEPS {
             for param_idx in 0..MAX_SLOT_PARAMS {

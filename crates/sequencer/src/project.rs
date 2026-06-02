@@ -612,9 +612,17 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
 
 impl ProjectEffectSlot {
     pub fn into_snapshot_with_node_id(self, node_id: u32) -> EffectSlotSnapshot {
+        self.into_snapshot_with_node_ids(node_id, 0)
+    }
+
+    pub fn into_snapshot_with_node_ids(
+        self,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) -> EffectSlotSnapshot {
         EffectSlotSnapshot {
             node_id,
-            modulator_node_id: 0,
+            modulator_node_id,
             num_params: self.num_params,
             defaults: self.defaults,
             plocks: self.plocks,
@@ -1398,6 +1406,7 @@ mod tests {
                     network.neurons[0].route = Some(1);
                     network.neurons[0].output_overrides.instrument =
                         vec![crate::neural::ProjectParamOverride {
+                            target_track: 1,
                             param_id: crate::neural::ParamNodeId {
                                 logical_id: 7,
                                 node_param_idx: 3,
@@ -1407,6 +1416,7 @@ mod tests {
                         }];
                     network.neurons[0].output_overrides.effects =
                         vec![crate::neural::ProjectEffectParamOverride {
+                            target_track: 1,
                             slot_index: 0,
                             param_id: crate::neural::ParamNodeId {
                                 logical_id: 11,
@@ -1487,11 +1497,19 @@ mod tests {
         assert_eq!(network.num_neurons, 6);
         assert_eq!(network.neurons[0].route, Some(1));
         assert_eq!(
+            network.neurons[0].output_overrides.instrument[0].target_track,
+            1
+        );
+        assert_eq!(
             network.neurons[0].output_overrides.instrument[0].param_id,
             crate::neural::ParamNodeId {
                 logical_id: 7,
                 node_param_idx: 3,
             }
+        );
+        assert_eq!(
+            network.neurons[0].output_overrides.effects[0].target_track,
+            1
         );
         assert_eq!(
             network.neurons[0].output_overrides.effects[0].param_id,

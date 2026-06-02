@@ -35,6 +35,7 @@ pub struct ParamNodeId {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectParamOverride {
+    pub target_track: usize,
     pub param_id: ParamNodeId,
     pub param_index: usize,
     pub value: f32,
@@ -42,6 +43,7 @@ pub struct ProjectParamOverride {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectEffectParamOverride {
+    pub target_track: usize,
     pub slot_index: usize,
     pub param_id: ParamNodeId,
     pub param_index: usize,
@@ -178,6 +180,7 @@ struct NeuronConfig {
     dampening_amount: f32,
     dampening_recovery: f32,
     route: Option<usize>,
+    seed_track_mask: u128,
 }
 
 impl Default for NeuronConfig {
@@ -191,8 +194,37 @@ impl Default for NeuronConfig {
             dampening_amount: 0.0,
             dampening_recovery: 0.98,
             route: None,
+            seed_track_mask: 0,
         }
     }
+}
+
+impl NeuronConfig {
+    fn accepts_seed_track(self, track: usize) -> bool {
+        seed_track_bit(track).is_some_and(|bit| self.seed_track_mask & bit != 0)
+    }
+}
+
+fn seed_track_bit(track: usize) -> Option<u128> {
+    (track < u128::BITS as usize).then_some(1_u128 << track)
+}
+
+fn neuron_seed_track_mask(neuron: &ProjectNeuron) -> u128 {
+    let mut mask = 0_u128;
+    if let Some(route) = neuron.route.and_then(seed_track_bit) {
+        mask |= route;
+    }
+    for override_param in &neuron.output_overrides.instrument {
+        if let Some(bit) = seed_track_bit(override_param.target_track) {
+            mask |= bit;
+        }
+    }
+    for override_param in &neuron.output_overrides.effects {
+        if let Some(bit) = seed_track_bit(override_param.target_track) {
+            mask |= bit;
+        }
+    }
+    mask
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +266,13 @@ struct NeuralFiringCandidate {
     fire_sample: u64,
     fire_beats: f64,
     event: StepEvent,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeuralOutput {
+    pub sample_time: u64,
+    pub event: StepEvent,
+    pub emit_trigger: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -364,6 +403,7 @@ impl NeuralRuntime {
                 dampening_amount: neuron.dampening_amount.clamp(0.0, 1.0),
                 dampening_recovery: neuron.dampening_recovery.clamp(0.0, 1.0),
                 route: neuron.route,
+                seed_track_mask: neuron_seed_track_mask(&neuron),
             };
         }
         self.seed_on_reset = [0.0; NUM_NEURONS];
@@ -432,7 +472,7 @@ impl NeuralRuntime {
             return;
         }
         for idx in 0..self.num_neurons {
-            if self.neurons[idx].route == Some(event.track) {
+            if self.neurons[idx].accepts_seed_track(event.track) {
                 if event.resolved.velocity <= 0.0 {
                     continue;
                 }
@@ -452,6 +492,30 @@ impl NeuralRuntime {
         block_start_sample: u64,
         samples_per_quarter: f64,
         out: &mut Vec<(u64, StepEvent)>,
+    ) {
+        let mut outputs = Vec::new();
+        self.process_boundaries_with_outputs(
+            start_beats,
+            end_beats,
+            block_start_sample,
+            samples_per_quarter,
+            &mut outputs,
+        );
+        out.extend(
+            outputs
+                .into_iter()
+                .filter(|output| output.emit_trigger)
+                .map(|output| (output.sample_time, output.event)),
+        );
+    }
+
+    pub fn process_boundaries_with_outputs(
+        &mut self,
+        start_beats: f64,
+        end_beats: f64,
+        block_start_sample: u64,
+        samples_per_quarter: f64,
+        out: &mut Vec<NeuralOutput>,
     ) {
         if !self.active || end_beats <= start_beats {
             return;
@@ -683,16 +747,19 @@ impl NeuralRuntime {
         })
     }
 
-    fn commit_firing(
-        &mut self,
-        mut candidate: NeuralFiringCandidate,
-        out: &mut Vec<(u64, StepEvent)>,
-    ) {
+    fn commit_firing(&mut self, mut candidate: NeuralFiringCandidate, out: &mut Vec<NeuralOutput>) {
         let neuron_idx = candidate.neuron_idx;
-        if let Some(route) = self.neurons[neuron_idx].route {
+        let emit_trigger = if let Some(route) = self.neurons[neuron_idx].route {
             candidate.event.track = route;
-            out.push((candidate.fire_sample, candidate.event.clone()));
-        }
+            true
+        } else {
+            false
+        };
+        out.push(NeuralOutput {
+            sample_time: candidate.fire_sample,
+            event: candidate.event.clone(),
+            emit_trigger,
+        });
         self.pending[neuron_idx].push(DelayedPropagation {
             remaining_steps: self.neurons[neuron_idx].delay_steps.max(1),
             ready_after_beats: candidate.fire_beats,
@@ -967,6 +1034,41 @@ mod tests {
         assert_eq!(runtime.network_id, 2);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1.track, 0);
+    }
+
+    #[test]
+    fn route_off_neuron_can_seed_from_target_track_plock() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.id = 9;
+        network.num_neurons = 1;
+        network.weights = vec![vec![1.0]];
+        network.neurons[0].route = None;
+        network.neurons[0].threshold = 0.5;
+        network.neurons[0]
+            .output_overrides
+            .effects
+            .push(ProjectEffectParamOverride {
+                target_track: 0,
+                slot_index: 0,
+                param_id: ParamNodeId {
+                    logical_id: 42,
+                    node_param_idx: 0,
+                },
+                param_index: 0,
+                value: 0.75,
+            });
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed(&test_event(0));
+
+        let mut out = Vec::new();
+        runtime.process_boundaries_with_outputs(0.0, 0.25, 0, 48_000.0, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].emit_trigger);
+        assert_eq!(output_neuron(&out[0].event), 0);
+        assert_eq!(out[0].event.track, 0);
     }
 
     #[test]

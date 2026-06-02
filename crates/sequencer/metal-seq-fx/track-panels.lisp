@@ -60,23 +60,28 @@
                      (get p :slot-idx) "-" (get p :param-idx))
     (box :height 1.28
       (h-stack :gap 0.35 :align :center
-        (label (str "S" (get p :step)) :font-size 9 :width 2.2 :color :yellow :bg :transparent)
+        (label (get p :label) :font-size 9 :width 2.2 :color :yellow :bg :transparent)
         (label (substring (get p :group) 0 8) :font-size 9 :width 5.6 :color :dim :bg :transparent)
         (label (substring (get p :name) 0 9) :font-size 10 :width 5.9 :color :white :bg :transparent)
-        (if (get p :options)
-          (dropdown :value (get p :text-value)
-            :options (get p :options)
-            :on-change (lambda (v) (fx-plock-set-option p v))
-            :width 5.2 :height 1.1 :font-size 9)
-          (number-picker :value (get p :value)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
-            :noui true :font-size 10 :text-color :dim
-            :on-change (lambda (v) (fx-plock-set-value p v))
-            :width 4.5 :height 1.05))
-        (button "x"
-          :width 1.35 :height 1.05 :padding 0 :font-size 9
-          :background-color :dark-gray :color :dim
-          :on-click |x y r| (fx-plock-clear p))))))
+        (if (= (get p :source) "neuron")
+          (label (if (get p :text-value) (get p :text-value) (str (get p :value)))
+            :font-size 10 :width 5.2 :color :dim :bg :transparent)
+          (if (get p :options)
+            (dropdown :value (get p :text-value)
+              :options (get p :options)
+              :on-change (lambda (v) (fx-plock-set-option p v))
+              :width 5.2 :height 1.1 :font-size 9)
+            (number-picker :value (get p :value)
+              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
+              :noui true :font-size 10 :text-color :dim
+              :on-change (lambda (v) (fx-plock-set-value p v))
+              :width 4.5 :height 1.05)))
+        (if (= (get p :source) "neuron")
+          (label "" :width 1.35 :font-size 9 :color :dim :bg :transparent)
+          (button "x"
+            :width 1.35 :height 1.05 :padding 0 :font-size 9
+            :background-color :dark-gray :color :dim
+            :on-click |x y r| (fx-plock-clear p)))))))
 
 (def fx-track-plocks-panel ()
   (box :debug-name "track-plocks-panel" :padding 0.75
@@ -89,7 +94,10 @@
         (v-stack :gap 0.2
           (each SEQ.track-plocks |p idx|
             (fx-plock-row p idx)))
-        (label "no p-locks for selected steps" :font-size 9 :color :dim :bg :transparent)))))
+        (label (if (> (len SEQ.selected-neural-neurons) 0)
+                 "no p-locks for selected neurons"
+                 "no p-locks for selected steps")
+          :font-size 9 :color :dim :bg :transparent)))))
 
 (def fx-track-accumulator-panel ()
   (box :debug-name "track-accumulator-panel" :padding 0.75

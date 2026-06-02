@@ -40,6 +40,7 @@ struct MatrixInteractionState {
 enum MatrixControl {
     Circle,
     Line,
+    Grid,
 }
 
 fn value_cell(value: Value) -> Rc<RefCell<Value>> {
@@ -107,6 +108,14 @@ fn control_from_props(props: &HashMap<String, Value>) -> MatrixControl {
     match props.get("control").or_else(|| props.get("control-type")) {
         Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "line" => {
             MatrixControl::Line
+        }
+        Some(Value::Keyword(value)) | Some(Value::String(value))
+            if matches!(
+                value.as_str(),
+                "grid" | "square" | "squares" | "cell" | "cells"
+            ) =>
+        {
+            MatrixControl::Grid
         }
         _ => MatrixControl::Circle,
     }
@@ -290,12 +299,34 @@ fn default_hover_cell_color(bg: Color) -> Color {
     color_mix(bg, Color::WHITE, 0.34)
 }
 
+fn resolve_matrix_color(props: &HashMap<String, Value>, keys: &[&str], default: Color) -> Color {
+    keys.iter()
+        .find_map(|key| props.get(*key).and_then(theme::parse_color_value))
+        .unwrap_or(default)
+}
+
+fn fill_color(props: &HashMap<String, Value>) -> Color {
+    resolve_matrix_color(
+        props,
+        &["fill", "fill-color", "cell-color", "color"],
+        Color::WHITE,
+    )
+}
+
+fn background_color(props: &HashMap<String, Value>) -> Color {
+    resolve_matrix_color(
+        props,
+        &["background", "background-color", "bg"],
+        theme::BUTTON_GHOST_BG(),
+    )
+}
+
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let rows = matrix_rows_from_props(props);
     let cols = matrix_cols_from_props(props);
     let matrix = parse_matrix_value(props, rows, cols);
-    let fg = resolve_named_color(props, "color", Color::WHITE);
-    let bg = resolve_named_color(props, "background-color", theme::BUTTON_GHOST_BG());
+    let fg = fill_color(props);
+    let bg = background_color(props);
     let row_u16 = rect.row.round() as u16;
     let col_u16 = rect.col.round() as u16;
     let width_u16 = rect.width.round().max(1.0) as u16;
@@ -361,7 +392,19 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float ringMask = 0.0;
     float innerMask = 0.0;
-    if (control < 0.5) {
+    if (control > 1.5) {
+        float fillAlpha = clamp(in.color_a.a * value, 0.0, 1.0);
+        float bgAlpha = clamp(in.color_b.a, 0.0, 1.0);
+        float outAlpha = fillAlpha + bgAlpha * (1.0 - fillAlpha);
+        if (outAlpha <= 0.0) {
+            return float4(0.0);
+        }
+        float3 outColor = (
+            in.color_a.rgb * fillAlpha +
+            in.color_b.rgb * bgAlpha * (1.0 - fillAlpha)
+        ) / outAlpha;
+        return float4(outColor, outAlpha);
+    } else if (control < 0.5) {
         float ringDist = d - radius;
         ringMask = smoothstep(pix, 0.0, ringDist) * inCell;
 
@@ -535,8 +578,8 @@ impl WidgetDefinition for MatrixWidget {
         let matrix = parse_matrix_value(&node.props, rows, cols);
         let state = get_state(node.widget_id);
         let control = control_from_props(&node.props);
-        let color = resolve_named_color(&node.props, "color", Color::WHITE);
-        let bg = resolve_named_color(&node.props, "background-color", theme::BUTTON_GHOST_BG());
+        let color = fill_color(&node.props);
+        let bg = background_color(&node.props);
         let border = resolve_named_color(&node.props, "border-color", default_cell_color(bg));
         let hover_border = resolve_named_color(
             &node.props,
@@ -580,6 +623,7 @@ impl WidgetDefinition for MatrixWidget {
                             match control {
                                 MatrixControl::Circle => 0.0,
                                 MatrixControl::Line => 1.0,
+                                MatrixControl::Grid => 2.0,
                             },
                             if is_clicked { 1.0 } else { 0.0 },
                             state.release_time,
@@ -688,6 +732,40 @@ mod tests {
         assert_eq!(
             parse_matrix_value(&props, 2, 3),
             vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]
+        );
+    }
+
+    #[test]
+    fn control_prop_accepts_grid_mode_aliases() {
+        let mut props = HashMap::new();
+        props.insert("control".to_string(), Value::Keyword("grid".to_string()));
+        assert_eq!(control_from_props(&props), MatrixControl::Grid);
+
+        props.insert("control".to_string(), Value::String("squares".to_string()));
+        assert_eq!(control_from_props(&props), MatrixControl::Grid);
+    }
+
+    #[test]
+    fn background_and_fill_color_props_accept_aliases() {
+        let mut props = HashMap::new();
+        props.insert(
+            "background".to_string(),
+            Value::Keyword("transparent".to_string()),
+        );
+        props.insert(
+            "fill-color".to_string(),
+            Value::String("#33669980".to_string()),
+        );
+
+        assert_eq!(background_color(&props), Color::rgba(0.0, 0.0, 0.0, 0.0));
+        assert_eq!(
+            fill_color(&props),
+            Color::rgba(
+                0x33 as f32 / 255.0,
+                0x66 as f32 / 255.0,
+                0x99 as f32 / 255.0,
+                0x80 as f32 / 255.0
+            )
         );
     }
 
@@ -862,5 +940,46 @@ mod tests {
                 MetalPrimitive::WidgetInstance { widget_type, .. } if widget_type == "matrix"
             )
         }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn grid_control_sets_square_alpha_shader_mode() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(1.0));
+        props.insert("cols".to_string(), Value::Number(1.0));
+        props.insert("control".to_string(), Value::Keyword("grid".to_string()));
+        props.insert(
+            "background".to_string(),
+            Value::Keyword("transparent".to_string()),
+        );
+        props.insert("fill".to_string(), Value::String("#ff000080".to_string()));
+        props.insert(
+            "value".to_string(),
+            list(vec![list(vec![Value::Number(0.5)])]),
+        );
+        let node = matrix_node(props);
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 640.0,
+            vp_h: 360.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 18.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+
+        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, viewport);
+        let [MetalPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
+            panic!("expected one widget instance");
+        };
+        assert_eq!(instance.value_t, 0.5);
+        assert_eq!(instance.uniform_a[0], 2.0);
+        assert_eq!(instance.color_b, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(instance.color_a, [1.0, 0.0, 0.0, 0x80 as f32 / 255.0]);
     }
 }
