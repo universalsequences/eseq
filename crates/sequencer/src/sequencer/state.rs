@@ -5,8 +5,8 @@ use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
 };
 use crate::neural::{
-    NeuralVisualizationSnapshot, ProjectNeuralNetwork,
-    remap_neural_network_routes_after_track_delete,
+    remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
+    ProjectNeuralNetwork,
 };
 use crate::voice::MAX_VOICES;
 
