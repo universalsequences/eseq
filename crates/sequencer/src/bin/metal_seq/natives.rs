@@ -225,13 +225,18 @@ pub(crate) fn init_runtime(
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
     expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
+    selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons,
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
     auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) -> RuntimeInit {
     let mut runtime = Runtime::new();
-    sequencer::lisp_effect::register_neural_authoring_natives(&mut runtime, Arc::clone(&state));
+    sequencer::lisp_effect::register_neural_authoring_natives_with_selection(
+        &mut runtime,
+        Arc::clone(&state),
+        Arc::clone(&selected_neural_neurons),
+    );
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -259,6 +264,12 @@ pub(crate) fn init_runtime(
                     Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
                 ),
                 ("neural-networks", build_neural_networks_value(&state)),
+                (
+                    "selected-neural-neurons",
+                    sequencer::lisp_effect::selected_neural_neurons_to_value(
+                        &selected_neural_neurons.lock().unwrap(),
+                    ),
+                ),
                 (
                     "neural-energy-matrix",
                     build_neural_energy_matrix_value(&state),

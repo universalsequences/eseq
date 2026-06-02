@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::os::raw::{c_char, c_float, c_int, c_void};
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::accumulator::ResolvedStep;
 use crate::audiograph::{self, LiveGraph, NodeVTable};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
-use crate::neural::{NUM_NEURONS, NeuralMaxPolySelection, ProjectNeuralNetwork, ProjectNeuron};
+use crate::neural::{NeuralMaxPolySelection, ProjectNeuralNetwork, ProjectNeuron, NUM_NEURONS};
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
@@ -3604,9 +3604,30 @@ fn register_sequencer_natives(
     );
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SelectedNeuralNeuron {
+    pub pattern_idx: usize,
+    pub network_id: u64,
+    pub neuron_idx: usize,
+}
+
+pub type SharedSelectedNeuralNeurons = Arc<Mutex<BTreeSet<SelectedNeuralNeuron>>>;
+
 pub fn register_neural_authoring_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
+) {
+    register_neural_authoring_natives_with_selection(
+        runtime,
+        state,
+        Arc::new(Mutex::new(BTreeSet::new())),
+    );
+}
+
+pub fn register_neural_authoring_natives_with_selection(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+    selected_neural_neurons: SharedSelectedNeuralNeurons,
 ) {
     let state_for_neural_list = Arc::clone(&state);
     runtime.register_native_with_docs(
@@ -3668,7 +3689,100 @@ pub fn register_neural_authoring_natives(
         },
     );
 
+    let state_for_neural_select = Arc::clone(&state);
+    let selection_for_neural_select = Arc::clone(&selected_neural_neurons);
+    runtime.register_native_with_docs(
+        "neural-select-neuron",
+        "(neural-select-neuron id-or-name neuron-index)",
+        "Select one neuron for UI authoring and return the full selected-neuron list.",
+        move |args, ctx| {
+            if args.len() != 2 {
+                return Err(
+                    "neural-select-neuron expects network id/name and neuron index".to_string(),
+                );
+            }
+            let reference = parse_neural_network_ref(&args[0])?;
+            let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
+            let networks = state_for_neural_select.current_neural_networks();
+            let network_idx = neural_network_index(&networks, &reference)?;
+            let network = &networks[network_idx];
+            if neuron_idx >= network.num_neurons {
+                return Err("neuron index out of range".to_string());
+            }
+            let pattern_idx = state_for_neural_select
+                .pattern
+                .current_pattern
+                .load(Ordering::Relaxed) as usize;
+            let mut selection = selection_for_neural_select.lock().unwrap();
+            selection.clear();
+            selection.insert(SelectedNeuralNeuron {
+                pattern_idx,
+                network_id: network.id,
+                neuron_idx,
+            });
+            ctx.set_status(format!(
+                "selected neural neuron {}:{}:{}",
+                pattern_idx, network.id, neuron_idx
+            ));
+            Ok(selected_neural_neurons_to_value(&selection))
+        },
+    );
+
+    let selection_for_neural_clear = Arc::clone(&selected_neural_neurons);
+    runtime.register_native_with_docs(
+        "neural-clear-selection",
+        "(neural-clear-selection)",
+        "Clear selected neural neurons and return the empty selected-neuron list.",
+        move |_args, _ctx| {
+            let mut selection = selection_for_neural_clear.lock().unwrap();
+            selection.clear();
+            Ok(selected_neural_neurons_to_value(&selection))
+        },
+    );
+
+    let selection_for_neural_selected = Arc::clone(&selected_neural_neurons);
+    runtime.register_native_with_docs(
+        "neural-selected-neurons",
+        "(neural-selected-neurons)",
+        "Return selected neural neurons as maps containing :pattern, :network-id, and :neuron.",
+        move |_args, _ctx| {
+            let selection = selection_for_neural_selected.lock().unwrap();
+            Ok(selected_neural_neurons_to_value(&selection))
+        },
+    );
+
+    let selection_for_neural_selected_predicate = Arc::clone(&selected_neural_neurons);
+    let state_for_neural_selected_predicate = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "neural-neuron-selected?",
+        "(neural-neuron-selected? network-id neuron-index)",
+        "Return true when a neural network neuron is selected in the current pattern.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err(
+                    "neural-neuron-selected? expects network id and neuron index".to_string(),
+                );
+            }
+            let network_id = match &args[0] {
+                EValue::Number(id) if id.is_finite() && *id >= 0.0 => *id as u64,
+                _ => return Err("network id must be a non-negative number".to_string()),
+            };
+            let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
+            let pattern_idx = state_for_neural_selected_predicate
+                .pattern
+                .current_pattern
+                .load(Ordering::Relaxed) as usize;
+            let selection = selection_for_neural_selected_predicate.lock().unwrap();
+            Ok(EValue::Bool(selection.contains(&SelectedNeuralNeuron {
+                pattern_idx,
+                network_id,
+                neuron_idx,
+            })))
+        },
+    );
+
     let state_for_neural_delete = Arc::clone(&state);
+    let selection_for_neural_delete = Arc::clone(&selected_neural_neurons);
     runtime.register_native_with_docs(
         "neural-delete",
         "(neural-delete id-or-name)",
@@ -3682,6 +3796,16 @@ pub fn register_neural_authoring_natives(
                 let idx = neural_network_index(networks, &reference)?;
                 Ok(networks.remove(idx))
             })?;
+            let pattern_idx = state_for_neural_delete
+                .pattern
+                .current_pattern
+                .load(Ordering::Relaxed) as usize;
+            selection_for_neural_delete
+                .lock()
+                .unwrap()
+                .retain(|selected| {
+                    selected.pattern_idx != pattern_idx || selected.network_id != deleted.id
+                });
             ctx.set_status(format!("deleted neural network '{}'", deleted.name));
             Ok(EValue::Bool(true))
         },
@@ -4599,6 +4723,14 @@ fn register_sequencer_natives_with_accumulators(
         "(fx-param \"name\") | (fx-param index)",
         "Read the current MIDI FX slot parameter value, resolving the current step's p-lock over the slot default.",
         move |args, _ctx| eval_midi_fx_param(&fx_eval_for_param, &args),
+    );
+
+    let fx_eval_for_track = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-track",
+        "(fx-track)",
+        "Return the zero-based source track for the current MIDI FX event.",
+        move |_args, _ctx| eval_midi_fx_track(&fx_eval_for_track),
     );
 
     let fx_eval_for_arp_emit_directed = Arc::clone(&accumulator_eval);
@@ -6183,6 +6315,19 @@ fn eval_midi_fx_param(
     Ok(EValue::Number(value as f64))
 }
 
+fn eval_midi_fx_track(accumulator_eval: &SharedAccumulatorEvalContext) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    let Some((track, _)) = eval.midi_fx_scope.as_ref() else {
+        return Err("fx-track is only available inside def-midi-fx".to_string());
+    };
+    Ok(EValue::Number(*track as f64))
+}
+
 enum FxNoteField {
     Transpose,
     Start,
@@ -7630,6 +7775,30 @@ fn neural_network_to_value(network: &ProjectNeuralNetwork) -> EValue {
         )),
     );
     EValue::Map(map)
+}
+
+pub fn selected_neural_neurons_to_value(selection: &BTreeSet<SelectedNeuralNeuron>) -> EValue {
+    lisp_list(
+        selection
+            .iter()
+            .map(|selected| {
+                let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
+                map.insert(
+                    "pattern".to_string(),
+                    lisp_number(selected.pattern_idx as f64),
+                );
+                map.insert(
+                    "network-id".to_string(),
+                    lisp_number(selected.network_id as f64),
+                );
+                map.insert(
+                    "neuron".to_string(),
+                    lisp_number(selected.neuron_idx as f64),
+                );
+                EValue::Map(map)
+            })
+            .collect(),
+    )
 }
 
 fn neural_neuron_to_value(idx: usize, neuron: &ProjectNeuron) -> EValue {
@@ -9307,10 +9476,12 @@ mod tests {
         runtime.register_reactive(
             "SEQ",
             vec![
+                ("current-pattern", Value::Number(0.0)),
                 ("neural-networks", Value::List(Vec::new())),
                 ("neural-energy-matrix", Value::List(Vec::new())),
                 ("neural-trigger-matrix", Value::List(Vec::new())),
                 ("neural-dampening-matrix", Value::List(Vec::new())),
+                ("selected-neural-neurons", Value::List(Vec::new())),
             ],
             true,
         );
@@ -9472,6 +9643,60 @@ mod tests {
             .unwrap();
         assert!(matches!(updated, Some(Value::Map(_))));
         assert_eq!(state.current_neural_networks()[0].weights[0][2], 0.9);
+    }
+
+    #[test]
+    fn neural_lisp_selects_and_clears_neuron_selection() {
+        let (_state, mut runtime) = neural_test_runtime(1);
+        runtime
+            .eval_str("(neural-create :name \"drums\" :neurons 3)")
+            .unwrap();
+
+        let selected = runtime
+            .eval_str("(neural-select-neuron \"drums\" 2)")
+            .unwrap()
+            .expect("selection list");
+        let Value::List(items) = selected else {
+            panic!("expected selected neuron list");
+        };
+        assert_eq!(items.len(), 1);
+        let Value::Map(selected) = &*items[0].borrow() else {
+            panic!("expected selected neuron map");
+        };
+        assert_eq!(
+            selected.get("pattern").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            selected
+                .get("network-id")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            selected.get("neuron").map(|value| value.borrow().clone()),
+            Some(Value::Number(2.0))
+        );
+        assert_eq!(
+            runtime.eval_str("(neural-neuron-selected? 1 2)").unwrap(),
+            Some(Value::Bool(true))
+        );
+
+        let cleared = runtime.eval_str("(neural-clear-selection)").unwrap();
+        assert!(matches!(cleared, Some(Value::List(items)) if items.is_empty()));
+        assert_eq!(
+            runtime.eval_str("(neural-neuron-selected? 1 2)").unwrap(),
+            Some(Value::Bool(false))
+        );
+
+        runtime
+            .eval_str("(neural-select-neuron \"drums\" 1)")
+            .unwrap();
+        runtime.eval_str("(neural-delete \"drums\")").unwrap();
+        assert_eq!(
+            runtime.eval_str("(neural-selected-neurons)").unwrap(),
+            Some(Value::List(vec![]))
+        );
     }
 
     #[test]
@@ -9685,7 +9910,9 @@ mod tests {
             Some(Value::Number(0.5))
         );
         assert_eq!(
-            runtime.eval_str("neural-8x8-track-router-max-poly").unwrap(),
+            runtime
+                .eval_str("neural-8x8-track-router-max-poly")
+                .unwrap(),
             Some(Value::Number(5.0))
         );
         assert_eq!(
@@ -9762,7 +9989,19 @@ mod tests {
             assert!(node.rect.height > 0.0, "{:?}", node.rect);
         }
 
-        let (_state, mut runtime) = neural_test_runtime(8);
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        let (state, mut runtime) = neural_test_runtime(8);
         let source = std::fs::read_to_string(format!(
             "{}/scripts/neural-8x8-track-router.lisp",
             env!("CARGO_MANIFEST_DIR")
@@ -9804,6 +10043,53 @@ mod tests {
                 visualization_matrix.rect
             );
         }
+
+        let label_3 =
+            find_by_stable_key(&layout, "neural-router-row-label-3").expect("row 3 label");
+        let label_click = label_3
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("row label on-click");
+        runtime
+            .invoke(label_click, vec![Value::Bool(true)])
+            .expect("invoke row label click");
+        assert_eq!(
+            runtime
+                .eval_str("(neural-neuron-selected? neural-8x8-track-router-id 2)")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
+        let row_3 = find_by_stable_key(&layout, "neural-router-row-3").expect("selected row 3");
+        let expected_selected_field = format!(
+            "neural-neuron-selected-0-{}-2",
+            state.current_neural_networks()[0].id
+        );
+        assert!(
+            matches!(
+                row_3.props.get("selected"),
+                Some(Value::ReactiveRef { namespace, field, .. })
+                    if namespace == "SEQ" && field == &expected_selected_field
+            ),
+            "row 3 should bind selected state to its targeted neural selection field"
+        );
+        assert_eq!(
+            row_3.props.get("selected-background-color"),
+            Some(&Value::Keyword("fx-panel-header-selected-bg".to_string()))
+        );
+
+        let clear_callback = layout
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("outer panel click clears selection");
+        runtime
+            .invoke(clear_callback, vec![Value::Bool(true)])
+            .expect("invoke outer panel click");
+        assert_eq!(
+            runtime.eval_str("(neural-selected-neurons)").unwrap(),
+            Some(Value::List(vec![]))
+        );
 
         let mut dropdowns = Vec::new();
         collect_widgets(&layout, "dropdown", &mut dropdowns);
@@ -11186,6 +11472,109 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(output.suppressed);
         assert_eq!(notes, vec![0.0, 4.0, 7.0, 12.0, 16.0, 19.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn folder_midi_fx_trigger_to_track_emits_to_selected_target_and_ignores_self() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(2),
+            fallback_instrument_descriptors(2),
+            0,
+            0,
+        );
+        runtime.eval(&super::load_midi_fx_library_source()).unwrap();
+        let descriptors = runtime.midi_fx_descriptors();
+        let trigger_idx = descriptors
+            .iter()
+            .position(|desc| desc.name == "trigger-to-track")
+            .expect("trigger-to-track MIDI FX is registered");
+        let trigger_desc = descriptors
+            .get(trigger_idx)
+            .expect("trigger-to-track descriptor");
+        assert_eq!(trigger_desc.params.len(), 2);
+        assert_eq!(trigger_desc.params[0].name, "track");
+        assert_eq!(trigger_desc.params[1].name, "enabled");
+
+        let mut slot = EffectSlotSnapshot::new_default(trigger_desc, 0);
+        slot.defaults[0] = 2.0;
+        let output = runtime
+            .invoke_midi_fx(
+                trigger_idx,
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 1.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 5.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![0.0],
+                vec![1.0],
+                0.0,
+                None,
+                slot.clone(),
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(2)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(!output.suppressed);
+        assert_eq!(output.emitted.len(), 1);
+        assert_eq!(output.emitted[0].track, Some(1));
+        assert_eq!(output.emitted[0].offset_beats, 0.0);
+        assert_eq!(output.emitted[0].resolved.transpose, 5.0);
+
+        slot.defaults[0] = 1.0;
+        let self_target_output = runtime
+            .invoke_midi_fx(
+                trigger_idx,
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 1.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 5.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![0.0],
+                vec![1.0],
+                0.0,
+                None,
+                slot,
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(2)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(!self_target_output.suppressed);
+        assert!(self_target_output.emitted.is_empty());
     }
 
     #[test]

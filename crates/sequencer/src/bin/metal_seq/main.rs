@@ -40,7 +40,7 @@ use ui_invalidation::*;
 use values::*;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1070,6 +1070,45 @@ fn sync_step_selection_bindings(
                     slot,
                 );
             }
+        }
+    }
+    dirty
+}
+
+fn neural_neuron_selected_field(pattern_idx: usize, network_id: u64, neuron_idx: usize) -> String {
+    format!("neural-neuron-selected-{pattern_idx}-{network_id}-{neuron_idx}")
+}
+
+// Mirrors step selection: row widgets bind to targeted fields so selection dirties only those rows.
+fn sync_selected_neural_neuron_bindings(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+) -> bool {
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            "selected-neural-neurons",
+            sequencer::lisp_effect::selected_neural_neurons_to_value(selection),
+        )
+        .effects_dirty;
+    let pattern_idx = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    for network in state.current_neural_networks() {
+        let neuron_count = network.num_neurons.min(sequencer::neural::NUM_NEURONS);
+        for neuron_idx in 0..neuron_count {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &neural_neuron_selected_field(pattern_idx, network.id, neuron_idx),
+                    Value::Bool(selection.contains(
+                        &sequencer::lisp_effect::SelectedNeuralNeuron {
+                            pattern_idx,
+                            network_id: network.id,
+                            neuron_idx,
+                        },
+                    )),
+                )
+                .effects_dirty;
         }
     }
     dirty
@@ -3012,6 +3051,8 @@ mod tests {
         let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons =
+            Arc::new(Mutex::new(BTreeSet::new()));
         let piano_roll_selection = Arc::new(Mutex::new(HashSet::<u64>::new()));
         let piano_roll_move_state = Arc::new(Mutex::new(None));
         let ui_epoch = Arc::new(AtomicUsize::new(0));
@@ -3046,6 +3087,7 @@ mod tests {
             fx_epoch.clone(),
             ui_invalidations.clone(),
             expanded_step_projection.clone(),
+            selected_neural_neurons.clone(),
             active_delete_target.clone(),
             active_delete_target_version.clone(),
             auto_follow_override_until.clone(),
@@ -3400,6 +3442,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_track = Arc::new(AtomicUsize::new(0));
     // Selected steps for p-locking
     let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+    let selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons =
+        Arc::new(Mutex::new(BTreeSet::new()));
     let piano_roll_selection: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>> = Arc::new(Mutex::new(None));
     let step_clipboard: Arc<
@@ -3449,6 +3493,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fx_epoch.clone(),
         ui_invalidations.clone(),
         expanded_step_projection.clone(),
+        selected_neural_neurons.clone(),
         active_delete_target.clone(),
         active_delete_target_version.clone(),
         auto_follow_override_until.clone(),
@@ -3500,6 +3545,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
     let mut prev_active_buffer_name = editor.active_buffer().name.clone();
+    let mut prev_selected_neural_neurons = selected_neural_neurons.lock().unwrap().clone();
     let mut prev_agent_generation_watermark = agent_generation_watermark(&app);
     let mut prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)> = None;
     let mut prev_auto_follow = true;
@@ -3679,6 +3725,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     let key = normalize_command_shortcuts(raw_key);
+                    if key.kind == crossterm::event::KeyEventKind::Press
+                        && key.code == crossterm::event::KeyCode::Esc
+                    {
+                        let cleared_neural_selection = {
+                            let mut selection = selected_neural_neurons.lock().unwrap();
+                            let had_selection = !selection.is_empty();
+                            selection.clear();
+                            had_selection
+                        };
+                        if cleared_neural_selection {
+                            let selection = selected_neural_neurons.lock().unwrap().clone();
+                            sync_selected_neural_neuron_bindings(
+                                editor.runtime_mut(),
+                                &state,
+                                &selection,
+                            );
+                            prev_selected_neural_neurons = selection;
+                            editor.mark_needs_redraw();
+                            ui_loop_stats.note_event(event_started.elapsed());
+                            continue;
+                        }
+                    }
                     if should_toggle_play_on_space(&editor, &key) {
                         let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                         editor.refresh_runtime_side_effects();
@@ -11344,6 +11412,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_meter_poll_at = Instant::now();
             }
             let mut needs_reactive_cycle = false;
+            let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
+            if selected_neural_snapshot != prev_selected_neural_neurons {
+                needs_reactive_cycle |= sync_selected_neural_neuron_bindings(
+                    editor.runtime_mut(),
+                    &state,
+                    &selected_neural_snapshot,
+                );
+                prev_selected_neural_neurons = selected_neural_snapshot;
+            }
             // Track switch — rebuild everything
             if ct != prev_current_track && !app.tracks.is_empty() {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
@@ -11657,6 +11734,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let started = Instant::now();
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
+                let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
+                sync_selected_neural_neuron_bindings(rt, &state, &selected_neural_snapshot);
+                prev_selected_neural_neurons = selected_neural_snapshot;
                 sync_names_pattern_elapsed = started.elapsed();
                 if current_track_playhead_visible {
                     let started = Instant::now();

@@ -4296,6 +4296,7 @@ fragment float4 waveform_frag(
             }
 
             let mut tab_verts = Vec::new();
+            let mut tab_text_prims = Vec::new();
             enc.setScissorRect(MTLScissorRect {
                 x: 0,
                 y: 0,
@@ -4327,7 +4328,11 @@ fragment float4 waveform_frag(
                     } else {
                         theme::BORDER_INACTIVE()
                     };
-                    let tab_radius = tile.border_radius_px.min(tab_height_px * 0.45).min(6.0);
+                    let tab_radius = tile
+                        .border_radius_px
+                        .max(8.0)
+                        .min(tab_height_px * 0.5)
+                        .min(tab_width_px * 0.25);
                     push_top_rounded_rect_fill_px(
                         &mut tab_verts,
                         tab_left_px,
@@ -4352,34 +4357,24 @@ fragment float4 waveform_frag(
                         vp_w,
                         vp_h,
                     );
-                    let text_col = tab.rect.col + 1.0;
-                    let text_row = tab.rect.row + 0.2;
                     let fg = if tab.selected {
                         theme::FG()
                     } else {
                         theme::STATUS_FG()
                     };
-                    for (offset, ch) in tab.label.chars().enumerate() {
-                        let ch_col = text_col + offset as f32;
-                        if ch_col + 1.0 > tab.rect.col + tab.rect.width {
-                            break;
-                        }
-                        let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                        rasterize_char(
-                            atlas,
-                            ch,
-                            (ch_col, text_row),
-                            &CharCtx {
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                                fg: to_rgba(fg),
-                                bg: to_rgba(tab_bg),
-                            },
-                            &mut tab_verts,
-                        );
-                    }
+                    tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
+                        widget_render::MetalProportionalTextPrimitive {
+                            row: tab.rect.row + (tab.rect.height - 1.0) * 0.5,
+                            col: tab.rect.col,
+                            align_width: tab.rect.width.max(0.0),
+                            h_align: 0.5,
+                            text: tab.label.clone(),
+                            font_size: 10.5,
+                            scale: 1.0,
+                            fg,
+                            bg: tab_bg,
+                        },
+                    ));
                 }
             }
             draw_vertices(
@@ -4391,6 +4386,30 @@ fragment float4 waveform_frag(
                 &atlas_texture,
                 &tab_verts,
             );
+            if let (Some(prop_atlas), Some(prop_pipe)) =
+                (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+            {
+                let prop_verts = build_proportional_text_quads_cached(
+                    &tab_text_prims,
+                    prop_atlas,
+                    &mut self.prop_text_layout_cache,
+                    &mut self.stats,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+                let prop_tex = prop_atlas.texture.clone();
+                draw_vertices(
+                    &enc,
+                    &self.device,
+                    &mut self.upload_arena,
+                    &mut self.stats,
+                    prop_pipe,
+                    &prop_tex,
+                    &prop_verts,
+                );
+            }
 
             // ── Global patch cables (no tile scissor) ───────────────────────
             // These are collected from visible mod-port widget rects and drawn

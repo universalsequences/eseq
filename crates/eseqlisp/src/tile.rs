@@ -213,7 +213,7 @@ pub fn tile_tab_layouts(
     let desired_widths = tabs
         .iter()
         .map(|tab| {
-            (tab.label.chars().count() as f32 + TILE_TAB_LABEL_PAD)
+            (estimated_tab_label_width_cells(&tab.label) + TILE_TAB_LABEL_PAD)
                 .clamp(TILE_TAB_MIN_WIDTH, TILE_TAB_MAX_WIDTH)
         })
         .collect::<Vec<_>>();
@@ -253,8 +253,97 @@ pub fn tile_tab_layouts(
 }
 
 fn truncate_tab_label(label: &str, width: f32) -> String {
-    let budget = (width - TILE_TAB_LABEL_PAD).floor().max(0.0) as usize;
-    label.chars().take(budget).collect()
+    let budget = (width - TILE_TAB_LABEL_PAD).max(0.0);
+    let mut used = 0.0;
+    let mut out = String::new();
+    for ch in label.chars() {
+        let char_width = estimated_tab_char_width_cells(ch);
+        if used + char_width > budget + 0.01 && !out.is_empty() {
+            break;
+        }
+        used += char_width;
+        out.push(ch);
+    }
+    out
+}
+
+fn estimated_tab_label_width_cells(label: &str) -> f32 {
+    label.chars().map(estimated_tab_char_width_cells).sum()
+}
+
+fn estimated_tab_char_width_cells(ch: char) -> f32 {
+    match ch {
+        ' ' => 0.38,
+        'i' | 'l' | 'I' | '!' | '|' | '.' | ',' | ':' | ';' | '\'' | '`' => 0.36,
+        'j' | 'f' | 'r' | 't' | '(' | ')' | '[' | ']' | '{' | '}' => 0.5,
+        'm' | 'w' | 'M' | 'W' => 0.95,
+        'A'..='Z' => 0.78,
+        '0'..='9' => 0.64,
+        '-' | '_' | '/' | '\\' => 0.55,
+        _ => 0.64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_width_estimate_uses_proportional_character_widths() {
+        let rect = Rect {
+            row: 10.0,
+            col: 0.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        let layouts = tile_tab_layouts(
+            rect,
+            &[
+                TileBufferTab {
+                    label: "iii".to_string(),
+                    buffer_idx: 0,
+                },
+                TileBufferTab {
+                    label: "WWW".to_string(),
+                    buffer_idx: 1,
+                },
+            ],
+            Some(0),
+        );
+
+        assert_eq!(layouts.len(), 2);
+        assert!(
+            layouts[1].rect.width > layouts[0].rect.width,
+            "wide glyph labels should reserve more tab width than narrow glyph labels"
+        );
+    }
+
+    #[test]
+    fn tab_width_estimate_keeps_matrix_label_untruncated() {
+        let rect = Rect {
+            row: 10.0,
+            col: 0.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        let layouts = tile_tab_layouts(
+            rect,
+            &[
+                TileBufferTab {
+                    label: "Seq".to_string(),
+                    buffer_idx: 0,
+                },
+                TileBufferTab {
+                    label: "Matrix".to_string(),
+                    buffer_idx: 1,
+                },
+            ],
+            Some(0),
+        );
+
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts[1].label, "Matrix");
+    }
 }
 
 // ── Tree operations ──────────────────────────────────────────────────────
