@@ -2556,9 +2556,11 @@ pub fn spawn_scheduler_thread(
             let mut live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
                 std::array::from_fn(|_| LiveMidiFxTrackState::default());
             let mut neural_runtime = NeuralRuntime::default();
+            let mut generator_runtime = crate::generator::GeneratorRuntime::default();
             let mut loaded_neural_networks: Option<Vec<crate::neural::ProjectNeuralNetwork>> = None;
             let mut last_live_midi_fx_active = false;
             let mut scratch_source_version = u64::MAX;
+            let mut published_sequencers_version = u64::MAX;
             let mut scratch_runtime = None;
             let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
             let mut debug_accum_invocations = 0_u64;
@@ -2586,7 +2588,10 @@ pub fn spawn_scheduler_thread(
                     .load(Ordering::Acquire);
                 let topology_edit_in_flight = state.topology_edit_in_flight();
 
-                if latest_scratch_source_version != scratch_source_version {
+                let latest_published_sequencers_version = state.published_sequencers_version();
+                if latest_scratch_source_version != scratch_source_version
+                    || latest_published_sequencers_version != published_sequencers_version
+                {
                     let source =
                         lisp_effect::midi_fx_library_source_with_user_source(&state.scratch_source());
                     if debug_accum {
@@ -2639,7 +2644,30 @@ pub fn spawn_scheduler_thread(
                             }
                         }
                     }
+                    // Register UI-authored generators (def-sequencer evaluated in any
+                    // editor file, published via SequencerState). These need a runtime
+                    // to live in even when there is no scratch/midi-fx source.
+                    let published = state.published_sequencers();
+                    if !published.is_empty() {
+                        let runtime = scratch_runtime.get_or_insert_with(|| {
+                            lisp_effect::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0)
+                        });
+                        for seq in &published {
+                            runtime.register_published_sequencer(
+                                seq.id,
+                                seq.name.clone(),
+                                crate::sequencer::Timebase::from_index(seq.resolution as u32),
+                                seq.tick_source.clone(),
+                            );
+                        }
+                    }
                     scratch_source_version = latest_scratch_source_version;
+                    published_sequencers_version = latest_published_sequencers_version;
+                    let generator_defs = scratch_runtime
+                        .as_ref()
+                        .map(|runtime| runtime.sequencer_defs())
+                        .unwrap_or_default();
+                    generator_runtime.sync_definitions(&generator_defs, clock.total_beats);
                 }
 
                 if !playing
@@ -2710,6 +2738,7 @@ pub fn spawn_scheduler_thread(
                     pending_accum_reset = [false; MAX_TRACKS];
                     accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
                     neural_runtime.reset_state(0.0);
+                    generator_runtime.reset(0.0);
                     state.set_neural_visualization(neural_runtime.visualization_snapshot());
                     thread::sleep(Duration::from_millis(if live_active { 1 } else { 2 }));
                     continue;
@@ -3447,6 +3476,88 @@ pub fn spawn_scheduler_thread(
                     if !chunk_enqueued {
                         break;
                     }
+
+                    // Lisp-defined generators: self-clocked over this chunk, additive
+                    // (like the neural layer). Each boundary invokes the generator's
+                    // :tick on the scheduler-side VM; seq-emit output is resolved to a
+                    // NetworkTrigger here.
+                    if !generator_runtime.is_empty() {
+                        let mut generator_emissions = Vec::new();
+                        if let Some(scratch) = scratch_runtime.as_mut() {
+                            generator_runtime.process_block(
+                                chunk_start_beats,
+                                chunk_end_beats,
+                                scheduled_until_sample,
+                                samples_per_quarter,
+                                |input| {
+                                    let generator_index = input.generator_index;
+                                    let random_state = input.random_state;
+                                    let fallback_state = input.state.clone();
+                                    scratch.invoke_sequencer_tick(generator_index, input).unwrap_or(
+                                        crate::generator::GeneratorTickResult {
+                                            emitted: Vec::new(),
+                                            random_state,
+                                            state: fallback_state,
+                                        },
+                                    )
+                                },
+                                &mut generator_emissions,
+                            );
+                        }
+                        // Velocity-merge coincident hits on the same track (accent, not
+                        // polyphony) — same policy as the neural layer.
+                        let mut merged_generator_emissions: Vec<crate::generator::GeneratorEmission> =
+                            Vec::new();
+                        for emission in generator_emissions {
+                            if let Some(last) = merged_generator_emissions.last_mut() {
+                                if last.sample_time == emission.sample_time
+                                    && last.event.track == emission.event.track
+                                {
+                                    last.event.resolved.velocity = (last.event.resolved.velocity
+                                        + emission.event.resolved.velocity)
+                                        .min(1.0);
+                                    continue;
+                                }
+                            }
+                            merged_generator_emissions.push(emission);
+                        }
+                        for emission in merged_generator_emissions {
+                            let track_idx = emission.event.track.unwrap_or(0);
+                            if track_idx >= snapshot.tracks.len() {
+                                continue;
+                            }
+                            let chord = chord_data_from_parts(
+                                &emission.event.chord,
+                                &emission.event.chord_durations,
+                                &[],
+                                emission.event.resolved.duration,
+                                emission.event.chord_step_transpose,
+                            );
+                            if !enqueue_network_trigger(
+                                &queue,
+                                &snapshot,
+                                pattern_epoch,
+                                emission.sample_time,
+                                track_idx,
+                                emission.generator_index,
+                                None,
+                                samples_per_quarter as f32,
+                                emission.event.resolved,
+                                chord,
+                                emission.event.effect_params,
+                                scheduled_instrument_params_from_vec(emission.event.instrument_params),
+                                resolve_sampler_params(&snapshot, track_idx, 0),
+                                0,
+                            ) {
+                                chunk_enqueued = false;
+                                break;
+                            }
+                        }
+                        if !chunk_enqueued {
+                            break;
+                        }
+                    }
+
                     scheduled_until_sample =
                         scheduled_until_sample.saturating_add(scheduler_block_size as u64);
                 }

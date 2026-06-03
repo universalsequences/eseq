@@ -3150,6 +3150,32 @@ pub struct AccumulatorEvalOutput {
 
 type SharedAccumulatorEvalContext = Arc<Mutex<Option<AccumulatorEvalContext>>>;
 
+type SharedRegisteredSequencers = Arc<Mutex<Vec<RegisteredSequencer>>>;
+type SharedGeneratorTickContext = Arc<Mutex<Option<GeneratorTickContext>>>;
+
+/// A lisp `def-sequencer` definition as held by the scheduler-side VM: its id
+/// (stable hash of the name, for hot-reload matching), display name, `:resolution`
+/// timebase, and the `:tick` closure to invoke per boundary crossing.
+#[derive(Clone)]
+pub(crate) struct RegisteredSequencer {
+    id: u64,
+    name: String,
+    resolution: Timebase,
+    tick: RegisteredAccumulatorCallback,
+}
+
+/// Per-invocation context for a generator `:tick`, mirroring [`AccumulatorEvalContext`]
+/// but for self-clocked generators: musical position only (no source step), an RNG
+/// cell for `gen-rand`, and the buffer that `seq-emit` pushes into.
+pub(crate) struct GeneratorTickContext {
+    tick_index: u64,
+    beat: f64,
+    resolution_beats: f64,
+    random_state: u64,
+    state: HashMap<String, f64>,
+    emitted: Vec<EmittedAccumulatorEvent>,
+}
+
 pub struct ScratchControlRuntime {
     runtime: Runtime,
     context: SharedSequencerEvalContext,
@@ -3159,6 +3185,8 @@ pub struct ScratchControlRuntime {
     pending_midi_fx_params: SharedPendingMidiFxParams,
     midi_fx_state: SharedMidiFxState,
     accumulator_eval: SharedAccumulatorEvalContext,
+    sequencers: SharedRegisteredSequencers,
+    generator_tick: SharedGeneratorTickContext,
     runtime_globals: Vec<String>,
 }
 
@@ -3180,6 +3208,8 @@ impl ScratchControlRuntime {
         let pending_midi_fx_params = Arc::new(Mutex::new(Vec::new()));
         let midi_fx_state = Arc::new(Mutex::new(HashMap::new()));
         let accumulator_eval = Arc::new(Mutex::new(None));
+        let sequencers = Arc::new(Mutex::new(Vec::new()));
+        let generator_tick = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::new();
         runtime.set_theme_sync_enabled(false);
         register_sequencer_natives_with_accumulators(
@@ -3192,6 +3222,8 @@ impl ScratchControlRuntime {
             Arc::clone(&pending_midi_fx_params),
             Arc::clone(&midi_fx_state),
             Arc::clone(&accumulator_eval),
+            Arc::clone(&sequencers),
+            Arc::clone(&generator_tick),
         );
         let mut this = Self {
             runtime,
@@ -3202,6 +3234,8 @@ impl ScratchControlRuntime {
             pending_midi_fx_params,
             midi_fx_state,
             accumulator_eval,
+            sequencers,
+            generator_tick,
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
@@ -3547,6 +3581,8 @@ impl ScratchControlRuntime {
         SharedPendingMidiFxParams,
         SharedMidiFxState,
         SharedAccumulatorEvalContext,
+        SharedRegisteredSequencers,
+        SharedGeneratorTickContext,
     ) {
         (
             self.runtime,
@@ -3557,9 +3593,12 @@ impl ScratchControlRuntime {
             self.pending_midi_fx_params,
             self.midi_fx_state,
             self.accumulator_eval,
+            self.sequencers,
+            self.generator_tick,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         runtime: Runtime,
         context: SharedSequencerEvalContext,
@@ -3569,6 +3608,8 @@ impl ScratchControlRuntime {
         pending_midi_fx_params: SharedPendingMidiFxParams,
         midi_fx_state: SharedMidiFxState,
         accumulator_eval: SharedAccumulatorEvalContext,
+        sequencers: SharedRegisteredSequencers,
+        generator_tick: SharedGeneratorTickContext,
     ) -> Self {
         let mut this = Self {
             runtime,
@@ -3579,12 +3620,113 @@ impl ScratchControlRuntime {
             pending_midi_fx_params,
             midi_fx_state,
             accumulator_eval,
+            sequencers,
+            generator_tick,
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
         this.install_midi_fx_macro();
         this.refresh_runtime_globals();
         this
+    }
+
+    /// Register a generator whose `:tick` is shipped source (from a UI-runtime
+    /// `def-sequencer` published via `SequencerState`). Upserts by id so re-evaluating
+    /// the authoring file hot-reloads the body without duplicating the generator.
+    pub fn register_published_sequencer(
+        &self,
+        id: u64,
+        name: String,
+        resolution: Timebase,
+        tick_source: String,
+    ) {
+        if let Ok(mut registry) = self.sequencers.lock() {
+            let entry = RegisteredSequencer {
+                id,
+                name,
+                resolution,
+                tick: RegisteredAccumulatorCallback::Source(tick_source),
+            };
+            if let Some(existing) = registry.iter_mut().find(|e| e.id == id) {
+                *existing = entry;
+            } else {
+                registry.push(entry);
+            }
+        }
+    }
+
+    /// Definitions of all generators registered in this VM, for the scheduler to
+    /// reconcile into its [`crate::generator::GeneratorRuntime`].
+    pub fn sequencer_defs(&self) -> Vec<crate::generator::GeneratorDef> {
+        self.sequencers
+            .lock()
+            .map(|registry| {
+                registry
+                    .iter()
+                    .map(|entry| crate::generator::GeneratorDef {
+                        id: entry.id,
+                        name: entry.name.clone(),
+                        resolution_beats: entry
+                            .resolution
+                            .step_beats(crate::generator::GENERATOR_RESOLUTION_REF_STEPS),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Invoke a registered generator's `:tick` closure for one boundary crossing,
+    /// returning the events it emitted plus the advanced RNG state. Mirrors
+    /// [`Self::invoke_accumulator`] but for self-clocked generators.
+    pub fn invoke_sequencer_tick(
+        &mut self,
+        registry_index: usize,
+        input: crate::generator::GeneratorTickInput,
+    ) -> Result<crate::generator::GeneratorTickResult, String> {
+        let callback = self
+            .sequencers
+            .lock()
+            .map_err(|_| "failed to lock sequencer registry".to_string())?
+            .get(registry_index)
+            .map(|entry| entry.tick.clone())
+            .ok_or_else(|| "registered sequencer out of range".to_string())?;
+        {
+            let mut ctx = self
+                .generator_tick
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            *ctx = Some(GeneratorTickContext {
+                tick_index: input.tick_index,
+                beat: input.beat,
+                resolution_beats: input.resolution_beats,
+                random_state: input.random_state,
+                state: input.state,
+                emitted: Vec::new(),
+            });
+        }
+        match callback {
+            RegisteredAccumulatorCallback::Source(source) => {
+                self.runtime
+                    .eval_str(&source)
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+            RegisteredAccumulatorCallback::Closure(callback) => {
+                self.runtime
+                    .invoke(callback, vec![])
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+        }
+        let ctx = self
+            .generator_tick
+            .lock()
+            .map_err(|_| "failed to lock generator tick context".to_string())?
+            .take()
+            .ok_or_else(|| "generator tick did not produce a context".to_string())?;
+        Ok(crate::generator::GeneratorTickResult {
+            emitted: ctx.emitted,
+            random_state: ctx.random_state,
+            state: ctx.state,
+        })
     }
 }
 
@@ -3603,6 +3745,8 @@ fn register_sequencer_natives(
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(None)),
     );
 }
@@ -4120,6 +4264,7 @@ pub fn register_neural_authoring_natives_with_selection(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_sequencer_natives_with_accumulators(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
@@ -4130,6 +4275,8 @@ fn register_sequencer_natives_with_accumulators(
     pending_midi_fx_params: SharedPendingMidiFxParams,
     midi_fx_state: SharedMidiFxState,
     accumulator_eval: SharedAccumulatorEvalContext,
+    sequencers: SharedRegisteredSequencers,
+    generator_tick: SharedGeneratorTickContext,
 ) {
     let current_track =
         |ctx: &SharedSequencerEvalContext| ctx.lock().map(|guard| guard.track).unwrap_or(0);
@@ -4137,6 +4284,201 @@ fn register_sequencer_natives_with_accumulators(
         |ctx: &SharedSequencerEvalContext| ctx.lock().map(|guard| guard.cursor_step).unwrap_or(0);
 
     let _ = install_runtime_globals(runtime, &context, &metadata, &[]);
+
+    // `def-sequencer` is a plain variadic builtin (NOT a macro): eseqlisp macros are
+    // fixed-arity with no unquote-splicing, and builtins already receive variadic
+    // evaluated args — so `(def-sequencer "name" :resolution :16 :tick (lambda () ...))`
+    // works directly, with the :tick closure usable on whichever VM evaluates the form.
+    // `__register-sequencer` is kept as the lower-level alias.
+    let sequencers_for_register = Arc::clone(&sequencers);
+    runtime.register_native_with_docs(
+        "def-sequencer",
+        "(def-sequencer name :resolution :16 :tick (lambda () (seq-emit ...)))",
+        "Define a self-clocked lisp generator. The :tick closure runs once per :resolution boundary and emits events via seq-emit.",
+        move |args, _ctx| register_sequencer_impl(&args, &sequencers_for_register),
+    );
+    let sequencers_for_register_alias = Arc::clone(&sequencers);
+    runtime.register_native_with_docs(
+        "__register-sequencer",
+        "(__register-sequencer name :resolution :16 :tick (lambda () ...))",
+        "Lower-level alias for def-sequencer.",
+        move |args, _ctx| register_sequencer_impl(&args, &sequencers_for_register_alias),
+    );
+
+    let generator_tick_for_emit = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "seq-emit",
+        "(seq-emit :track t :at :now :vel v :note n :dur (beats :8) :chord (list ...) :quantize :16)",
+        "Emit an event from a generator :tick at a musical offset; the engine resolves timing to samples.",
+        move |args, _ctx| {
+            let mut guard = generator_tick_for_emit
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("seq-emit called outside a generator tick".to_string());
+            };
+            let event = build_seq_emit_event(&args, ctx)?;
+            ctx.emitted.push(event);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let generator_tick_for_tick = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "gen-tick",
+        "(gen-tick)",
+        "0-based count of this generator's boundary crossings since reset.",
+        move |_args, _ctx| {
+            let guard = generator_tick_for_tick
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("gen-tick called outside a generator tick".to_string());
+            };
+            Ok(EValue::Number(ctx.tick_index as f64))
+        },
+    );
+
+    let generator_tick_for_beat = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "gen-beat",
+        "(gen-beat)",
+        "Musical position of this boundary in quarter-note beats.",
+        move |_args, _ctx| {
+            let guard = generator_tick_for_beat
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("gen-beat called outside a generator tick".to_string());
+            };
+            Ok(EValue::Number(ctx.beat))
+        },
+    );
+
+    let generator_tick_for_bar = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "gen-bar",
+        "(gen-bar)",
+        "0-based bar index of this boundary (4 beats per bar).",
+        move |_args, _ctx| {
+            let guard = generator_tick_for_bar
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("gen-bar called outside a generator tick".to_string());
+            };
+            Ok(EValue::Number((ctx.beat / 4.0).floor()))
+        },
+    );
+
+    let generator_tick_for_phase = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "gen-phase",
+        "(gen-phase)",
+        "Position within the current bar in beats (0..4).",
+        move |_args, _ctx| {
+            let guard = generator_tick_for_phase
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("gen-phase called outside a generator tick".to_string());
+            };
+            Ok(EValue::Number(ctx.beat.rem_euclid(4.0)))
+        },
+    );
+
+    let generator_tick_for_rand = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "gen-rand",
+        "(gen-rand)",
+        "Deterministic pseudo-random float in [0,1), seeded per generator.",
+        move |_args, _ctx| {
+            let mut guard = generator_tick_for_rand
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("gen-rand called outside a generator tick".to_string());
+            };
+            ctx.random_state = ctx.random_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let bits = gen_splitmix64(ctx.random_state);
+            Ok(EValue::Number((bits >> 11) as f64 / (1u64 << 53) as f64))
+        },
+    );
+
+    let generator_tick_for_state_get = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "state-get",
+        "(state-get \"key\") | (state-get \"key\" default)",
+        "Read a persistent per-generator scalar state cell (0.0, or the given default, if unset).",
+        move |args, _ctx| {
+            let key = match args.first() {
+                Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => s.clone(),
+                _ => return Err("state-get expects a string key".to_string()),
+            };
+            let default = match args.get(1) {
+                Some(EValue::Number(n)) => *n,
+                _ => 0.0,
+            };
+            let guard = generator_tick_for_state_get
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("state-get called outside a generator tick".to_string());
+            };
+            Ok(EValue::Number(ctx.state.get(&key).copied().unwrap_or(default)))
+        },
+    );
+
+    let generator_tick_for_state_set = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "state-set!",
+        "(state-set! \"key\" value)",
+        "Write a persistent per-generator scalar state cell; returns the value.",
+        move |args, _ctx| {
+            let key = match args.first() {
+                Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => s.clone(),
+                _ => return Err("state-set! expects a string key".to_string()),
+            };
+            let Some(EValue::Number(value)) = args.get(1) else {
+                return Err("state-set! expects (state-set! \"key\" number)".to_string());
+            };
+            let mut guard = generator_tick_for_state_set
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("state-set! called outside a generator tick".to_string());
+            };
+            ctx.state.insert(key, *value);
+            Ok(EValue::Number(*value))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "gen-offset",
+        "(gen-offset :16 n)",
+        "Beats offset = n steps at a timebase, for seq-emit :at.",
+        move |args, _ctx| {
+            let timebase = parse_timebase_arg(&args, 0)?;
+            let Some(EValue::Number(n)) = args.get(1) else {
+                return Err("gen-offset expects (gen-offset :timebase n)".to_string());
+            };
+            Ok(EValue::Number(
+                *n * timebase.step_beats(crate::generator::GENERATOR_RESOLUTION_REF_STEPS),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "beats",
+        "(beats :8)",
+        "Beats in one step of a timebase, for seq-emit :dur.",
+        move |args, _ctx| {
+            let timebase = parse_timebase_arg(&args, 0)?;
+            Ok(EValue::Number(
+                timebase.step_beats(crate::generator::GENERATOR_RESOLUTION_REF_STEPS),
+            ))
+        },
+    );
 
     let accumulators_for_register = Arc::clone(&accumulators);
     runtime.register_native_with_docs(
@@ -7189,6 +7531,200 @@ fn parse_step_param_arg(args: &[EValue], idx: usize) -> Result<StepParam, String
     }
 }
 
+fn register_sequencer_impl(
+    args: &[EValue],
+    sequencers: &SharedRegisteredSequencers,
+) -> Result<EValue, String> {
+    let name = match args.first() {
+        Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => {
+            s.trim_start_matches('@').to_string()
+        }
+        _ => return Err("def-sequencer expects a name".to_string()),
+    };
+    let mut resolution = Timebase::Sixteenth;
+    let mut tick: Option<EValue> = None;
+    let mut idx = 1;
+    while idx < args.len() {
+        let key = match &args[idx] {
+            EValue::Keyword(k) | EValue::String(k) | EValue::Symbol(k) => {
+                k.trim_start_matches(':').to_ascii_lowercase()
+            }
+            _ => return Err("def-sequencer expects keyword/value pairs".to_string()),
+        };
+        idx += 1;
+        if args.get(idx).is_none() {
+            return Err(format!("def-sequencer missing value for :{key}"));
+        }
+        match key.as_str() {
+            "resolution" | "res" => resolution = parse_timebase_arg(args, idx)?,
+            "tick" => tick = Some(args[idx].clone()),
+            "init" => { /* reserved for future one-time init */ }
+            _ => return Err(format!("def-sequencer unknown key :{key}")),
+        }
+        idx += 1;
+    }
+    let Some(tick) = tick else {
+        return Err("def-sequencer requires :tick".to_string());
+    };
+    // `def-sequencer` auto-quotes :tick, so it arrives as list *data* — store it as
+    // re-evaluable source (run once per boundary). The low-level `__register-sequencer`
+    // does not auto-quote, so its :tick arrives as a closure.
+    let tick = match tick {
+        EValue::List(_) => {
+            RegisteredAccumulatorCallback::Source(eseqlisp::vm::format_lisp_source(&tick))
+        }
+        closure => RegisteredAccumulatorCallback::Closure(closure),
+    };
+    let id = stable_sequencer_id(&name);
+    let entry = RegisteredSequencer {
+        id,
+        name,
+        resolution,
+        tick,
+    };
+    let mut registry = sequencers
+        .lock()
+        .map_err(|_| "failed to lock sequencer registry".to_string())?;
+    if let Some(existing) = registry.iter_mut().find(|e| e.id == entry.id) {
+        *existing = entry;
+    } else {
+        registry.push(entry);
+    }
+    Ok(EValue::Number(id as f64))
+}
+
+/// Serialize an auto-quoted `:tick` body (list data) back to re-evaluable lisp
+/// source, for shipping a UI-authored `def-sequencer` to the scheduler VM.
+pub fn sequencer_tick_source(value: &EValue) -> String {
+    eseqlisp::vm::format_lisp_source(value)
+}
+
+/// Parse a `def-sequencer` `:resolution` value (timebase keyword/number) to its
+/// `Timebase` index, defaulting to sixteenth.
+pub fn sequencer_resolution_index(value: &EValue) -> u8 {
+    parse_timebase_arg(std::slice::from_ref(value), 0)
+        .unwrap_or(Timebase::Sixteenth) as u8
+}
+
+pub fn stable_sequencer_id(name: &str) -> u64 {
+    // FNV-1a over the name; stable across processes so hot-reload matches by id.
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in name.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    if hash == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        hash
+    }
+}
+
+fn gen_splitmix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn build_seq_emit_event(
+    args: &[EValue],
+    ctx: &GeneratorTickContext,
+) -> Result<EmittedAccumulatorEvent, String> {
+    let mut resolved = crate::generator::default_resolved();
+    let mut chord: Vec<f32> = Vec::new();
+    let mut offset_beats: f32 = 0.0;
+    let mut target_track: Option<usize> = None;
+    let mut quantize: Option<Timebase> = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = match &args[idx] {
+            EValue::Keyword(k) | EValue::String(k) | EValue::Symbol(k) => {
+                k.trim_start_matches(':').to_ascii_lowercase()
+            }
+            _ => return Err("seq-emit expects keyword/value pairs".to_string()),
+        };
+        idx += 1;
+        let Some(value) = args.get(idx) else {
+            return Err(format!("seq-emit missing value for :{key}"));
+        };
+        match key.as_str() {
+            "at" => {
+                offset_beats = match value {
+                    EValue::Keyword(k) | EValue::String(k) | EValue::Symbol(k)
+                        if k.eq_ignore_ascii_case("now") =>
+                    {
+                        0.0
+                    }
+                    EValue::Number(n) => *n as f32,
+                    _ => return Err("seq-emit :at expects :now or a beats number".to_string()),
+                };
+            }
+            "vel" | "velocity" => {
+                resolved.velocity = acc_emit_number(value, "velocity")?.clamp(0.0, 1.0)
+            }
+            "note" | "transpose" | "trn" => {
+                resolved.transpose = acc_emit_number(value, "note")?
+            }
+            "dur" | "duration" => resolved.duration = acc_emit_number(value, "duration")?.max(0.0),
+            "speed" | "spd" => resolved.speed = acc_emit_number(value, "speed")?.max(0.0),
+            "pan" => resolved.pan = acc_emit_number(value, "pan")?.clamp(-1.0, 1.0),
+            "chop" | "chp" => resolved.chop = acc_emit_number(value, "chop")?.max(1.0),
+            "track" => {
+                let track = acc_emit_number(value, "track")?;
+                if track < 0.0 {
+                    return Err("seq-emit :track must be >= 0".to_string());
+                }
+                target_track = Some(track as usize);
+            }
+            "chord" => {
+                chord.clear();
+                let EValue::List(items) = value else {
+                    return Err("seq-emit :chord expects a list of transposes".to_string());
+                };
+                for item in items {
+                    if let EValue::Number(n) = &*item.borrow() {
+                        chord.push(*n as f32);
+                    }
+                }
+            }
+            "quantize" | "q" => {
+                quantize = match value {
+                    EValue::Bool(false) | EValue::Nil => None,
+                    EValue::Keyword(k) | EValue::String(k) if k.eq_ignore_ascii_case("off") => None,
+                    _ => Some(parse_timebase_arg(args, idx)?),
+                };
+            }
+            _ => return Err(format!("seq-emit unknown key :{key}")),
+        }
+        idx += 1;
+    }
+    if let Some(grid) = quantize {
+        let grid_beats = grid
+            .step_beats(crate::generator::GENERATOR_RESOLUTION_REF_STEPS)
+            .max(1e-9);
+        let target = ctx.beat + offset_beats as f64;
+        let position = target / grid_beats;
+        let nearest = position.round();
+        let snapped_units = if (position - nearest).abs() <= 1e-9 {
+            nearest
+        } else {
+            position.ceil()
+        };
+        let snapped = (snapped_units * grid_beats).max(target);
+        offset_beats = (snapped - ctx.beat) as f32;
+    }
+    Ok(EmittedAccumulatorEvent {
+        offset_beats,
+        track: target_track,
+        resolved,
+        chord,
+        chord_durations: Vec::new(),
+        chord_step_transpose: 0.0,
+        effect_params: Vec::new(),
+        instrument_params: Vec::new(),
+    })
+}
+
 fn parse_timebase_arg(args: &[EValue], idx: usize) -> Result<Timebase, String> {
     let Some(value) = args.get(idx) else {
         return Err("expected timebase".to_string());
@@ -9014,6 +9550,8 @@ pub fn run_embedded_scratch_flow(
         pending_midi_fx_params,
         midi_fx_state,
         accumulator_eval,
+        sequencers,
+        generator_tick,
     ) = control_runtime.into_parts();
     let init_src = read_eseqlisp_init_source();
     let mut editor = Editor::new(
@@ -9106,6 +9644,8 @@ pub fn run_embedded_scratch_flow(
                     pending_midi_fx_params,
                     midi_fx_state,
                     accumulator_eval,
+                    sequencers,
+                    generator_tick,
                 ),
             ));
         }
@@ -12474,6 +13014,180 @@ mod tests {
         assert!(output.suppressed);
         assert!((output.emitted[0].offset_beats - (1.0 / 3.0)).abs() < 0.0001);
         assert_eq!(output.emitted[1].offset_beats, 0.5);
+    }
+
+    #[test]
+    fn registered_sequencer_tick_emits_event() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        runtime
+            .eval(
+                r#"(__register-sequencer "chord"
+                     :resolution :1
+                     :tick (lambda () (seq-emit :track 0 :at :now :vel 0.9 :chord (list 0 4 7))))"#,
+            )
+            .expect("register sequencer");
+
+        let defs = runtime.sequencer_defs();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "chord");
+        assert!((defs[0].resolution_beats - 4.0).abs() < 1e-9); // :1 = whole = 4 beats
+
+        let result = runtime
+            .invoke_sequencer_tick(
+                0,
+                crate::generator::GeneratorTickInput {
+                    id: defs[0].id,
+                    generator_index: 0,
+                    tick_index: 0,
+                    beat: 0.0,
+                    resolution_beats: defs[0].resolution_beats,
+                    samples_per_quarter: 48_000.0,
+                    random_state: 1,
+                    state: Default::default(),
+                },
+            )
+            .expect("tick");
+
+        assert_eq!(result.emitted.len(), 1);
+        let event = &result.emitted[0];
+        assert_eq!(event.track, Some(0));
+        assert_eq!(event.offset_beats, 0.0);
+        assert!((event.resolved.velocity - 0.9).abs() < 1e-6);
+        assert_eq!(event.chord, vec![0.0, 4.0, 7.0]);
+    }
+
+    #[test]
+    fn def_sequencer_drives_generator_runtime_end_to_end() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        runtime
+            .eval(
+                r#"(def-sequencer "chord"
+                     :resolution :1
+                     :tick (seq-emit :track 0 :at :now :vel 0.8 :chord (list 0 4 7)))"#,
+            )
+            .expect("def-sequencer");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&runtime.sequencer_defs(), 0.0);
+        assert_eq!(generators.len(), 1);
+
+        // Drive exactly as the scheduler does: tick the generator runtime, routing
+        // each boundary through the scheduler-side VM's :tick closure.
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            |input| {
+                runtime
+                    .invoke_sequencer_tick(input.generator_index, input)
+                    .expect("tick")
+            },
+            &mut out,
+        );
+
+        // :1 = whole note = 4 beats; one boundary at beat 4.0 within (0, 4].
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event.track, Some(0));
+        assert_eq!(out[0].event.chord, vec![0.0, 4.0, 7.0]);
+        assert_eq!(out[0].sample_time, 192_000); // 4 beats * 48000 spq
+    }
+
+    #[test]
+    fn def_sequencer_state_cells_persist_across_ticks() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        runtime
+            .eval(
+                r#"(def-sequencer "counter"
+                     :resolution :4
+                     :tick (do
+                       (state-set! "n" (+ 1 (state-get "n" 0)))
+                       (seq-emit :track 0 :at :now :note (state-get "n"))))"#,
+            )
+            .expect("def-sequencer");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&runtime.sequencer_defs(), 0.0);
+
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            |input| {
+                runtime
+                    .invoke_sequencer_tick(input.generator_index, input)
+                    .expect("tick")
+            },
+            &mut out,
+        );
+
+        // :4 = quarter = 1 beat; boundaries at 1,2,3,4 -> the counter persists across
+        // ticks, so transpose climbs 1,2,3,4.
+        let transposes: Vec<f32> = out.iter().map(|e| e.event.resolved.transpose).collect();
+        assert_eq!(transposes, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn seq_emit_quantize_snaps_offset_to_grid() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        runtime
+            .eval(
+                r#"(__register-sequencer "q"
+                     :resolution :16
+                     :tick (lambda () (seq-emit :track 0 :at :now :quantize :4)))"#,
+            )
+            .expect("register sequencer");
+
+        // Boundary at beat 0.30 with :4 (quarter, 1 beat) quantize -> snap up to 1.0,
+        // so offset = 1.0 - 0.30 = 0.70 beats.
+        let result = runtime
+            .invoke_sequencer_tick(
+                0,
+                crate::generator::GeneratorTickInput {
+                    id: 0,
+                    generator_index: 0,
+                    tick_index: 0,
+                    beat: 0.30,
+                    resolution_beats: 0.25,
+                    samples_per_quarter: 48_000.0,
+                    random_state: 1,
+                    state: Default::default(),
+                },
+            )
+            .expect("tick");
+        assert_eq!(result.emitted.len(), 1);
+        assert!((result.emitted[0].offset_beats - 0.70).abs() < 1e-5);
     }
 
     #[test]

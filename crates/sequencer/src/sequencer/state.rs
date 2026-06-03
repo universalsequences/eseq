@@ -1049,6 +1049,19 @@ pub struct RuntimeBindingState {
     pub sampler_analysis_status: Vec<AtomicU32>,
 }
 
+/// A generator definition published from the UI/editor runtime to the scheduler
+/// VM. `tick_source` is the auto-quoted `:tick` body serialized to re-evaluable
+/// lisp (see `lisp_effect::sequencer_tick_source`); `resolution` is a `Timebase`
+/// index. The scheduler polls [`SequencerState::published_sequencers_version`] and
+/// registers these into its generator runtime.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublishedSequencer {
+    pub id: u64,
+    pub name: String,
+    pub resolution: u8,
+    pub tick_source: String,
+}
+
 pub struct SequencerState {
     pub pattern: PatternState,
     pub transport: TransportState,
@@ -1058,6 +1071,8 @@ pub struct SequencerState {
     neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     scratch_source: Mutex<String>,
     scratch_source_version: AtomicU64,
+    published_sequencers: Mutex<Vec<PublishedSequencer>>,
+    published_sequencers_version: AtomicU64,
     scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pending_accumulator_reset_all: AtomicBool,
@@ -1250,6 +1265,8 @@ impl SequencerState {
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
+            published_sequencers: Mutex::new(Vec::new()),
+            published_sequencers_version: AtomicU64::new(0),
             scratch_effect_descriptors: Mutex::new(Vec::new()),
             scratch_instrument_descriptors: Mutex::new(Vec::new()),
             pending_accumulator_reset_all: AtomicBool::new(false),
@@ -1744,6 +1761,25 @@ impl SequencerState {
     pub fn set_scratch_source(&self, source: impl Into<String>) {
         *self.scratch_source.lock().unwrap() = source.into();
         self.scratch_source_version.fetch_add(1, Ordering::AcqRel);
+    }
+    /// Publish (upsert by id) a UI-authored generator definition for the scheduler.
+    pub fn publish_sequencer(&self, sequencer: PublishedSequencer) {
+        {
+            let mut list = self.published_sequencers.lock().unwrap();
+            if let Some(existing) = list.iter_mut().find(|s| s.id == sequencer.id) {
+                *existing = sequencer;
+            } else {
+                list.push(sequencer);
+            }
+        }
+        self.published_sequencers_version
+            .fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn published_sequencers(&self) -> Vec<PublishedSequencer> {
+        self.published_sequencers.lock().unwrap().clone()
+    }
+    pub fn published_sequencers_version(&self) -> u64 {
+        self.published_sequencers_version.load(Ordering::Acquire)
     }
     pub fn scratch_runtime_descriptors(
         &self,

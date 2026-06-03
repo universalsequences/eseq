@@ -2353,6 +2353,60 @@ pub(crate) fn init_runtime(
         "#,
     );
 
+    // `def-sequencer` in the editor/UI runtime publishes its definition to the
+    // scheduler VM (where the generator actually runs). The compiler auto-quotes
+    // :tick / :init, so the body arrives here as list data — never evaluated in the
+    // UI — which we serialize and ship via SequencerState. Re-evaluating the
+    // authoring file republishes (upsert by id) for live hot-reload.
+    let st_def_sequencer = state.clone();
+    let ui_ep_def_sequencer = ui_epoch.clone();
+    runtime.register_native("def-sequencer", move |args, _ctx| {
+        let name = match args.first() {
+            Some(Value::String(s) | Value::Symbol(s) | Value::Keyword(s)) => {
+                s.trim_start_matches('@').to_string()
+            }
+            _ => return Err("def-sequencer expects a name".to_string()),
+        };
+        let mut resolution: u8 = Timebase::Sixteenth as u8;
+        let mut tick_source: Option<String> = None;
+        let mut idx = 1;
+        while idx < args.len() {
+            let key = match &args[idx] {
+                Value::Keyword(k) | Value::String(k) | Value::Symbol(k) => {
+                    k.trim_start_matches(':').to_ascii_lowercase()
+                }
+                _ => return Err("def-sequencer expects keyword/value pairs".to_string()),
+            };
+            idx += 1;
+            let Some(value) = args.get(idx) else {
+                return Err(format!("def-sequencer missing value for :{key}"));
+            };
+            match key.as_str() {
+                "resolution" | "res" => {
+                    resolution = sequencer::lisp_effect::sequencer_resolution_index(value)
+                }
+                "tick" => {
+                    tick_source = Some(sequencer::lisp_effect::sequencer_tick_source(value))
+                }
+                "init" => { /* reserved for future one-time init */ }
+                _ => return Err(format!("def-sequencer unknown key :{key}")),
+            }
+            idx += 1;
+        }
+        let Some(tick_source) = tick_source else {
+            return Err("def-sequencer requires :tick".to_string());
+        };
+        let id = sequencer::lisp_effect::stable_sequencer_id(&name);
+        st_def_sequencer.publish_sequencer(sequencer::sequencer::PublishedSequencer {
+            id,
+            name: name.clone(),
+            resolution,
+            tick_source,
+        });
+        ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::String(name))
+    });
+
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();

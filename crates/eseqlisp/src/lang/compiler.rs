@@ -1504,6 +1504,11 @@ impl Compiler {
             // Auto-quote the value following :material or :shader keywords,
             // since these contain SDF shader expressions (with variables like
             // value_t, x, y) that must not be evaluated at runtime.
+            //
+            // `def-sequencer` does the same for :tick / :init: the body is a
+            // program for the *sequencer* runtime, so it must be captured as data
+            // here (in the UI/editor runtime) and shipped, not evaluated locally.
+            let is_def_sequencer = matches!(op, Expression::Symbol(s) if s == "def-sequencer");
             let mut quote_next = false;
             for (i, elem) in list.iter().skip(1).enumerate() {
                 if quote_next {
@@ -1533,6 +1538,9 @@ impl Compiler {
                         let idx = self.use_string_constant(k);
                         self.emit(OpCode::PushKeyword(idx));
                         if k == "material" || k == "shader" {
+                            quote_next = true;
+                        }
+                        if is_def_sequencer && (k == "tick" || k == "init") {
                             quote_next = true;
                         }
                     }
