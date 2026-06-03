@@ -18,10 +18,11 @@
 //! but over a `Vec`-sized node field with a sparse edge set rather than a fixed
 //! 64-neuron dense weight matrix.
 //!
-//! Status: v1a (grid skeleton). Nodes accumulate gather into `energy`, fire on a
-//! pluggable predicate, propagate after `delay_steps`, and emit a fixed note. Payload
-//! relay (Ext 1), edge-state dampening (Ext 2), and engine reset/seed config (Ext 3)
-//! land in later increments — the data structures already carry the fields they need
+//! Status: v1a (grid skeleton) + v1b (payload relay). Nodes accumulate gather into
+//! `energy`, fire on a pluggable predicate, propagate after `delay_steps`, and re-emit
+//! the incoming payload (Ext 1) with the node's `transpose` added so a seed note
+//! ripples and re-pitches on every hop. Edge-state dampening (Ext 2) and the rest of
+//! engine reset/seed config (Ext 3) land in v1c — the data carries the fields it needs
 //! (`dampening`, `seed_track_mask`, `reset_interval_beats`, `seed_on_reset`).
 
 use crate::generator::{default_resolved, GENERATOR_RESOLUTION_REF_STEPS};
@@ -122,6 +123,10 @@ pub struct GraphNode {
     pub reduce: Reduce,
     /// Initial value of the `energy` state cell on reset/seed (per-node, spec §3.3).
     pub seed_on_reset: f64,
+    /// Semitone offset added to the carried payload note each time this node fires
+    /// (Ext 1). Mirrors `neural`'s per-neuron `transpose`; the engine applies it on the
+    /// default emit path so the cascade works with a bare threshold `:update`.
+    pub transpose: f32,
 }
 
 impl Default for GraphNode {
@@ -134,6 +139,28 @@ impl Default for GraphNode {
             seed_track_mask: 0,
             reduce: Reduce::Sum,
             seed_on_reset: 0.0,
+            transpose: 0.0,
+        }
+    }
+}
+
+/// The payload that rides along an edge with a spike (Ext 1, spec §3.1): the seed
+/// event (note / velocity) that originated from a step trigger and ripples through the
+/// net, re-pitched on every hop. A firing node re-emits its incoming payload with its
+/// own `transpose` added — the running sum of transposes around a feedback cycle is
+/// the Aphex-Twin melodic-cascade behavior.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphPayload {
+    /// Accumulated transpose (semitone offset) carried by the signal.
+    pub note: f32,
+    pub velocity: f32,
+}
+
+impl Default for GraphPayload {
+    fn default() -> Self {
+        Self {
+            note: 0.0,
+            velocity: 1.0,
         }
     }
 }
@@ -152,6 +179,8 @@ pub struct NodeEval {
     pub tick_index: u64,
     /// Musical position of this boundary in quarter-note beats.
     pub beat: f64,
+    /// The payload that arrived this boundary (`node-input-event`), if any.
+    pub input_event: Option<GraphPayload>,
 }
 
 /// The decision returned by a node's `:update`. v1a: just whether it fired and the
@@ -178,6 +207,7 @@ pub struct GraphEmission {
 struct GraphPropagation {
     remaining_steps: u32,
     ready_after_beats: f64,
+    payload: GraphPayload,
 }
 
 /// A fired node awaiting `max_poly` selection within one boundary.
@@ -214,6 +244,8 @@ pub struct GraphRuntime {
     energy: Vec<f64>,
     input_accum: Vec<f64>,
     input_seen: Vec<bool>,
+    /// The payload that last arrived at each node (Ext 1), consumed by its next fire.
+    source_event: Vec<Option<GraphPayload>>,
     tick_count: Vec<u64>,
     pending: Vec<Vec<GraphPropagation>>,
 
@@ -259,6 +291,7 @@ impl GraphRuntime {
             energy: vec![0.0; num_nodes],
             input_accum: vec![0.0; num_nodes],
             input_seen: vec![false; num_nodes],
+            source_event: vec![None; num_nodes],
             tick_count: vec![0; num_nodes],
             pending: vec![Vec::new(); num_nodes],
             last_eval_indices: vec![0; num_nodes],
@@ -294,6 +327,7 @@ impl GraphRuntime {
             self.energy[idx] = self.nodes[idx].seed_on_reset;
             self.input_accum[idx] = 0.0;
             self.input_seen[idx] = false;
+            self.source_event[idx] = None;
             self.tick_count[idx] = 0;
             self.pending[idx].clear();
             let step_beats = self.node_step_beats(idx);
@@ -323,9 +357,10 @@ impl GraphRuntime {
 
     /// Inject a fire into every node whose resolved `seed-from` includes `track`,
     /// respecting that node's delay (spec §4). Mechanically identical to a firing's
-    /// scatter: it pushes a delayed propagation onto the seeded node so the node
-    /// scatters along its out-edges after `delay_steps`. (Payload carry is Ext 1.)
-    pub fn seed(&mut self, track: usize, seed_beats: f64) {
+    /// scatter: it pushes a delayed propagation onto the seeded node carrying the step
+    /// event's `payload`, so the node scatters that payload along its out-edges after
+    /// `delay_steps` (Ext 1 — the seed note then ripples through the net).
+    pub fn seed(&mut self, track: usize, seed_beats: f64, payload: GraphPayload) {
         if !self.active {
             return;
         }
@@ -334,7 +369,7 @@ impl GraphRuntime {
         };
         for idx in 0..self.num_nodes {
             if self.nodes[idx].seed_track_mask & bit != 0 {
-                self.push_propagation(idx, seed_beats);
+                self.push_propagation(idx, seed_beats, payload);
             }
         }
     }
@@ -413,6 +448,7 @@ impl GraphRuntime {
                     energy: self.energy[idx],
                     tick_index: self.tick_count[idx],
                     beat: boundary_beats,
+                    input_event: self.source_event[idx],
                 };
                 self.tick_count[idx] = self.tick_count[idx].saturating_add(1);
                 if update_fn(&eval).fired {
@@ -495,25 +531,23 @@ impl GraphRuntime {
     }
 
     /// Decrement this node's pending scatters, then for each that became ready deposit
-    /// `gather()` along its out-edges into the targets' input accumulators.
+    /// `gather()` along its out-edges into the targets' input accumulators, carrying the
+    /// scatter's payload into each target's `source_event` (Ext 1).
     fn deposit_ready_propagations(&mut self, node_index: usize, boundary_beats: f64) {
-        let mut ready = 0usize;
+        let mut ready: Vec<GraphPayload> = Vec::new();
         let mut kept = Vec::with_capacity(self.pending[node_index].len());
         for mut prop in std::mem::take(&mut self.pending[node_index]) {
             if boundary_beats > prop.ready_after_beats + 1e-9 {
                 prop.remaining_steps = prop.remaining_steps.saturating_sub(1);
             }
             if prop.remaining_steps == 0 {
-                ready += 1;
+                ready.push(prop.payload);
             } else {
                 kept.push(prop);
             }
         }
         self.pending[node_index] = kept;
-        if ready == 0 {
-            return;
-        }
-        for _ in 0..ready {
+        for payload in ready {
             for &edge_idx in &self.out_edges[node_index] {
                 let edge = self.edges[edge_idx];
                 let amount = edge.gather();
@@ -525,6 +559,7 @@ impl GraphRuntime {
                 let first = !self.input_seen[target];
                 self.input_accum[target] = reduce.fold(self.input_accum[target], amount, first);
                 self.input_seen[target] = true;
+                self.source_event[target] = Some(payload);
             }
         }
     }
@@ -557,8 +592,18 @@ impl GraphRuntime {
     }
 
     /// Emit the firing, reset the node's energy, and schedule its delayed scatter.
+    ///
+    /// Ext 1: the firing re-emits the payload that arrived (`source_event`) with this
+    /// node's `transpose` added — so the seed note re-pitches on every hop — and the
+    /// same re-pitched payload rides the outgoing scatter, accumulating around feedback
+    /// loops. Mirrors `neural::firing_candidate` (clone source event, add transpose).
     fn commit_firing(&mut self, candidate: &GraphFiringCandidate, out: &mut Vec<GraphEmission>) {
         let node_index = candidate.node_index;
+        let incoming = self.source_event[node_index].unwrap_or_default();
+        let payload = GraphPayload {
+            note: incoming.note + self.nodes[node_index].transpose,
+            velocity: incoming.velocity,
+        };
         let mut event = EmittedAccumulatorEvent {
             offset_beats: 0.0,
             track: self.nodes[node_index].route,
@@ -569,22 +614,23 @@ impl GraphRuntime {
             effect_params: Vec::new(),
             instrument_params: Vec::new(),
         };
-        // v1a emits a fixed note; payload relay + transpose accumulation is Ext 1.
-        event.resolved.transpose = 0.0;
+        event.resolved.transpose = payload.note;
+        event.resolved.velocity = payload.velocity;
         out.push(GraphEmission {
             sample_time: candidate.fire_sample,
             node_index,
             event,
         });
         self.energy[node_index] = 0.0;
-        self.push_propagation(node_index, candidate.fire_beats);
+        self.push_propagation(node_index, candidate.fire_beats, payload);
     }
 
-    fn push_propagation(&mut self, node_index: usize, ready_after_beats: f64) {
+    fn push_propagation(&mut self, node_index: usize, ready_after_beats: f64, payload: GraphPayload) {
         let remaining = self.nodes[node_index].delay_steps.max(1);
         self.pending[node_index].push(GraphPropagation {
             remaining_steps: remaining,
             ready_after_beats,
+            payload,
         });
     }
 }
@@ -775,6 +821,42 @@ pub struct GraphManifest {
 }
 
 impl GraphManifest {
+    /// True if `other` materializes to the same node field + edge set as `self`, i.e.
+    /// a hot-reload can keep the live runtime's energy/pending state. Ignores the
+    /// `:update`/`:gather` *code* and behavioral `:params` (re-read each eval), and the
+    /// node `:state` declarations — only materialization-relevant structure matters.
+    pub fn structurally_compatible(&self, other: &GraphManifest) -> bool {
+        let intrinsics = |n: &NodeProto| {
+            (
+                n.resolution,
+                n.delay_steps,
+                n.quantize,
+                n.route,
+                n.seed_from.clone(),
+                n.reduce,
+            )
+        };
+        let edge_shape = |sets: &[EdgeSetSpec]| {
+            sets.iter()
+                .map(|s| {
+                    (
+                        s.from.clone(),
+                        s.to.clone(),
+                        s.topology.clone(),
+                        s.param_default("weight"),
+                        s.param_default("dampening"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        self.shape == other.shape
+            && self.energy_decay == other.energy_decay
+            && self.reset_every_beats == other.reset_every_beats
+            && self.seed_on_reset == other.seed_on_reset
+            && intrinsics(&self.node) == intrinsics(&other.node)
+            && edge_shape(&self.edge_sets) == edge_shape(&other.edge_sets)
+    }
+
     /// Expand the manifest into the node field + edge set for [`GraphRuntime::new`],
     /// applying prototype defaults to every instance. Per-instance plocks (weights,
     /// per-node delay edits) are layered on later by the serialization store; this is
@@ -794,6 +876,7 @@ impl GraphManifest {
             seed_track_mask,
             reduce: self.node.reduce,
             seed_on_reset: self.seed_on_reset,
+            transpose: self.node.param_default("transpose").unwrap_or(0.0) as f32,
         };
         let nodes = vec![proto_node; num_nodes];
 
@@ -876,7 +959,7 @@ mod tests {
         let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
         let edges = vec![GraphEdge::new(0, 1, 1.0)];
         let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 0.5, 0.0);
-        runtime.push_propagation(0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
 
         let out = run(&mut runtime, 4.0, 0, vec![1.0, 1.0]);
         assert_eq!(out.len(), 1);
@@ -891,7 +974,7 @@ mod tests {
         let nodes = vec![node(Timebase::Quarter)];
         let edges = vec![GraphEdge::new(0, 0, 1.0)];
         let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
-        runtime.push_propagation(0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
 
         let out = run(&mut runtime, 8.0, 0, vec![1.0]);
         let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
@@ -908,8 +991,8 @@ mod tests {
         let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
         let edges = vec![GraphEdge::new(0, 0, 1.0), GraphEdge::new(1, 1, 1.0)];
         let mut runtime = GraphRuntime::new(7, "g".into(), nodes, edges, 1.0, 0.0);
-        runtime.push_propagation(0, 0.0);
-        runtime.push_propagation(1, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        runtime.push_propagation(1, 0.0, GraphPayload::default());
 
         let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0]);
         assert_eq!(out.len(), 2);
@@ -923,8 +1006,8 @@ mod tests {
         let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
         let edges = vec![GraphEdge::new(0, 0, 1.0), GraphEdge::new(1, 1, 1.0)];
         let mut runtime = GraphRuntime::new(7, "g".into(), nodes, edges, 1.0, 0.0);
-        runtime.push_propagation(0, 0.0);
-        runtime.push_propagation(1, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        runtime.push_propagation(1, 0.0, GraphPayload::default());
 
         // max_poly 1: only the lowest-index coincident firing survives this boundary.
         let out = run(&mut runtime, 1.0, 1, vec![1.0, 1.0]);
@@ -940,8 +1023,8 @@ mod tests {
         let edges = vec![GraphEdge::new(0, 1, 1.0)];
         let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 0.5, 0.0);
 
-        runtime.seed(3, 0.0); // node0 subscribes to track 3
-        runtime.seed(5, 0.0); // nobody subscribes to track 5
+        runtime.seed(3, 0.0, GraphPayload::default()); // node0 subscribes to track 3
+        runtime.seed(5, 0.0, GraphPayload::default()); // nobody subscribes to track 5
 
         let out = run(&mut runtime, 4.0, 0, vec![1.0, 1.0]);
         assert_eq!(out.len(), 1);
@@ -997,10 +1080,67 @@ mod tests {
         };
         let mut runtime = manifest.materialize();
         assert_eq!(runtime.num_nodes(), 1);
-        runtime.push_propagation(0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
         let out = run(&mut runtime, 4.0, 0, vec![1.0]);
         let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
         assert_eq!(samples, vec![48_000, 96_000, 144_000, 192_000]);
+    }
+
+    #[test]
+    fn seed_payload_repitches_on_each_hop() {
+        // Chain 0->1->2 (weight 1), each node transposes +5. A payload (note 10) seeded
+        // into node0 scatters down the chain; each firing re-emits the incoming note
+        // plus its own transpose, so notes accumulate: node1 -> 15, node2 -> 20.
+        let mut n = node(Timebase::Quarter);
+        n.transpose = 5.0;
+        let nodes = vec![n.clone(), n.clone(), n];
+        let edges = vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(1, 2, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(
+            0,
+            0.0,
+            GraphPayload {
+                note: 10.0,
+                velocity: 1.0,
+            },
+        );
+
+        let out = run(&mut runtime, 4.0, 0, vec![1.0, 1.0, 1.0]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].sample_time, 48_000);
+        assert_eq!(out[0].event.resolved.transpose, 15.0);
+        assert_eq!(out[1].node_index, 2);
+        assert_eq!(out[1].sample_time, 96_000);
+        assert_eq!(out[1].event.resolved.transpose, 20.0);
+    }
+
+    #[test]
+    fn seed_via_mask_carries_payload_downstream() {
+        // node0 subscribes to track 2; edge 0->1 (weight 1); node1 transposes +7.
+        // A seed on track 2 (note 3, vel 0.5) scatters from node0 to node1, which fires
+        // emitting note 3+7=10 carrying the seed velocity.
+        let mut n0 = node(Timebase::Quarter);
+        n0.seed_track_mask = seed_track_mask(&[2]);
+        let mut n1 = node(Timebase::Quarter);
+        n1.transpose = 7.0;
+        let nodes = vec![n0, n1];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.seed(
+            2,
+            0.0,
+            GraphPayload {
+                note: 3.0,
+                velocity: 0.5,
+            },
+        );
+
+        let out = run(&mut runtime, 4.0, 0, vec![1.0, 1.0]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].event.resolved.transpose, 10.0);
+        assert_eq!(out[0].event.resolved.velocity, 0.5);
     }
 
     #[test]

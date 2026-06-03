@@ -1049,17 +1049,26 @@ pub struct RuntimeBindingState {
     pub sampler_analysis_status: Vec<AtomicU32>,
 }
 
-/// A generator definition published from the UI/editor runtime to the scheduler
-/// VM. `tick_source` is the auto-quoted `:tick` body serialized to re-evaluable
-/// lisp (see `lisp_effect::sequencer_tick_source`); `resolution` is a `Timebase`
-/// index. The scheduler polls [`SequencerState::published_sequencers_version`] and
-/// registers these into its generator runtime.
+/// A sequencer definition published from the UI/editor runtime to the scheduler VM.
+///
+/// Two shapes share this channel:
+/// - **tick mode** (`graph == None`): `tick_source` is the auto-quoted `:tick` body
+///   serialized to re-evaluable lisp (see `lisp_effect::sequencer_tick_source`) and
+///   `resolution` is a `Timebase` index; the scheduler registers it into its generator
+///   runtime.
+/// - **graph mode** (`graph == Some(_)`): the whole-body manifest is carried in-process
+///   as a [`crate::graph::GraphManifest`]; the scheduler materializes it into a
+///   `GraphRuntime`. `tick_source`/`resolution` are unused.
+///
+/// The scheduler polls [`SequencerState::published_sequencers_version`] and reconciles.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublishedSequencer {
     pub id: u64,
     pub name: String,
     pub resolution: u8,
     pub tick_source: String,
+    /// Present iff this is a graph-mode sequencer.
+    pub graph: Option<crate::graph::GraphManifest>,
 }
 
 pub struct SequencerState {

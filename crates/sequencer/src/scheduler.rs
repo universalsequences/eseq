@@ -749,6 +749,26 @@ fn resolve_sampler_params(
     }
 }
 
+/// Seed every graph-mode runtime from a step-sequencer trigger (spec §4): each node
+/// whose resolved `seed-from` includes the event's track receives a fire carrying the
+/// step's note/velocity, after that node's delay. Mirrors the `neural` seed sites.
+fn seed_graph_runtimes(
+    graphs: &mut [crate::graph::GraphRuntime],
+    event: &StepEvent,
+    seed_beats: f64,
+) {
+    if graphs.is_empty() {
+        return;
+    }
+    let payload = crate::graph::GraphPayload {
+        note: event.resolved.transpose,
+        velocity: event.resolved.velocity,
+    };
+    for graph in graphs.iter_mut() {
+        graph.seed(event.track, seed_beats, payload);
+    }
+}
+
 fn chord_data_from_parts(
     notes: &[f32],
     durations: &[f32],
@@ -2557,6 +2577,11 @@ pub fn spawn_scheduler_thread(
                 std::array::from_fn(|_| LiveMidiFxTrackState::default());
             let mut neural_runtime = NeuralRuntime::default();
             let mut generator_runtime = crate::generator::GeneratorRuntime::default();
+            // Graph-mode sequencers: parallel vecs (manifest + live runtime), reconciled
+            // by id from the published-sequencer channel. Held alongside the generator
+            // runtime; both are additive layers over the neural/step output.
+            let mut graph_manifests: Vec<crate::graph::GraphManifest> = Vec::new();
+            let mut graph_runtimes: Vec<crate::graph::GraphRuntime> = Vec::new();
             let mut loaded_neural_networks: Option<Vec<crate::neural::ProjectNeuralNetwork>> = None;
             let mut last_live_midi_fx_active = false;
             let mut scratch_source_version = u64::MAX;
@@ -2653,6 +2678,9 @@ pub fn spawn_scheduler_thread(
                             lisp_effect::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0)
                         });
                         for seq in &published {
+                            if seq.graph.is_some() {
+                                continue; // graph-mode entries reconcile below, not as ticks
+                            }
                             runtime.register_published_sequencer(
                                 seq.id,
                                 seq.name.clone(),
@@ -2668,6 +2696,30 @@ pub fn spawn_scheduler_thread(
                         .map(|runtime| runtime.sequencer_defs())
                         .unwrap_or_default();
                     generator_runtime.sync_definitions(&generator_defs, clock.total_beats);
+
+                    // Reconcile graph-mode runtimes by id: reuse a live runtime (its
+                    // energy/pending state) when the new manifest materializes
+                    // identically, else rebuild fresh and realign to the transport.
+                    let new_manifests: Vec<crate::graph::GraphManifest> =
+                        published.iter().filter_map(|s| s.graph.clone()).collect();
+                    let mut next_runtimes = Vec::with_capacity(new_manifests.len());
+                    for manifest in &new_manifests {
+                        let reused = graph_manifests
+                            .iter()
+                            .position(|m| m.id == manifest.id)
+                            .filter(|&pos| graph_manifests[pos].structurally_compatible(manifest))
+                            .map(|pos| graph_runtimes[pos].clone());
+                        match reused {
+                            Some(rt) => next_runtimes.push(rt),
+                            None => {
+                                let mut rt = manifest.materialize();
+                                rt.realign(clock.total_beats);
+                                next_runtimes.push(rt);
+                            }
+                        }
+                    }
+                    graph_runtimes = next_runtimes;
+                    graph_manifests = new_manifests;
                 }
 
                 if !playing
@@ -2739,6 +2791,9 @@ pub fn spawn_scheduler_thread(
                     accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
                     neural_runtime.reset_state(0.0);
                     generator_runtime.reset(0.0);
+                    for graph in &mut graph_runtimes {
+                        graph.reset(0.0);
+                    }
                     state.set_neural_visualization(neural_runtime.visualization_snapshot());
                     thread::sleep(Duration::from_millis(if live_active { 1 } else { 2 }));
                     continue;
@@ -3328,6 +3383,7 @@ pub fn spawn_scheduler_thread(
                                         samples_per_quarter as f64,
                                     );
                                     neural_runtime.process_seed_at(&seed_event, seed_beats);
+                                    seed_graph_runtimes(&mut graph_runtimes, &seed_event, seed_beats);
                                 } else {
                                     let chord =
                                         step_chord_data(&snapshot, target_track, trigger.step);
@@ -3355,6 +3411,7 @@ pub fn spawn_scheduler_thread(
                                         samples_per_quarter as f64,
                                     );
                                     neural_runtime.process_seed_at(&step_event, seed_beats);
+                                    seed_graph_runtimes(&mut graph_runtimes, &step_event, seed_beats);
                                     if !ok {
                                         chunk_enqueued = false;
                                         break;
@@ -3386,6 +3443,7 @@ pub fn spawn_scheduler_thread(
                                     samples_per_quarter as f64,
                                 );
                                 neural_runtime.process_seed_at(&step_event, seed_beats);
+                                seed_graph_runtimes(&mut graph_runtimes, &step_event, seed_beats);
                                 if !ok {
                                     chunk_enqueued = false;
                                     break;
@@ -3556,6 +3614,89 @@ pub fn spawn_scheduler_thread(
                         if !chunk_enqueued {
                             break;
                         }
+                    }
+
+                    // Graph-mode sequencers: native gather/scatter over this chunk. Each
+                    // fired node's :update predicate runs on the scheduler VM; firings
+                    // resolve to NetworkTriggers (velocity-merged + max_poly), additive
+                    // like the neural/generator layers.
+                    for graph_index in 0..graph_runtimes.len() {
+                        if graph_runtimes[graph_index].is_empty() {
+                            continue;
+                        }
+                        let mut graph_emissions = Vec::new();
+                        if let Some(scratch) = scratch_runtime.as_mut() {
+                            let manifest = &graph_manifests[graph_index];
+                            let max_poly = manifest.max_poly;
+                            graph_runtimes[graph_index].process_block(
+                                chunk_start_beats,
+                                chunk_end_beats,
+                                scheduled_until_sample,
+                                samples_per_quarter,
+                                max_poly,
+                                |eval| {
+                                    scratch
+                                        .invoke_graph_update(manifest, eval)
+                                        .unwrap_or(crate::graph::NodeFire { fired: false })
+                                },
+                                &mut graph_emissions,
+                            );
+                        }
+                        // Velocity-merge coincident hits on the same track (accent).
+                        let mut merged_graph_emissions: Vec<crate::graph::GraphEmission> = Vec::new();
+                        for emission in graph_emissions {
+                            if let Some(last) = merged_graph_emissions.last_mut() {
+                                if last.sample_time == emission.sample_time
+                                    && last.event.track == emission.event.track
+                                {
+                                    last.event.resolved.velocity = (last.event.resolved.velocity
+                                        + emission.event.resolved.velocity)
+                                        .min(1.0);
+                                    continue;
+                                }
+                            }
+                            merged_graph_emissions.push(emission);
+                        }
+                        for emission in merged_graph_emissions {
+                            let track_idx = emission.event.track.unwrap_or(0);
+                            if track_idx >= snapshot.tracks.len() {
+                                continue;
+                            }
+                            let chord = chord_data_from_parts(
+                                &emission.event.chord,
+                                &emission.event.chord_durations,
+                                &[],
+                                emission.event.resolved.duration,
+                                emission.event.chord_step_transpose,
+                            );
+                            if !enqueue_network_trigger(
+                                &queue,
+                                &snapshot,
+                                pattern_epoch,
+                                emission.sample_time,
+                                track_idx,
+                                emission.node_index,
+                                None,
+                                samples_per_quarter as f32,
+                                emission.event.resolved,
+                                chord,
+                                emission.event.effect_params,
+                                scheduled_instrument_params_from_vec(
+                                    emission.event.instrument_params,
+                                ),
+                                resolve_sampler_params(&snapshot, track_idx, 0),
+                                0,
+                            ) {
+                                chunk_enqueued = false;
+                                break;
+                            }
+                        }
+                        if !chunk_enqueued {
+                            break;
+                        }
+                    }
+                    if !chunk_enqueued {
+                        break;
                     }
 
                     scheduled_until_sample =

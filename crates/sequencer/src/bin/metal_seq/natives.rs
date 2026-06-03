@@ -2367,6 +2367,20 @@ pub(crate) fn init_runtime(
             }
             _ => return Err("def-sequencer expects a name".to_string()),
         };
+        // Graph mode (presence of a `def-node` sub-form): parse the whole-body
+        // manifest and ship it in-process. tick_source/resolution are unused.
+        if sequencer::lisp_effect::graph_mode_present(&args) {
+            let manifest = sequencer::lisp_effect::parse_graph_manifest(&args)?;
+            st_def_sequencer.publish_sequencer(sequencer::sequencer::PublishedSequencer {
+                id: manifest.id,
+                name: name.clone(),
+                resolution: Timebase::Sixteenth as u8,
+                tick_source: String::new(),
+                graph: Some(manifest),
+            });
+            ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
+            return Ok(Value::String(name));
+        }
         let mut resolution: u8 = Timebase::Sixteenth as u8;
         let mut tick_source: Option<String> = None;
         let mut idx = 1;
@@ -2402,6 +2416,7 @@ pub(crate) fn init_runtime(
             name: name.clone(),
             resolution,
             tick_source,
+            graph: None,
         });
         ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(name))

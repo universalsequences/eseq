@@ -3152,6 +3152,24 @@ type SharedAccumulatorEvalContext = Arc<Mutex<Option<AccumulatorEvalContext>>>;
 
 type SharedRegisteredSequencers = Arc<Mutex<Vec<RegisteredSequencer>>>;
 type SharedGeneratorTickContext = Arc<Mutex<Option<GeneratorTickContext>>>;
+type SharedGraphNodeContext = Arc<Mutex<Option<GraphNodeContext>>>;
+
+/// Per-node-event context for a graph-mode `:update`, bound while the update body
+/// evaluates so the `node-*` accessors read it. Carries only musical/symbolic
+/// coordinates and the node's resolved input + behavioral params/state (no samples).
+pub(crate) struct GraphNodeContext {
+    node_index: usize,
+    input: f64,
+    energy: f64,
+    tick_index: u64,
+    beat: f64,
+    /// Behavioral params (`node-param`), prototype defaults + per-instance plocks.
+    params: HashMap<String, f64>,
+    /// Author-defined state cells (`node-state`/`node-set!`) beyond engine `energy`.
+    state: HashMap<String, f64>,
+    /// The payload that arrived this boundary (`node-input-event`), if any (Ext 1).
+    input_event: Option<crate::graph::GraphPayload>,
+}
 
 /// A lisp `def-sequencer` definition as held by the scheduler-side VM: its id
 /// (stable hash of the name, for hot-reload matching), display name, `:resolution`
@@ -3187,6 +3205,7 @@ pub struct ScratchControlRuntime {
     accumulator_eval: SharedAccumulatorEvalContext,
     sequencers: SharedRegisteredSequencers,
     generator_tick: SharedGeneratorTickContext,
+    graph_node: SharedGraphNodeContext,
     runtime_globals: Vec<String>,
 }
 
@@ -3210,6 +3229,7 @@ impl ScratchControlRuntime {
         let accumulator_eval = Arc::new(Mutex::new(None));
         let sequencers = Arc::new(Mutex::new(Vec::new()));
         let generator_tick = Arc::new(Mutex::new(None));
+        let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::new();
         runtime.set_theme_sync_enabled(false);
         register_sequencer_natives_with_accumulators(
@@ -3225,6 +3245,7 @@ impl ScratchControlRuntime {
             Arc::clone(&sequencers),
             Arc::clone(&generator_tick),
         );
+        register_graph_node_natives(&mut runtime, Arc::clone(&graph_node));
         let mut this = Self {
             runtime,
             context,
@@ -3236,6 +3257,7 @@ impl ScratchControlRuntime {
             accumulator_eval,
             sequencers,
             generator_tick,
+            graph_node,
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
@@ -3583,6 +3605,7 @@ impl ScratchControlRuntime {
         SharedAccumulatorEvalContext,
         SharedRegisteredSequencers,
         SharedGeneratorTickContext,
+        SharedGraphNodeContext,
     ) {
         (
             self.runtime,
@@ -3595,6 +3618,7 @@ impl ScratchControlRuntime {
             self.accumulator_eval,
             self.sequencers,
             self.generator_tick,
+            self.graph_node,
         )
     }
 
@@ -3610,6 +3634,7 @@ impl ScratchControlRuntime {
         accumulator_eval: SharedAccumulatorEvalContext,
         sequencers: SharedRegisteredSequencers,
         generator_tick: SharedGeneratorTickContext,
+        graph_node: SharedGraphNodeContext,
     ) -> Self {
         let mut this = Self {
             runtime,
@@ -3622,6 +3647,7 @@ impl ScratchControlRuntime {
             accumulator_eval,
             sequencers,
             generator_tick,
+            graph_node,
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
@@ -3728,6 +3754,220 @@ impl ScratchControlRuntime {
             state: ctx.state,
         })
     }
+
+    /// Run a graph node's `:update` rule for one evaluation boundary and report
+    /// whether it fired. The behavioral params (prototype defaults; per-instance plocks
+    /// later) and the engine-integrated `energy` are bound via the `node-*` accessors;
+    /// the truthiness of the body's result is the fire decision. With no `:update`
+    /// body, falls back to the neural rule (fire when `energy >= threshold`).
+    ///
+    /// v1a: `energy` is engine-owned (integrated + reset by [`crate::graph::GraphRuntime`]),
+    /// so the body is a pure predicate. Author state cells and emit/relay arrive in v1b.
+    pub fn invoke_graph_update(
+        &mut self,
+        manifest: &crate::graph::GraphManifest,
+        eval: &crate::graph::NodeEval,
+    ) -> Result<crate::graph::NodeFire, String> {
+        let mut params = HashMap::with_capacity(manifest.node.params.len());
+        for p in &manifest.node.params {
+            params.insert(p.name.clone(), p.default);
+        }
+        let Some(source) = manifest.node.update_source.as_deref() else {
+            let threshold = params.get("threshold").copied().unwrap_or(1.0);
+            return Ok(crate::graph::NodeFire {
+                fired: eval.energy >= threshold,
+            });
+        };
+        {
+            let mut ctx = self
+                .graph_node
+                .lock()
+                .map_err(|_| "failed to lock graph node context".to_string())?;
+            *ctx = Some(GraphNodeContext {
+                node_index: eval.node_index,
+                input: eval.input,
+                energy: eval.energy,
+                tick_index: eval.tick_index,
+                beat: eval.beat,
+                params,
+                state: HashMap::new(),
+                input_event: eval.input_event,
+            });
+        }
+        // Bind `self` (the node handle the accessors take) to this node's index. The
+        // `node-*` accessors read the ambient context and ignore the value, but the
+        // body must reference a bound symbol — the scratch VM errors on unknowns.
+        let wrapped = format!("(let ((self {})) {source})", eval.node_index);
+        let result = self.runtime.eval_str(&wrapped).map_err(|e| format!("{e:?}"));
+        if std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some() {
+            eprintln!("[graph-update] src={wrapped:?} result={result:?}");
+        }
+        let fired = matches!(&result, Ok(Some(v)) if evalue_is_truthy(v));
+        let _ = self.graph_node.lock().map(|mut ctx| ctx.take());
+        result?;
+        Ok(crate::graph::NodeFire { fired })
+    }
+}
+
+/// Lisp truthiness: everything is true except `false` and `nil`.
+fn evalue_is_truthy(value: &EValue) -> bool {
+    !matches!(value, EValue::Bool(false) | EValue::Nil)
+}
+
+/// Register the `node-*` accessors a graph-mode `:update` reads. They read the
+/// currently-bound [`GraphNodeContext`] (set by `invoke_graph_update`) and ignore
+/// their `self` argument (the context is ambient, like the `gen-*` builtins).
+fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNodeContext) {
+    fn ctx_key(value: Option<&EValue>) -> Option<String> {
+        match value {
+            Some(EValue::Keyword(k) | EValue::String(k) | EValue::Symbol(k)) => {
+                Some(k.trim_start_matches(':').to_string())
+            }
+            _ => None,
+        }
+    }
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "node-input",
+        "(node-input self)",
+        "The reduced gather result arriving at this node this evaluation boundary.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("node-input called outside :update")?;
+            Ok(EValue::Number(ctx.input))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "node-index",
+        "(node-index self)",
+        "This node's instance index within the shape.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("node-index called outside :update")?;
+            Ok(EValue::Number(ctx.node_index as f64))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "node-tick",
+        "(node-tick self)",
+        "0-based count of this node's evaluation boundaries since reset.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("node-tick called outside :update")?;
+            Ok(EValue::Number(ctx.tick_index as f64))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "node-param",
+        "(node-param self :key)",
+        "Read a behavioral param of this node (prototype default + per-instance plock).",
+        move |args, _ctx| {
+            let key = ctx_key(args.get(1).or_else(|| args.first()))
+                .ok_or("node-param expects a key")?;
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("node-param called outside :update")?;
+            Ok(EValue::Number(ctx.params.get(&key).copied().unwrap_or(0.0)))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "node-state",
+        "(node-state self :key)",
+        "Read a runtime state cell of this node (engine `energy`, or an author cell).",
+        move |args, _ctx| {
+            let key = ctx_key(args.get(1).or_else(|| args.first()))
+                .ok_or("node-state expects a key")?;
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("node-state called outside :update")?;
+            let value = if key == "energy" {
+                ctx.energy
+            } else {
+                ctx.state.get(&key).copied().unwrap_or(0.0)
+            };
+            Ok(EValue::Number(value))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "node-input-event",
+        "(node-input-event self)",
+        "The payload (event) that arrived at this node this boundary, or nil (Ext 1).",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("node-input-event called outside :update")?;
+            Ok(match ctx.input_event {
+                Some(payload) => {
+                    let mut map = HashMap::new();
+                    map.insert(
+                        "note".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(
+                            payload.note as f64,
+                        ))),
+                    );
+                    map.insert(
+                        "vel".to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(
+                            payload.velocity as f64,
+                        ))),
+                    );
+                    EValue::Map(map)
+                }
+                None => EValue::Nil,
+            })
+        },
+    );
+
+    fn event_field(args: &[EValue], key: &str) -> EValue {
+        if let Some(EValue::Map(map)) = args.first() {
+            if let Some(cell) = map.get(key) {
+                if let EValue::Number(n) = &*cell.borrow() {
+                    return EValue::Number(*n);
+                }
+            }
+        }
+        EValue::Number(0.0)
+    }
+    runtime.register_native_with_docs(
+        "event-note",
+        "(event-note ev)",
+        "Read the note (transpose) field off a relayed event (Ext 1).",
+        move |args, _ctx| Ok(event_field(&args, "note")),
+    );
+    runtime.register_native_with_docs(
+        "event-vel",
+        "(event-vel ev)",
+        "Read the velocity field off a relayed event (Ext 1).",
+        move |args, _ctx| Ok(event_field(&args, "vel")),
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "node-set!",
+        "(node-set! self :key value)",
+        "Write an author state cell of this node (v1a: engine `energy` is engine-owned).",
+        move |args, _ctx| {
+            let key = ctx_key(args.get(1)).ok_or("node-set! expects a key")?;
+            let value = match args.get(2) {
+                Some(EValue::Number(n)) => *n,
+                _ => return Err("node-set! expects (node-set! self :key number)".to_string()),
+            };
+            let mut guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_mut().ok_or("node-set! called outside :update")?;
+            if key != "energy" {
+                ctx.state.insert(key, value);
+            }
+            Ok(EValue::Number(value))
+        },
+    );
 }
 
 fn register_sequencer_natives(
@@ -7927,7 +8167,7 @@ fn graph_parse_edge_set(items: &[EValue]) -> Result<EdgeSetSpec, String> {
 }
 
 /// True if these `def-sequencer` args carry a `def-node` sub-form (graph mode).
-pub(crate) fn graph_mode_present(args: &[EValue]) -> bool {
+pub fn graph_mode_present(args: &[EValue]) -> bool {
     args.iter().any(|arg| {
         graph_list_items(arg)
             .map(|items| graph_head_symbol(&items).as_deref() == Some("def-node"))
@@ -7937,7 +8177,7 @@ pub(crate) fn graph_mode_present(args: &[EValue]) -> bool {
 
 /// Parse a graph-mode `def-sequencer` arg list (including the leading name) into a
 /// [`GraphManifest`].
-pub(crate) fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
+pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
     let name = match args.first() {
         Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => {
             s.trim_start_matches('@').to_string()
@@ -9938,6 +10178,7 @@ pub fn run_embedded_scratch_flow(
         accumulator_eval,
         sequencers,
         generator_tick,
+        graph_node,
     ) = control_runtime.into_parts();
     let init_src = read_eseqlisp_init_source();
     let mut editor = Editor::new(
@@ -10032,6 +10273,7 @@ pub fn run_embedded_scratch_flow(
                     accumulator_eval,
                     sequencers,
                     generator_tick,
+                    graph_node,
                 ),
             ));
         }
@@ -10514,6 +10756,152 @@ mod tests {
         // Materialize: 2 nodes, 2x2 all-to-all edges.
         let runtime = manifest.materialize();
         assert_eq!(runtime.num_nodes(), 2);
+    }
+
+    #[test]
+    fn graph_update_predicate_fires_through_vm_and_engine() {
+        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
+        use crate::sequencer::Timebase;
+
+        // One self-looping node (weight 1) seeded with energy 2; its :update fires when
+        // energy >= threshold, evaluated on the real scheduler VM. Exercises node-state
+        // / node-param accessors + truthiness -> fire through GraphRuntime::process_block.
+        let manifest = GraphManifest {
+            id: 99,
+            name: "g".into(),
+            shape: ShapeSpec::Line(1),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 2.0,
+            max_poly: 0,
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Quarter,
+                params: vec![ParamSpec {
+                    name: "threshold".into(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+                update_source: Some(
+                    "(>= (node-state self :energy) (node-param self :threshold))".into(),
+                ),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "n".into(),
+                to: "n".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+            }],
+        };
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut runtime = manifest.materialize();
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or(crate::graph::NodeFire { fired: false })
+            },
+            &mut out,
+        );
+        // Seeded energy fires at beat 1; the self-loop re-fires every quarter after.
+        let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
+        assert_eq!(samples, vec![48_000, 96_000, 144_000, 192_000]);
+        assert!(out.iter().all(|e| e.node_index == 0));
+    }
+
+    #[test]
+    fn graph_update_reads_input_event_through_vm() {
+        use crate::graph::{
+            EdgeSetSpec, GraphManifest, GraphPayload, NodeProto, ParamSpec, SeedFrom, ShapeSpec,
+            Topology,
+        };
+        use crate::sequencer::Timebase;
+
+        // A self-looping node seeded (track 0, note 4) whose :update fires only when the
+        // arrived event's note exceeds 1 — exercising node-input-event/event-note on the
+        // real scratch VM. The carried note (4) re-emits each hop.
+        let manifest = GraphManifest {
+            id: 7,
+            name: "g".into(),
+            shape: ShapeSpec::Line(1),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Quarter,
+                seed_from: SeedFrom::Tracks(vec![0]),
+                update_source: Some("(>= (event-note (node-input-event self)) 1)".into()),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "n".into(),
+                to: "n".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+            }],
+        };
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut runtime = manifest.materialize();
+        runtime.seed(0, 0.0, GraphPayload { note: 4.0, velocity: 1.0 });
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or(crate::graph::NodeFire { fired: false })
+            },
+            &mut out,
+        );
+        // The seed reaches the node at beat 1 and the self-loop re-fires every quarter;
+        // each emission carries the relayed note (4, node transpose 0).
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|e| e.event.resolved.transpose == 4.0));
     }
 
     #[test]
