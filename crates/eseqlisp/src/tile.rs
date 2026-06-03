@@ -36,12 +36,10 @@ pub struct TileTabLayout {
     pub selected: bool,
 }
 
-pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.6;
-const TILE_TAB_MIN_WIDTH: f32 = 4.0;
-const TILE_TAB_MAX_WIDTH: f32 = 14.0;
+pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.28;
+pub const TILE_TAB_TOP_INSET: f32 = 0.18;
 const TILE_TAB_LABEL_PAD: f32 = 2.0;
-const TILE_TAB_GAP: f32 = 0.0;
-const TILE_TAB_RIGHT_INSET: f32 = 0.55;
+const TILE_TAB_HORIZONTAL_INSET: f32 = 0.55;
 
 pub struct TileLeaf {
     pub id: TileId,
@@ -192,7 +190,7 @@ pub fn tile_body_rect(rect: Rect, has_tabs: bool) -> Rect {
     if !has_tabs {
         return rect;
     }
-    let strip_height = TILE_TAB_STRIP_HEIGHT.min(rect.height.max(0.0));
+    let strip_height = (TILE_TAB_TOP_INSET + TILE_TAB_STRIP_HEIGHT).min(rect.height.max(0.0));
     Rect {
         row: rect.row + strip_height,
         col: rect.col,
@@ -209,50 +207,29 @@ pub fn tile_tab_layouts(
     if tabs.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
         return Vec::new();
     }
-    let available_width = (rect.width - TILE_TAB_RIGHT_INSET * 2.0).max(0.0);
-    if available_width <= 0.0 {
-        return Vec::new();
-    }
-    let gap_total = TILE_TAB_GAP * tabs.len().saturating_sub(1) as f32;
-    let available_tab_width = (available_width - gap_total).max(0.0);
-    if available_tab_width <= 0.0 {
+    let tab_container_width = (rect.width - TILE_TAB_HORIZONTAL_INSET * 2.0).max(0.0);
+    let tab_width = (tab_container_width / tabs.len() as f32).max(0.0);
+    if tab_width <= 0.0 {
         return Vec::new();
     }
 
-    let desired_widths = tabs
-        .iter()
-        .map(|tab| {
-            (estimated_tab_label_width_cells(&tab.label) + TILE_TAB_LABEL_PAD)
-                .clamp(TILE_TAB_MIN_WIDTH, TILE_TAB_MAX_WIDTH)
-        })
-        .collect::<Vec<_>>();
-    let desired_equal_width = desired_widths
-        .iter()
-        .copied()
-        .fold(TILE_TAB_MIN_WIDTH, f32::max);
-    let max_equal_width = (available_tab_width / tabs.len() as f32).max(1.0);
-    let equal_width = desired_equal_width.min(max_equal_width).max(1.0);
-    let widths = vec![equal_width; tabs.len()];
-    let total_width = widths.iter().sum::<f32>() + gap_total;
-    let mut col = rect.col + rect.width - TILE_TAB_RIGHT_INSET - total_width;
     let selected = selected_tab.unwrap_or(usize::MAX);
-    widths
-        .into_iter()
+    tabs.iter()
         .enumerate()
-        .map(|(index, width)| {
+        .map(|(index, tab)| {
             let is_selected = index == selected;
+            let col = rect.col + TILE_TAB_HORIZONTAL_INSET + tab_width * index as f32;
             let layout = TileTabLayout {
                 index,
-                label: truncate_tab_label(&tabs[index].label, width),
+                label: truncate_tab_label(&tab.label, tab_width),
                 rect: Rect {
-                    row: rect.row,
+                    row: rect.row + TILE_TAB_TOP_INSET,
                     col,
-                    width,
+                    width: tab_width,
                     height: TILE_TAB_STRIP_HEIGHT,
                 },
                 selected: is_selected,
             };
-            col += width + TILE_TAB_GAP;
             layout
         })
         .collect()
@@ -271,10 +248,6 @@ fn truncate_tab_label(label: &str, width: f32) -> String {
         out.push(ch);
     }
     out
-}
-
-fn estimated_tab_label_width_cells(label: &str) -> f32 {
-    label.chars().map(estimated_tab_char_width_cells).sum()
 }
 
 fn estimated_tab_char_width_cells(ch: char) -> f32 {
@@ -319,6 +292,9 @@ mod tests {
 
         assert_eq!(layouts.len(), 2);
         assert_eq!(layouts[0].rect.width, layouts[1].rect.width);
+        assert!(layouts[0].rect.col > rect.col);
+        assert_eq!(layouts[1].rect.col, rect.col + rect.width * 0.5);
+        assert!(layouts[1].rect.col + layouts[1].rect.width < rect.col + rect.width);
         assert_eq!(layouts[1].label, "WWW");
     }
 

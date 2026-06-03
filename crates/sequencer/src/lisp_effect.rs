@@ -3169,6 +3169,8 @@ pub(crate) struct GraphNodeContext {
     state: HashMap<String, f64>,
     /// The payload that arrived this boundary (`node-input-event`), if any (Ext 1).
     input_event: Option<crate::graph::GraphPayload>,
+    dampen_incoming: Option<f64>,
+    recover_incoming: Option<f64>,
 }
 
 /// A lisp `def-sequencer` definition as held by the scheduler-side VM: its id
@@ -3768,14 +3770,12 @@ impl ScratchControlRuntime {
         manifest: &crate::graph::GraphManifest,
         eval: &crate::graph::NodeEval,
     ) -> Result<crate::graph::NodeFire, String> {
-        let mut params = HashMap::with_capacity(manifest.node.params.len());
-        for p in &manifest.node.params {
-            params.insert(p.name.clone(), p.default);
-        }
+        let params = eval.params.clone();
         let Some(source) = manifest.node.update_source.as_deref() else {
             let threshold = params.get("threshold").copied().unwrap_or(1.0);
             return Ok(crate::graph::NodeFire {
                 fired: eval.energy >= threshold,
+                ..crate::graph::NodeFire::default()
             });
         };
         {
@@ -3792,20 +3792,37 @@ impl ScratchControlRuntime {
                 params,
                 state: HashMap::new(),
                 input_event: eval.input_event,
+                dampen_incoming: None,
+                recover_incoming: None,
             });
         }
         // Bind `self` (the node handle the accessors take) to this node's index. The
         // `node-*` accessors read the ambient context and ignore the value, but the
         // body must reference a bound symbol — the scratch VM errors on unknowns.
         let wrapped = format!("(let ((self {})) {source})", eval.node_index);
-        let result = self.runtime.eval_str(&wrapped).map_err(|e| format!("{e:?}"));
+        let result = self
+            .runtime
+            .eval_str(&wrapped)
+            .map_err(|e| format!("{e:?}"));
         if std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some() {
             eprintln!("[graph-update] src={wrapped:?} result={result:?}");
         }
+        let mut dampen_incoming = None;
+        let mut recover_incoming = None;
+        if let Ok(mut ctx) = self.graph_node.lock() {
+            if let Some(ctx) = ctx.take() {
+                dampen_incoming = ctx.dampen_incoming;
+                recover_incoming = ctx.recover_incoming;
+            }
+        }
         let fired = matches!(&result, Ok(Some(v)) if evalue_is_truthy(v));
-        let _ = self.graph_node.lock().map(|mut ctx| ctx.take());
         result?;
-        Ok(crate::graph::NodeFire { fired })
+        Ok(crate::graph::NodeFire {
+            fired,
+            dampen_incoming,
+            recover_incoming,
+            ..crate::graph::NodeFire::default()
+        })
     }
 }
 
@@ -3869,8 +3886,8 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
         "(node-param self :key)",
         "Read a behavioral param of this node (prototype default + per-instance plock).",
         move |args, _ctx| {
-            let key = ctx_key(args.get(1).or_else(|| args.first()))
-                .ok_or("node-param expects a key")?;
+            let key =
+                ctx_key(args.get(1).or_else(|| args.first())).ok_or("node-param expects a key")?;
             let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
             let ctx = guard.as_ref().ok_or("node-param called outside :update")?;
             Ok(EValue::Number(ctx.params.get(&key).copied().unwrap_or(0.0)))
@@ -3883,8 +3900,8 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
         "(node-state self :key)",
         "Read a runtime state cell of this node (engine `energy`, or an author cell).",
         move |args, _ctx| {
-            let key = ctx_key(args.get(1).or_else(|| args.first()))
-                .ok_or("node-state expects a key")?;
+            let key =
+                ctx_key(args.get(1).or_else(|| args.first())).ok_or("node-state expects a key")?;
             let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
             let ctx = guard.as_ref().ok_or("node-state called outside :update")?;
             let value = if key == "energy" {
@@ -3903,7 +3920,9 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
         "The payload (event) that arrived at this node this boundary, or nil (Ext 1).",
         move |_args, _ctx| {
             let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
-            let ctx = guard.as_ref().ok_or("node-input-event called outside :update")?;
+            let ctx = guard
+                .as_ref()
+                .ok_or("node-input-event called outside :update")?;
             Ok(match ctx.input_event {
                 Some(payload) => {
                     let mut map = HashMap::new();
@@ -3968,6 +3987,50 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
             Ok(EValue::Number(value))
         },
     );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "dampen-incoming",
+        "(dampen-incoming self amount)",
+        "Request dampening for incoming edges that triggered this node if the firing commits.",
+        move |args, _ctx| {
+            let amount = match args.get(1).or_else(|| args.first()) {
+                Some(EValue::Number(n)) => *n,
+                _ => {
+                    return Err("dampen-incoming expects (dampen-incoming self amount)".to_string())
+                }
+            };
+            let mut guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard
+                .as_mut()
+                .ok_or("dampen-incoming called outside :update")?;
+            ctx.dampen_incoming = Some(amount);
+            Ok(EValue::Number(amount))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "recover-incoming",
+        "(recover-incoming self factor)",
+        "Request recovery for all incoming edges if this node does not fire.",
+        move |args, _ctx| {
+            let factor = match args.get(1).or_else(|| args.first()) {
+                Some(EValue::Number(n)) => *n,
+                _ => {
+                    return Err(
+                        "recover-incoming expects (recover-incoming self factor)".to_string()
+                    )
+                }
+            };
+            let mut guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard
+                .as_mut()
+                .ok_or("recover-incoming called outside :update")?;
+            ctx.recover_incoming = Some(factor);
+            Ok(EValue::Number(factor))
+        },
+    );
 }
 
 fn register_sequencer_natives(
@@ -4008,6 +4071,129 @@ pub fn register_neural_authoring_natives(
         runtime,
         state,
         Arc::new(Mutex::new(BTreeSet::new())),
+    );
+}
+
+pub fn register_graph_authoring_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+) {
+    let state_for_graph_list = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-list",
+        "(graph-list)",
+        "Return graph-mode sequencer definitions with current-pattern overrides.",
+        move |_args, _ctx| {
+            Ok(lisp_list(
+                state_for_graph_list
+                    .published_sequencers()
+                    .into_iter()
+                    .filter_map(|published| published.graph)
+                    .map(|manifest| {
+                        let graph_overrides = state_for_graph_list.current_graph_overrides();
+                        let overrides = graph_overrides_for_manifest(&graph_overrides, &manifest);
+                        graph_manifest_to_value(&manifest, overrides)
+                    })
+                    .collect(),
+            ))
+        },
+    );
+
+    let state_for_graph_describe = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-describe",
+        "(graph-describe id-or-name)",
+        "Return one graph-mode sequencer definition.",
+        move |args, _ctx| {
+            let reference = args
+                .first()
+                .ok_or_else(|| "graph-describe expects graph id or name".to_string())?;
+            let manifest = resolve_graph_manifest(&state_for_graph_describe, reference)?;
+            let graph_overrides = state_for_graph_describe.current_graph_overrides();
+            let overrides = graph_overrides_for_manifest(&graph_overrides, &manifest);
+            Ok(graph_manifest_to_value(&manifest, overrides))
+        },
+    );
+
+    let state_for_graph_node = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node",
+        "(graph-node sequencer node-index :delay 2 :route 0 :seed-from 1)",
+        "Set sparse per-pattern graph node intrinsic overrides.",
+        move |args, ctx| {
+            if args.len() < 2 {
+                return Err("graph-node expects graph id/name and node index".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_node, &args[0])?;
+            let instance = parse_nonnegative_usize(&args[1], "node index")?;
+            if instance >= manifest.shape.num_nodes() {
+                return Err("graph-node node index out of range".to_string());
+            }
+            let edit = parse_graph_node_edit(&args[2..])?;
+            let sequencer_name = manifest.name.clone();
+            state_for_graph_node.edit_current_graph_overrides(|graphs| {
+                let graph = ensure_graph_overrides(graphs, &manifest);
+                let node = ensure_graph_node_intrinsic(graph, &manifest.node.name, instance);
+                apply_graph_node_edit(node, edit);
+                Ok(())
+            })?;
+            ctx.set_status(format!("updated graph '{sequencer_name}' node {instance}"));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_graph_param = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-param",
+        "(graph-param sequencer node-index :threshold 0.75)",
+        "Set one sparse per-pattern graph node param override.",
+        move |args, ctx| {
+            if args.len() != 4 {
+                return Err("graph-param expects graph, node index, param, value".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_param, &args[0])?;
+            let instance = parse_nonnegative_usize(&args[1], "node index")?;
+            if instance >= manifest.shape.num_nodes() {
+                return Err("graph-param node index out of range".to_string());
+            }
+            let param = graph_key_string(&args[2]).ok_or("graph-param expects param name")?;
+            let value = graph_number(&args[3]).ok_or("graph-param value must be numeric")?;
+            let sequencer_name = manifest.name.clone();
+            state_for_graph_param.edit_current_graph_overrides(|graphs| {
+                let graph = ensure_graph_overrides(graphs, &manifest);
+                upsert_graph_node_param(graph, &manifest.node.name, instance, &param, value);
+                Ok(())
+            })?;
+            ctx.set_status(format!(
+                "updated graph '{sequencer_name}' node {instance} param {param}"
+            ));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_graph_edge = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-edge",
+        "(graph-edge sequencer :from 0 :to 1 :weight 0.5)",
+        "Set one sparse per-pattern graph edge param override.",
+        move |args, ctx| {
+            if args.len() < 6 {
+                return Err("graph-edge expects graph, :from, :to, and a param".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_edge, &args[0])?;
+            let edit = parse_graph_edge_edit(&manifest, &args[1..])?;
+            let sequencer_name = manifest.name.clone();
+            let param_name = edit.param.clone();
+            state_for_graph_edge.edit_current_graph_overrides(|graphs| {
+                let graph = ensure_graph_overrides(graphs, &manifest);
+                upsert_graph_edge_param(graph, edit);
+                Ok(())
+            })?;
+            ctx.set_status(format!(
+                "updated graph '{sequencer_name}' edge {param_name}"
+            ));
+            Ok(EValue::Bool(true))
+        },
     );
 }
 
@@ -4665,7 +4851,9 @@ fn register_sequencer_natives_with_accumulators(
             let Some(ctx) = guard.as_ref() else {
                 return Err("state-get called outside a generator tick".to_string());
             };
-            Ok(EValue::Number(ctx.state.get(&key).copied().unwrap_or(default)))
+            Ok(EValue::Number(
+                ctx.state.get(&key).copied().unwrap_or(default),
+            ))
         },
     );
 
@@ -4714,9 +4902,9 @@ fn register_sequencer_natives_with_accumulators(
         "Beats in one step of a timebase, for seq-emit :dur.",
         move |args, _ctx| {
             let timebase = parse_timebase_arg(&args, 0)?;
-            Ok(EValue::Number(
-                timebase.step_beats(crate::generator::GENERATOR_RESOLUTION_REF_STEPS),
-            ))
+            Ok(EValue::Number(timebase.step_beats(
+                crate::generator::GENERATOR_RESOLUTION_REF_STEPS,
+            )))
         },
     );
 
@@ -7842,8 +8030,7 @@ pub fn sequencer_tick_source(value: &EValue) -> String {
 /// Parse a `def-sequencer` `:resolution` value (timebase keyword/number) to its
 /// `Timebase` index, defaulting to sixteenth.
 pub fn sequencer_resolution_index(value: &EValue) -> u8 {
-    parse_timebase_arg(std::slice::from_ref(value), 0)
-        .unwrap_or(Timebase::Sixteenth) as u8
+    parse_timebase_arg(std::slice::from_ref(value), 0).unwrap_or(Timebase::Sixteenth) as u8
 }
 
 pub fn stable_sequencer_id(name: &str) -> u64 {
@@ -8074,8 +8261,14 @@ fn graph_parse_state_list(value: &EValue) -> Vec<StateSpec> {
 }
 
 fn graph_parse_shape(value: &EValue) -> Result<ShapeSpec, String> {
-    let items = graph_list_items(value).ok_or_else(|| ":shape expects a generator form".to_string())?;
-    let n = |idx: usize| items.get(idx).and_then(graph_number).map(|n| n.max(0.0) as usize);
+    let items =
+        graph_list_items(value).ok_or_else(|| ":shape expects a generator form".to_string())?;
+    let n = |idx: usize| {
+        items
+            .get(idx)
+            .and_then(graph_number)
+            .map(|n| n.max(0.0) as usize)
+    };
     match graph_head_symbol(&items).as_deref() {
         Some("grid") => Ok(ShapeSpec::Grid {
             rows: n(1).ok_or("(grid R C) expects rows")?,
@@ -8190,6 +8383,7 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
     let mut reset_every_beats = 0.0;
     let mut seed_on_reset = 0.0;
     let mut max_poly = 0u32;
+    let mut max_poly_selection = NeuralMaxPolySelection::Deterministic;
     let mut node: Option<NodeProto> = None;
     let mut edge_sets: Vec<EdgeSetSpec> = Vec::new();
 
@@ -8200,7 +8394,9 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
             match graph_head_symbol(&items).as_deref() {
                 Some("def-node") => {
                     if node.is_some() {
-                        return Err("graph-mode def-sequencer allows one def-node in v1".to_string());
+                        return Err(
+                            "graph-mode def-sequencer allows one def-node in v1".to_string()
+                        );
                     }
                     node = Some(graph_parse_node_proto(&items)?);
                     i += 1;
@@ -8230,8 +8426,9 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
             "reset-every" => reset_every_beats = graph_bars_or_beats(value),
             "seed-on-reset" => seed_on_reset = graph_number(value).unwrap_or(0.0),
             "max-poly" => max_poly = graph_number(value).unwrap_or(0.0).max(0.0) as u32,
-            // v1a: deterministic selection only; resolution is per-node, not sequencer-level.
-            "max-poly-selection" | "resolution" | "res" => {}
+            "max-poly-selection" => max_poly_selection = parse_neural_max_poly_selection(value)?,
+            // Resolution is per-node, not sequencer-level.
+            "resolution" | "res" => {}
             _ => return Err(format!("graph-mode def-sequencer unknown key :{key}")),
         }
         i += 1;
@@ -8247,6 +8444,7 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
         reset_every_beats,
         seed_on_reset,
         max_poly,
+        max_poly_selection,
         node,
         edge_sets,
     })
@@ -8288,9 +8486,7 @@ fn build_seq_emit_event(
             "vel" | "velocity" => {
                 resolved.velocity = acc_emit_number(value, "velocity")?.clamp(0.0, 1.0)
             }
-            "note" | "transpose" | "trn" => {
-                resolved.transpose = acc_emit_number(value, "note")?
-            }
+            "note" | "transpose" | "trn" => resolved.transpose = acc_emit_number(value, "note")?,
             "dur" | "duration" => resolved.duration = acc_emit_number(value, "duration")?.max(0.0),
             "speed" | "spd" => resolved.speed = acc_emit_number(value, "speed")?.max(0.0),
             "pan" => resolved.pan = acc_emit_number(value, "pan")?.clamp(-1.0, 1.0),
@@ -9596,6 +9792,333 @@ fn neural_neuron_to_value(idx: usize, neuron: &ProjectNeuron) -> EValue {
     EValue::Map(map)
 }
 
+#[derive(Default)]
+struct GraphNodeEdit {
+    resolution: Option<u8>,
+    delay_steps: Option<u32>,
+    quantize: Option<crate::graph::ProjectGraphQuantizeOverride>,
+    route: Option<crate::graph::ProjectGraphRouteOverride>,
+    seed_from: Option<crate::graph::ProjectGraphSeedFrom>,
+}
+
+struct GraphEdgeEdit {
+    group: String,
+    from: usize,
+    to: usize,
+    param: String,
+    value: f64,
+}
+
+fn graph_key_string(value: &EValue) -> Option<String> {
+    match value {
+        EValue::Keyword(k) | EValue::Symbol(k) | EValue::String(k) => Some(
+            k.trim_start_matches(':')
+                .trim_start_matches('@')
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn resolve_graph_manifest(
+    state: &crate::sequencer::SequencerState,
+    reference: &EValue,
+) -> Result<crate::graph::GraphManifest, String> {
+    let published = state.published_sequencers();
+    match reference {
+        EValue::Number(id) if id.is_finite() && *id >= 0.0 => {
+            let id = *id as u64;
+            published
+                .into_iter()
+                .filter_map(|published| published.graph)
+                .find(|manifest| manifest.id == id)
+                .ok_or_else(|| "graph sequencer id not found".to_string())
+        }
+        EValue::String(name) | EValue::Symbol(name) | EValue::Keyword(name) => {
+            let name = name.trim_start_matches('@').trim_start_matches(':');
+            published
+                .into_iter()
+                .filter_map(|published| published.graph)
+                .find(|manifest| manifest.name == name)
+                .ok_or_else(|| "graph sequencer name not found".to_string())
+        }
+        _ => Err("graph reference must be id or name".to_string()),
+    }
+}
+
+fn graph_overrides_for_manifest<'a>(
+    overrides: &'a [crate::graph::ProjectGraphOverrides],
+    manifest: &crate::graph::GraphManifest,
+) -> Option<&'a crate::graph::ProjectGraphOverrides> {
+    overrides.iter().find(|overrides| {
+        overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
+    })
+}
+
+fn ensure_graph_overrides<'a>(
+    graphs: &'a mut Vec<crate::graph::ProjectGraphOverrides>,
+    manifest: &crate::graph::GraphManifest,
+) -> &'a mut crate::graph::ProjectGraphOverrides {
+    if let Some(idx) = graphs.iter().position(|graph| {
+        graph.sequencer_id == manifest.id || graph.sequencer_name == manifest.name
+    }) {
+        return &mut graphs[idx];
+    }
+    graphs.push(crate::graph::ProjectGraphOverrides {
+        sequencer_id: manifest.id,
+        sequencer_name: manifest.name.clone(),
+        ..crate::graph::ProjectGraphOverrides::default()
+    });
+    graphs.last_mut().expect("just pushed graph overrides")
+}
+
+fn ensure_graph_node_intrinsic<'a>(
+    graph: &'a mut crate::graph::ProjectGraphOverrides,
+    group: &str,
+    instance: usize,
+) -> &'a mut crate::graph::ProjectGraphNodeIntrinsicOverride {
+    if let Some(idx) = graph
+        .node_intrinsics
+        .iter()
+        .position(|node| node.group == group && node.instance == instance)
+    {
+        return &mut graph.node_intrinsics[idx];
+    }
+    graph
+        .node_intrinsics
+        .push(crate::graph::ProjectGraphNodeIntrinsicOverride {
+            group: group.to_string(),
+            instance,
+            resolution: None,
+            delay_steps: None,
+            quantize: None,
+            route: None,
+            seed_from: None,
+        });
+    graph
+        .node_intrinsics
+        .last_mut()
+        .expect("just pushed graph node override")
+}
+
+fn parse_graph_route_override(
+    value: &EValue,
+) -> Result<crate::graph::ProjectGraphRouteOverride, String> {
+    match graph_keyword(value).as_deref() {
+        Some("none") | Some("nil") | Some("off") => {
+            Ok(crate::graph::ProjectGraphRouteOverride::None)
+        }
+        _ => parse_nonnegative_usize(value, "route")
+            .map(crate::graph::ProjectGraphRouteOverride::Track),
+    }
+}
+
+fn parse_graph_seed_from(value: &EValue) -> Result<crate::graph::ProjectGraphSeedFrom, String> {
+    match graph_keyword(value).as_deref() {
+        Some("route") => return Ok(crate::graph::ProjectGraphSeedFrom::Route),
+        _ => {}
+    }
+    match value {
+        EValue::Number(_) => Ok(crate::graph::ProjectGraphSeedFrom::Tracks(vec![
+            parse_nonnegative_usize(value, "seed-from")?,
+        ])),
+        EValue::List(_) => Ok(crate::graph::ProjectGraphSeedFrom::Tracks(
+            graph_list_items(value)
+                .unwrap_or_default()
+                .iter()
+                .map(|value| parse_nonnegative_usize(value, "seed-from track"))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        _ => Err("seed-from expects :route, track, or track list".to_string()),
+    }
+}
+
+fn parse_graph_quantize_override(
+    value: &EValue,
+) -> Result<crate::graph::ProjectGraphQuantizeOverride, String> {
+    match graph_keyword(value).as_deref() {
+        Some("off") | Some("none") | Some("nil") | Some("false") => {
+            Ok(crate::graph::ProjectGraphQuantizeOverride::Off)
+        }
+        _ => Ok(crate::graph::ProjectGraphQuantizeOverride::Timebase(
+            graph_timebase(value)? as u8,
+        )),
+    }
+}
+
+fn parse_graph_node_edit(args: &[EValue]) -> Result<GraphNodeEdit, String> {
+    let mut edit = GraphNodeEdit::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = graph_keyword(&args[idx])
+            .ok_or_else(|| "graph-node expects keyword/value pairs".to_string())?;
+        idx += 1;
+        let value = args
+            .get(idx)
+            .ok_or_else(|| format!("graph-node :{key} expects a value"))?;
+        match key.as_str() {
+            "resolution" | "res" => edit.resolution = Some(graph_timebase(value)? as u8),
+            "delay" | "delay-steps" => edit.delay_steps = Some(parse_u32_value(value, "delay")?),
+            "quantize" | "q" => edit.quantize = Some(parse_graph_quantize_override(value)?),
+            "route" => edit.route = Some(parse_graph_route_override(value)?),
+            "seed-from" => edit.seed_from = Some(parse_graph_seed_from(value)?),
+            other => return Err(format!("graph-node unknown argument :{other}")),
+        }
+        idx += 1;
+    }
+    Ok(edit)
+}
+
+fn apply_graph_node_edit(
+    node: &mut crate::graph::ProjectGraphNodeIntrinsicOverride,
+    edit: GraphNodeEdit,
+) {
+    if edit.resolution.is_some() {
+        node.resolution = edit.resolution;
+    }
+    if edit.delay_steps.is_some() {
+        node.delay_steps = edit.delay_steps;
+    }
+    if edit.quantize.is_some() {
+        node.quantize = edit.quantize;
+    }
+    if edit.route.is_some() {
+        node.route = edit.route;
+    }
+    if edit.seed_from.is_some() {
+        node.seed_from = edit.seed_from;
+    }
+}
+
+fn upsert_graph_node_param(
+    graph: &mut crate::graph::ProjectGraphOverrides,
+    group: &str,
+    instance: usize,
+    param: &str,
+    value: f64,
+) {
+    if let Some(existing) = graph
+        .node_params
+        .iter_mut()
+        .find(|entry| entry.group == group && entry.instance == instance && entry.param == param)
+    {
+        existing.value = value;
+        return;
+    }
+    graph
+        .node_params
+        .push(crate::graph::ProjectGraphNodeParamOverride {
+            group: group.to_string(),
+            instance,
+            param: param.to_string(),
+            value,
+        });
+}
+
+fn parse_graph_edge_edit(
+    manifest: &crate::graph::GraphManifest,
+    args: &[EValue],
+) -> Result<GraphEdgeEdit, String> {
+    let edge_set = manifest
+        .edge_sets
+        .first()
+        .ok_or_else(|| "graph-edge requires an edge set".to_string())?;
+    let mut group = crate::graph::edge_set_group_id(edge_set);
+    let mut from = None;
+    let mut to = None;
+    let mut param = None;
+    let mut value = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = graph_keyword(&args[idx])
+            .ok_or_else(|| "graph-edge expects keyword/value pairs".to_string())?;
+        idx += 1;
+        let arg = args
+            .get(idx)
+            .ok_or_else(|| format!("graph-edge :{key} expects a value"))?;
+        match key.as_str() {
+            "from" => from = Some(parse_nonnegative_usize(arg, "from")?),
+            "to" => to = Some(parse_nonnegative_usize(arg, "to")?),
+            "group" => {
+                group = graph_key_string(arg)
+                    .ok_or_else(|| "graph-edge :group expects a symbol/string".to_string())?
+            }
+            other => {
+                param = Some(other.to_string());
+                value = Some(graph_number(arg).ok_or("graph-edge param value must be numeric")?);
+            }
+        }
+        idx += 1;
+    }
+    let from = from.ok_or_else(|| "graph-edge requires :from".to_string())?;
+    let to = to.ok_or_else(|| "graph-edge requires :to".to_string())?;
+    if from >= manifest.shape.num_nodes() || to >= manifest.shape.num_nodes() {
+        return Err("graph-edge from/to index out of range".to_string());
+    }
+    Ok(GraphEdgeEdit {
+        group,
+        from,
+        to,
+        param: param.ok_or_else(|| "graph-edge requires an edge param".to_string())?,
+        value: value.ok_or_else(|| "graph-edge requires an edge param value".to_string())?,
+    })
+}
+
+fn upsert_graph_edge_param(graph: &mut crate::graph::ProjectGraphOverrides, edit: GraphEdgeEdit) {
+    if let Some(existing) = graph.edge_params.iter_mut().find(|entry| {
+        entry.group == edit.group
+            && entry.from == edit.from
+            && entry.to == edit.to
+            && entry.param == edit.param
+    }) {
+        existing.value = edit.value;
+        return;
+    }
+    graph
+        .edge_params
+        .push(crate::graph::ProjectGraphEdgeParamOverride {
+            group: edit.group,
+            from: edit.from,
+            to: edit.to,
+            param: edit.param,
+            value: edit.value,
+        });
+}
+
+fn graph_manifest_to_value(
+    manifest: &crate::graph::GraphManifest,
+    overrides: Option<&crate::graph::ProjectGraphOverrides>,
+) -> EValue {
+    let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
+    map.insert("id".to_string(), lisp_number(manifest.id as f64));
+    map.insert("name".to_string(), lisp_string(manifest.name.clone()));
+    map.insert(
+        "nodes".to_string(),
+        lisp_number(manifest.shape.num_nodes() as f64),
+    );
+    map.insert(
+        "max-poly".to_string(),
+        lisp_number(manifest.max_poly as f64),
+    );
+    map.insert(
+        "max-poly-selection".to_string(),
+        lisp_string(manifest.max_poly_selection.as_str().to_string()),
+    );
+    map.insert(
+        "node-group".to_string(),
+        lisp_string(manifest.node.name.clone()),
+    );
+    map.insert(
+        "overrides".to_string(),
+        lisp_number(
+            overrides
+                .map(|o| o.node_intrinsics.len() + o.node_params.len() + o.edge_params.len())
+                .unwrap_or(0) as f64,
+        ),
+    );
+    EValue::Map(map)
+}
+
 fn lisp_string(value: impl Into<String>) -> Rc<RefCell<EValue>> {
     Rc::new(RefCell::new(EValue::String(value.into())))
 }
@@ -10594,7 +11117,8 @@ mod tests {
         clear_neural_effect_plock_by_network_id, clear_neural_instrument_plock_by_network_id,
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
-        new_eval_context, parse_manifest, read_eseqlisp_init_source, register_sequencer_natives,
+        new_eval_context, parse_manifest, read_eseqlisp_init_source,
+        register_graph_authoring_natives, register_sequencer_natives,
         scratch_runtime_with_fallbacks, selected_neural_instrument_plock_value,
         set_selected_neural_instrument_plocks, shared_native_metadata, AccumulatorNoteSpan,
         DGenParam, DGenSidechainInput, ScratchControlRuntime, SelectedNeuralNeuron,
@@ -10605,12 +11129,15 @@ mod tests {
     use crate::scheduled_event::{
         ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
     };
-    use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
+    use crate::sequencer::{
+        default_empty_effect_chain, PublishedSequencer, SequencerState, StepParam, Timebase,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::vm::Value;
     use eseqlisp::{BufferMode, Editor, EditorConfig, Runtime};
     use std::cell::RefCell;
     use std::collections::BTreeSet;
+    use std::collections::HashMap;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -10625,7 +11152,12 @@ mod tests {
         Value::Symbol(s.to_string())
     }
     fn gv_list(items: Vec<Value>) -> Value {
-        Value::List(items.into_iter().map(|v| Rc::new(RefCell::new(v))).collect())
+        Value::List(
+            items
+                .into_iter()
+                .map(|v| Rc::new(RefCell::new(v)))
+                .collect(),
+        )
     }
 
     fn sample_graph_args() -> Vec<Value> {
@@ -10637,6 +11169,8 @@ mod tests {
             gv_num(0.9),
             gv_kw("max-poly"),
             gv_num(4.0),
+            gv_kw("max-poly-selection"),
+            gv_kw("propagation"),
             gv_kw("reset-every"),
             gv_list(vec![gv_sym("bars"), gv_num(4.0)]),
             gv_list(vec![
@@ -10646,6 +11180,8 @@ mod tests {
                 gv_kw("16"),
                 gv_kw("delay"),
                 gv_num(1.0),
+                gv_kw("seed-from"),
+                gv_num(0.0),
                 gv_kw("quantize"),
                 gv_kw("off"),
                 gv_kw("reduce"),
@@ -10727,6 +11263,10 @@ mod tests {
         assert_eq!(manifest.shape, ShapeSpec::Line(2));
         assert_eq!(manifest.energy_decay, 0.9);
         assert_eq!(manifest.max_poly, 4);
+        assert_eq!(
+            manifest.max_poly_selection,
+            NeuralMaxPolySelection::Propagation
+        );
         assert_eq!(manifest.reset_every_beats, 16.0); // (bars 4) @ 4/4
 
         let node = &manifest.node;
@@ -10735,7 +11275,7 @@ mod tests {
         assert_eq!(node.delay_steps, 1);
         assert_eq!(node.quantize, None);
         assert_eq!(node.reduce, Reduce::Sum);
-        assert_eq!(node.seed_from, SeedFrom::Route);
+        assert_eq!(node.seed_from, SeedFrom::Tracks(vec![0]));
         assert_eq!(node.param_default("threshold"), Some(1.0));
         let transpose = node.params.iter().find(|p| p.name == "transpose").unwrap();
         assert!(transpose.is_int);
@@ -10774,6 +11314,7 @@ mod tests {
             reset_every_beats: 0.0,
             seed_on_reset: 2.0,
             max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -10823,7 +11364,7 @@ mod tests {
             |eval| {
                 scratch
                     .invoke_graph_update(&manifest, eval)
-                    .unwrap_or(crate::graph::NodeFire { fired: false })
+                    .unwrap_or_default()
             },
             &mut out,
         );
@@ -10852,6 +11393,7 @@ mod tests {
             reset_every_beats: 0.0,
             seed_on_reset: 0.0,
             max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -10883,7 +11425,14 @@ mod tests {
             0,
         );
         let mut runtime = manifest.materialize();
-        runtime.seed(0, 0.0, GraphPayload { note: 4.0, velocity: 1.0 });
+        runtime.seed(
+            0,
+            0.0,
+            GraphPayload {
+                note: 4.0,
+                velocity: 1.0,
+            },
+        );
         let mut out = Vec::new();
         runtime.process_block(
             0.0,
@@ -10894,7 +11443,7 @@ mod tests {
             |eval| {
                 scratch
                     .invoke_graph_update(&manifest, eval)
-                    .unwrap_or(crate::graph::NodeFire { fired: false })
+                    .unwrap_or_default()
             },
             &mut out,
         );
@@ -10905,11 +11454,347 @@ mod tests {
     }
 
     #[test]
+    fn graph_update_dampen_and_recover_incoming_through_vm() {
+        use crate::graph::{
+            EdgeSetSpec, GraphEdge, GraphManifest, GraphPayload, NodeProto, ParamSpec, ShapeSpec,
+            Topology,
+        };
+        use crate::sequencer::Timebase;
+
+        let manifest = GraphManifest {
+            id: 17,
+            name: "g".into(),
+            shape: ShapeSpec::Line(2),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Quarter,
+                params: vec![
+                    ParamSpec {
+                        name: "threshold".into(),
+                        min: 0.0,
+                        max: 4.0,
+                        default: 1.0,
+                        is_int: false,
+                    },
+                    ParamSpec {
+                        name: "dampening".into(),
+                        min: 0.0,
+                        max: 1.0,
+                        default: 0.5,
+                        is_int: false,
+                    },
+                    ParamSpec {
+                        name: "recovery".into(),
+                        min: 0.0,
+                        max: 1.0,
+                        default: 0.5,
+                        is_int: false,
+                    },
+                ],
+                update_source: Some(
+                    "(if (>= (node-state self :energy) (node-param self :threshold)) (do (dampen-incoming self (node-param self :dampening)) true) (do (recover-incoming self (node-param self :recovery)) false))"
+                        .into(),
+                ),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "n".into(),
+                to: "n".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+            }],
+        };
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut seed_node = crate::graph::GraphNode {
+            resolution: Timebase::Quarter,
+            ..crate::graph::GraphNode::default()
+        };
+        seed_node.seed_track_mask = crate::graph::seed_track_mask(&[0]);
+        let param_defaults = manifest
+            .node
+            .params
+            .iter()
+            .map(|param| (param.name.clone(), param.default))
+            .collect::<HashMap<_, _>>();
+        let mut runtime = crate::graph::GraphRuntime::new_with_config(
+            17,
+            "g".into(),
+            vec![
+                seed_node,
+                crate::graph::GraphNode {
+                    resolution: Timebase::Quarter,
+                    ..crate::graph::GraphNode::default()
+                },
+            ],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+            NeuralMaxPolySelection::Deterministic,
+            vec![param_defaults.clone(), param_defaults],
+        );
+        runtime.seed(0, 0.0, GraphPayload::default());
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or_default()
+            },
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(runtime.edge_dampening(0), Some(0.5));
+
+        runtime.process_block(
+            1.0,
+            2.0,
+            48_000,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or_default()
+            },
+            &mut out,
+        );
+        assert_eq!(runtime.edge_dampening(0), Some(0.25));
+    }
+
+    fn register_graph_def_sequencer_test_native(runtime: &mut Runtime, state: Arc<SequencerState>) {
+        runtime.register_native("def-sequencer", move |args, _ctx| {
+            let name = match args.first() {
+                Some(Value::String(s) | Value::Symbol(s) | Value::Keyword(s)) => {
+                    s.trim_start_matches('@').to_string()
+                }
+                _ => return Err("def-sequencer expects a name".to_string()),
+            };
+            if !super::graph_mode_present(&args) {
+                return Err("test def-sequencer native only supports graph mode".to_string());
+            }
+            let manifest = super::parse_graph_manifest(&args)?;
+            state.publish_sequencer(PublishedSequencer {
+                id: manifest.id,
+                name: name.clone(),
+                resolution: Timebase::Sixteenth as u8,
+                tick_source: String::new(),
+                graph: Some(manifest),
+            });
+            Ok(Value::String(name))
+        });
+    }
+
+    #[test]
+    fn graph_authoring_buffer_overrides_routes_and_emits_multiple_tracks() {
+        use crate::graph::GraphPayload;
+
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut authoring = Runtime::new();
+        register_graph_def_sequencer_test_native(&mut authoring, Arc::clone(&state));
+        register_graph_authoring_natives(&mut authoring, Arc::clone(&state));
+
+        authoring
+            .eval_str(
+                r#"
+                (def-sequencer "graph-route-e2e"
+                  :shape (line 4)
+                  :energy-decay 1
+                  :reset-every 0
+                  :seed-on-reset 0
+                  :max-poly 4
+                  :max-poly-selection :deterministic
+
+                  (def-node nrn
+                    :resolution :16
+                    :delay 1
+                    :quantize :16
+                    :route 0
+                    :seed-from ()
+                    :reduce :sum
+                    :params ((threshold :float 0 4 :default 0.5)
+                             (transpose :int -48 48 :default 0))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    :update (>= (node-state self :energy)
+                                (node-param self :threshold)))
+
+                  (edges
+                    :from nrn
+                    :to nrn
+                    :topology (all-to-all)
+                    :gather (edge :weight)
+                    :params ((weight :float -1 1 :default 1))))
+
+                (graph-node "graph-route-e2e" 0 :route 0 :seed-from 0)
+                (graph-node "graph-route-e2e" 1 :route 1)
+                (graph-node "graph-route-e2e" 2 :route 2)
+                (graph-node "graph-route-e2e" 3 :route 3)
+                "#,
+            )
+            .expect("evaluate graph authoring buffer");
+
+        let published = state.published_sequencers();
+        let manifest = published
+            .iter()
+            .find_map(|published| published.graph.clone())
+            .expect("published graph manifest");
+        let graph_overrides = state.current_graph_overrides();
+        let overrides = graph_overrides
+            .iter()
+            .find(|overrides| overrides.sequencer_name == manifest.name)
+            .expect("graph overrides");
+        assert_eq!(overrides.node_intrinsics.len(), 4);
+        assert!(matches!(
+            overrides.node_intrinsics[1].route,
+            Some(crate::graph::ProjectGraphRouteOverride::Track(1))
+        ));
+        assert!(matches!(
+            overrides.node_intrinsics[2].route,
+            Some(crate::graph::ProjectGraphRouteOverride::Track(2))
+        ));
+        assert!(matches!(
+            overrides.node_intrinsics[3].route,
+            Some(crate::graph::ProjectGraphRouteOverride::Track(3))
+        ));
+
+        let mut graph_runtime = manifest.materialize_with_overrides(Some(overrides));
+        graph_runtime.seed(
+            0,
+            0.0,
+            GraphPayload {
+                note: 0.0,
+                velocity: 1.0,
+            },
+        );
+
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        let mut emissions = Vec::new();
+        graph_runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or_default()
+            },
+            &mut emissions,
+        );
+
+        let mut tracks = emissions
+            .iter()
+            .filter_map(|emission| emission.event.track)
+            .collect::<Vec<_>>();
+        tracks.sort_unstable();
+        tracks.dedup();
+        assert_eq!(tracks, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn graph_authoring_natives_write_current_pattern_overrides() {
+        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
+        use crate::sequencer::{PublishedSequencer, Timebase};
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let manifest = GraphManifest {
+            id: 123,
+            name: "neural".into(),
+            shape: ShapeSpec::Line(2),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 2,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            node: NodeProto {
+                name: "nrn".into(),
+                params: vec![ParamSpec {
+                    name: "threshold".into(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "nrn".into(),
+                to: "nrn".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    is_int: false,
+                }],
+            }],
+        };
+        state.publish_sequencer(PublishedSequencer {
+            id: manifest.id,
+            name: manifest.name.clone(),
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            graph: Some(manifest),
+        });
+
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(graph-node \"neural\" 1 :delay 3 :route 0 :seed-from 0)")
+            .expect("graph-node");
+        runtime
+            .eval_str("(graph-param \"neural\" 1 :threshold 0.75)")
+            .expect("graph-param");
+        runtime
+            .eval_str("(graph-edge \"neural\" :from 0 :to 1 :weight 0.5)")
+            .expect("graph-edge");
+
+        let overrides = state.current_graph_overrides();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].node_intrinsics[0].delay_steps, Some(3));
+        assert_eq!(overrides[0].node_params[0].value, 0.75);
+        assert_eq!(overrides[0].edge_params[0].value, 0.5);
+    }
+
+    #[test]
     fn parse_graph_manifest_requires_shape_and_node() {
-        let no_shape = vec![
-            gv_sym("g"),
-            gv_list(vec![gv_sym("def-node"), gv_sym("n")]),
-        ];
+        let no_shape = vec![gv_sym("g"), gv_list(vec![gv_sym("def-node"), gv_sym("n")])];
         assert!(super::parse_graph_manifest(&no_shape)
             .unwrap_err()
             .contains(":shape"));

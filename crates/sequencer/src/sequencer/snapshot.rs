@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::effects::EffectSlotSnapshot;
+use crate::graph::ProjectGraphOverrides;
 use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
@@ -51,6 +52,7 @@ pub struct SequencerSnapshot {
     pub tracks: Vec<SequencerTrackSnapshot>,
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
 }
 
 impl SequencerSnapshot {
@@ -67,6 +69,7 @@ impl SequencerSnapshot {
             tracks: Vec::new(),
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         }
     }
 
@@ -183,7 +186,7 @@ impl SequencerSnapshot {
             });
         }
 
-        let (mod_connections, neural_networks) = state
+        let (mod_connections, neural_networks, graph_overrides) = state
             .pattern
             .pattern_bank
             .lock()
@@ -193,6 +196,7 @@ impl SequencerSnapshot {
                 (
                     pattern.mod_connections.clone(),
                     pattern.neural_networks.clone(),
+                    pattern.graph_overrides.clone(),
                 )
             })
             .unwrap_or_default();
@@ -202,6 +206,7 @@ impl SequencerSnapshot {
             tracks,
             mod_connections,
             neural_networks,
+            graph_overrides,
         }
     }
 }

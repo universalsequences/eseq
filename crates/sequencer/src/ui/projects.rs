@@ -1027,6 +1027,7 @@ impl App {
             if current_pattern < bank.len() {
                 let current_mod_connections = bank[current_pattern].mod_connections.clone();
                 let current_neural_networks = bank[current_pattern].neural_networks.clone();
+                let current_graph_overrides = bank[current_pattern].graph_overrides.clone();
                 let mut snapshot = PatternSnapshot::capture(
                     &self.state,
                     num_tracks,
@@ -1037,6 +1038,7 @@ impl App {
                 );
                 snapshot.mod_connections = current_mod_connections;
                 snapshot.neural_networks = current_neural_networks;
+                snapshot.graph_overrides = current_graph_overrides;
                 bank[current_pattern] = snapshot;
             }
         }
@@ -1813,6 +1815,7 @@ impl App {
             bus_patterns,
             mod_connections,
             neural_networks,
+            graph_overrides,
             instrument_types: _,
             instrument_run_modes,
             sample_paths: _,
@@ -2032,6 +2035,7 @@ impl App {
                 .collect(),
             mod_connections: mod_connections.into_iter().map(Into::into).collect(),
             neural_networks,
+            graph_overrides,
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
         refresh_neural_output_override_param_ids(&mut snapshot);
@@ -2330,6 +2334,7 @@ mod tests {
                 instrument_types: Vec::new(),
                 mod_connections: Vec::new(),
                 neural_networks: Vec::new(),
+                graph_overrides: Vec::new(),
                 sample_paths: Vec::new(),
                 sample_names: Vec::new(),
             }],

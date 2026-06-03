@@ -378,10 +378,7 @@ fn render_tile_tab_header(frame: &mut Frame, tile: &crate::backend::TileFrame) {
         width.min(frame_area.width as i32 - col) as u16,
         height.min(frame_area.height as i32 - row) as u16,
     );
-    let block = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(Style::default().fg(to_rcolor(crate::theme::BORDER_INACTIVE())))
-        .style(Style::default().bg(to_rcolor(crate::theme::BG())));
+    let block = Block::default().style(Style::default().bg(to_rcolor(crate::theme::BG())));
     frame.render_widget(block, area);
 }
 

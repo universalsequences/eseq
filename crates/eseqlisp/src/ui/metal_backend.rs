@@ -3839,7 +3839,6 @@ fragment float4 waveform_frag(
                 let tile_top_px = tile.body_rect.row * cell_h;
                 let tile_width_px = tile.body_rect.width * cell_w;
                 let tile_height_px = tile.body_rect.height * cell_h;
-                let header_height_px = (tile.body_rect.row - tile.rect.row).max(0.0) * cell_h;
                 let border_inset_px = if tile.show_border {
                     tile.border_width_px
                         .max(0.0)
@@ -3906,18 +3905,6 @@ fragment float4 waveform_frag(
                     vp_w,
                     vp_h,
                 );
-                if header_height_px > 0.0 {
-                    push_horizontal_rule(
-                        &mut tile_bg_verts,
-                        frame_left_px,
-                        frame_top_px + header_height_px - 1.0,
-                        frame_width_px,
-                        1.0,
-                        theme::STATUS_EDGE(),
-                        vp_w,
-                        vp_h,
-                    );
-                }
                 draw_vertices(
                     &enc,
                     &self.device,
@@ -4331,23 +4318,21 @@ fragment float4 waveform_frag(
                 let group_right = last_tab.rect.col + last_tab.rect.width;
                 let group_width = (group_right - group_left).max(0.0);
                 let group_height = first_tab.rect.height;
-                let group_width_px = group_width * cell_w;
                 let group_height_px = group_height * cell_h;
-                let group_inset_y = (group_height_px * 0.12).min(3.0);
+                let group_inset_y = 0.0;
                 let group_visual_top = group_top + group_inset_y / cell_h.max(1.0);
                 let group_visual_height_px = (group_height_px - group_inset_y * 2.0).max(1.0);
                 let group_visual_height = group_visual_height_px / cell_h.max(1.0);
-                let group_radius = (group_visual_height_px * 0.5).min(group_width_px * 0.5);
                 let group_bg = theme::STATUS_BG();
                 let selected_tab_bg = Color::from_hex(0x48, 0x48, 0x4d);
-                push_rounded_instance_cells(
+                push_rounded_instance_cells_with_normalized_radius(
                     &mut tab_instances,
                     group_left,
                     group_visual_top,
                     group_width,
                     group_visual_height,
                     group_bg,
-                    group_radius,
+                    0.95,
                     cell_w,
                     cell_h,
                     vp_w,
@@ -4363,16 +4348,14 @@ fragment float4 waveform_frag(
                         let selected_h = (group_visual_height
                             - selected_inset_px * 2.0 / cell_h.max(1.0))
                         .max(0.1);
-                        let selected_radius =
-                            ((selected_h * cell_h) * 0.5).min((selected_w * cell_w) * 0.5);
-                        push_rounded_instance_cells(
+                        push_rounded_instance_cells_with_normalized_radius(
                             &mut tab_instances,
                             selected_x,
                             selected_y,
                             selected_w,
                             selected_h,
                             selected_tab_bg,
-                            selected_radius,
+                            0.95,
                             cell_w,
                             cell_h,
                             vp_w,
@@ -7690,6 +7673,36 @@ fragment float4 waveform_frag(
         );
         if let Some(instance) = instances.last_mut() {
             instance.corner_radius = normalized_overlay_radius(height, cell_h, radius_px);
+        }
+    }
+
+    fn push_rounded_instance_cells_with_normalized_radius(
+        instances: &mut Vec<WidgetInstance>,
+        col: f32,
+        row: f32,
+        width: f32,
+        height: f32,
+        color: Color,
+        normalized_radius: f32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        push_rounded_instance_cells_rgba(
+            instances,
+            col,
+            row,
+            width,
+            height,
+            color.to_rgba(),
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+        );
+        if let Some(instance) = instances.last_mut() {
+            instance.corner_radius = normalized_radius.clamp(0.001, 1.0);
         }
     }
 

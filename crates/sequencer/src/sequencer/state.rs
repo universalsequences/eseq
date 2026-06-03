@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
 };
+use crate::graph::ProjectGraphOverrides;
 use crate::neural::{
     remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
     ProjectNeuralNetwork,
@@ -73,6 +74,7 @@ pub struct PatternSnapshot {
     pub instrument_run_modes: Vec<CustomInstrumentRunMode>,
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
 }
 
 impl PatternSnapshot {
@@ -111,6 +113,7 @@ impl PatternSnapshot {
             })
             .collect();
         remap_neural_network_routes_after_track_delete(&mut self.neural_networks, track_idx);
+        remap_graph_overrides_after_track_delete(&mut self.graph_overrides, track_idx);
     }
 
     pub fn remove_effect_slot(&mut self, track: usize, slot_idx: usize) {
@@ -454,6 +457,7 @@ impl PatternSnapshot {
             instrument_run_modes,
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         }
     }
 
@@ -466,6 +470,7 @@ impl PatternSnapshot {
         instrument_types: &[InstrumentType],
         mod_connections: Vec<ModConnection>,
         neural_networks: Vec<ProjectNeuralNetwork>,
+        graph_overrides: Vec<ProjectGraphOverrides>,
     ) -> Self {
         let mut snapshot = Self::capture(
             state,
@@ -477,6 +482,7 @@ impl PatternSnapshot {
         );
         snapshot.mod_connections = mod_connections;
         snapshot.neural_networks = neural_networks;
+        snapshot.graph_overrides = graph_overrides;
         snapshot
     }
 
@@ -716,6 +722,7 @@ impl PatternSnapshot {
             instrument_run_modes: Vec::with_capacity(num_tracks),
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         };
         for t in 0..num_tracks {
             snap.push_default_track(t, slot_descriptors);
@@ -819,6 +826,54 @@ impl PatternSnapshot {
 fn remove_track_lane_if_present<T>(lanes: &mut Vec<T>, track_idx: usize) {
     if track_idx < lanes.len() {
         lanes.remove(track_idx);
+    }
+}
+
+fn remap_optional_track_after_delete(track: usize, deleted_track: usize) -> Option<usize> {
+    if track == deleted_track {
+        None
+    } else if track > deleted_track {
+        Some(track - 1)
+    } else {
+        Some(track)
+    }
+}
+
+fn remap_graph_overrides_after_track_delete(
+    overrides: &mut [ProjectGraphOverrides],
+    deleted_track: usize,
+) {
+    for graph in overrides {
+        for intrinsic in &mut graph.node_intrinsics {
+            if let Some(route) = intrinsic.route.take() {
+                intrinsic.route = match route {
+                    crate::graph::ProjectGraphRouteOverride::None => {
+                        Some(crate::graph::ProjectGraphRouteOverride::None)
+                    }
+                    crate::graph::ProjectGraphRouteOverride::Track(track) => {
+                        remap_optional_track_after_delete(track, deleted_track)
+                            .map(crate::graph::ProjectGraphRouteOverride::Track)
+                    }
+                };
+            }
+            if let Some(seed_from) = intrinsic.seed_from.take() {
+                intrinsic.seed_from = Some(match seed_from {
+                    crate::graph::ProjectGraphSeedFrom::Route => {
+                        crate::graph::ProjectGraphSeedFrom::Route
+                    }
+                    crate::graph::ProjectGraphSeedFrom::Tracks(tracks) => {
+                        crate::graph::ProjectGraphSeedFrom::Tracks(
+                            tracks
+                                .into_iter()
+                                .filter_map(|track| {
+                                    remap_optional_track_after_delete(track, deleted_track)
+                                })
+                                .collect(),
+                        )
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -1101,7 +1156,7 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
     ) -> PatternSnapshot {
         let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let (mod_connections, neural_networks) = self
+        let (mod_connections, neural_networks, graph_overrides) = self
             .pattern
             .pattern_bank
             .lock()
@@ -1111,6 +1166,7 @@ impl SequencerState {
                 (
                     snapshot.mod_connections.clone(),
                     snapshot.neural_networks.clone(),
+                    snapshot.graph_overrides.clone(),
                 )
             })
             .unwrap_or_default();
@@ -1123,6 +1179,7 @@ impl SequencerState {
             instrument_types,
             mod_connections,
             neural_networks,
+            graph_overrides,
         )
     }
 
@@ -1340,6 +1397,37 @@ impl SequencerState {
                 .get_mut(current_pattern)
                 .ok_or_else(|| "current pattern out of range".to_string())?;
             edit(&mut snapshot.neural_networks)?
+        };
+        self.publish_scheduler_snapshot();
+        Ok(result)
+    }
+
+    pub fn current_graph_overrides(&self) -> Vec<ProjectGraphOverrides> {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        self.pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|snapshot| snapshot.graph_overrides.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn edit_current_graph_overrides<F, R>(&self, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ProjectGraphOverrides>) -> Result<R, String>,
+    {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let result = {
+            let mut bank = self
+                .pattern
+                .pattern_bank
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let snapshot = bank
+                .get_mut(current_pattern)
+                .ok_or_else(|| "current pattern out of range".to_string())?;
+            edit(&mut snapshot.graph_overrides)?
         };
         self.publish_scheduler_snapshot();
         Ok(result)
@@ -1913,6 +2001,7 @@ impl SequencerState {
                 instrument_types,
                 bank[cur].mod_connections.clone(),
                 bank[cur].neural_networks.clone(),
+                bank[cur].graph_overrides.clone(),
             );
             bank[cur] = current_snapshot;
             bank[new_idx].restore(self);
@@ -1947,6 +2036,7 @@ impl SequencerState {
                 instrument_types,
                 bank[cur].mod_connections.clone(),
                 bank[cur].neural_networks.clone(),
+                bank[cur].graph_overrides.clone(),
             );
             let cloned = bank[cur].clone();
             bank.push(cloned);
@@ -1987,6 +2077,7 @@ impl SequencerState {
                 instrument_types,
                 bank[cur].mod_connections.clone(),
                 bank[cur].neural_networks.clone(),
+                bank[cur].graph_overrides.clone(),
             );
             bank.remove(cur);
             let new_idx = cur.min(bank.len() - 1);
@@ -2028,6 +2119,7 @@ impl SequencerState {
             instrument_types,
             bank[cur].mod_connections.clone(),
             bank[cur].neural_networks.clone(),
+            bank[cur].graph_overrides.clone(),
         );
         let source = bank[cur].clone();
         for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
@@ -2529,6 +2621,7 @@ mod tests {
                 .collect(),
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         }
     }
 
@@ -2880,6 +2973,7 @@ mod tests {
             instrument_run_modes: vec![CustomInstrumentRunMode::Instrument; 4],
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         };
         let descriptors = vec![
             vec![EffectDescriptor::builtin_filter()],

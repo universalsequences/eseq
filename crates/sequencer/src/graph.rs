@@ -27,7 +27,11 @@
 
 use crate::generator::{default_resolved, GENERATOR_RESOLUTION_REF_STEPS};
 use crate::lisp_effect::EmittedAccumulatorEvent;
-use crate::neural::next_grid_boundary;
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::neural::{next_grid_boundary, NeuralMaxPolySelection};
 use crate::sequencer::Timebase;
 
 /// Reference subdivision used to convert a `Timebase` to beats — only affects
@@ -113,6 +117,108 @@ impl GraphEdge {
 /// Per-instance node configuration. These are the **intrinsic** fields the engine
 /// reads to schedule/route (spec §2.2); they are prototype defaults but per-instance
 /// editable. `seed_track_mask` is the resolved `seed-from` track set (Ext 1/§4).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectGraphRouteOverride {
+    None,
+    Track(usize),
+}
+
+impl ProjectGraphRouteOverride {
+    fn to_route(&self) -> Option<usize> {
+        match self {
+            Self::None => None,
+            Self::Track(track) => Some(*track),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectGraphQuantizeOverride {
+    Off,
+    Timebase(u8),
+}
+
+impl ProjectGraphQuantizeOverride {
+    fn to_quantize(&self) -> Option<Timebase> {
+        match self {
+            Self::Off => None,
+            Self::Timebase(index) => Some(Timebase::from_index(*index as u32)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectGraphSeedFrom {
+    Route,
+    Tracks(Vec<usize>),
+}
+
+impl From<&SeedFrom> for ProjectGraphSeedFrom {
+    fn from(value: &SeedFrom) -> Self {
+        match value {
+            SeedFrom::Route => Self::Route,
+            SeedFrom::Tracks(tracks) => Self::Tracks(tracks.clone()),
+        }
+    }
+}
+
+impl From<&ProjectGraphSeedFrom> for SeedFrom {
+    fn from(value: &ProjectGraphSeedFrom) -> Self {
+        match value {
+            ProjectGraphSeedFrom::Route => Self::Route,
+            ProjectGraphSeedFrom::Tracks(tracks) => Self::Tracks(tracks.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectGraphNodeIntrinsicOverride {
+    pub group: String,
+    pub instance: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantize: Option<ProjectGraphQuantizeOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<ProjectGraphRouteOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_from: Option<ProjectGraphSeedFrom>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectGraphNodeParamOverride {
+    pub group: String,
+    pub instance: usize,
+    pub param: String,
+    pub value: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectGraphEdgeParamOverride {
+    pub group: String,
+    pub from: usize,
+    pub to: usize,
+    pub param: String,
+    pub value: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectGraphOverrides {
+    pub sequencer_id: u64,
+    pub sequencer_name: String,
+    #[serde(default)]
+    pub node_intrinsics: Vec<ProjectGraphNodeIntrinsicOverride>,
+    #[serde(default)]
+    pub node_params: Vec<ProjectGraphNodeParamOverride>,
+    #[serde(default)]
+    pub edge_params: Vec<ProjectGraphEdgeParamOverride>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphNode {
     pub resolution: Timebase,
@@ -127,6 +233,8 @@ pub struct GraphNode {
     /// (Ext 1). Mirrors `neural`'s per-neuron `transpose`; the engine applies it on the
     /// default emit path so the cascade works with a bare threshold `:update`.
     pub transpose: f32,
+    /// Threshold cached from params for native max-poly propagation scoring.
+    pub threshold: f64,
 }
 
 impl Default for GraphNode {
@@ -140,6 +248,7 @@ impl Default for GraphNode {
             reduce: Reduce::Sum,
             seed_on_reset: 0.0,
             transpose: 0.0,
+            threshold: 1.0,
         }
     }
 }
@@ -181,6 +290,9 @@ pub struct NodeEval {
     pub beat: f64,
     /// The payload that arrived this boundary (`node-input-event`), if any.
     pub input_event: Option<GraphPayload>,
+    /// Behavioral params for this node instance: prototype defaults plus sparse
+    /// per-pattern overrides.
+    pub params: HashMap<String, f64>,
 }
 
 /// The decision returned by a node's `:update`. v1a: just whether it fired and the
@@ -189,6 +301,11 @@ pub struct NodeEval {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NodeFire {
     pub fired: bool,
+    /// If set, commit-time edge-state mutation for incoming edges that actually
+    /// triggered this node this eval.
+    pub dampen_incoming: Option<f64>,
+    /// If set, non-fire recovery factor for all incoming edges.
+    pub recover_incoming: Option<f64>,
 }
 
 /// One firing resolved to an absolute sample time, tagged with the node index for the
@@ -216,6 +333,7 @@ struct GraphFiringCandidate {
     node_index: usize,
     fire_sample: u64,
     fire_beats: f64,
+    dampen_incoming: Option<f64>,
 }
 
 /// The runtime for one graph-mode `def-sequencer`. Structure-of-arrays over the
@@ -233,14 +351,18 @@ pub struct GraphRuntime {
 
     // ── edges ──
     edges: Vec<GraphEdge>,
+    edge_default_dampening: Vec<f64>,
     out_edges: Vec<Vec<usize>>, // node -> edge indices originating there
     in_edges: Vec<Vec<usize>>,  // node -> edge indices terminating there (Ext 2)
 
     // ── sequencer-level engine config ──
     energy_decay: f64,
     reset_interval_beats: f64,
+    max_poly_selection: NeuralMaxPolySelection,
+    random_state: u64,
 
     // ── per-node runtime state ──
+    node_params: Vec<HashMap<String, f64>>,
     energy: Vec<f64>,
     input_accum: Vec<f64>,
     input_seen: Vec<bool>,
@@ -248,6 +370,9 @@ pub struct GraphRuntime {
     source_event: Vec<Option<GraphPayload>>,
     tick_count: Vec<u64>,
     pending: Vec<Vec<GraphPropagation>>,
+    /// Edge indices that contributed positive current to each target since that target
+    /// last evaluated. Cleared when the target's update/recovery path commits.
+    incoming_triggers: Vec<Vec<usize>>,
 
     // ── clock bookkeeping ──
     last_eval_indices: Vec<u64>,
@@ -266,6 +391,37 @@ impl GraphRuntime {
         energy_decay: f64,
         reset_interval_beats: f64,
     ) -> Self {
+        let node_params = nodes
+            .iter()
+            .map(|node| {
+                let mut params = HashMap::new();
+                params.insert("threshold".to_string(), node.threshold);
+                params.insert("transpose".to_string(), node.transpose as f64);
+                params
+            })
+            .collect();
+        Self::new_with_config(
+            id,
+            name,
+            nodes,
+            edges,
+            energy_decay,
+            reset_interval_beats,
+            NeuralMaxPolySelection::Deterministic,
+            node_params,
+        )
+    }
+
+    pub fn new_with_config(
+        id: u64,
+        name: String,
+        nodes: Vec<GraphNode>,
+        edges: Vec<GraphEdge>,
+        energy_decay: f64,
+        reset_interval_beats: f64,
+        max_poly_selection: NeuralMaxPolySelection,
+        node_params: Vec<HashMap<String, f64>>,
+    ) -> Self {
         let num_nodes = nodes.len();
         let mut out_edges = vec![Vec::new(); num_nodes];
         let mut in_edges = vec![Vec::new(); num_nodes];
@@ -277,23 +433,29 @@ impl GraphRuntime {
                 in_edges[edge.to].push(edge_idx);
             }
         }
+        let edge_default_dampening = edges.iter().map(|edge| edge.dampening).collect();
         let mut runtime = Self {
             id,
             name,
             active: true,
             num_nodes,
             nodes,
+            edge_default_dampening,
             edges,
             out_edges,
             in_edges,
             energy_decay: energy_decay.clamp(0.0, 1.0),
             reset_interval_beats: reset_interval_beats.max(0.0),
+            max_poly_selection,
+            random_state: id,
+            node_params: normalized_node_params(num_nodes, node_params),
             energy: vec![0.0; num_nodes],
             input_accum: vec![0.0; num_nodes],
             input_seen: vec![false; num_nodes],
             source_event: vec![None; num_nodes],
             tick_count: vec![0; num_nodes],
             pending: vec![Vec::new(); num_nodes],
+            incoming_triggers: vec![Vec::new(); num_nodes],
             last_eval_indices: vec![0; num_nodes],
             last_decay_index: 0,
             next_reset_beat: 0.0,
@@ -319,6 +481,10 @@ impl GraphRuntime {
         self.energy.get(node_index).copied().unwrap_or(0.0)
     }
 
+    pub fn edge_dampening(&self, edge_index: usize) -> Option<f64> {
+        self.edges.get(edge_index).map(|edge| edge.dampening)
+    }
+
     /// Reset all runtime state: clocks realigned to `total_beats`, energy zeroed then
     /// seeded from `seed_on_reset`, pending queues cleared, decay/reset indices
     /// recomputed (mirrors `neural::reset_state`).
@@ -330,8 +496,12 @@ impl GraphRuntime {
             self.source_event[idx] = None;
             self.tick_count[idx] = 0;
             self.pending[idx].clear();
+            self.incoming_triggers[idx].clear();
             let step_beats = self.node_step_beats(idx);
             self.last_eval_indices[idx] = (total_beats / step_beats).floor() as u64;
+        }
+        for (edge, default_dampening) in self.edges.iter_mut().zip(&self.edge_default_dampening) {
+            edge.dampening = *default_dampening;
         }
         self.last_decay_index = self.finest_decay_index(total_beats);
         self.next_reset_beat = if self.reset_interval_beats > 0.0 {
@@ -350,8 +520,8 @@ impl GraphRuntime {
         }
         self.last_decay_index = self.finest_decay_index(total_beats);
         if self.reset_interval_beats > 0.0 {
-            self.next_reset_beat =
-                ((total_beats / self.reset_interval_beats).floor() + 1.0) * self.reset_interval_beats;
+            self.next_reset_beat = ((total_beats / self.reset_interval_beats).floor() + 1.0)
+                * self.reset_interval_beats;
         }
     }
 
@@ -430,6 +600,7 @@ impl GraphRuntime {
             // candidates (read-only — energy reset is deferred to commit so max_poly
             // can reject without consuming the node).
             let mut candidates: Vec<GraphFiringCandidate> = Vec::new();
+            let mut decisions = vec![NodeFire::default(); self.num_nodes];
             for idx in 0..self.num_nodes {
                 if !due[idx] {
                     continue;
@@ -449,25 +620,54 @@ impl GraphRuntime {
                     tick_index: self.tick_count[idx],
                     beat: boundary_beats,
                     input_event: self.source_event[idx],
+                    params: self.node_params[idx].clone(),
                 };
                 self.tick_count[idx] = self.tick_count[idx].saturating_add(1);
-                if update_fn(&eval).fired {
-                    let (fire_sample, fire_beats) =
-                        self.quantized_fire_timing(idx, boundary_beats, sample_time, samples_per_quarter);
+                let decision = update_fn(&eval);
+                decisions[idx] = decision;
+                if decision.fired {
+                    let (fire_sample, fire_beats) = self.quantized_fire_timing(
+                        idx,
+                        boundary_beats,
+                        sample_time,
+                        samples_per_quarter,
+                    );
                     candidates.push(GraphFiringCandidate {
                         node_index: idx,
                         fire_sample,
                         fire_beats,
+                        dampen_incoming: decision.dampen_incoming,
                     });
                 }
             }
 
             // ── max_poly selection (deterministic: earliest sample, then index). ──
             candidates.sort_by_key(|c| (c.fire_sample, c.node_index));
-            let accepted = max_poly_accept(&candidates, max_poly);
+            let accepted = self.max_poly_accept(&candidates, max_poly);
+            let mut rejected = vec![false; self.num_nodes];
+            let mut accepted_node = vec![false; self.num_nodes];
             for (cand_idx, candidate) in candidates.iter().enumerate() {
                 if accepted[cand_idx] {
+                    accepted_node[candidate.node_index] = true;
                     self.commit_firing(candidate, out);
+                } else {
+                    rejected[candidate.node_index] = true;
+                }
+            }
+            for idx in 0..self.num_nodes {
+                if !due[idx] {
+                    continue;
+                }
+                if accepted_node[idx] {
+                    continue;
+                }
+                if rejected[idx] {
+                    self.drop_firing(idx);
+                } else {
+                    if let Some(factor) = decisions[idx].recover_incoming {
+                        self.recover_incoming(idx, factor);
+                    }
+                    self.clear_incoming_triggers(idx);
                 }
             }
 
@@ -500,9 +700,12 @@ impl GraphRuntime {
         let mut next: Option<f64> = None;
         for idx in 0..self.num_nodes {
             let step_beats = self.node_step_beats(idx);
-            if let Some(boundary) =
-                next_grid_boundary(&mut self.last_eval_indices[idx], step_beats, start_beats, end_beats)
-            {
+            if let Some(boundary) = next_grid_boundary(
+                &mut self.last_eval_indices[idx],
+                step_beats,
+                start_beats,
+                end_beats,
+            ) {
                 next = Some(match next {
                     Some(cur) => cur.min(boundary),
                     None => boundary,
@@ -560,6 +763,9 @@ impl GraphRuntime {
                 self.input_accum[target] = reduce.fold(self.input_accum[target], amount, first);
                 self.input_seen[target] = true;
                 self.source_event[target] = Some(payload);
+                if !self.incoming_triggers[target].contains(&edge_idx) {
+                    self.incoming_triggers[target].push(edge_idx);
+                }
             }
         }
     }
@@ -622,10 +828,116 @@ impl GraphRuntime {
             event,
         });
         self.energy[node_index] = 0.0;
+        if let Some(amount) = candidate.dampen_incoming {
+            self.dampen_incoming(node_index, amount);
+        }
+        self.clear_incoming_triggers(node_index);
         self.push_propagation(node_index, candidate.fire_beats, payload);
     }
 
-    fn push_propagation(&mut self, node_index: usize, ready_after_beats: f64, payload: GraphPayload) {
+    fn drop_firing(&mut self, node_index: usize) {
+        self.energy[node_index] = 0.0;
+        self.clear_incoming_triggers(node_index);
+    }
+
+    fn dampen_incoming(&mut self, node_index: usize, amount: f64) {
+        let amount = amount.clamp(0.0, 1.0);
+        for edge_idx in self.incoming_triggers[node_index].iter().copied() {
+            if let Some(edge) = self.edges.get_mut(edge_idx) {
+                edge.dampening = (edge.dampening + amount).min(1.0);
+            }
+        }
+    }
+
+    fn recover_incoming(&mut self, node_index: usize, factor: f64) {
+        let factor = factor.clamp(0.0, 1.0);
+        for edge_idx in self.in_edges[node_index].iter().copied() {
+            if let Some(edge) = self.edges.get_mut(edge_idx) {
+                edge.dampening *= factor;
+            }
+        }
+    }
+
+    fn clear_incoming_triggers(&mut self, node_index: usize) {
+        self.incoming_triggers[node_index].clear();
+    }
+
+    fn max_poly_accept(&mut self, candidates: &[GraphFiringCandidate], max_poly: u32) -> Vec<bool> {
+        let mut accepted = vec![true; candidates.len()];
+        if max_poly == 0 || candidates.len() <= max_poly as usize {
+            return accepted;
+        }
+        accepted.fill(false);
+        let accepted_count = max_poly as usize;
+        match self.max_poly_selection {
+            NeuralMaxPolySelection::Deterministic => {
+                for slot in accepted.iter_mut().take(accepted_count) {
+                    *slot = true;
+                }
+            }
+            NeuralMaxPolySelection::Propagation => {
+                let mut indices = (0..candidates.len()).collect::<Vec<_>>();
+                indices.sort_by(|left, right| {
+                    let left_candidate = &candidates[*left];
+                    let right_candidate = &candidates[*right];
+                    self.propagation_selection_score(right_candidate.node_index)
+                        .total_cmp(&self.propagation_selection_score(left_candidate.node_index))
+                        .then(left_candidate.fire_sample.cmp(&right_candidate.fire_sample))
+                        .then(left_candidate.node_index.cmp(&right_candidate.node_index))
+                });
+                for candidate_idx in indices.into_iter().take(accepted_count) {
+                    accepted[candidate_idx] = true;
+                }
+            }
+            NeuralMaxPolySelection::Random => {
+                let mut indices = (0..candidates.len()).collect::<Vec<_>>();
+                for pos in 0..accepted_count {
+                    let selected = pos + self.random_index(indices.len() - pos);
+                    indices.swap(pos, selected);
+                }
+                for candidate_idx in indices.into_iter().take(accepted_count) {
+                    accepted[candidate_idx] = true;
+                }
+            }
+        }
+        accepted
+    }
+
+    fn propagation_selection_score(&self, source: usize) -> f64 {
+        let mut score = 0.0;
+        for &edge_idx in &self.out_edges[source] {
+            let edge = self.edges[edge_idx];
+            let amount = edge.gather();
+            if amount <= 0.0 || edge.to >= self.num_nodes {
+                continue;
+            }
+            let threshold = self.nodes[edge.to].threshold.max(1e-6);
+            let projected = self.energy[edge.to] + amount;
+            if projected >= threshold {
+                score += 1_000.0 + (projected - threshold);
+            } else {
+                score += amount / threshold;
+            }
+        }
+        score
+    }
+
+    fn random_index(&mut self, upper: usize) -> usize {
+        debug_assert!(upper > 0);
+        (self.next_random_u64() % upper as u64) as usize
+    }
+
+    fn next_random_u64(&mut self) -> u64 {
+        self.random_state = self.random_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        splitmix64(self.random_state)
+    }
+
+    fn push_propagation(
+        &mut self,
+        node_index: usize,
+        ready_after_beats: f64,
+        payload: GraphPayload,
+    ) {
         let remaining = self.nodes[node_index].delay_steps.max(1);
         self.pending[node_index].push(GraphPropagation {
             remaining_steps: remaining,
@@ -635,19 +947,18 @@ impl GraphRuntime {
     }
 }
 
-/// Deterministic `max_poly` selection: with the candidates already sorted by
-/// `(fire_sample, node_index)`, accept the earliest `max_poly`. `max_poly == 0` means
-/// unlimited (parity with the neural/generator convention). Returns a per-candidate
-/// acceptance mask aligned with the input slice.
-fn max_poly_accept(candidates: &[GraphFiringCandidate], max_poly: u32) -> Vec<bool> {
-    let mut accepted = vec![true; candidates.len()];
-    if max_poly == 0 || candidates.len() <= max_poly as usize {
-        return accepted;
-    }
-    for slot in accepted.iter_mut().skip(max_poly as usize) {
-        *slot = false;
-    }
-    accepted
+fn normalized_node_params(
+    num_nodes: usize,
+    mut node_params: Vec<HashMap<String, f64>>,
+) -> Vec<HashMap<String, f64>> {
+    node_params.resize_with(num_nodes, HashMap::new);
+    node_params
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
 }
 
 /// Bit for `track` in a `u128` seed mask, or `None` if out of range (mirrors
@@ -662,7 +973,10 @@ fn seed_track_bit(track: usize) -> Option<u128> {
 
 /// Build a `seed-from` mask from a list of input track indices.
 pub fn seed_track_mask(tracks: &[usize]) -> u128 {
-    tracks.iter().filter_map(|&t| seed_track_bit(t)).fold(0, |m, b| m | b)
+    tracks
+        .iter()
+        .filter_map(|&t| seed_track_bit(t))
+        .fold(0, |m, b| m | b)
 }
 
 // ───────────────────────────── Authored manifest ─────────────────────────────
@@ -773,7 +1087,10 @@ impl Default for NodeProto {
 
 impl NodeProto {
     pub fn param_default(&self, name: &str) -> Option<f64> {
-        self.params.iter().find(|p| p.name == name).map(|p| p.default)
+        self.params
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.default)
     }
 }
 
@@ -816,6 +1133,7 @@ pub struct GraphManifest {
     pub reset_every_beats: f64,
     pub seed_on_reset: f64,
     pub max_poly: u32,
+    pub max_poly_selection: NeuralMaxPolySelection,
     pub node: NodeProto,
     pub edge_sets: Vec<EdgeSetSpec>,
 }
@@ -853,6 +1171,7 @@ impl GraphManifest {
             && self.energy_decay == other.energy_decay
             && self.reset_every_beats == other.reset_every_beats
             && self.seed_on_reset == other.seed_on_reset
+            && self.max_poly_selection == other.max_poly_selection
             && intrinsics(&self.node) == intrinsics(&other.node)
             && edge_shape(&self.edge_sets) == edge_shape(&other.edge_sets)
     }
@@ -862,54 +1181,124 @@ impl GraphManifest {
     /// per-node delay edits) are layered on later by the serialization store; this is
     /// the zero-override baseline.
     pub fn materialize(&self) -> GraphRuntime {
+        self.materialize_with_overrides(None)
+    }
+
+    pub fn materialize_with_overrides(
+        &self,
+        overrides: Option<&ProjectGraphOverrides>,
+    ) -> GraphRuntime {
         let num_nodes = self.shape.num_nodes();
-        let route = self.node.route;
-        let seed_track_mask = match &self.node.seed_from {
-            SeedFrom::Route => route.map(|t| seed_track_mask(&[t])).unwrap_or(0),
-            SeedFrom::Tracks(tracks) => seed_track_mask(tracks),
-        };
-        let proto_node = GraphNode {
-            resolution: self.node.resolution,
-            delay_steps: self.node.delay_steps,
-            quantize: self.node.quantize,
-            route,
-            seed_track_mask,
-            reduce: self.node.reduce,
-            seed_on_reset: self.seed_on_reset,
-            transpose: self.node.param_default("transpose").unwrap_or(0.0) as f32,
-        };
-        let nodes = vec![proto_node; num_nodes];
+        let proto_params = self
+            .node
+            .params
+            .iter()
+            .map(|param| (param.name.clone(), param.default))
+            .collect::<HashMap<_, _>>();
+        let mut nodes = Vec::with_capacity(num_nodes);
+        let mut node_params = vec![proto_params; num_nodes];
+        for idx in 0..num_nodes {
+            let mut route = self.node.route;
+            let mut seed_from = self.node.seed_from.clone();
+            let mut resolution = self.node.resolution;
+            let mut delay_steps = self.node.delay_steps;
+            let mut quantize = self.node.quantize;
+            if let Some(overrides) = overrides {
+                for intrinsic in overrides.node_intrinsics.iter().filter(|intrinsic| {
+                    intrinsic.group == self.node.name && intrinsic.instance == idx
+                }) {
+                    if let Some(value) = intrinsic.resolution {
+                        resolution = Timebase::from_index(value as u32);
+                    }
+                    if let Some(value) = intrinsic.delay_steps {
+                        delay_steps = value;
+                    }
+                    if let Some(value) = &intrinsic.quantize {
+                        quantize = value.to_quantize();
+                    }
+                    if let Some(value) = &intrinsic.route {
+                        route = value.to_route();
+                    }
+                    if let Some(value) = &intrinsic.seed_from {
+                        seed_from = SeedFrom::from(value);
+                    }
+                }
+                for param in overrides
+                    .node_params
+                    .iter()
+                    .filter(|param| param.group == self.node.name && param.instance == idx)
+                {
+                    node_params[idx].insert(param.param.clone(), param.value);
+                }
+            }
+            let seed_track_mask = match &seed_from {
+                SeedFrom::Route => route.map(|t| seed_track_mask(&[t])).unwrap_or(0),
+                SeedFrom::Tracks(tracks) => seed_track_mask(tracks),
+            };
+            nodes.push(GraphNode {
+                resolution,
+                delay_steps,
+                quantize,
+                route,
+                seed_track_mask,
+                reduce: self.node.reduce,
+                seed_on_reset: self.seed_on_reset,
+                transpose: node_params[idx].get("transpose").copied().unwrap_or(0.0) as f32,
+                threshold: node_params[idx].get("threshold").copied().unwrap_or(1.0),
+            });
+        }
 
         let mut edges = Vec::new();
         for set in &self.edge_sets {
+            let edge_group = edge_set_group_id(set);
             let weight = set.param_default("weight");
             let dampening = set.param_default("dampening");
             match set.topology {
                 Topology::AllToAll => {
                     for from in 0..num_nodes {
                         for to in 0..num_nodes {
-                            edges.push(GraphEdge {
+                            let mut edge = GraphEdge {
                                 from,
                                 to,
                                 weight,
                                 dampening,
                                 delay_steps: 0,
-                            });
+                            };
+                            if let Some(overrides) = overrides {
+                                for param in overrides.edge_params.iter().filter(|param| {
+                                    param.group == edge_group
+                                        && param.from == from
+                                        && param.to == to
+                                }) {
+                                    match param.param.as_str() {
+                                        "weight" => edge.weight = param.value,
+                                        "dampening" => edge.dampening = param.value.clamp(0.0, 1.0),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            edges.push(edge);
                         }
                     }
                 }
             }
         }
 
-        GraphRuntime::new(
+        GraphRuntime::new_with_config(
             self.id,
             self.name.clone(),
             nodes,
             edges,
             self.energy_decay,
             self.reset_every_beats,
+            self.max_poly_selection,
+            node_params,
         )
     }
+}
+
+pub fn edge_set_group_id(set: &EdgeSetSpec) -> String {
+    format!("{}->{}", set.from, set.to)
 }
 
 #[cfg(test)]
@@ -920,6 +1309,7 @@ mod tests {
     fn threshold_update(thresholds: Vec<f64>) -> impl FnMut(&NodeEval) -> NodeFire {
         move |eval: &NodeEval| NodeFire {
             fired: eval.energy >= thresholds[eval.node_index],
+            ..NodeFire::default()
         }
     }
 
@@ -940,6 +1330,14 @@ mod tests {
         let mut update = threshold_update(thresholds);
         runtime.process_block(0.0, end_beats, 0, 48_000.0, max_poly, &mut update, &mut out);
         out
+    }
+
+    fn always_fire_with_dampen(amount: f64) -> impl FnMut(&NodeEval) -> NodeFire {
+        move |eval| NodeFire {
+            fired: eval.input > 0.0,
+            dampen_incoming: Some(amount),
+            ..NodeFire::default()
+        }
     }
 
     #[test]
@@ -1059,6 +1457,7 @@ mod tests {
             reset_every_beats: 0.0,
             seed_on_reset: 0.0,
             max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -1141,6 +1540,187 @@ mod tests {
         assert_eq!(out[0].node_index, 1);
         assert_eq!(out[0].event.resolved.transpose, 10.0);
         assert_eq!(out[0].event.resolved.velocity, 0.5);
+    }
+
+    #[test]
+    fn dampen_incoming_mutates_only_triggered_edges() {
+        let nodes = vec![
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+        ];
+        let edges = vec![GraphEdge::new(0, 2, 1.0), GraphEdge::new(1, 2, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let mut out = Vec::new();
+        let mut update = always_fire_with_dampen(0.5);
+        runtime.process_block(0.0, 1.0, 0, 48_000.0, 0, &mut update, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 2);
+        assert_eq!(runtime.edges[0].dampening, 0.5);
+        assert_eq!(
+            runtime.edges[1].dampening, 0.0,
+            "untriggered incoming edge must not be dampened"
+        );
+    }
+
+    #[test]
+    fn dampening_subtracts_from_weight_on_next_gather() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let mut out = Vec::new();
+        let mut update = always_fire_with_dampen(0.5);
+        runtime.process_block(0.0, 1.0, 0, 48_000.0, 0, &mut update, &mut out);
+        assert_eq!(runtime.edges[0].dampening, 0.5);
+
+        runtime.push_propagation(0, 1.0, GraphPayload::default());
+        let mut observed_inputs = Vec::new();
+        runtime.process_block(
+            1.0,
+            2.0,
+            48_000,
+            48_000.0,
+            0,
+            |eval| {
+                if eval.node_index == 1 {
+                    observed_inputs.push(eval.input);
+                }
+                NodeFire::default()
+            },
+            &mut out,
+        );
+        assert_eq!(observed_inputs, vec![0.5]);
+    }
+
+    #[test]
+    fn recover_incoming_applies_to_non_firing_due_node() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let mut edge = GraphEdge::new(0, 1, 1.0);
+        edge.dampening = 0.8;
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, vec![edge], 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            0,
+            |_eval| NodeFire {
+                fired: false,
+                recover_incoming: Some(0.5),
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+        assert!(out.is_empty());
+        assert!((runtime.edges[0].dampening - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn reset_restores_runtime_edge_dampening_to_default() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let mut edge = GraphEdge::new(0, 1, 1.0);
+        edge.dampening = 0.2;
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, vec![edge], 1.0, 0.0);
+        runtime.edges[0].dampening = 0.9;
+
+        runtime.reset(0.0);
+
+        assert_eq!(runtime.edges[0].dampening, 0.2);
+    }
+
+    #[test]
+    fn rejected_max_poly_candidate_does_not_dampen() {
+        let nodes = vec![
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+        ];
+        let edges = vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(0, 2, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let mut out = Vec::new();
+        let mut update = always_fire_with_dampen(0.5);
+        runtime.process_block(0.0, 1.0, 0, 48_000.0, 1, &mut update, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(runtime.edges[0].dampening, 0.5);
+        assert_eq!(runtime.edges[1].dampening, 0.0);
+    }
+
+    #[test]
+    fn max_poly_propagation_selection_uses_effective_downstream_score() {
+        let mut n0 = node(Timebase::Quarter);
+        n0.seed_on_reset = 1.0;
+        let mut n1 = node(Timebase::Quarter);
+        n1.seed_on_reset = 1.0;
+        let n2 = node(Timebase::Quarter);
+        let mut runtime = GraphRuntime::new_with_config(
+            1,
+            "g".into(),
+            vec![n0, n1, n2],
+            vec![GraphEdge::new(0, 2, 0.1), GraphEdge::new(1, 2, 1.0)],
+            1.0,
+            0.0,
+            NeuralMaxPolySelection::Propagation,
+            Vec::new(),
+        );
+        let out = run(&mut runtime, 1.0, 1, vec![1.0, 1.0, 99.0]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+    }
+
+    #[test]
+    fn max_poly_random_selection_can_accept_non_first_candidate() {
+        let mut nodes = Vec::new();
+        for _ in 0..4 {
+            let mut n = node(Timebase::Quarter);
+            n.seed_on_reset = 1.0;
+            nodes.push(n);
+        }
+        let mut runtime = GraphRuntime::new_with_config(
+            0,
+            "g".into(),
+            nodes,
+            Vec::new(),
+            1.0,
+            0.0,
+            NeuralMaxPolySelection::Random,
+            Vec::new(),
+        );
+        let out = run(&mut runtime, 1.0, 1, vec![1.0; 4]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 3);
+    }
+
+    #[test]
+    fn seed_from_can_differ_from_route() {
+        let mut n0 = node(Timebase::Quarter);
+        n0.seed_track_mask = seed_track_mask(&[0]);
+        n0.route = Some(2);
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![n0],
+            vec![GraphEdge::new(0, 0, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.seed(0, 0.0, GraphPayload::default());
+        runtime.seed(2, 0.0, GraphPayload::default());
+
+        let out = run(&mut runtime, 1.0, 0, vec![1.0]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event.track, Some(2));
     }
 
     #[test]

@@ -237,6 +237,7 @@ pub(crate) fn init_runtime(
         Arc::clone(&state),
         Arc::clone(&selected_neural_neurons),
     );
+    sequencer::lisp_effect::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -2399,9 +2400,7 @@ pub(crate) fn init_runtime(
                 "resolution" | "res" => {
                     resolution = sequencer::lisp_effect::sequencer_resolution_index(value)
                 }
-                "tick" => {
-                    tick_source = Some(sequencer::lisp_effect::sequencer_tick_source(value))
-                }
+                "tick" => tick_source = Some(sequencer::lisp_effect::sequencer_tick_source(value)),
                 "init" => { /* reserved for future one-time init */ }
                 _ => return Err(format!("def-sequencer unknown key :{key}")),
             }

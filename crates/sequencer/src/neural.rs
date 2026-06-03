@@ -1127,6 +1127,93 @@ mod tests {
     }
 
     #[test]
+    fn graph_runtime_matches_native_neural_for_seeded_transpose_hop() {
+        let mut network = ProjectNeuralNetwork {
+            enabled: true,
+            num_neurons: 2,
+            weights: vec![vec![0.0, 1.0], vec![0.0, 0.0]],
+            neurons: vec![ProjectNeuron::default(), ProjectNeuron::default()],
+            max_poly: 2,
+            ..ProjectNeuralNetwork::default()
+        };
+        network.neurons[0].route = Some(0);
+        network.neurons[1].route = Some(1);
+        network.neurons[1].transpose = 7.0;
+
+        let mut native = NeuralRuntime::default();
+        native.load_from_networks(&[network], 0.0);
+        let mut seed = test_event(0);
+        seed.resolved.transpose = 4.0;
+        seed.resolved.velocity = 0.6;
+        native.process_seed_at(&seed, 0.0);
+        let mut native_out = Vec::new();
+        native.process_boundaries(0.0, 2.0, 0, 48_000.0, &mut native_out);
+
+        let mut graph_nodes = vec![crate::graph::GraphNode::default(); 2];
+        graph_nodes[0].resolution = Timebase::Sixteenth;
+        graph_nodes[0].route = Some(0);
+        graph_nodes[0].seed_track_mask = crate::graph::seed_track_mask(&[0]);
+        graph_nodes[1].resolution = Timebase::Sixteenth;
+        graph_nodes[1].route = Some(1);
+        graph_nodes[1].transpose = 7.0;
+        graph_nodes[1].threshold = 1.0;
+        let mut graph = crate::graph::GraphRuntime::new(
+            1,
+            "neural".to_string(),
+            graph_nodes,
+            vec![crate::graph::GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        graph.seed(
+            0,
+            0.0,
+            crate::graph::GraphPayload {
+                note: seed.resolved.transpose,
+                velocity: seed.resolved.velocity,
+            },
+        );
+        let mut graph_out = Vec::new();
+        graph.process_block(
+            0.0,
+            2.0,
+            0,
+            48_000.0,
+            2,
+            |eval| crate::graph::NodeFire {
+                fired: eval.energy >= 1.0,
+                ..crate::graph::NodeFire::default()
+            },
+            &mut graph_out,
+        );
+
+        let native_summary = native_out
+            .iter()
+            .map(|(sample, event)| {
+                (
+                    *sample,
+                    event.track,
+                    event.resolved.transpose,
+                    event.resolved.velocity,
+                )
+            })
+            .collect::<Vec<_>>();
+        let graph_summary = graph_out
+            .iter()
+            .map(|emission| {
+                (
+                    emission.sample_time,
+                    emission.event.track.unwrap_or(usize::MAX),
+                    emission.event.resolved.transpose,
+                    emission.event.resolved.velocity,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(graph_summary, native_summary);
+    }
+
+    #[test]
     fn runtime_runs_first_enabled_valid_network() {
         let mut disabled = ProjectNeuralNetwork::default();
         disabled.id = 1;

@@ -2582,6 +2582,7 @@ pub fn spawn_scheduler_thread(
             // runtime; both are additive layers over the neural/step output.
             let mut graph_manifests: Vec<crate::graph::GraphManifest> = Vec::new();
             let mut graph_runtimes: Vec<crate::graph::GraphRuntime> = Vec::new();
+            let mut loaded_graph_overrides: Option<Vec<crate::graph::ProjectGraphOverrides>> = None;
             let mut loaded_neural_networks: Option<Vec<crate::neural::ProjectNeuralNetwork>> = None;
             let mut last_live_midi_fx_active = false;
             let mut scratch_source_version = u64::MAX;
@@ -2712,7 +2713,11 @@ pub fn spawn_scheduler_thread(
                         match reused {
                             Some(rt) => next_runtimes.push(rt),
                             None => {
-                                let mut rt = manifest.materialize();
+                                let overrides = snapshot.graph_overrides.iter().find(|overrides| {
+                                    overrides.sequencer_id == manifest.id
+                                        || overrides.sequencer_name == manifest.name
+                                });
+                                let mut rt = manifest.materialize_with_overrides(overrides);
                                 rt.realign(clock.total_beats);
                                 next_runtimes.push(rt);
                             }
@@ -2720,6 +2725,22 @@ pub fn spawn_scheduler_thread(
                     }
                     graph_runtimes = next_runtimes;
                     graph_manifests = new_manifests;
+                    loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
+                }
+
+                if loaded_graph_overrides.as_ref() != Some(&snapshot.graph_overrides) {
+                    let mut next_runtimes = Vec::with_capacity(graph_manifests.len());
+                    for manifest in &graph_manifests {
+                        let overrides = snapshot.graph_overrides.iter().find(|overrides| {
+                            overrides.sequencer_id == manifest.id
+                                || overrides.sequencer_name == manifest.name
+                        });
+                        let mut rt = manifest.materialize_with_overrides(overrides);
+                        rt.realign(clock.total_beats);
+                        next_runtimes.push(rt);
+                    }
+                    graph_runtimes = next_runtimes;
+                    loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
                 }
 
                 if !playing
@@ -3637,7 +3658,7 @@ pub fn spawn_scheduler_thread(
                                 |eval| {
                                     scratch
                                         .invoke_graph_update(manifest, eval)
-                                        .unwrap_or(crate::graph::NodeFire { fired: false })
+                                        .unwrap_or_default()
                                 },
                                 &mut graph_emissions,
                             );

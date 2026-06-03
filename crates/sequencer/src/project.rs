@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::EffectSlotSnapshot;
+use crate::graph::ProjectGraphOverrides;
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
@@ -246,6 +247,8 @@ pub struct ProjectPattern {
     pub mod_connections: Vec<ProjectModConnection>,
     #[serde(default)]
     pub neural_networks: Vec<ProjectNeuralNetwork>,
+    #[serde(default)]
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
     pub instrument_types: Vec<ProjectInstrumentType>,
     #[serde(default)]
     pub instrument_run_modes: Vec<ProjectCustomInstrumentRunMode>,
@@ -454,6 +457,7 @@ impl ProjectPattern {
                 .map(ProjectModConnection::from)
                 .collect(),
             neural_networks: snapshot.neural_networks.clone(),
+            graph_overrides: snapshot.graph_overrides.clone(),
             instrument_types: snapshot
                 .instrument_types
                 .iter()
@@ -1427,6 +1431,32 @@ mod tests {
                         }];
                     vec![network]
                 },
+                graph_overrides: vec![ProjectGraphOverrides {
+                    sequencer_id: 99,
+                    sequencer_name: "neural".to_string(),
+                    node_intrinsics: vec![crate::graph::ProjectGraphNodeIntrinsicOverride {
+                        group: "nrn".to_string(),
+                        instance: 1,
+                        resolution: Some(Timebase::Eighth as u8),
+                        delay_steps: Some(3),
+                        quantize: Some(crate::graph::ProjectGraphQuantizeOverride::Off),
+                        route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),
+                        seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
+                    }],
+                    node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
+                        group: "nrn".to_string(),
+                        instance: 1,
+                        param: "threshold".to_string(),
+                        value: 0.75,
+                    }],
+                    edge_params: vec![crate::graph::ProjectGraphEdgeParamOverride {
+                        group: "nrn->nrn".to_string(),
+                        from: 0,
+                        to: 1,
+                        param: "weight".to_string(),
+                        value: 0.5,
+                    }],
+                }],
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
             }],
@@ -1518,6 +1548,14 @@ mod tests {
                 node_param_idx: 5,
             }
         );
+        assert_eq!(restored.patterns[0].graph_overrides.len(), 1);
+        let graph = &restored.patterns[0].graph_overrides[0];
+        assert_eq!(graph.sequencer_name, "neural");
+        assert_eq!(graph.node_intrinsics[0].delay_steps, Some(3));
+        assert_eq!(graph.node_params[0].param, "threshold");
+        assert_eq!(graph.node_params[0].value, 0.75);
+        assert_eq!(graph.edge_params[0].group, "nrn->nrn");
+        assert_eq!(graph.edge_params[0].value, 0.5);
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);
         assert_eq!(restored.buses.len(), 3);
@@ -1610,6 +1648,7 @@ mod tests {
         assert_eq!(step[crate::sequencer::StepParam::Pan.index()], 0.0);
         assert_eq!(step[crate::sequencer::StepParam::Chop.index()], 1.0);
         assert_eq!(step[crate::sequencer::StepParam::Delay.index()], 0.0);
+        assert!(project.patterns[0].graph_overrides.is_empty());
     }
 
     #[test]
