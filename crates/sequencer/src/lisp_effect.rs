@@ -3184,6 +3184,11 @@ pub(crate) struct RegisteredSequencer {
     tick: RegisteredAccumulatorCallback,
 }
 
+struct CompiledGraphUpdate {
+    source: String,
+    callback: EValue,
+}
+
 /// Per-invocation context for a generator `:tick`, mirroring [`AccumulatorEvalContext`]
 /// but for self-clocked generators: musical position only (no source step), an RNG
 /// cell for `gen-rand`, and the buffer that `seq-emit` pushes into.
@@ -3208,6 +3213,7 @@ pub struct ScratchControlRuntime {
     sequencers: SharedRegisteredSequencers,
     generator_tick: SharedGeneratorTickContext,
     graph_node: SharedGraphNodeContext,
+    graph_updates: HashMap<u64, CompiledGraphUpdate>,
     runtime_globals: Vec<String>,
 }
 
@@ -3260,6 +3266,7 @@ impl ScratchControlRuntime {
             sequencers,
             generator_tick,
             graph_node,
+            graph_updates: HashMap::new(),
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
@@ -3650,12 +3657,44 @@ impl ScratchControlRuntime {
             sequencers,
             generator_tick,
             graph_node,
+            graph_updates: HashMap::new(),
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
         this.install_midi_fx_macro();
         this.refresh_runtime_globals();
         this
+    }
+
+    fn graph_update_callback(&mut self, id: u64, source: &str) -> Result<EValue, String> {
+        if let Some(compiled) = self.graph_updates.get(&id) {
+            if compiled.source == source {
+                return Ok(compiled.callback.clone());
+            }
+        }
+
+        let wrapped = format!("(lambda (self) {source})");
+        let callback = self
+            .runtime
+            .eval_str(&wrapped)
+            .map_err(|e| format!("{e:?}"))?
+            .ok_or_else(|| "graph update compilation produced no callback".to_string())?;
+        match callback {
+            EValue::Closure(_, _) | EValue::NativeFunction(_) => {
+                self.graph_updates.insert(
+                    id,
+                    CompiledGraphUpdate {
+                        source: source.to_string(),
+                        callback: callback.clone(),
+                    },
+                );
+                Ok(callback)
+            }
+            other => Err(format!(
+                "graph update must compile to a callable, got {}",
+                eseqlisp::vm::format_lisp_value(&other)
+            )),
+        }
     }
 
     /// Register a generator whose `:tick` is shipped source (from a UI-runtime
@@ -3778,6 +3817,7 @@ impl ScratchControlRuntime {
                 ..crate::graph::NodeFire::default()
             });
         };
+        let callback = self.graph_update_callback(manifest.id, source)?;
         {
             let mut ctx = self
                 .graph_node
@@ -3796,16 +3836,15 @@ impl ScratchControlRuntime {
                 recover_incoming: None,
             });
         }
-        // Bind `self` (the node handle the accessors take) to this node's index. The
-        // `node-*` accessors read the ambient context and ignore the value, but the
-        // body must reference a bound symbol — the scratch VM errors on unknowns.
-        let wrapped = format!("(let ((self {})) {source})", eval.node_index);
         let result = self
             .runtime
-            .eval_str(&wrapped)
+            .invoke(callback, vec![EValue::Number(eval.node_index as f64)])
             .map_err(|e| format!("{e:?}"));
         if std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some() {
-            eprintln!("[graph-update] src={wrapped:?} result={result:?}");
+            eprintln!(
+                "[graph-update] id={} node={} src={source:?} result={result:?}",
+                manifest.id, eval.node_index
+            );
         }
         let mut dampen_incoming = None;
         let mut recover_incoming = None;
@@ -11372,6 +11411,14 @@ mod tests {
         let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
         assert_eq!(samples, vec![48_000, 96_000, 144_000, 192_000]);
         assert!(out.iter().all(|e| e.node_index == 0));
+        assert_eq!(scratch.graph_updates.len(), 1);
+        assert_eq!(
+            scratch
+                .graph_updates
+                .get(&manifest.id)
+                .map(|update| update.source.as_str()),
+            manifest.node.update_source.as_deref()
+        );
     }
 
     #[test]
@@ -11723,6 +11770,198 @@ mod tests {
         tracks.sort_unstable();
         tracks.dedup();
         assert_eq!(tracks, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn graph_4x4_demo_ui_exposes_delay_controls_and_weight_matrix() {
+        fn collect_widgets<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == widget_type {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_widgets(child, widget_type, out);
+            }
+        }
+
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+        }
+
+        let state = Arc::new(SequencerState::new(
+            5,
+            (0..5).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = Runtime::new();
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/graph-neural-4x4-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read graph 4x4 demo script");
+        runtime.eval_str(&source).expect("evaluate graph 4x4 demo");
+        let manifest = state
+            .published_sequencers()
+            .into_iter()
+            .find_map(|published| published.graph)
+            .expect("published graph manifest");
+        assert_eq!(
+            manifest.shape.num_nodes(),
+            4,
+            "the demo matrix must cover every materialized node"
+        );
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        let tree = pending
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("graph 4x4 script should publish widget tree");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((36.0, 16.0)))
+            .expect("graph 4x4 widget tree should lay out");
+
+        let mut matrices = Vec::new();
+        collect_widgets(&layout, "matrix", &mut matrices);
+        assert_eq!(matrices.len(), 1, "expected one editable weight matrix");
+        assert_measured(matrices[0]);
+        let matrix = find_by_stable_key(&layout, "graph-4x4-weight-matrix")
+            .expect("weight matrix stable key");
+        assert_measured(matrix);
+
+        let mut pickers = Vec::new();
+        collect_widgets(&layout, "number-picker", &mut pickers);
+        assert_eq!(pickers.len(), 4, "expected one delay picker per visible row");
+        for idx in 0..4 {
+            let picker = find_by_stable_key(&layout, &format!("graph-4x4-delay-{idx}"))
+                .unwrap_or_else(|| panic!("delay picker {idx}"));
+            assert_measured(picker);
+        }
+
+        let delay_change = find_by_stable_key(&layout, "graph-4x4-delay-2")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("delay callback");
+        runtime
+            .invoke(delay_change, vec![Value::Number(5.0)])
+            .expect("invoke delay callback");
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-4x4-demo")
+            .expect("graph overrides");
+        assert!(graph
+            .node_intrinsics
+            .iter()
+            .any(|node| node.instance == 2 && node.delay_steps == Some(5)));
+
+        let matrix_change = matrix
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("matrix callback");
+        runtime
+            .invoke(
+                matrix_change,
+                vec![gv_list(vec![
+                    gv_list(vec![gv_num(0.1), gv_num(0.2), gv_num(0.3), gv_num(0.4)]),
+                    gv_list(vec![gv_num(0.5), gv_num(0.6), gv_num(0.7), gv_num(0.8)]),
+                    gv_list(vec![gv_num(0.9), gv_num(0.1), gv_num(0.2), gv_num(0.3)]),
+                    gv_list(vec![gv_num(0.4), gv_num(0.5), gv_num(0.6), gv_num(0.7)]),
+                ])],
+            )
+            .expect("invoke matrix callback");
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-4x4-demo")
+            .expect("graph overrides after matrix edit");
+        assert_eq!(graph.edge_params.len(), 16);
+        assert!(graph.edge_params.iter().any(|edge| {
+            edge.from == 3 && edge.to == 2 && edge.param == "weight" && edge.value == 0.6
+        }));
+
+        let matrix_change = matrix
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("matrix callback");
+        runtime
+            .invoke(
+                matrix_change,
+                vec![gv_list(vec![
+                    gv_list(vec![gv_num(0.0), gv_num(0.0), gv_num(0.0), gv_num(0.0)]),
+                    gv_list(vec![gv_num(0.0), gv_num(0.0), gv_num(0.0), gv_num(0.0)]),
+                    gv_list(vec![gv_num(0.0), gv_num(0.0), gv_num(0.0), gv_num(0.0)]),
+                    gv_list(vec![gv_num(0.0), gv_num(0.0), gv_num(0.0), gv_num(0.0)]),
+                ])],
+            )
+            .expect("invoke zero matrix callback");
+
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-4x4-demo")
+            .expect("graph overrides after zero matrix edit");
+        let mut graph_runtime = manifest.materialize_with_overrides(Some(graph));
+        graph_runtime.seed(
+            0,
+            0.0,
+            crate::graph::GraphPayload {
+                note: 0.0,
+                velocity: 1.0,
+            },
+        );
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(5),
+            fallback_instrument_descriptors(5),
+            0,
+            0,
+        );
+        let mut emissions = Vec::new();
+        graph_runtime.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or_default()
+            },
+            &mut emissions,
+        );
+        assert!(
+            emissions.is_empty(),
+            "zero matrix should silence graph propagation"
+        );
     }
 
     #[test]
