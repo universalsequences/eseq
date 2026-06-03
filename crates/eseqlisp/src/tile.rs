@@ -36,12 +36,12 @@ pub struct TileTabLayout {
     pub selected: bool,
 }
 
-pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.4;
+pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.6;
 const TILE_TAB_MIN_WIDTH: f32 = 4.0;
 const TILE_TAB_MAX_WIDTH: f32 = 14.0;
 const TILE_TAB_LABEL_PAD: f32 = 2.0;
-const TILE_TAB_GAP: f32 = 0.2;
-const TILE_TAB_RIGHT_INSET: f32 = 1.0;
+const TILE_TAB_GAP: f32 = 0.0;
+const TILE_TAB_RIGHT_INSET: f32 = 0.55;
 
 pub struct TileLeaf {
     pub id: TileId,
@@ -188,8 +188,17 @@ impl TileLeaf {
     }
 }
 
-pub fn tile_body_rect(rect: Rect, _has_tabs: bool) -> Rect {
-    rect
+pub fn tile_body_rect(rect: Rect, has_tabs: bool) -> Rect {
+    if !has_tabs {
+        return rect;
+    }
+    let strip_height = TILE_TAB_STRIP_HEIGHT.min(rect.height.max(0.0));
+    Rect {
+        row: rect.row + strip_height,
+        col: rect.col,
+        width: rect.width,
+        height: (rect.height - strip_height).max(0.0),
+    }
 }
 
 pub fn tile_tab_layouts(
@@ -217,16 +226,13 @@ pub fn tile_tab_layouts(
                 .clamp(TILE_TAB_MIN_WIDTH, TILE_TAB_MAX_WIDTH)
         })
         .collect::<Vec<_>>();
-    let desired_total = desired_widths.iter().sum::<f32>();
-    let widths = if desired_total <= available_tab_width {
-        desired_widths
-    } else {
-        let equal_width = (available_tab_width / tabs.len() as f32).max(1.0);
-        desired_widths
-            .into_iter()
-            .map(|width| width.min(equal_width).max(1.0))
-            .collect::<Vec<_>>()
-    };
+    let desired_equal_width = desired_widths
+        .iter()
+        .copied()
+        .fold(TILE_TAB_MIN_WIDTH, f32::max);
+    let max_equal_width = (available_tab_width / tabs.len() as f32).max(1.0);
+    let equal_width = desired_equal_width.min(max_equal_width).max(1.0);
+    let widths = vec![equal_width; tabs.len()];
     let total_width = widths.iter().sum::<f32>() + gap_total;
     let mut col = rect.col + rect.width - TILE_TAB_RIGHT_INSET - total_width;
     let selected = selected_tab.unwrap_or(usize::MAX);
@@ -239,7 +245,7 @@ pub fn tile_tab_layouts(
                 index,
                 label: truncate_tab_label(&tabs[index].label, width),
                 rect: Rect {
-                    row: rect.row - TILE_TAB_STRIP_HEIGHT,
+                    row: rect.row,
                     col,
                     width,
                     height: TILE_TAB_STRIP_HEIGHT,
@@ -289,7 +295,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tab_width_estimate_uses_proportional_character_widths() {
+    fn tab_widths_are_equal_and_fit_widest_label() {
         let rect = Rect {
             row: 10.0,
             col: 0.0,
@@ -312,10 +318,8 @@ mod tests {
         );
 
         assert_eq!(layouts.len(), 2);
-        assert!(
-            layouts[1].rect.width > layouts[0].rect.width,
-            "wide glyph labels should reserve more tab width than narrow glyph labels"
-        );
+        assert_eq!(layouts[0].rect.width, layouts[1].rect.width);
+        assert_eq!(layouts[1].label, "WWW");
     }
 
     #[test]

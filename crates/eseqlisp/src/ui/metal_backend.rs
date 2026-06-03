@@ -3839,6 +3839,7 @@ fragment float4 waveform_frag(
                 let tile_top_px = tile.body_rect.row * cell_h;
                 let tile_width_px = tile.body_rect.width * cell_w;
                 let tile_height_px = tile.body_rect.height * cell_h;
+                let header_height_px = (tile.body_rect.row - tile.rect.row).max(0.0) * cell_h;
                 let border_inset_px = if tile.show_border {
                     tile.border_width_px
                         .max(0.0)
@@ -3896,15 +3897,27 @@ fragment float4 waveform_frag(
                 enc.setScissorRect(tile_scissor);
                 push_rounded_rect_fill_px(
                     &mut tile_bg_verts,
-                    tile_left_px,
-                    tile_top_px,
-                    tile_width_px,
-                    tile_height_px,
+                    frame_left_px,
+                    frame_top_px,
+                    frame_width_px,
+                    frame_height_px,
                     tile.border_radius_px,
                     tile_bg,
                     vp_w,
                     vp_h,
                 );
+                if header_height_px > 0.0 {
+                    push_horizontal_rule(
+                        &mut tile_bg_verts,
+                        frame_left_px,
+                        frame_top_px + header_height_px - 1.0,
+                        frame_width_px,
+                        1.0,
+                        theme::STATUS_EDGE(),
+                        vp_w,
+                        vp_h,
+                    );
+                }
                 draw_vertices(
                     &enc,
                     &self.device,
@@ -4273,10 +4286,10 @@ fragment float4 waveform_frag(
                     let mut bverts = Vec::new();
                     push_rounded_rect_border_px(
                         &mut bverts,
-                        tile_left_px,
-                        tile_top_px,
-                        tile_width_px,
-                        tile_height_px,
+                        frame_left_px,
+                        frame_top_px,
+                        frame_width_px,
+                        frame_height_px,
                         tile.border_width_px,
                         tile.border_radius_px,
                         border_color,
@@ -4295,7 +4308,7 @@ fragment float4 waveform_frag(
                 }
             }
 
-            let mut tab_verts = Vec::new();
+            let mut tab_instances = Vec::new();
             let mut tab_text_prims = Vec::new();
             enc.setScissorRect(MTLScissorRect {
                 x: 0,
@@ -4307,56 +4320,65 @@ fragment float4 waveform_frag(
                 if tile.tabs.is_empty() {
                     continue;
                 }
-                let tile_bg = tile
-                    .background_color_name
-                    .as_deref()
-                    .and_then(theme::named_color)
-                    .or(tile.background_color)
-                    .unwrap_or(theme::BG());
+                let Some(first_tab) = tile.tabs.first() else {
+                    continue;
+                };
+                let Some(last_tab) = tile.tabs.last() else {
+                    continue;
+                };
+                let group_left = first_tab.rect.col;
+                let group_top = first_tab.rect.row;
+                let group_right = last_tab.rect.col + last_tab.rect.width;
+                let group_width = (group_right - group_left).max(0.0);
+                let group_height = first_tab.rect.height;
+                let group_width_px = group_width * cell_w;
+                let group_height_px = group_height * cell_h;
+                let group_inset_y = (group_height_px * 0.12).min(3.0);
+                let group_visual_top = group_top + group_inset_y / cell_h.max(1.0);
+                let group_visual_height_px = (group_height_px - group_inset_y * 2.0).max(1.0);
+                let group_visual_height = group_visual_height_px / cell_h.max(1.0);
+                let group_radius = (group_visual_height_px * 0.5).min(group_width_px * 0.5);
+                let group_bg = theme::STATUS_BG();
+                let selected_tab_bg = Color::from_hex(0x48, 0x48, 0x4d);
+                push_rounded_instance_cells(
+                    &mut tab_instances,
+                    group_left,
+                    group_visual_top,
+                    group_width,
+                    group_visual_height,
+                    group_bg,
+                    group_radius,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
                 for tab in &tile.tabs {
-                    let tab_left_px = tab.rect.col * cell_w;
-                    let tab_top_px = tab.rect.row * cell_h;
-                    let tab_width_px = tab.rect.width * cell_w;
-                    let tab_height_px = tab.rect.height * cell_h;
-                    let tab_bg = if tab.selected {
-                        tile_bg
-                    } else {
-                        theme::STATUS_BG()
-                    };
-                    let tab_border = if tab.selected {
-                        theme::BORDER_ACTIVE()
-                    } else {
-                        theme::BORDER_INACTIVE()
-                    };
-                    let tab_radius = tile
-                        .border_radius_px
-                        .max(8.0)
-                        .min(tab_height_px * 0.5)
-                        .min(tab_width_px * 0.25);
-                    push_top_rounded_rect_fill_px(
-                        &mut tab_verts,
-                        tab_left_px,
-                        tab_top_px,
-                        tab_width_px,
-                        tab_height_px,
-                        tab_radius,
-                        tab_bg,
-                        vp_w,
-                        vp_h,
-                    );
-                    push_top_rounded_rect_border_px(
-                        &mut tab_verts,
-                        tab_left_px,
-                        tab_top_px,
-                        tab_width_px,
-                        tab_height_px,
-                        tile.border_width_px.max(1.0).min(2.0),
-                        tab_radius,
-                        tab_border,
-                        !tab.selected,
-                        vp_w,
-                        vp_h,
-                    );
+                    if tab.selected {
+                        let selected_inset_px = 1.0;
+                        let selected_x = tab.rect.col + selected_inset_px / cell_w.max(1.0);
+                        let selected_y = group_visual_top + selected_inset_px / cell_h.max(1.0);
+                        let selected_w =
+                            (tab.rect.width - selected_inset_px * 2.0 / cell_w.max(1.0)).max(0.1);
+                        let selected_h = (group_visual_height
+                            - selected_inset_px * 2.0 / cell_h.max(1.0))
+                        .max(0.1);
+                        let selected_radius =
+                            ((selected_h * cell_h) * 0.5).min((selected_w * cell_w) * 0.5);
+                        push_rounded_instance_cells(
+                            &mut tab_instances,
+                            selected_x,
+                            selected_y,
+                            selected_w,
+                            selected_h,
+                            selected_tab_bg,
+                            selected_radius,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
                     let fg = if tab.selected {
                         theme::FG()
                     } else {
@@ -4372,20 +4394,25 @@ fragment float4 waveform_frag(
                             font_size: 10.5,
                             scale: 1.0,
                             fg,
-                            bg: tab_bg,
+                            bg: if tab.selected {
+                                selected_tab_bg
+                            } else {
+                                group_bg
+                            },
                         },
                     ));
                 }
             }
-            draw_vertices(
-                &enc,
-                &self.device,
-                &mut self.upload_arena,
-                &mut self.stats,
-                &pipeline,
-                &atlas_texture,
-                &tab_verts,
-            );
+            if let Some(box_pipeline) = self.widget_pipelines.get("box") {
+                draw_widget_instances(
+                    &enc,
+                    &self.device,
+                    &mut self.upload_arena,
+                    &mut self.stats,
+                    box_pipeline,
+                    tab_instances.as_slice(),
+                );
+            }
             if let (Some(prop_atlas), Some(prop_pipe)) =
                 (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
             {
@@ -7432,50 +7459,6 @@ fragment float4 waveform_frag(
         points
     }
 
-    fn top_rounded_rect_points_px(
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        radius: f32,
-        segments_per_corner: usize,
-    ) -> Vec<(f32, f32)> {
-        if width <= 0.0 || height <= 0.0 {
-            return Vec::new();
-        }
-        let radius = radius.clamp(0.0, width.min(height) * 0.5);
-        if radius <= 0.0 {
-            return vec![
-                (x, y),
-                (x + width, y),
-                (x + width, y + height),
-                (x, y + height),
-            ];
-        }
-
-        let segments = segments_per_corner.max(2);
-        let mut points = Vec::with_capacity((segments + 1) * 2 + 2);
-        for i in 0..=segments {
-            let t = i as f32 / segments as f32;
-            let angle = (-90.0f32 + 90.0f32 * t).to_radians();
-            points.push((
-                x + width - radius + angle.cos() * radius,
-                y + radius + angle.sin() * radius,
-            ));
-        }
-        points.push((x + width, y + height));
-        points.push((x, y + height));
-        for i in 0..=segments {
-            let t = i as f32 / segments as f32;
-            let angle = (180.0f32 + 90.0f32 * t).to_radians();
-            points.push((
-                x + radius + angle.cos() * radius,
-                y + radius + angle.sin() * radius,
-            ));
-        }
-        points
-    }
-
     fn push_rounded_rect_fill_px(
         verts: &mut Vec<Vertex>,
         x: f32,
@@ -7491,42 +7474,6 @@ fragment float4 waveform_frag(
             return;
         }
         let points = rounded_rect_points_px(x, y, width, height, radius, 8);
-        if points.len() < 3 {
-            return;
-        }
-
-        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
-        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
-        let rgba = color.to_rgba();
-        let center = (x + width * 0.5, y + height * 0.5);
-        let v = |point: (f32, f32)| Vertex {
-            position: [ndc_x(point.0), ndc_y(point.1)],
-            uv: [0.0, 0.0],
-            fg: rgba,
-            bg: rgba,
-        };
-
-        for i in 0..points.len() {
-            let j = (i + 1) % points.len();
-            verts.extend_from_slice(&[v(center), v(points[i]), v(points[j])]);
-        }
-    }
-
-    fn push_top_rounded_rect_fill_px(
-        verts: &mut Vec<Vertex>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        radius: f32,
-        color: Color,
-        vp_w: f32,
-        vp_h: f32,
-    ) {
-        if width <= 0.0 || height <= 0.0 {
-            return;
-        }
-        let points = top_rounded_rect_points_px(x, y, width, height, radius, 8);
         if points.len() < 3 {
             return;
         }
@@ -7635,66 +7582,6 @@ fragment float4 waveform_frag(
 
         for i in 0..outer.len() {
             let j = (i + 1) % outer.len();
-            verts.extend_from_slice(&[
-                v(outer[i]),
-                v(inner[i]),
-                v(outer[j]),
-                v(outer[j]),
-                v(inner[i]),
-                v(inner[j]),
-            ]);
-        }
-    }
-
-    fn push_top_rounded_rect_border_px(
-        verts: &mut Vec<Vertex>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        border_width: f32,
-        radius: f32,
-        color: Color,
-        include_bottom: bool,
-        vp_w: f32,
-        vp_h: f32,
-    ) {
-        if width <= 0.0 || height <= 0.0 || border_width <= 0.0 {
-            return;
-        }
-        let inset = border_width.min(width * 0.5).min(height * 0.5);
-        let radius = radius.clamp(0.0, width.min(height) * 0.5);
-        let outer = top_rounded_rect_points_px(x, y, width, height, radius, 8);
-        let inner = top_rounded_rect_points_px(
-            x + inset,
-            y + inset,
-            (width - inset * 2.0).max(0.0),
-            (height - inset * 2.0).max(0.0),
-            (radius - inset).max(0.0),
-            8,
-        );
-        if outer.len() < 3 || outer.len() != inner.len() {
-            return;
-        }
-
-        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
-        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
-        let rgba = color.to_rgba();
-        let v = |point: (f32, f32)| Vertex {
-            position: [ndc_x(point.0), ndc_y(point.1)],
-            uv: [0.0, 0.0],
-            fg: rgba,
-            bg: rgba,
-        };
-        let bottom = y + height;
-
-        for i in 0..outer.len() {
-            let j = (i + 1) % outer.len();
-            let is_bottom_edge =
-                (outer[i].1 - bottom).abs() < 0.01 && (outer[j].1 - bottom).abs() < 0.01;
-            if is_bottom_edge && !include_bottom {
-                continue;
-            }
             verts.extend_from_slice(&[
                 v(outer[i]),
                 v(inner[i]),

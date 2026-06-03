@@ -5912,14 +5912,16 @@ fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
 
     let precise_col = tab_rect.rect.col + tab_rect.rect.width * 0.5;
     let precise_row = tab_rect.rect.row + tab_rect.rect.height * 0.5;
+    let tile_rect = editor.tile_rect(tile_id).unwrap();
     assert!(
-        tab_rect.rect.row < editor.tile_rect(tile_id).unwrap().row,
-        "folder tabs should be appended above the tile body"
+        tab_rect.rect.row >= tile_rect.row
+            && tab_rect.rect.row + tab_rect.rect.height <= editor.tile_body_rect(tile_id).unwrap().row + f32::EPSILON,
+        "tabs should live in the tile header row above the content body"
     );
-    assert_ne!(
+    assert_eq!(
         editor.tile_at_screen(precise_col, precise_row),
         Some(tile_id),
-        "the tab click point should overlap a different tile, not the tabbed tile body"
+        "tab click point should be inside the tabbed tile"
     );
     editor.handle_tiled_mouse_precise(
         mouse_event(
@@ -5947,7 +5949,7 @@ fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
     assert_eq!(editor.active_buffer().name, "*matrix*");
     assert_eq!(
         editor.active_tile, tile_id,
-        "releasing over the covered transport tile must not steal active tile selection"
+        "releasing on the internal tab header must keep the tabbed tile selected"
     );
     assert_eq!(editor.active_leaf().selected_tab, Some(1));
     assert_eq!(
@@ -5976,22 +5978,26 @@ fn tab_selection_survives_reapplying_same_layout() {
 }
 
 #[test]
-fn tabbed_tile_frame_appends_folder_tabs_above_unchanged_body() {
+fn tabbed_tile_frame_reserves_internal_header_row_for_tabs() {
     let mut editor = editor_with_tabbed_buffers();
     let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);
     let tile = &frame.tiles[0];
 
     assert!(!tile.tabs.is_empty());
-    assert_eq!(tile.body_rect, tile.rect);
+    assert!(tile.body_rect.row > tile.rect.row);
+    assert_eq!(tile.body_rect.col, tile.rect.col);
+    assert_eq!(tile.body_rect.width, tile.rect.width);
+    assert!(tile.body_rect.height < tile.rect.height);
     let first_tab_height = tile.tabs[0].rect.height;
     for tab in &tile.tabs {
         assert!(tab.rect.width > 0.0);
         assert_eq!(tab.rect.height, first_tab_height);
         assert!(tab.rect.col + tab.rect.width <= tile.rect.col + tile.rect.width);
-        assert!(tab.rect.row + tab.rect.height <= tile.rect.row + f32::EPSILON);
+        assert!(tab.rect.row >= tile.rect.row);
+        assert!(tab.rect.row + tab.rect.height <= tile.body_rect.row + f32::EPSILON);
     }
     assert!(tile.frame.widget_layout.as_ref().unwrap().rect.height > 0.0);
-    assert_eq!(editor.tile_body_rect(editor.active_tile).unwrap(), tile.rect);
+    assert_eq!(editor.tile_body_rect(editor.active_tile).unwrap(), tile.body_rect);
 }
 
 #[test]

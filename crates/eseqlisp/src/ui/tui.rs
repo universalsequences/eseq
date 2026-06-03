@@ -307,6 +307,7 @@ pub fn render_tiled(frame: &mut Frame, tiled: &TiledRenderFrame) {
 
     // Render each tile
     for tile in &tiled.tiles {
+        render_tile_tab_header(frame, tile);
         let body_area = Rect::new(
             tile.body_rect.col.round() as u16,
             tile.body_rect.row.round() as u16,
@@ -351,6 +352,37 @@ pub fn render_tiled(frame: &mut Frame, tiled: &TiledRenderFrame) {
 
         render_completion_popup(frame, comp, active_tile_area);
     }
+}
+
+fn render_tile_tab_header(frame: &mut Frame, tile: &crate::backend::TileFrame) {
+    if tile.tabs.is_empty() {
+        return;
+    }
+    let frame_area = frame.area();
+    let col = tile.rect.col.round() as i32;
+    let row = tile.rect.row.round() as i32;
+    let width = tile.rect.width.round() as i32;
+    let height = (tile.body_rect.row - tile.rect.row).ceil() as i32;
+    if col < 0
+        || row < 0
+        || width <= 0
+        || height <= 0
+        || col >= frame_area.width as i32
+        || row >= frame_area.height as i32
+    {
+        return;
+    }
+    let area = Rect::new(
+        col as u16,
+        row as u16,
+        width.min(frame_area.width as i32 - col) as u16,
+        height.min(frame_area.height as i32 - row) as u16,
+    );
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(to_rcolor(crate::theme::BORDER_INACTIVE())))
+        .style(Style::default().bg(to_rcolor(crate::theme::BG())));
+    frame.render_widget(block, area);
 }
 
 fn render_tile_tabs(frame: &mut Frame, tile: &crate::backend::TileFrame) {
