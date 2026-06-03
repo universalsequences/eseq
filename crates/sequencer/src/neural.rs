@@ -209,7 +209,7 @@ pub fn remap_neural_network_routes_after_track_delete(
 /// [`GridBoundaryClock`] so lisp generators and neurons step their clocks
 /// identically. `last_index` is only advanced for boundaries that are *skipped*
 /// (already passed); the returned boundary is left for the caller to consume.
-fn next_grid_boundary(
+pub fn next_grid_boundary(
     last_index: &mut u64,
     resolution_beats: f64,
     start_beats: f64,

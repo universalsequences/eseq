@@ -64,6 +64,7 @@ mod filter;
 pub mod generator;
 #[allow(dead_code)]
 mod gatepitch;
+pub mod graph;
 #[allow(dead_code)]
 mod limiter;
 #[allow(dead_code)]

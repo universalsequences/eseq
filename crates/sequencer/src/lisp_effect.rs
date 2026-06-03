@@ -7626,6 +7626,392 @@ fn gen_splitmix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+// ───────────────────────── Graph-mode manifest parsing ─────────────────────────
+//
+// A graph-mode `def-sequencer` arrives (after the compiler's whole-body auto-quote)
+// as a flat sequence of `EValue`s: the name, keyword/value config pairs, and the
+// `def-node` / `edges` sub-forms as list data. These parse that data into a
+// [`crate::graph::GraphManifest`]. Graph mode is selected by the presence of a
+// `def-node` sub-form (its absence keeps the existing tick-mode path).
+
+use crate::graph::{
+    EdgeSetSpec, GraphManifest, LeakSpec, NodeProto, ParamSpec, Reduce as GraphReduce, SeedFrom,
+    ShapeSpec, StateSpec, Topology,
+};
+
+/// Clone a list value's items out of their cells, or `None` if not a list.
+fn graph_list_items(value: &EValue) -> Option<Vec<EValue>> {
+    match value {
+        EValue::List(items) => Some(items.iter().map(|i| i.borrow().clone()).collect()),
+        _ => None,
+    }
+}
+
+/// The lowercased head symbol of a sub-form (`def-node`, `edges`, `grid`, …).
+fn graph_head_symbol(items: &[EValue]) -> Option<String> {
+    match items.first() {
+        Some(EValue::Symbol(s)) => Some(s.trim_start_matches('@').to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// Normalize a keyword/symbol/string to a bare lowercase key (no leading `:`/`@`).
+fn graph_keyword(value: &EValue) -> Option<String> {
+    match value {
+        EValue::Keyword(k) | EValue::Symbol(k) | EValue::String(k) => Some(
+            k.trim_start_matches('@')
+                .trim_start_matches(':')
+                .to_ascii_lowercase(),
+        ),
+        _ => None,
+    }
+}
+
+fn graph_number(value: &EValue) -> Option<f64> {
+    match value {
+        EValue::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn graph_symbol_string(value: &EValue) -> String {
+    match value {
+        EValue::Symbol(s) | EValue::String(s) | EValue::Keyword(s) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+fn graph_timebase(value: &EValue) -> Result<Timebase, String> {
+    parse_timebase_arg(std::slice::from_ref(value), 0)
+}
+
+fn graph_reduce(value: &EValue) -> GraphReduce {
+    match graph_keyword(value).as_deref() {
+        Some("max") => GraphReduce::Max,
+        Some("min") => GraphReduce::Min,
+        Some("product") => GraphReduce::Product,
+        Some("count") => GraphReduce::Count,
+        _ => GraphReduce::Sum,
+    }
+}
+
+/// `:off`/`none`/`nil` → no quantize; else a timebase.
+fn graph_quantize(value: &EValue) -> Result<Option<Timebase>, String> {
+    match graph_keyword(value).as_deref() {
+        Some("off") | Some("none") | Some("nil") | Some("false") => Ok(None),
+        _ => Ok(Some(graph_timebase(value)?)),
+    }
+}
+
+/// `:route`/`none` → follow route; a number → single track; a list → track set.
+fn graph_seed_from(value: &EValue) -> SeedFrom {
+    match graph_keyword(value).as_deref() {
+        Some("route") | Some("none") | Some("nil") => return SeedFrom::Route,
+        _ => {}
+    }
+    match value {
+        EValue::Number(n) if *n >= 0.0 => SeedFrom::Tracks(vec![*n as usize]),
+        EValue::List(_) => {
+            let tracks = graph_list_items(value)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| graph_number(v).filter(|n| *n >= 0.0).map(|n| n as usize))
+                .collect();
+            SeedFrom::Tracks(tracks)
+        }
+        _ => SeedFrom::Route,
+    }
+}
+
+fn graph_route(value: &EValue) -> Option<usize> {
+    match value {
+        EValue::Number(n) if *n >= 0.0 => Some(*n as usize),
+        _ => None,
+    }
+}
+
+/// `(bars 4)` → beats (assumes 4/4), `(beats 2)` → beats, bare number → beats.
+fn graph_bars_or_beats(value: &EValue) -> f64 {
+    if let Some(items) = graph_list_items(value) {
+        let n = items.get(1).and_then(graph_number).unwrap_or(0.0);
+        match graph_head_symbol(&items).as_deref() {
+            Some("bars") | Some("bar") => return n * 4.0,
+            Some("beats") | Some("beat") => return n,
+            _ => {}
+        }
+    }
+    graph_number(value).unwrap_or(0.0)
+}
+
+/// `(name :float min max :default d)` / `(name :int min max :default d)`.
+fn graph_parse_param(items: &[EValue]) -> Option<ParamSpec> {
+    let name = match items.first()? {
+        EValue::Symbol(s) | EValue::String(s) => s.clone(),
+        _ => return None,
+    };
+    let mut is_int = false;
+    let mut nums: Vec<f64> = Vec::new();
+    let mut default: Option<f64> = None;
+    let mut i = 1;
+    while i < items.len() {
+        match &items[i] {
+            EValue::Keyword(k) => match k.trim_start_matches(':').to_ascii_lowercase().as_str() {
+                "int" => is_int = true,
+                "float" => is_int = false,
+                "default" => {
+                    i += 1;
+                    default = items.get(i).and_then(graph_number);
+                }
+                _ => {}
+            },
+            EValue::Number(n) => nums.push(*n),
+            _ => {}
+        }
+        i += 1;
+    }
+    let min = nums.first().copied().unwrap_or(0.0);
+    let max = nums.get(1).copied().unwrap_or(0.0);
+    Some(ParamSpec {
+        name,
+        min,
+        max,
+        default: default.unwrap_or(min),
+        is_int,
+    })
+}
+
+fn graph_parse_param_list(value: &EValue) -> Vec<ParamSpec> {
+    graph_list_items(value)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(graph_list_items)
+        .filter_map(|items| graph_parse_param(&items))
+        .collect()
+}
+
+/// `(per-step :energy-decay)` or `(per-step 0.9)`.
+fn graph_parse_leak(value: &EValue) -> Option<LeakSpec> {
+    let items = graph_list_items(value)?;
+    if graph_head_symbol(&items).as_deref() != Some("per-step") {
+        return None;
+    }
+    match items.get(1) {
+        Some(EValue::Number(n)) => Some(LeakSpec::PerStep(*n)),
+        Some(v) if graph_keyword(v).as_deref() == Some("energy-decay") => {
+            Some(LeakSpec::PerStepEnergyDecay)
+        }
+        _ => None,
+    }
+}
+
+/// `(energy :leak (per-step :energy-decay))`.
+fn graph_parse_state(items: &[EValue]) -> Option<StateSpec> {
+    let name = match items.first()? {
+        EValue::Symbol(s) | EValue::String(s) => s.clone(),
+        _ => return None,
+    };
+    let mut leak = None;
+    let mut i = 1;
+    while i < items.len() {
+        if graph_keyword(&items[i]).as_deref() == Some("leak") {
+            i += 1;
+            if let Some(v) = items.get(i) {
+                leak = graph_parse_leak(v);
+            }
+        }
+        i += 1;
+    }
+    Some(StateSpec { name, leak })
+}
+
+fn graph_parse_state_list(value: &EValue) -> Vec<StateSpec> {
+    graph_list_items(value)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(graph_list_items)
+        .filter_map(|items| graph_parse_state(&items))
+        .collect()
+}
+
+fn graph_parse_shape(value: &EValue) -> Result<ShapeSpec, String> {
+    let items = graph_list_items(value).ok_or_else(|| ":shape expects a generator form".to_string())?;
+    let n = |idx: usize| items.get(idx).and_then(graph_number).map(|n| n.max(0.0) as usize);
+    match graph_head_symbol(&items).as_deref() {
+        Some("grid") => Ok(ShapeSpec::Grid {
+            rows: n(1).ok_or("(grid R C) expects rows")?,
+            cols: n(2).ok_or("(grid R C) expects cols")?,
+        }),
+        Some("line") => Ok(ShapeSpec::Line(n(1).ok_or("(line N) expects N")?)),
+        Some("ring") => Ok(ShapeSpec::Ring(n(1).ok_or("(ring N) expects N")?)),
+        other => Err(format!("unknown :shape generator: {other:?}")),
+    }
+}
+
+fn graph_parse_topology(value: &EValue) -> Result<Topology, String> {
+    let items =
+        graph_list_items(value).ok_or_else(|| ":topology expects a generator form".to_string())?;
+    match graph_head_symbol(&items).as_deref() {
+        Some("all-to-all") => Ok(Topology::AllToAll),
+        Some(other) => Err(format!(
+            "unsupported :topology `{other}` (v1 supports all-to-all)"
+        )),
+        None => Err(":topology expects a generator form".to_string()),
+    }
+}
+
+fn graph_parse_node_proto(items: &[EValue]) -> Result<NodeProto, String> {
+    let name = match items.get(1) {
+        Some(EValue::Symbol(s) | EValue::String(s)) => s.clone(),
+        _ => return Err("def-node expects a name".to_string()),
+    };
+    let mut proto = NodeProto {
+        name,
+        ..NodeProto::default()
+    };
+    let mut i = 2;
+    while i < items.len() {
+        let Some(key) = graph_keyword(&items[i]) else {
+            return Err("def-node expects keyword/value pairs".to_string());
+        };
+        i += 1;
+        let Some(value) = items.get(i) else {
+            return Err(format!("def-node missing value for :{key}"));
+        };
+        match key.as_str() {
+            "resolution" | "res" => proto.resolution = graph_timebase(value)?,
+            "delay" | "delay-steps" => {
+                proto.delay_steps = graph_number(value).unwrap_or(0.0).max(0.0) as u32
+            }
+            "quantize" | "q" => proto.quantize = graph_quantize(value)?,
+            "route" => proto.route = graph_route(value),
+            "seed-from" => proto.seed_from = graph_seed_from(value),
+            "reduce" => proto.reduce = graph_reduce(value),
+            "params" => proto.params = graph_parse_param_list(value),
+            "state" => proto.state = graph_parse_state_list(value),
+            "update" => proto.update_source = Some(eseqlisp::vm::format_lisp_source(value)),
+            _ => return Err(format!("def-node unknown key :{key}")),
+        }
+        i += 1;
+    }
+    Ok(proto)
+}
+
+fn graph_parse_edge_set(items: &[EValue]) -> Result<EdgeSetSpec, String> {
+    let mut set = EdgeSetSpec {
+        from: String::new(),
+        to: String::new(),
+        topology: Topology::AllToAll,
+        gather_source: None,
+        params: Vec::new(),
+    };
+    let mut i = 1;
+    while i < items.len() {
+        let Some(key) = graph_keyword(&items[i]) else {
+            return Err("edges expects keyword/value pairs".to_string());
+        };
+        i += 1;
+        let Some(value) = items.get(i) else {
+            return Err(format!("edges missing value for :{key}"));
+        };
+        match key.as_str() {
+            "from" => set.from = graph_symbol_string(value),
+            "to" => set.to = graph_symbol_string(value),
+            "topology" => set.topology = graph_parse_topology(value)?,
+            "gather" => set.gather_source = Some(eseqlisp::vm::format_lisp_source(value)),
+            "params" => set.params = graph_parse_param_list(value),
+            _ => return Err(format!("edges unknown key :{key}")),
+        }
+        i += 1;
+    }
+    Ok(set)
+}
+
+/// True if these `def-sequencer` args carry a `def-node` sub-form (graph mode).
+pub(crate) fn graph_mode_present(args: &[EValue]) -> bool {
+    args.iter().any(|arg| {
+        graph_list_items(arg)
+            .map(|items| graph_head_symbol(&items).as_deref() == Some("def-node"))
+            .unwrap_or(false)
+    })
+}
+
+/// Parse a graph-mode `def-sequencer` arg list (including the leading name) into a
+/// [`GraphManifest`].
+pub(crate) fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
+    let name = match args.first() {
+        Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => {
+            s.trim_start_matches('@').to_string()
+        }
+        _ => return Err("def-sequencer expects a name".to_string()),
+    };
+    let id = stable_sequencer_id(&name);
+    let mut shape: Option<ShapeSpec> = None;
+    let mut energy_decay = 0.9;
+    let mut reset_every_beats = 0.0;
+    let mut seed_on_reset = 0.0;
+    let mut max_poly = 0u32;
+    let mut node: Option<NodeProto> = None;
+    let mut edge_sets: Vec<EdgeSetSpec> = Vec::new();
+
+    let mut i = 1;
+    while i < args.len() {
+        // `def-node` / `edges` sub-forms (positional list data).
+        if let Some(items) = graph_list_items(&args[i]) {
+            match graph_head_symbol(&items).as_deref() {
+                Some("def-node") => {
+                    if node.is_some() {
+                        return Err("graph-mode def-sequencer allows one def-node in v1".to_string());
+                    }
+                    node = Some(graph_parse_node_proto(&items)?);
+                    i += 1;
+                    continue;
+                }
+                Some("edges") => {
+                    edge_sets.push(graph_parse_edge_set(&items)?);
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        // keyword/value config.
+        let Some(key) = graph_keyword(&args[i]) else {
+            return Err(format!(
+                "graph-mode def-sequencer: unexpected form at position {i}"
+            ));
+        };
+        i += 1;
+        let Some(value) = args.get(i) else {
+            return Err(format!("def-sequencer missing value for :{key}"));
+        };
+        match key.as_str() {
+            "shape" => shape = Some(graph_parse_shape(value)?),
+            "energy-decay" => energy_decay = graph_number(value).unwrap_or(0.9),
+            "reset-every" => reset_every_beats = graph_bars_or_beats(value),
+            "seed-on-reset" => seed_on_reset = graph_number(value).unwrap_or(0.0),
+            "max-poly" => max_poly = graph_number(value).unwrap_or(0.0).max(0.0) as u32,
+            // v1a: deterministic selection only; resolution is per-node, not sequencer-level.
+            "max-poly-selection" | "resolution" | "res" => {}
+            _ => return Err(format!("graph-mode def-sequencer unknown key :{key}")),
+        }
+        i += 1;
+    }
+
+    let shape = shape.ok_or_else(|| "graph-mode def-sequencer requires :shape".to_string())?;
+    let node = node.ok_or_else(|| "graph-mode def-sequencer requires a def-node".to_string())?;
+    Ok(GraphManifest {
+        id,
+        name,
+        shape,
+        energy_decay,
+        reset_every_beats,
+        seed_on_reset,
+        max_poly,
+        node,
+        edge_sets,
+    })
+}
+
 fn build_seq_emit_event(
     args: &[EValue],
     ctx: &GeneratorTickContext,
@@ -9985,6 +10371,170 @@ mod tests {
     use std::collections::BTreeSet;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    // ── graph-mode manifest parsing ──
+    fn gv_num(x: f64) -> Value {
+        Value::Number(x)
+    }
+    fn gv_kw(s: &str) -> Value {
+        Value::Keyword(s.to_string())
+    }
+    fn gv_sym(s: &str) -> Value {
+        Value::Symbol(s.to_string())
+    }
+    fn gv_list(items: Vec<Value>) -> Value {
+        Value::List(items.into_iter().map(|v| Rc::new(RefCell::new(v))).collect())
+    }
+
+    fn sample_graph_args() -> Vec<Value> {
+        vec![
+            gv_sym("neural"),
+            gv_kw("shape"),
+            gv_list(vec![gv_sym("line"), gv_num(2.0)]),
+            gv_kw("energy-decay"),
+            gv_num(0.9),
+            gv_kw("max-poly"),
+            gv_num(4.0),
+            gv_kw("reset-every"),
+            gv_list(vec![gv_sym("bars"), gv_num(4.0)]),
+            gv_list(vec![
+                gv_sym("def-node"),
+                gv_sym("nrn"),
+                gv_kw("resolution"),
+                gv_kw("16"),
+                gv_kw("delay"),
+                gv_num(1.0),
+                gv_kw("quantize"),
+                gv_kw("off"),
+                gv_kw("reduce"),
+                gv_sym("sum"),
+                gv_kw("params"),
+                gv_list(vec![
+                    gv_list(vec![
+                        gv_sym("threshold"),
+                        gv_kw("float"),
+                        gv_num(0.0),
+                        gv_num(4.0),
+                        gv_kw("default"),
+                        gv_num(1.0),
+                    ]),
+                    gv_list(vec![
+                        gv_sym("transpose"),
+                        gv_kw("int"),
+                        gv_num(-24.0),
+                        gv_num(24.0),
+                        gv_kw("default"),
+                        gv_num(0.0),
+                    ]),
+                ]),
+                gv_kw("state"),
+                gv_list(vec![gv_list(vec![
+                    gv_sym("energy"),
+                    gv_kw("leak"),
+                    gv_list(vec![gv_sym("per-step"), gv_kw("energy-decay")]),
+                ])]),
+                gv_kw("update"),
+                gv_list(vec![
+                    gv_sym(">="),
+                    gv_list(vec![gv_sym("node-state"), gv_sym("self"), gv_kw("energy")]),
+                    gv_num(1.0),
+                ]),
+            ]),
+            gv_list(vec![
+                gv_sym("edges"),
+                gv_kw("from"),
+                gv_sym("nrn"),
+                gv_kw("to"),
+                gv_sym("nrn"),
+                gv_kw("topology"),
+                gv_list(vec![gv_sym("all-to-all")]),
+                gv_kw("params"),
+                gv_list(vec![gv_list(vec![
+                    gv_sym("weight"),
+                    gv_kw("float"),
+                    gv_num(-1.0),
+                    gv_num(1.0),
+                    gv_kw("default"),
+                    gv_num(0.5),
+                ])]),
+            ]),
+        ]
+    }
+
+    #[test]
+    fn graph_mode_detected_by_def_node() {
+        assert!(super::graph_mode_present(&sample_graph_args()));
+        // A tick-style arg list (no def-node) is not graph mode.
+        let tick_args = vec![
+            Value::Symbol("liebezeit".into()),
+            Value::Keyword("resolution".into()),
+            Value::Keyword("16".into()),
+            Value::Keyword("tick".into()),
+            gv_list(vec![gv_sym("lambda"), gv_list(vec![])]),
+        ];
+        assert!(!super::graph_mode_present(&tick_args));
+    }
+
+    #[test]
+    fn parse_graph_manifest_extracts_full_shape() {
+        use crate::graph::{LeakSpec, Reduce, SeedFrom, ShapeSpec, Topology};
+        use crate::sequencer::Timebase;
+
+        let manifest = super::parse_graph_manifest(&sample_graph_args()).expect("parse");
+        assert_eq!(manifest.name, "neural");
+        assert_eq!(manifest.shape, ShapeSpec::Line(2));
+        assert_eq!(manifest.energy_decay, 0.9);
+        assert_eq!(manifest.max_poly, 4);
+        assert_eq!(manifest.reset_every_beats, 16.0); // (bars 4) @ 4/4
+
+        let node = &manifest.node;
+        assert_eq!(node.name, "nrn");
+        assert_eq!(node.resolution, Timebase::Sixteenth);
+        assert_eq!(node.delay_steps, 1);
+        assert_eq!(node.quantize, None);
+        assert_eq!(node.reduce, Reduce::Sum);
+        assert_eq!(node.seed_from, SeedFrom::Route);
+        assert_eq!(node.param_default("threshold"), Some(1.0));
+        let transpose = node.params.iter().find(|p| p.name == "transpose").unwrap();
+        assert!(transpose.is_int);
+        assert_eq!(transpose.default, 0.0);
+        assert_eq!(node.state.len(), 1);
+        assert_eq!(node.state[0].name, "energy");
+        assert_eq!(node.state[0].leak, Some(LeakSpec::PerStepEnergyDecay));
+        assert!(node.update_source.as_deref().unwrap().contains(">="));
+
+        assert_eq!(manifest.edge_sets.len(), 1);
+        let edges = &manifest.edge_sets[0];
+        assert_eq!(edges.from, "nrn");
+        assert_eq!(edges.to, "nrn");
+        assert_eq!(edges.topology, Topology::AllToAll);
+        assert_eq!(edges.params[0].name, "weight");
+        assert_eq!(edges.params[0].default, 0.5);
+
+        // Materialize: 2 nodes, 2x2 all-to-all edges.
+        let runtime = manifest.materialize();
+        assert_eq!(runtime.num_nodes(), 2);
+    }
+
+    #[test]
+    fn parse_graph_manifest_requires_shape_and_node() {
+        let no_shape = vec![
+            gv_sym("g"),
+            gv_list(vec![gv_sym("def-node"), gv_sym("n")]),
+        ];
+        assert!(super::parse_graph_manifest(&no_shape)
+            .unwrap_err()
+            .contains(":shape"));
+
+        let no_node = vec![
+            gv_sym("g"),
+            gv_kw("shape"),
+            gv_list(vec![gv_sym("grid"), gv_num(2.0), gv_num(2.0)]),
+        ];
+        assert!(super::parse_graph_manifest(&no_node)
+            .unwrap_err()
+            .contains("def-node"));
+    }
 
     static CAPTURED_DGEN_SAMPLE_RATE_BITS: AtomicU32 = AtomicU32::new(0);
 

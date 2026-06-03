@@ -1509,8 +1509,27 @@ impl Compiler {
             // program for the *sequencer* runtime, so it must be captured as data
             // here (in the UI/editor runtime) and shipped, not evaluated locally.
             let is_def_sequencer = matches!(op, Expression::Symbol(s) if s == "def-sequencer");
+            // Graph-mode `def-sequencer`: the *entire* body (`:shape`, sequencer-level
+            // config, `def-node` and `edges` sub-forms) is a manifest for the sequencer
+            // runtime and must be captured as data, not evaluated here. Detected by the
+            // presence of a `def-node` sub-form (its absence selects the existing tick
+            // mode, whose path below is left untouched). `,x` (Unquote) at the top level
+            // still escapes to runtime evaluation, so computed config composes — this is
+            // the auto-quasiquote of the whole body.
+            let is_graph_sequencer = is_def_sequencer
+                && list.iter().skip(1).any(|elem| {
+                    matches!(elem, Expression::List(l)
+                        if matches!(l.first(), Some(Expression::Symbol(s)) if s == "def-node"))
+                });
             let mut quote_next = false;
             for (i, elem) in list.iter().skip(1).enumerate() {
+                if is_graph_sequencer {
+                    match elem {
+                        Expression::Unquote(inner) => self.compile_expression(inner)?,
+                        _ => self.compile_quoted_expression(elem)?,
+                    }
+                    continue;
+                }
                 if quote_next {
                     self.compile_quoted_expression(elem)?;
                     quote_next = false;
