@@ -336,6 +336,69 @@ struct GraphFiringCandidate {
     dampen_incoming: Option<f64>,
 }
 
+/// Fully materialized, override-resolved graph configuration.
+///
+/// This is deliberately separate from [`GraphRuntime`]'s mutable state so live UI
+/// edits can update routes, delays, params, and weights without replacing energy,
+/// pending propagations, RNG, or dampening state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphRuntimeConfig {
+    pub id: u64,
+    pub name: String,
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub edge_default_dampening: Vec<f64>,
+    pub out_edges: Vec<Vec<usize>>,
+    pub in_edges: Vec<Vec<usize>>,
+    pub energy_decay: f64,
+    pub reset_interval_beats: f64,
+    pub max_poly_selection: NeuralMaxPolySelection,
+    pub node_params: Vec<HashMap<String, f64>>,
+}
+
+impl GraphRuntimeConfig {
+    pub fn new(
+        id: u64,
+        name: String,
+        nodes: Vec<GraphNode>,
+        edges: Vec<GraphEdge>,
+        energy_decay: f64,
+        reset_interval_beats: f64,
+        max_poly_selection: NeuralMaxPolySelection,
+        node_params: Vec<HashMap<String, f64>>,
+    ) -> Self {
+        let num_nodes = nodes.len();
+        let mut out_edges = vec![Vec::new(); num_nodes];
+        let mut in_edges = vec![Vec::new(); num_nodes];
+        for (edge_idx, edge) in edges.iter().enumerate() {
+            if edge.from < num_nodes {
+                out_edges[edge.from].push(edge_idx);
+            }
+            if edge.to < num_nodes {
+                in_edges[edge.to].push(edge_idx);
+            }
+        }
+        let edge_default_dampening = edges.iter().map(|edge| edge.dampening).collect();
+        Self {
+            id,
+            name,
+            nodes,
+            edges,
+            edge_default_dampening,
+            out_edges,
+            in_edges,
+            energy_decay: energy_decay.clamp(0.0, 1.0),
+            reset_interval_beats: reset_interval_beats.max(0.0),
+            max_poly_selection,
+            node_params: normalized_node_params(num_nodes, node_params),
+        }
+    }
+
+    fn num_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+}
+
 /// The runtime for one graph-mode `def-sequencer`. Structure-of-arrays over the
 /// shape; sparse edge set; per-node clocks. Reconciled by id like the generator
 /// runtime so hot-reloads preserve live state on compatible edits.
@@ -422,33 +485,35 @@ impl GraphRuntime {
         max_poly_selection: NeuralMaxPolySelection,
         node_params: Vec<HashMap<String, f64>>,
     ) -> Self {
-        let num_nodes = nodes.len();
-        let mut out_edges = vec![Vec::new(); num_nodes];
-        let mut in_edges = vec![Vec::new(); num_nodes];
-        for (edge_idx, edge) in edges.iter().enumerate() {
-            if edge.from < num_nodes {
-                out_edges[edge.from].push(edge_idx);
-            }
-            if edge.to < num_nodes {
-                in_edges[edge.to].push(edge_idx);
-            }
-        }
-        let edge_default_dampening = edges.iter().map(|edge| edge.dampening).collect();
-        let mut runtime = Self {
+        Self::new_from_config(GraphRuntimeConfig::new(
             id,
             name,
+            nodes,
+            edges,
+            energy_decay,
+            reset_interval_beats,
+            max_poly_selection,
+            node_params,
+        ))
+    }
+
+    pub fn new_from_config(config: GraphRuntimeConfig) -> Self {
+        let num_nodes = config.num_nodes();
+        let mut runtime = Self {
+            id: config.id,
+            name: config.name,
             active: true,
             num_nodes,
-            nodes,
-            edge_default_dampening,
-            edges,
-            out_edges,
-            in_edges,
-            energy_decay: energy_decay.clamp(0.0, 1.0),
-            reset_interval_beats: reset_interval_beats.max(0.0),
-            max_poly_selection,
-            random_state: id,
-            node_params: normalized_node_params(num_nodes, node_params),
+            nodes: config.nodes,
+            edge_default_dampening: config.edge_default_dampening,
+            edges: config.edges,
+            out_edges: config.out_edges,
+            in_edges: config.in_edges,
+            energy_decay: config.energy_decay,
+            reset_interval_beats: config.reset_interval_beats,
+            max_poly_selection: config.max_poly_selection,
+            random_state: config.id,
+            node_params: config.node_params,
             energy: vec![0.0; num_nodes],
             input_accum: vec![0.0; num_nodes],
             input_seen: vec![false; num_nodes],
@@ -462,6 +527,54 @@ impl GraphRuntime {
         };
         runtime.reset(0.0);
         runtime
+    }
+
+    pub fn config_compatible(&self, config: &GraphRuntimeConfig) -> bool {
+        self.id == config.id
+            && self.num_nodes == config.num_nodes()
+            && self.edges.len() == config.edges.len()
+            && self
+                .edges
+                .iter()
+                .zip(&config.edges)
+                .all(|(current, next)| current.from == next.from && current.to == next.to)
+    }
+
+    pub fn apply_config_preserving_state(
+        &mut self,
+        config: GraphRuntimeConfig,
+        total_beats: f64,
+    ) -> bool {
+        if !self.config_compatible(&config) {
+            return false;
+        }
+
+        let num_nodes = config.num_nodes();
+        let edge_default_dampening = config.edge_default_dampening;
+        self.id = config.id;
+        self.name = config.name;
+        self.num_nodes = num_nodes;
+        self.nodes = config.nodes;
+        self.out_edges = config.out_edges;
+        self.in_edges = config.in_edges;
+        self.energy_decay = config.energy_decay;
+        self.reset_interval_beats = config.reset_interval_beats;
+        self.max_poly_selection = config.max_poly_selection;
+        self.node_params = config.node_params;
+
+        for (idx, next_edge) in config.edges.into_iter().enumerate() {
+            let old_default = self.edge_default_dampening[idx];
+            let old_current = self.edges[idx].dampening;
+            let new_default = edge_default_dampening[idx];
+            let dampening_delta = old_current - old_default;
+            let mut updated_edge = next_edge;
+            updated_edge.dampening = (new_default + dampening_delta).clamp(0.0, 1.0);
+            self.edges[idx] = updated_edge;
+            self.edge_default_dampening[idx] = new_default;
+        }
+
+        self.realign(total_beats);
+        true
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1139,41 +1252,21 @@ pub struct GraphManifest {
 }
 
 impl GraphManifest {
-    /// True if `other` materializes to the same node field + edge set as `self`, i.e.
-    /// a hot-reload can keep the live runtime's energy/pending state. Ignores the
-    /// `:update`/`:gather` *code* and behavioral `:params` (re-read each eval), and the
-    /// node `:state` declarations — only materialization-relevant structure matters.
+    /// True if `other` materializes to the same runtime identity and edge topology.
+    /// Live-editable config fields such as route, delay, threshold, weight, and
+    /// default dampening are intentionally compatible because they can be applied to
+    /// an existing runtime without replacing state.
     pub fn structurally_compatible(&self, other: &GraphManifest) -> bool {
-        let intrinsics = |n: &NodeProto| {
-            (
-                n.resolution,
-                n.delay_steps,
-                n.quantize,
-                n.route,
-                n.seed_from.clone(),
-                n.reduce,
-            )
-        };
-        let edge_shape = |sets: &[EdgeSetSpec]| {
-            sets.iter()
-                .map(|s| {
-                    (
-                        s.from.clone(),
-                        s.to.clone(),
-                        s.topology.clone(),
-                        s.param_default("weight"),
-                        s.param_default("dampening"),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        self.shape == other.shape
-            && self.energy_decay == other.energy_decay
-            && self.reset_every_beats == other.reset_every_beats
-            && self.seed_on_reset == other.seed_on_reset
-            && self.max_poly_selection == other.max_poly_selection
-            && intrinsics(&self.node) == intrinsics(&other.node)
-            && edge_shape(&self.edge_sets) == edge_shape(&other.edge_sets)
+        let current = self.runtime_config_with_overrides(None);
+        let next = other.runtime_config_with_overrides(None);
+        current.id == next.id
+            && current.num_nodes() == next.num_nodes()
+            && current.edges.len() == next.edges.len()
+            && current
+                .edges
+                .iter()
+                .zip(&next.edges)
+                .all(|(current, next)| current.from == next.from && current.to == next.to)
     }
 
     /// Expand the manifest into the node field + edge set for [`GraphRuntime::new`],
@@ -1184,10 +1277,10 @@ impl GraphManifest {
         self.materialize_with_overrides(None)
     }
 
-    pub fn materialize_with_overrides(
+    pub fn runtime_config_with_overrides(
         &self,
         overrides: Option<&ProjectGraphOverrides>,
-    ) -> GraphRuntime {
+    ) -> GraphRuntimeConfig {
         let num_nodes = self.shape.num_nodes();
         let proto_params = self
             .node
@@ -1284,7 +1377,7 @@ impl GraphManifest {
             }
         }
 
-        GraphRuntime::new_with_config(
+        GraphRuntimeConfig::new(
             self.id,
             self.name.clone(),
             nodes,
@@ -1294,6 +1387,13 @@ impl GraphManifest {
             self.max_poly_selection,
             node_params,
         )
+    }
+
+    pub fn materialize_with_overrides(
+        &self,
+        overrides: Option<&ProjectGraphOverrides>,
+    ) -> GraphRuntime {
+        GraphRuntime::new_from_config(self.runtime_config_with_overrides(overrides))
     }
 }
 
@@ -1330,6 +1430,19 @@ mod tests {
         let mut update = threshold_update(thresholds);
         runtime.process_block(0.0, end_beats, 0, 48_000.0, max_poly, &mut update, &mut out);
         out
+    }
+
+    fn runtime_config(id: u64, nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> GraphRuntimeConfig {
+        GraphRuntimeConfig::new(
+            id,
+            "g".into(),
+            nodes,
+            edges,
+            1.0,
+            0.0,
+            NeuralMaxPolySelection::Deterministic,
+            Vec::new(),
+        )
     }
 
     fn always_fire_with_dampen(amount: f64) -> impl FnMut(&NodeEval) -> NodeFire {
@@ -1721,6 +1834,207 @@ mod tests {
         let out = run(&mut runtime, 1.0, 0, vec![1.0]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].event.track, Some(2));
+    }
+
+    #[test]
+    fn live_config_update_preserves_runtime_state() {
+        let mut n0 = node(Timebase::Quarter);
+        n0.seed_track_mask = seed_track_mask(&[0]);
+        let mut n1 = node(Timebase::Quarter);
+        n1.route = Some(1);
+        let mut runtime = GraphRuntime::new_with_config(
+            11,
+            "g".into(),
+            vec![n0, n1],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            8.0,
+            NeuralMaxPolySelection::Deterministic,
+            Vec::new(),
+        );
+        runtime.energy[1] = 0.75;
+        runtime.input_accum[1] = 0.25;
+        runtime.input_seen[1] = true;
+        runtime.source_event[1] = Some(GraphPayload {
+            note: 7.0,
+            velocity: 0.8,
+        });
+        runtime.tick_count[1] = 9;
+        runtime.pending[0].push(GraphPropagation {
+            remaining_steps: 3,
+            ready_after_beats: 2.0,
+            payload: GraphPayload::default(),
+        });
+        runtime.incoming_triggers[1].push(0);
+        runtime.random_state = 123;
+
+        let mut next0 = node(Timebase::Eighth);
+        next0.delay_steps = 4;
+        next0.seed_track_mask = seed_track_mask(&[3]);
+        let mut next1 = node(Timebase::Quarter);
+        next1.route = Some(2);
+        next1.threshold = 0.4;
+        next1.transpose = 5.0;
+        let mut params = vec![HashMap::new(), HashMap::new()];
+        params[1].insert("threshold".into(), 0.4);
+        params[1].insert("transpose".into(), 5.0);
+        let config = GraphRuntimeConfig::new(
+            11,
+            "g".into(),
+            vec![next0, next1],
+            vec![GraphEdge::new(0, 1, 0.2)],
+            0.5,
+            4.0,
+            NeuralMaxPolySelection::Propagation,
+            params,
+        );
+
+        assert!(runtime.apply_config_preserving_state(config, 2.0));
+
+        assert_eq!(runtime.energy[1], 0.75);
+        assert_eq!(runtime.input_accum[1], 0.25);
+        assert!(runtime.input_seen[1]);
+        assert_eq!(
+            runtime.source_event[1],
+            Some(GraphPayload {
+                note: 7.0,
+                velocity: 0.8
+            })
+        );
+        assert_eq!(runtime.tick_count[1], 9);
+        assert_eq!(runtime.pending[0][0].remaining_steps, 3);
+        assert_eq!(runtime.incoming_triggers[1], vec![0]);
+        assert_eq!(runtime.random_state, 123);
+        assert_eq!(runtime.nodes[0].delay_steps, 4);
+        assert_eq!(runtime.nodes[0].seed_track_mask, seed_track_mask(&[3]));
+        assert_eq!(runtime.nodes[1].route, Some(2));
+        assert_eq!(runtime.nodes[1].threshold, 0.4);
+        assert_eq!(runtime.nodes[1].transpose, 5.0);
+        assert_eq!(runtime.edges[0].weight, 0.2);
+        assert_eq!(runtime.energy_decay, 0.5);
+        assert_eq!(runtime.reset_interval_beats, 4.0);
+        assert_eq!(
+            runtime.max_poly_selection,
+            NeuralMaxPolySelection::Propagation
+        );
+    }
+
+    #[test]
+    fn live_weight_zero_affects_pending_propagation() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            nodes.clone(),
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let config = runtime_config(1, nodes, vec![GraphEdge::new(0, 1, 0.0)]);
+        assert!(runtime.apply_config_preserving_state(config, 0.0));
+
+        let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0]);
+        assert!(
+            out.is_empty(),
+            "pending scatter should read the live-edited zero weight"
+        );
+    }
+
+    #[test]
+    fn live_delay_edit_preserves_existing_pending_and_affects_future_seeds() {
+        let mut n0 = node(Timebase::Quarter);
+        n0.delay_steps = 3;
+        n0.seed_track_mask = seed_track_mask(&[0]);
+        let mut runtime = GraphRuntime::new(1, "g".into(), vec![n0.clone()], Vec::new(), 1.0, 0.0);
+        runtime.seed(0, 0.0, GraphPayload::default());
+        assert_eq!(runtime.pending[0][0].remaining_steps, 3);
+
+        n0.delay_steps = 6;
+        let config = runtime_config(1, vec![n0], Vec::new());
+        assert!(runtime.apply_config_preserving_state(config, 0.0));
+        assert_eq!(runtime.pending[0][0].remaining_steps, 3);
+
+        runtime.seed(0, 0.0, GraphPayload::default());
+        assert_eq!(runtime.pending[0][1].remaining_steps, 6);
+    }
+
+    #[test]
+    fn live_node_param_update_changes_threshold_and_preserves_payload() {
+        let mut n0 = node(Timebase::Quarter);
+        n0.threshold = 1.0;
+        let mut runtime = GraphRuntime::new(1, "g".into(), vec![n0.clone()], Vec::new(), 1.0, 0.0);
+        runtime.energy[0] = 0.5;
+        runtime.source_event[0] = Some(GraphPayload {
+            note: 12.0,
+            velocity: 0.6,
+        });
+
+        n0.threshold = 0.25;
+        n0.transpose = 7.0;
+        let mut params = HashMap::new();
+        params.insert("threshold".into(), 0.25);
+        params.insert("transpose".into(), 7.0);
+        let config = GraphRuntimeConfig::new(
+            1,
+            "g".into(),
+            vec![n0],
+            Vec::new(),
+            1.0,
+            0.0,
+            NeuralMaxPolySelection::Deterministic,
+            vec![params],
+        );
+        assert!(runtime.apply_config_preserving_state(config, 0.0));
+
+        assert_eq!(runtime.energy[0], 0.5);
+        assert_eq!(
+            runtime.source_event[0],
+            Some(GraphPayload {
+                note: 12.0,
+                velocity: 0.6
+            })
+        );
+        assert_eq!(runtime.nodes[0].threshold, 0.25);
+        assert_eq!(runtime.node_params[0].get("threshold"), Some(&0.25));
+    }
+
+    #[test]
+    fn live_default_dampening_edit_preserves_delta_from_default() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let mut edge = GraphEdge::new(0, 1, 1.0);
+        edge.dampening = 0.2;
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes.clone(), vec![edge], 1.0, 0.0);
+        runtime.edges[0].dampening = 0.5;
+
+        let mut next_edge = GraphEdge::new(0, 1, 0.8);
+        next_edge.dampening = 0.1;
+        let config = runtime_config(1, nodes, vec![next_edge]);
+        assert!(runtime.apply_config_preserving_state(config, 0.0));
+
+        assert_eq!(runtime.edge_default_dampening[0], 0.1);
+        assert!((runtime.edges[0].dampening - 0.4).abs() < f64::EPSILON);
+        assert_eq!(runtime.edges[0].weight, 0.8);
+    }
+
+    #[test]
+    fn incompatible_config_is_rejected_without_clearing_state() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            nodes.clone(),
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.energy[1] = 0.5;
+        let config = runtime_config(1, nodes, vec![GraphEdge::new(1, 0, 1.0)]);
+
+        assert!(!runtime.apply_config_preserving_state(config, 0.0));
+        assert_eq!(runtime.energy[1], 0.5);
+        assert_eq!((runtime.edges[0].from, runtime.edges[0].to), (0, 1));
     }
 
     #[test]

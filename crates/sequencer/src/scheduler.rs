@@ -769,6 +769,51 @@ fn seed_graph_runtimes(
     }
 }
 
+fn graph_overrides_for_manifest<'a>(
+    manifest: &crate::graph::GraphManifest,
+    overrides: &'a [crate::graph::ProjectGraphOverrides],
+) -> Option<&'a crate::graph::ProjectGraphOverrides> {
+    overrides.iter().find(|overrides| {
+        overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
+    })
+}
+
+fn reconcile_graph_runtimes(
+    manifests: Vec<crate::graph::GraphManifest>,
+    overrides: &[crate::graph::ProjectGraphOverrides],
+    runtimes: &mut Vec<crate::graph::GraphRuntime>,
+    stored_manifests: &mut Vec<crate::graph::GraphManifest>,
+    total_beats: f64,
+) {
+    let mut existing = std::mem::take(runtimes);
+    let mut next_runtimes = Vec::with_capacity(manifests.len());
+    for manifest in &manifests {
+        let graph_overrides = graph_overrides_for_manifest(manifest, overrides);
+        let config = manifest.runtime_config_with_overrides(graph_overrides);
+        let next_runtime = if let Some(pos) = existing
+            .iter()
+            .position(|runtime| runtime.id == manifest.id)
+        {
+            let mut runtime = existing.swap_remove(pos);
+            if runtime.config_compatible(&config) {
+                runtime.apply_config_preserving_state(config, total_beats);
+                runtime
+            } else {
+                let mut runtime = crate::graph::GraphRuntime::new_from_config(config);
+                runtime.realign(total_beats);
+                runtime
+            }
+        } else {
+            let mut runtime = crate::graph::GraphRuntime::new_from_config(config);
+            runtime.realign(total_beats);
+            runtime
+        };
+        next_runtimes.push(next_runtime);
+    }
+    *runtimes = next_runtimes;
+    *stored_manifests = manifests;
+}
+
 fn chord_data_from_parts(
     notes: &[f32],
     durations: &[f32],
@@ -2698,48 +2743,26 @@ pub fn spawn_scheduler_thread(
                         .unwrap_or_default();
                     generator_runtime.sync_definitions(&generator_defs, clock.total_beats);
 
-                    // Reconcile graph-mode runtimes by id: reuse a live runtime (its
-                    // energy/pending state) when the new manifest materializes
-                    // identically, else rebuild fresh and realign to the transport.
                     let new_manifests: Vec<crate::graph::GraphManifest> =
                         published.iter().filter_map(|s| s.graph.clone()).collect();
-                    let mut next_runtimes = Vec::with_capacity(new_manifests.len());
-                    for manifest in &new_manifests {
-                        let reused = graph_manifests
-                            .iter()
-                            .position(|m| m.id == manifest.id)
-                            .filter(|&pos| graph_manifests[pos].structurally_compatible(manifest))
-                            .map(|pos| graph_runtimes[pos].clone());
-                        match reused {
-                            Some(rt) => next_runtimes.push(rt),
-                            None => {
-                                let overrides = snapshot.graph_overrides.iter().find(|overrides| {
-                                    overrides.sequencer_id == manifest.id
-                                        || overrides.sequencer_name == manifest.name
-                                });
-                                let mut rt = manifest.materialize_with_overrides(overrides);
-                                rt.realign(clock.total_beats);
-                                next_runtimes.push(rt);
-                            }
-                        }
-                    }
-                    graph_runtimes = next_runtimes;
-                    graph_manifests = new_manifests;
+                    reconcile_graph_runtimes(
+                        new_manifests,
+                        &snapshot.graph_overrides,
+                        &mut graph_runtimes,
+                        &mut graph_manifests,
+                        clock.total_beats,
+                    );
                     loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
                 }
 
                 if loaded_graph_overrides.as_ref() != Some(&snapshot.graph_overrides) {
-                    let mut next_runtimes = Vec::with_capacity(graph_manifests.len());
-                    for manifest in &graph_manifests {
-                        let overrides = snapshot.graph_overrides.iter().find(|overrides| {
-                            overrides.sequencer_id == manifest.id
-                                || overrides.sequencer_name == manifest.name
-                        });
-                        let mut rt = manifest.materialize_with_overrides(overrides);
-                        rt.realign(clock.total_beats);
-                        next_runtimes.push(rt);
-                    }
-                    graph_runtimes = next_runtimes;
+                    reconcile_graph_runtimes(
+                        graph_manifests.clone(),
+                        &snapshot.graph_overrides,
+                        &mut graph_runtimes,
+                        &mut graph_manifests,
+                        clock.total_beats,
+                    );
                     loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
                 }
 
@@ -3738,17 +3761,22 @@ mod tests {
     use super::{
         apply_fit_to_scale_to_trigger, apply_neuron_output_overrides, delayed_step_sample_time,
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, midi_fx_window_events_from_step,
-        quantized_live_tick_sample, resolve_effect_params, resolve_instrument_plocks,
-        resolve_sampler_params, run_midi_fx_chain_for_track, should_reload_neural_runtime,
-        swung_network_sample_time, track_active_note_spans_at_beat, track_note_spans_for_trigger,
-        MidiFxEvent, SnapshotSequencerClock,
+        quantized_live_tick_sample, reconcile_graph_runtimes, resolve_effect_params,
+        resolve_instrument_plocks, resolve_sampler_params, run_midi_fx_chain_for_track,
+        should_reload_neural_runtime, swung_network_sample_time, track_active_note_spans_at_beat,
+        track_note_spans_for_trigger, MidiFxEvent, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
+    use crate::graph::{
+        EdgeSetSpec, GraphEmission, GraphManifest, GraphPayload, NodeEval, NodeFire, NodeProto,
+        ParamSpec, ProjectGraphNodeIntrinsicOverride, ProjectGraphOverrides,
+        ProjectGraphRouteOverride, SeedFrom, ShapeSpec, Topology,
+    };
     use crate::lisp_effect;
     use crate::neural::{
-        NeuralOutput, ParamNodeId, ProjectEffectParamOverride, ProjectNeuralNetwork, ProjectNeuron,
-        ProjectParamOverride,
+        NeuralMaxPolySelection, NeuralOutput, ParamNodeId, ProjectEffectParamOverride,
+        ProjectNeuralNetwork, ProjectNeuron, ProjectParamOverride,
     };
     use crate::scheduled_event::{
         resolved_chord_transpose, EventSource, ScheduledChordData, ScheduledEffectParam,
@@ -3757,7 +3785,7 @@ mod tests {
         StepEvent,
     };
     use crate::sequencer::{
-        default_empty_effect_chain, SequencerState, StepParam, SwingResolution,
+        default_empty_effect_chain, SequencerState, StepParam, SwingResolution, Timebase,
     };
     use std::sync::Arc;
 
@@ -3772,6 +3800,168 @@ mod tests {
             pan: 0.0,
             chop: 1.0,
         }
+    }
+
+    fn graph_manifest(id: u64, name: &str, shape: ShapeSpec) -> GraphManifest {
+        GraphManifest {
+            id,
+            name: name.into(),
+            shape,
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Quarter,
+                route: Some(0),
+                seed_from: SeedFrom::Route,
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "n".into(),
+                to: "n".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+            }],
+        }
+    }
+
+    fn graph_route_override(
+        sequencer_id: u64,
+        sequencer_name: &str,
+        node_index: usize,
+        route: usize,
+    ) -> ProjectGraphOverrides {
+        ProjectGraphOverrides {
+            sequencer_id,
+            sequencer_name: sequencer_name.into(),
+            node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
+                group: "n".into(),
+                instance: node_index,
+                resolution: None,
+                delay_steps: None,
+                quantize: None,
+                route: Some(ProjectGraphRouteOverride::Track(route)),
+                seed_from: None,
+            }],
+            node_params: Vec::new(),
+            edge_params: Vec::new(),
+        }
+    }
+
+    fn process_graph(
+        runtime: &mut crate::graph::GraphRuntime,
+        start_beats: f64,
+        end_beats: f64,
+    ) -> Vec<GraphEmission> {
+        let mut out = Vec::new();
+        runtime.process_block(
+            start_beats,
+            end_beats,
+            0,
+            48_000.0,
+            0,
+            |eval: &NodeEval| NodeFire {
+                fired: eval.energy >= 1.0,
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+        out
+    }
+
+    #[test]
+    fn graph_override_reconcile_preserves_pending_runtime_state() {
+        let manifest = graph_manifest(1, "g", ShapeSpec::Line(1));
+        let mut manifests = Vec::new();
+        let mut runtimes = Vec::new();
+        reconcile_graph_runtimes(
+            vec![manifest.clone()],
+            &[],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+        runtimes[0].seed(0, 0.0, GraphPayload::default());
+
+        reconcile_graph_runtimes(
+            vec![manifest],
+            &[graph_route_override(1, "g", 0, 2)],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+
+        let out = process_graph(&mut runtimes[0], 0.0, 1.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event.track, Some(2));
+    }
+
+    #[test]
+    fn graph_shape_change_rebuilds_and_clears_pending_state() {
+        let mut manifests = Vec::new();
+        let mut runtimes = Vec::new();
+        reconcile_graph_runtimes(
+            vec![graph_manifest(1, "g", ShapeSpec::Line(1))],
+            &[],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+        runtimes[0].seed(0, 0.0, GraphPayload::default());
+
+        reconcile_graph_runtimes(
+            vec![graph_manifest(1, "g", ShapeSpec::Line(2))],
+            &[],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+
+        assert_eq!(runtimes[0].num_nodes(), 2);
+        let out = process_graph(&mut runtimes[0], 0.0, 1.0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn graph_reconcile_tracks_multiple_graphs_by_id() {
+        let mut manifests = Vec::new();
+        let mut runtimes = Vec::new();
+        let graph_a = graph_manifest(1, "a", ShapeSpec::Line(1));
+        let graph_b = graph_manifest(2, "b", ShapeSpec::Line(1));
+        reconcile_graph_runtimes(
+            vec![graph_a.clone(), graph_b.clone()],
+            &[],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+        runtimes[0].seed(0, 0.0, GraphPayload::default());
+        runtimes[1].seed(0, 0.0, GraphPayload::default());
+
+        reconcile_graph_runtimes(
+            vec![graph_a, graph_b],
+            &[graph_route_override(1, "a", 0, 3)],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+
+        let out_a = process_graph(&mut runtimes[0], 0.0, 1.0);
+        let out_b = process_graph(&mut runtimes[1], 0.0, 1.0);
+        assert_eq!(out_a.len(), 1);
+        assert_eq!(out_b.len(), 1);
+        assert_eq!(out_a[0].event.track, Some(3));
+        assert_eq!(out_b[0].event.track, Some(0));
     }
 
     #[test]
