@@ -764,8 +764,20 @@ fn seed_graph_runtimes(
         note: event.resolved.transpose,
         velocity: event.resolved.velocity,
     };
-    for graph in graphs.iter_mut() {
-        graph.seed(event.track, seed_beats, payload);
+    let debug_graph = std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some();
+    for (graph_idx, graph) in graphs.iter_mut().enumerate() {
+        let seeded = graph.seed(event.track, seed_beats, payload);
+        if debug_graph {
+            eprintln!(
+                "[graph-seed] graph={} track={} beat={:.6} seeded={} node0_mask={:#x} node0_pending={}",
+                graph_idx,
+                event.track,
+                seed_beats,
+                seeded,
+                graph.seed_track_mask_for_node(0).unwrap_or(0),
+                graph.pending_count_for_node(0).unwrap_or(0)
+            );
+        }
     }
 }
 
@@ -2634,6 +2646,8 @@ pub fn spawn_scheduler_thread(
             let mut published_sequencers_version = u64::MAX;
             let mut scratch_runtime = None;
             let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
+            let debug_graph = std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some();
+            let mut debug_graph_drive_chunks = 0_u32;
             let mut debug_accum_invocations = 0_u64;
 
             loop {
@@ -2752,6 +2766,15 @@ pub fn spawn_scheduler_thread(
                         &mut graph_manifests,
                         clock.total_beats,
                     );
+                    if debug_graph {
+                        eprintln!(
+                            "[graph-reconcile] published={} graph_manifests={} runtimes={} overrides={}",
+                            published.len(),
+                            graph_manifests.len(),
+                            graph_runtimes.len(),
+                            snapshot.graph_overrides.len()
+                        );
+                    }
                     loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
                 }
 
@@ -3664,11 +3687,28 @@ pub fn spawn_scheduler_thread(
                     // fired node's :update predicate runs on the scheduler VM; firings
                     // resolve to NetworkTriggers (velocity-merged + max_poly), additive
                     // like the neural/generator layers.
+                    let log_graph_drive_chunk = debug_graph && debug_graph_drive_chunks < 60;
+                    if log_graph_drive_chunk {
+                        eprintln!(
+                            "[graph-drive] runtimes={} scratch={} chunk=({:.3}..{:.3})",
+                            graph_runtimes.len(),
+                            scratch_runtime.is_some(),
+                            chunk_start_beats,
+                            chunk_end_beats
+                        );
+                        for (i, rt) in graph_runtimes.iter().enumerate() {
+                            eprintln!(
+                                "[graph-drive]   runtime[{i}] is_empty={}",
+                                rt.is_empty()
+                            );
+                        }
+                    }
                     for graph_index in 0..graph_runtimes.len() {
                         if graph_runtimes[graph_index].is_empty() {
                             continue;
                         }
                         let mut graph_emissions = Vec::new();
+                        let mut graph_eval_count = 0_usize;
                         if let Some(scratch) = scratch_runtime.as_mut() {
                             let manifest = &graph_manifests[graph_index];
                             let max_poly = manifest.max_poly;
@@ -3679,11 +3719,34 @@ pub fn spawn_scheduler_thread(
                                 samples_per_quarter,
                                 max_poly,
                                 |eval| {
-                                    scratch
-                                        .invoke_graph_update(manifest, eval)
-                                        .unwrap_or_default()
+                                    graph_eval_count += 1;
+                                    match scratch.invoke_graph_update(manifest, eval) {
+                                        Ok(decision) => decision,
+                                        Err(error) => {
+                                            if debug_graph {
+                                                eprintln!(
+                                                    "[graph-update-error] graph={} node={} beat={:.6} error={}",
+                                                    manifest.name,
+                                                    eval.node_index,
+                                                    eval.beat,
+                                                    error
+                                                );
+                                            }
+                                            crate::graph::NodeFire::default()
+                                        }
+                                    }
                                 },
                                 &mut graph_emissions,
+                            );
+                        }
+                        if log_graph_drive_chunk {
+                            eprintln!(
+                                "[graph-drive]   runtime[{graph_index}] evals={} emissions={} node0_pending={}",
+                                graph_eval_count,
+                                graph_emissions.len(),
+                                graph_runtimes[graph_index]
+                                    .pending_count_for_node(0)
+                                    .unwrap_or(0)
                             );
                         }
                         // Velocity-merge coincident hits on the same track (accent).
@@ -3738,6 +3801,9 @@ pub fn spawn_scheduler_thread(
                         if !chunk_enqueued {
                             break;
                         }
+                    }
+                    if log_graph_drive_chunk {
+                        debug_graph_drive_chunks += 1;
                     }
                     if !chunk_enqueued {
                         break;

@@ -3677,7 +3677,7 @@ impl ScratchControlRuntime {
         let callback = self
             .runtime
             .eval_str(&wrapped)
-            .map_err(|e| format!("{e:?}"))?
+            .map_err(|e| format!("failed to compile graph update: {e:?}; source={source}"))?
             .ok_or_else(|| "graph update compilation produced no callback".to_string())?;
         match callback {
             EValue::Closure(_, _) | EValue::NativeFunction(_) => {
@@ -3855,12 +3855,16 @@ impl ScratchControlRuntime {
             }
         }
         let fired = matches!(&result, Ok(Some(v)) if evalue_is_truthy(v));
+        let emit = match &result {
+            Ok(Some(v)) => parse_emit_spec(v),
+            _ => None,
+        };
         result?;
         Ok(crate::graph::NodeFire {
             fired,
+            emit,
             dampen_incoming,
             recover_incoming,
-            ..crate::graph::NodeFire::default()
         })
     }
 }
@@ -3868,6 +3872,31 @@ impl ScratchControlRuntime {
 /// Lisp truthiness: everything is true except `false` and `nil`.
 fn evalue_is_truthy(value: &EValue) -> bool {
     !matches!(value, EValue::Bool(false) | EValue::Nil)
+}
+
+/// Marker key stamped onto the Map that `(emit …)` returns, so a `:update`'s result is
+/// distinguishable from any other truthy value (a plain `true`, a number, or an
+/// `in-event` map) when [`ScratchControlRuntime::invoke_graph_update`] decodes it.
+const EMIT_MARKER: &str = "__emit";
+
+/// Decode the shaped event a `:update` body returned. Only a Map carrying [`EMIT_MARKER`]
+/// (i.e. the value `(emit …)` produced) yields an [`crate::graph::EmitSpec`]; any other
+/// truthy value means "fire with the legacy default" and returns `None`.
+fn parse_emit_spec(value: &EValue) -> Option<crate::graph::EmitSpec> {
+    let EValue::Map(map) = value else {
+        return None;
+    };
+    map.get(EMIT_MARKER)?;
+    let field = |key: &str| -> Option<f32> {
+        map.get(key).and_then(|cell| match &*cell.borrow() {
+            EValue::Number(n) => Some(*n as f32),
+            _ => None,
+        })
+    };
+    Some(crate::graph::EmitSpec {
+        note: field("note"),
+        velocity: field("vel"),
+    })
 }
 
 /// Register the `node-*` accessors a graph-mode `:update` reads. They read the
@@ -3962,25 +3991,7 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
             let ctx = guard
                 .as_ref()
                 .ok_or("node-input-event called outside :update")?;
-            Ok(match ctx.input_event {
-                Some(payload) => {
-                    let mut map = HashMap::new();
-                    map.insert(
-                        "note".to_string(),
-                        std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(
-                            payload.note as f64,
-                        ))),
-                    );
-                    map.insert(
-                        "vel".to_string(),
-                        std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(
-                            payload.velocity as f64,
-                        ))),
-                    );
-                    EValue::Map(map)
-                }
-                None => EValue::Nil,
-            })
+            Ok(payload_to_event(ctx.input_event))
         },
     );
 
@@ -4044,7 +4055,8 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
                 .as_mut()
                 .ok_or("dampen-incoming called outside :update")?;
             ctx.dampen_incoming = Some(amount);
-            Ok(EValue::Number(amount))
+            // Returns nil so a `:update` ending on this edge-effect reads as "no fire".
+            Ok(EValue::Nil)
         },
     );
 
@@ -4067,9 +4079,193 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
                 .as_mut()
                 .ok_or("recover-incoming called outside :update")?;
             ctx.recover_incoming = Some(factor);
-            Ok(EValue::Number(factor))
+            // Returns nil so the common `(if fire? (emit …) (recover-incoming …))`
+            // shape skips when the else-branch runs (the chosen no-fire form).
+            Ok(EValue::Nil)
         },
     );
+
+    // ── Terse, self-less surface (Ext B) ──────────────────────────────────────────
+    // The node context is ambient, so these take no `self`. They read/write the same
+    // bound `GraphNodeContext` as the `node-*` accessors above; the older `node-*`
+    // forms remain as aliases so existing definitions keep working.
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "param",
+        "(param :key)",
+        "Read a behavioral param of this node (prototype default + per-instance plock).",
+        move |args, _ctx| {
+            let key = ctx_key(args.first()).ok_or("param expects (param :key)")?;
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("param called outside :update")?;
+            Ok(EValue::Number(ctx.params.get(&key).copied().unwrap_or(0.0)))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "energy",
+        "(energy)",
+        "Read this node's engine-owned integrated energy.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("energy called outside :update")?;
+            Ok(EValue::Number(ctx.energy))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "set-state!",
+        "(set-state! :key value)",
+        "Write an author state cell of this node (engine `energy` is engine-owned).",
+        move |args, _ctx| {
+            let key = ctx_key(args.first()).ok_or("set-state! expects a key")?;
+            let value = match args.get(1) {
+                Some(EValue::Number(n)) => *n,
+                _ => return Err("set-state! expects (set-state! :key number)".to_string()),
+            };
+            let mut guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_mut().ok_or("set-state! called outside :update")?;
+            if key != "energy" {
+                ctx.state.insert(key, value);
+            }
+            Ok(EValue::Number(value))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "input",
+        "(input)",
+        "The reduced gather result arriving at this node this evaluation boundary.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("input called outside :update")?;
+            Ok(EValue::Number(ctx.input))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "index",
+        "(index)",
+        "This node's instance index within the shape.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("index called outside :update")?;
+            Ok(EValue::Number(ctx.node_index as f64))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "step",
+        "(step)",
+        "0-based count of this node's evaluation boundaries since reset.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("step called outside :update")?;
+            Ok(EValue::Number(ctx.tick_index as f64))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "in-event",
+        "(in-event)",
+        "The payload (event) that arrived at this node this boundary, or nil.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("in-event called outside :update")?;
+            Ok(payload_to_event(ctx.input_event))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "in-note",
+        "(in-note)",
+        "The note of the event arriving this boundary (0 if nothing arrived).",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("in-note called outside :update")?;
+            Ok(EValue::Number(
+                ctx.input_event.map(|p| p.note as f64).unwrap_or(0.0),
+            ))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "in-vel",
+        "(in-vel)",
+        "The velocity of the event arriving this boundary (1.0 if nothing arrived).",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("in-vel called outside :update")?;
+            Ok(EValue::Number(
+                ctx.input_event.map(|p| p.velocity as f64).unwrap_or(1.0),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "emit",
+        "(emit :note n :vel v)",
+        "Fire this node with a shaped event. Each named field overrides the emitted and \
+         propagated payload; unnamed fields relay the incoming event verbatim. Returning \
+         it from `:update` is the fire decision (truthy).",
+        move |args, _ctx| {
+            let mut map: HashMap<String, std::rc::Rc<std::cell::RefCell<EValue>>> = HashMap::new();
+            map.insert(
+                EMIT_MARKER.to_string(),
+                std::rc::Rc::new(std::cell::RefCell::new(EValue::Bool(true))),
+            );
+            let mut i = 0;
+            while i < args.len() {
+                let key = ctx_key(args.get(i))
+                    .ok_or("emit expects keyword/value pairs, e.g. (emit :note 60 :vel 0.8)")?;
+                let value = match args.get(i + 1) {
+                    Some(EValue::Number(n)) => *n,
+                    _ => return Err(format!("emit field :{key} expects a number")),
+                };
+                let field = match key.as_str() {
+                    "note" => "note",
+                    "vel" | "velocity" => "vel",
+                    other => return Err(format!("emit: unknown field :{other}")),
+                };
+                map.insert(
+                    field.to_string(),
+                    std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(value))),
+                );
+                i += 2;
+            }
+            Ok(EValue::Map(map))
+        },
+    );
+}
+
+/// Build the `{note, vel}` Map an `:update` sees for an arrived payload, or nil.
+fn payload_to_event(payload: Option<crate::graph::GraphPayload>) -> EValue {
+    match payload {
+        Some(payload) => {
+            let mut map = HashMap::new();
+            map.insert(
+                "note".to_string(),
+                std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(payload.note as f64))),
+            );
+            map.insert(
+                "vel".to_string(),
+                std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(
+                    payload.velocity as f64,
+                ))),
+            );
+            EValue::Map(map)
+        }
+        None => EValue::Nil,
+    }
 }
 
 fn register_sequencer_natives(
@@ -11501,6 +11697,91 @@ mod tests {
     }
 
     #[test]
+    fn graph_update_emit_shapes_velocity_per_hop_through_vm() {
+        use crate::graph::{
+            EdgeSetSpec, GraphManifest, GraphPayload, NodeProto, ParamSpec, SeedFrom, ShapeSpec,
+            Topology,
+        };
+        use crate::sequencer::Timebase;
+
+        // A self-looping node seeded (note 10, vel 1.0). Its :update emits via the terse
+        // self-less surface, relaying the note unchanged and halving velocity each hop.
+        // Because the emitted payload is what rides the scatter, the decayed velocity
+        // feeds the next boundary's `in-vel` — proving per-hop velocity accumulation is
+        // expressible purely in the DSL (the velocity analogue of the transpose cascade).
+        let manifest = GraphManifest {
+            id: 31,
+            name: "g".into(),
+            shape: ShapeSpec::Line(1),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Quarter,
+                seed_from: SeedFrom::Tracks(vec![0]),
+                update_source: Some("(emit :note (in-note) :vel (* (in-vel) 0.5))".into()),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "n".into(),
+                to: "n".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+            }],
+        };
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut runtime = manifest.materialize();
+        runtime.seed(
+            0,
+            0.0,
+            GraphPayload {
+                note: 10.0,
+                velocity: 1.0,
+            },
+        );
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or_default()
+            },
+            &mut out,
+        );
+        assert!(out.len() >= 3, "expected several hops, got {}", out.len());
+        // Note relays unchanged (emit named :note (in-note), no transpose applied).
+        assert!(out.iter().all(|e| e.event.resolved.transpose == 10.0));
+        // Velocity halves each hop and the decayed value propagates: 0.5, 0.25, 0.125, …
+        let vels: Vec<f32> = out.iter().map(|e| e.event.resolved.velocity).collect();
+        assert_eq!(vels[0], 0.5);
+        assert_eq!(vels[1], 0.25);
+        assert_eq!(vels[2], 0.125);
+    }
+
+    #[test]
     fn graph_update_dampen_and_recover_incoming_through_vm() {
         use crate::graph::{
             EdgeSetSpec, GraphEdge, GraphManifest, GraphPayload, NodeProto, ParamSpec, ShapeSpec,
@@ -11773,7 +12054,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_4x4_demo_ui_exposes_delay_controls_and_weight_matrix() {
+    fn graph_8x8_demo_ui_exposes_node_param_controls_and_weight_matrix() {
         fn collect_widgets<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
             widget_type: &str,
@@ -11809,19 +12090,19 @@ mod tests {
         }
 
         let state = Arc::new(SequencerState::new(
-            5,
-            (0..5).map(|_| default_empty_effect_chain()).collect(),
+            8,
+            (0..8).map(|_| default_empty_effect_chain()).collect(),
         ));
         let mut runtime = Runtime::new();
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
 
         let source = std::fs::read_to_string(format!(
-            "{}/scripts/graph-neural-4x4-demo.lisp",
+            "{}/scripts/graph-neural-8x8-demo.lisp",
             env!("CARGO_MANIFEST_DIR")
         ))
-        .expect("read graph 4x4 demo script");
-        runtime.eval_str(&source).expect("evaluate graph 4x4 demo");
+        .expect("read graph 8x8 demo script");
+        runtime.eval_str(&source).expect("evaluate graph 8x8 demo");
         let manifest = state
             .published_sequencers()
             .into_iter()
@@ -11829,7 +12110,7 @@ mod tests {
             .expect("published graph manifest");
         assert_eq!(
             manifest.shape.num_nodes(),
-            4,
+            8,
             "the demo matrix must cover every materialized node"
         );
 
@@ -11841,69 +12122,177 @@ mod tests {
                 eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
                 eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
             })
-            .expect("graph 4x4 script should publish widget tree");
+            .expect("graph 8x8 script should publish widget tree");
         let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((36.0, 16.0)))
-            .expect("graph 4x4 widget tree should lay out");
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((40.0, 28.0)))
+            .expect("graph 8x8 widget tree should lay out");
 
         let mut matrices = Vec::new();
         collect_widgets(&layout, "matrix", &mut matrices);
         assert_eq!(matrices.len(), 1, "expected one editable weight matrix");
         assert_measured(matrices[0]);
-        let matrix = find_by_stable_key(&layout, "graph-4x4-weight-matrix")
+        let matrix = find_by_stable_key(&layout, "graph-8x8-weight-matrix")
             .expect("weight matrix stable key");
         assert_measured(matrix);
 
+        // Three number-pickers (delay + transpose + vel-decay) and two dropdowns
+        // (resolution + quantize) per node — the per-node knobs the Ext B DSL reads.
         let mut pickers = Vec::new();
         collect_widgets(&layout, "number-picker", &mut pickers);
-        assert_eq!(pickers.len(), 4, "expected one delay picker per visible row");
-        for idx in 0..4 {
-            let picker = find_by_stable_key(&layout, &format!("graph-4x4-delay-{idx}"))
-                .unwrap_or_else(|| panic!("delay picker {idx}"));
-            assert_measured(picker);
+        assert_eq!(
+            pickers.len(),
+            24,
+            "expected delay + transpose + vel-decay per node"
+        );
+        let mut dropdowns = Vec::new();
+        collect_widgets(&layout, "dropdown", &mut dropdowns);
+        assert_eq!(
+            dropdowns.len(),
+            16,
+            "expected resolution + quantize per node"
+        );
+        for idx in 0..8 {
+            for key in [
+                format!("graph-8x8-delay-{idx}"),
+                format!("graph-8x8-transpose-{idx}"),
+                format!("graph-8x8-vel-decay-{idx}"),
+                format!("graph-8x8-resolution-{idx}"),
+                format!("graph-8x8-quantize-{idx}"),
+            ] {
+                let widget = find_by_stable_key(&layout, &key)
+                    .unwrap_or_else(|| panic!("missing control {key}"));
+                assert_measured(widget);
+            }
         }
 
-        let delay_change = find_by_stable_key(&layout, "graph-4x4-delay-2")
+        // transpose picker -> per-node behavioral param override.
+        let transpose_change = find_by_stable_key(&layout, "graph-8x8-transpose-2")
             .and_then(|node| node.props.get("on-change"))
             .cloned()
-            .expect("delay callback");
+            .expect("transpose callback");
         runtime
-            .invoke(delay_change, vec![Value::Number(5.0)])
-            .expect("invoke delay callback");
+            .invoke(transpose_change, vec![Value::Number(7.0)])
+            .expect("invoke transpose callback");
+        // vel-decay picker -> per-node behavioral param override (the velocity analogue).
+        let vel_change = find_by_stable_key(&layout, "graph-8x8-vel-decay-5")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("vel-decay callback");
+        runtime
+            .invoke(vel_change, vec![Value::Number(0.5)])
+            .expect("invoke vel-decay callback");
+        // resolution dropdown -> per-node intrinsic override.
+        let resolution_change = find_by_stable_key(&layout, "graph-8x8-resolution-3")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("resolution callback");
+        runtime
+            .invoke(resolution_change, vec![Value::String("8".into())])
+            .expect("invoke resolution callback");
+
         let overrides = state.current_graph_overrides();
         let graph = overrides
             .iter()
-            .find(|graph| graph.sequencer_name == "neural-4x4-demo")
+            .find(|graph| graph.sequencer_name == "neural-8x8-demo")
             .expect("graph overrides");
-        assert!(graph
-            .node_intrinsics
-            .iter()
-            .any(|node| node.instance == 2 && node.delay_steps == Some(5)));
+        assert!(
+            graph.node_params.iter().any(|param| {
+                param.instance == 2 && param.param == "transpose" && param.value == 7.0
+            }),
+            "transpose knob should write a node param override"
+        );
+        assert!(
+            graph.node_params.iter().any(|param| {
+                param.instance == 5 && param.param == "vel-decay" && param.value == 0.5
+            }),
+            "vel-decay knob should write a node param override"
+        );
+        assert!(
+            graph.node_intrinsics.iter().any(|node| {
+                node.instance == 3
+                    && node.resolution == Some(crate::sequencer::Timebase::Eighth as u8)
+            }),
+            "resolution dropdown should write an intrinsic override"
+        );
+
+        let mut graph_runtime = manifest.materialize_with_overrides(Some(graph));
+        assert_eq!(graph_runtime.seed_track_mask_for_node(0), Some(1));
+        let seeded = graph_runtime.seed(
+            0,
+            0.0,
+            crate::graph::GraphPayload {
+                note: 0.0,
+                velocity: 1.0,
+            },
+        );
+        assert_eq!(seeded, 1, "track 0 should seed node 0 exactly once");
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(8),
+            fallback_instrument_descriptors(8),
+            0,
+            0,
+        );
+        let mut chunked_emissions = Vec::new();
+        let mut start_beats = 0.0_f64;
+        let mut eval_count = 0_usize;
+        let mut max_input = 0.0_f64;
+        let mut max_energy = 0.0_f64;
+        while start_beats < 1.0 {
+            let end_beats = (start_beats + 0.021_f64).min(1.0_f64);
+            graph_runtime.process_block(
+                start_beats,
+                end_beats,
+                0,
+                48_000.0,
+                manifest.max_poly,
+                |eval| {
+                    eval_count += 1;
+                    max_input = max_input.max(eval.input);
+                    max_energy = max_energy.max(eval.energy);
+                    scratch
+                        .invoke_graph_update(&manifest, eval)
+                        .expect("demo graph update should evaluate")
+                },
+                &mut chunked_emissions,
+            );
+            start_beats = end_beats;
+        }
+        assert!(eval_count > 0, "chunked graph drive should evaluate nodes");
+        assert!(
+            !chunked_emissions.is_empty(),
+            "track-0 seed should propagate through the ring under chunked graph drive; evals={eval_count} max_input={max_input} max_energy={max_energy} edge_overrides={}",
+            graph.edge_params.len()
+        );
+
+        let make_matrix = |fill: &dyn Fn(usize, usize) -> f64| {
+            gv_list(
+                (0..8)
+                    .map(|r| gv_list((0..8).map(|c| gv_num(fill(r, c))).collect()))
+                    .collect(),
+            )
+        };
 
         let matrix_change = matrix
             .props
             .get("on-change")
             .cloned()
             .expect("matrix callback");
+        // Each cell = (to-column + 1) / 10, so cell (from=3, to=4) == 0.5.
         runtime
             .invoke(
                 matrix_change,
-                vec![gv_list(vec![
-                    gv_list(vec![gv_num(0.1), gv_num(0.2), gv_num(0.3), gv_num(0.4)]),
-                    gv_list(vec![gv_num(0.5), gv_num(0.6), gv_num(0.7), gv_num(0.8)]),
-                    gv_list(vec![gv_num(0.9), gv_num(0.1), gv_num(0.2), gv_num(0.3)]),
-                    gv_list(vec![gv_num(0.4), gv_num(0.5), gv_num(0.6), gv_num(0.7)]),
-                ])],
+                vec![make_matrix(&|_r, c| (c as f64 + 1.0) / 10.0)],
             )
             .expect("invoke matrix callback");
         let overrides = state.current_graph_overrides();
         let graph = overrides
             .iter()
-            .find(|graph| graph.sequencer_name == "neural-4x4-demo")
+            .find(|graph| graph.sequencer_name == "neural-8x8-demo")
             .expect("graph overrides after matrix edit");
-        assert_eq!(graph.edge_params.len(), 16);
+        assert_eq!(graph.edge_params.len(), 64);
         assert!(graph.edge_params.iter().any(|edge| {
-            edge.from == 3 && edge.to == 2 && edge.param == "weight" && edge.value == 0.6
+            edge.from == 3 && edge.to == 4 && edge.param == "weight" && edge.value == 0.5
         }));
 
         let matrix_change = matrix
@@ -11912,21 +12301,13 @@ mod tests {
             .cloned()
             .expect("matrix callback");
         runtime
-            .invoke(
-                matrix_change,
-                vec![gv_list(vec![
-                    gv_list(vec![gv_num(0.0), gv_num(0.0), gv_num(0.0), gv_num(0.0)]),
-                    gv_list(vec![gv_num(0.0), gv_num(0.0), gv_num(0.0), gv_num(0.0)]),
-                    gv_list(vec![gv_num(0.0), gv_num(0.0), gv_num(0.0), gv_num(0.0)]),
-                    gv_list(vec![gv_num(0.0), gv_num(0.0), gv_num(0.0), gv_num(0.0)]),
-                ])],
-            )
+            .invoke(matrix_change, vec![make_matrix(&|_r, _c| 0.0)])
             .expect("invoke zero matrix callback");
 
         let overrides = state.current_graph_overrides();
         let graph = overrides
             .iter()
-            .find(|graph| graph.sequencer_name == "neural-4x4-demo")
+            .find(|graph| graph.sequencer_name == "neural-8x8-demo")
             .expect("graph overrides after zero matrix edit");
         let mut graph_runtime = manifest.materialize_with_overrides(Some(graph));
         graph_runtime.seed(
@@ -11939,8 +12320,8 @@ mod tests {
         );
         let mut scratch = ScratchControlRuntime::new(
             Arc::clone(&state),
-            fallback_effect_descriptors(5),
-            fallback_instrument_descriptors(5),
+            fallback_effect_descriptors(8),
+            fallback_instrument_descriptors(8),
             0,
             0,
         );

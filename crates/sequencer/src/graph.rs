@@ -274,6 +274,20 @@ impl Default for GraphPayload {
     }
 }
 
+/// A firing's shaped event, built by `(emit …)` in a node's `:update` (Ext B). Each
+/// field is optional: an unset field *relays the incoming payload verbatim* (no
+/// implicit transpose), so the author owns exactly what they name and nothing else.
+/// When a firing carries no `EmitSpec` at all (the `:update` returned a bare truthy
+/// value), `commit_firing` falls back to the legacy relay + `transpose` so the native
+/// neuron drop-in keeps working unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EmitSpec {
+    /// Absolute emitted/propagated note (semitone offset). `None` relays `in-note`.
+    pub note: Option<f32>,
+    /// Absolute emitted/propagated velocity. `None` relays `in-vel`.
+    pub velocity: Option<f32>,
+}
+
 /// Context passed to the per-node `:update` predicate at one evaluation boundary.
 /// Carries only musical/symbolic coordinates and the node's resolved input — never
 /// samples (the engine owns all sample math).
@@ -301,6 +315,9 @@ pub struct NodeEval {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NodeFire {
     pub fired: bool,
+    /// The shaped event from `(emit …)`, if the rule emitted one (Ext B). `None` means
+    /// the legacy default (relay incoming payload + this node's `transpose`).
+    pub emit: Option<EmitSpec>,
     /// If set, commit-time edge-state mutation for incoming edges that actually
     /// triggered this node this eval.
     pub dampen_incoming: Option<f64>,
@@ -333,6 +350,7 @@ struct GraphFiringCandidate {
     node_index: usize,
     fire_sample: u64,
     fire_beats: f64,
+    emit: Option<EmitSpec>,
     dampen_incoming: Option<f64>,
 }
 
@@ -550,6 +568,10 @@ impl GraphRuntime {
         }
 
         let num_nodes = config.num_nodes();
+        let previous_step_beats: Vec<f64> = (0..self.num_nodes)
+            .map(|idx| self.node_step_beats(idx))
+            .collect();
+        let previous_reset_interval_beats = self.reset_interval_beats;
         let edge_default_dampening = config.edge_default_dampening;
         self.id = config.id;
         self.name = config.name;
@@ -573,7 +595,20 @@ impl GraphRuntime {
             self.edge_default_dampening[idx] = new_default;
         }
 
-        self.realign(total_beats);
+        let mut eval_grid_changed = false;
+        for (idx, previous_step_beats) in previous_step_beats.into_iter().enumerate() {
+            let next_step_beats = self.node_step_beats(idx);
+            if (previous_step_beats - next_step_beats).abs() > 1e-9 {
+                self.last_eval_indices[idx] = grid_index_at(total_beats, next_step_beats);
+                eval_grid_changed = true;
+            }
+        }
+        if eval_grid_changed {
+            self.last_decay_index = self.finest_decay_index(total_beats);
+        }
+        if (previous_reset_interval_beats - self.reset_interval_beats).abs() > 1e-9 {
+            self.next_reset_beat = next_reset_beat_after(total_beats, self.reset_interval_beats);
+        }
         true
     }
 
@@ -598,6 +633,16 @@ impl GraphRuntime {
         self.edges.get(edge_index).map(|edge| edge.dampening)
     }
 
+    /// Read a node's resolved seed mask (telemetry / tests).
+    pub fn seed_track_mask_for_node(&self, node_index: usize) -> Option<u128> {
+        self.nodes.get(node_index).map(|node| node.seed_track_mask)
+    }
+
+    /// Number of delayed propagations currently queued for a node (telemetry / tests).
+    pub fn pending_count_for_node(&self, node_index: usize) -> Option<usize> {
+        self.pending.get(node_index).map(Vec::len)
+    }
+
     /// Reset all runtime state: clocks realigned to `total_beats`, energy zeroed then
     /// seeded from `seed_on_reset`, pending queues cleared, decay/reset indices
     /// recomputed (mirrors `neural::reset_state`).
@@ -611,17 +656,13 @@ impl GraphRuntime {
             self.pending[idx].clear();
             self.incoming_triggers[idx].clear();
             let step_beats = self.node_step_beats(idx);
-            self.last_eval_indices[idx] = (total_beats / step_beats).floor() as u64;
+            self.last_eval_indices[idx] = grid_index_at(total_beats, step_beats);
         }
         for (edge, default_dampening) in self.edges.iter_mut().zip(&self.edge_default_dampening) {
             edge.dampening = *default_dampening;
         }
         self.last_decay_index = self.finest_decay_index(total_beats);
-        self.next_reset_beat = if self.reset_interval_beats > 0.0 {
-            ((total_beats / self.reset_interval_beats).floor() + 1.0) * self.reset_interval_beats
-        } else {
-            0.0
-        };
+        self.next_reset_beat = next_reset_beat_after(total_beats, self.reset_interval_beats);
     }
 
     /// Realign every node's clock to the current transport position without firing
@@ -629,13 +670,10 @@ impl GraphRuntime {
     pub fn realign(&mut self, total_beats: f64) {
         for idx in 0..self.num_nodes {
             let step_beats = self.node_step_beats(idx);
-            self.last_eval_indices[idx] = (total_beats / step_beats).floor() as u64;
+            self.last_eval_indices[idx] = grid_index_at(total_beats, step_beats);
         }
         self.last_decay_index = self.finest_decay_index(total_beats);
-        if self.reset_interval_beats > 0.0 {
-            self.next_reset_beat = ((total_beats / self.reset_interval_beats).floor() + 1.0)
-                * self.reset_interval_beats;
-        }
+        self.next_reset_beat = next_reset_beat_after(total_beats, self.reset_interval_beats);
     }
 
     /// Inject a fire into every node whose resolved `seed-from` includes `track`,
@@ -643,18 +681,21 @@ impl GraphRuntime {
     /// scatter: it pushes a delayed propagation onto the seeded node carrying the step
     /// event's `payload`, so the node scatters that payload along its out-edges after
     /// `delay_steps` (Ext 1 — the seed note then ripples through the net).
-    pub fn seed(&mut self, track: usize, seed_beats: f64, payload: GraphPayload) {
+    pub fn seed(&mut self, track: usize, seed_beats: f64, payload: GraphPayload) -> usize {
         if !self.active {
-            return;
+            return 0;
         }
         let Some(bit) = seed_track_bit(track) else {
-            return;
+            return 0;
         };
+        let mut seeded = 0;
         for idx in 0..self.num_nodes {
             if self.nodes[idx].seed_track_mask & bit != 0 {
                 self.push_propagation(idx, seed_beats, payload);
+                seeded += 1;
             }
         }
+        seeded
     }
 
     /// Drive the whole graph across `(start_beats, end_beats]`, appending firings to
@@ -749,6 +790,7 @@ impl GraphRuntime {
                         node_index: idx,
                         fire_sample,
                         fire_beats,
+                        emit: decision.emit,
                         dampen_incoming: decision.dampen_incoming,
                     });
                 }
@@ -912,16 +954,28 @@ impl GraphRuntime {
 
     /// Emit the firing, reset the node's energy, and schedule its delayed scatter.
     ///
-    /// Ext 1: the firing re-emits the payload that arrived (`source_event`) with this
-    /// node's `transpose` added — so the seed note re-pitches on every hop — and the
-    /// same re-pitched payload rides the outgoing scatter, accumulating around feedback
-    /// loops. Mirrors `neural::firing_candidate` (clone source event, add transpose).
+    /// The emitted event *and* the payload that rides the outgoing scatter are one and
+    /// the same `GraphPayload`, so whatever the firing emits is what downstream nodes
+    /// receive as their `in-event` — that identity is what makes per-hop fields
+    /// accumulate around feedback loops (Ext 1's melodic cascade).
+    ///
+    /// Ext B: if the rule supplied an `(emit …)` spec, each field it names overrides
+    /// the payload and each field it omits relays the incoming value verbatim (no
+    /// implicit transpose — the author writes `(+ (in-note) (param :transpose))` if they
+    /// want it). With no spec (a bare truthy `:update`), fall back to the legacy relay +
+    /// `transpose`, preserving the native-neuron drop-in.
     fn commit_firing(&mut self, candidate: &GraphFiringCandidate, out: &mut Vec<GraphEmission>) {
         let node_index = candidate.node_index;
         let incoming = self.source_event[node_index].unwrap_or_default();
-        let payload = GraphPayload {
-            note: incoming.note + self.nodes[node_index].transpose,
-            velocity: incoming.velocity,
+        let payload = match &candidate.emit {
+            Some(spec) => GraphPayload {
+                note: spec.note.unwrap_or(incoming.note),
+                velocity: spec.velocity.unwrap_or(incoming.velocity),
+            },
+            None => GraphPayload {
+                note: incoming.note + self.nodes[node_index].transpose,
+                velocity: incoming.velocity,
+            },
         };
         let mut event = EmittedAccumulatorEvent {
             offset_beats: 0.0,
@@ -1066,6 +1120,18 @@ fn normalized_node_params(
 ) -> Vec<HashMap<String, f64>> {
     node_params.resize_with(num_nodes, HashMap::new);
     node_params
+}
+
+fn grid_index_at(total_beats: f64, step_beats: f64) -> u64 {
+    (total_beats / step_beats.max(1e-9)).floor().max(0.0) as u64
+}
+
+fn next_reset_beat_after(total_beats: f64, reset_interval_beats: f64) -> f64 {
+    if reset_interval_beats > 0.0 {
+        ((total_beats / reset_interval_beats).floor() + 1.0) * reset_interval_beats
+    } else {
+        0.0
+    }
 }
 
 fn splitmix64(mut value: u64) -> u64 {
@@ -1476,6 +1542,67 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].node_index, 1);
         assert_eq!(out[0].sample_time, 48_000);
+    }
+
+    #[test]
+    fn process_block_evaluates_due_boundaries_across_audio_sized_chunks() {
+        let nodes = vec![node(Timebase::Sixteenth)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, Vec::new(), 1.0, 0.0);
+        let mut eval_beats = Vec::new();
+        let mut out = Vec::new();
+        let mut start_beats = 0.0_f64;
+
+        while start_beats < 1.0 {
+            let end_beats = (start_beats + 0.021_f64).min(1.0_f64);
+            runtime.process_block(
+                start_beats,
+                end_beats,
+                0,
+                48_000.0,
+                0,
+                |eval| {
+                    eval_beats.push(eval.beat);
+                    NodeFire::default()
+                },
+                &mut out,
+            );
+            start_beats = end_beats;
+        }
+
+        assert_eq!(eval_beats, vec![0.25, 0.5, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn compatible_config_refresh_preserves_eval_cursor_across_audio_sized_chunks() {
+        let nodes = vec![node(Timebase::Sixteenth)];
+        let mut runtime =
+            GraphRuntime::new_from_config(runtime_config(1, nodes.clone(), Vec::new()));
+        let mut eval_beats = Vec::new();
+        let mut out = Vec::new();
+        let mut start_beats = 0.0_f64;
+
+        while start_beats < 1.0 {
+            let end_beats = (start_beats + 0.021_f64).min(1.0_f64);
+            assert!(runtime.apply_config_preserving_state(
+                runtime_config(1, nodes.clone(), Vec::new()),
+                end_beats,
+            ));
+            runtime.process_block(
+                start_beats,
+                end_beats,
+                0,
+                48_000.0,
+                0,
+                |eval| {
+                    eval_beats.push(eval.beat);
+                    NodeFire::default()
+                },
+                &mut out,
+            );
+            start_beats = end_beats;
+        }
+
+        assert_eq!(eval_beats, vec![0.25, 0.5, 0.75, 1.0]);
     }
 
     #[test]
