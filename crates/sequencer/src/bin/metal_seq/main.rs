@@ -1353,10 +1353,15 @@ fn sync_all_expanded_step_viewports(
     dirty
 }
 
+fn sync_shared_track_collapsed(track_collapsed: &Arc<Mutex<Vec<bool>>>, app: &ui::App) {
+    *track_collapsed.lock().unwrap() = app.track_collapsed.clone();
+}
+
 struct UiInvalidationApplyCtx<'a> {
     app: &'a mut ui::App,
     editor: &'a mut Editor,
     state: &'a Arc<SequencerState>,
+    track_collapsed: &'a Arc<Mutex<Vec<bool>>>,
     bus_state: &'a Arc<Mutex<Vec<ui::BusChannelState>>>,
     current_track_idx: usize,
     selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
@@ -1386,6 +1391,7 @@ fn apply_ui_invalidations(
         app,
         editor,
         state,
+        track_collapsed,
         bus_state,
         current_track_idx,
         selected_steps,
@@ -1692,6 +1698,13 @@ fn apply_ui_invalidations(
                 TrackMixerInvalidation::Output => {
                     needs_reactive_cycle |= rt
                         .set_reactive("SEQ", "track-outputs", build_track_outputs(app, state))
+                        .effects_dirty;
+                }
+                TrackMixerInvalidation::Collapsed => {
+                    let collapsed = track_collapsed.lock().unwrap().clone();
+                    app.replace_track_collapsed(collapsed);
+                    needs_reactive_cycle |= rt
+                        .set_reactive("SEQ", "track-collapsed", build_track_collapsed(app))
                         .effects_dirty;
                 }
             },
@@ -3274,6 +3287,7 @@ mod tests {
 
         let mut track_names = Vec::<String>::new();
         let track_pan_ids = Arc::new(Mutex::new(Vec::<i32>::new()));
+        let track_collapsed = Arc::new(Mutex::new(app.track_collapsed.clone()));
         let bus_state = Arc::new(Mutex::new(app.buses.clone()));
         let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
         let current_track = Arc::new(AtomicUsize::new(0));
@@ -3302,6 +3316,7 @@ mod tests {
             state.clone(),
             &track_names,
             track_pan_ids.clone(),
+            track_collapsed.clone(),
             bus_state.clone(),
             bus_node_ids.clone(),
             current_track.clone(),
@@ -3376,6 +3391,7 @@ mod tests {
             .collect();
         *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
         *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
+        sync_shared_track_collapsed(&track_collapsed, &app);
         push_project_scratch_to_named_buffer(&mut editor, &app);
         if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
             editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
@@ -3663,6 +3679,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let track_pan_ids: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(
         app.graph.track_node_ids.iter().map(|n| n.pan_id).collect(),
     ));
+    let track_collapsed: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(app.track_collapsed.clone()));
     let bus_state: Arc<Mutex<Vec<ui::BusChannelState>>> = Arc::new(Mutex::new(app.buses.clone()));
     let bus_node_ids: Arc<Mutex<Vec<ui::BusNodeIds>>> =
         Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
@@ -3711,6 +3728,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.clone(),
         &track_names,
         track_pan_ids.clone(),
+        track_collapsed.clone(),
         bus_state.clone(),
         bus_node_ids.clone(),
         current_track.clone(),
@@ -4846,6 +4864,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         selected_steps.lock().unwrap().clear();
                         piano_roll_selection.lock().unwrap().clear();
                         track_names = app.tracks.clone();
+                        sync_shared_track_collapsed(&track_collapsed, &app);
                         current_track.store(0, Ordering::Relaxed);
                         {
                             let mut pan_ids = track_pan_ids.lock().unwrap();
@@ -8578,6 +8597,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
                                     let rt = editor.runtime_mut();
                                     let started = Instant::now();
+                                    sync_shared_track_collapsed(&track_collapsed, &app);
                                     sync_track_name_state(rt, &mut track_names, &app);
                                     sync_pattern_state(rt, &state);
                                     sync_names_pattern_elapsed = started.elapsed();
@@ -8800,6 +8820,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.delete_bus_pattern_at(deleted_pattern, new_pattern);
                             let ct = current_track.load(Ordering::Relaxed);
                             let rt = editor.runtime_mut();
+                            sync_shared_track_collapsed(&track_collapsed, &app);
                             sync_track_name_state(rt, &mut track_names, &app);
                             sync_pattern_state(rt, &state);
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
@@ -9606,6 +9627,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     current_track.store(draft_track, Ordering::Relaxed);
                                     app.ui.cursor_track = draft_track;
                                     track_names = app.tracks.clone();
+                                    sync_shared_track_collapsed(&track_collapsed, &app);
 
                                     let rt = editor.runtime_mut();
                                     rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
@@ -11255,6 +11277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         track_names = app.tracks.clone();
+                        sync_shared_track_collapsed(&track_collapsed, &app);
                         let restored_track = if app.tracks.is_empty() {
                             0
                         } else {
@@ -12043,7 +12066,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
-            let matrix_visible = editor_has_visible_buffer(&editor, "*matrix*");
             let master_meter_visible = transport_visible || mixer_visible;
             let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
                 || editor_has_visible_buffer(&editor, "*piano-roll*");
@@ -12111,6 +12133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
                 reset_sampler_waveform_view(&mut editor);
                 let rt = editor.runtime_mut();
+                sync_shared_track_collapsed(&track_collapsed, &app);
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
                 set_current_track_reactive(rt, app.tracks.len(), ct);
@@ -12276,9 +12299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 prev_bus_peak_levels = cached_bus_peak_levels.clone();
             }
-            if matrix_visible
-                && last_neural_visualization_poll_at.elapsed() >= NEURAL_VISUALIZATION_POLL_INTERVAL
-            {
+            if last_neural_visualization_poll_at.elapsed() >= NEURAL_VISUALIZATION_POLL_INTERVAL {
                 last_neural_visualization_poll_at = Instant::now();
                 needs_reactive_cycle |=
                     sync_neural_visualization_fields(editor.runtime_mut(), &state);
@@ -12407,6 +12428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app: &mut app,
                     editor: &mut editor,
                     state: &state,
+                    track_collapsed: &track_collapsed,
                     bus_state: &bus_state,
                     current_track_idx: ct,
                     selected_steps: &selected_steps,
@@ -12442,6 +12464,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let old_pattern_epoch = prev_pattern_epoch;
                 let rt = editor.runtime_mut();
                 let started = Instant::now();
+                sync_shared_track_collapsed(&track_collapsed, &app);
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
                 let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
@@ -12571,6 +12594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                 } else {
+                    sync_shared_track_collapsed(&track_collapsed, &app);
                     sync_track_name_state(rt, &mut track_names, &app);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_step_param_lists(rt, &state, ct);

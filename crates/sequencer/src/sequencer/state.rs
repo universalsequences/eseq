@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
 };
-use crate::graph::ProjectGraphOverrides;
+use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
 use crate::neural::{
     remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
     ProjectNeuralNetwork,
@@ -1133,6 +1133,7 @@ pub struct SequencerState {
     scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     scheduler_snapshot_version: AtomicU64,
     neural_visualization: Mutex<NeuralVisualizationSnapshot>,
+    graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     scratch_source: Mutex<String>,
     scratch_source_version: AtomicU64,
     published_sequencers: Mutex<Vec<PublishedSequencer>>,
@@ -1329,6 +1330,7 @@ impl SequencerState {
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
+            graph_visualizations: Mutex::new(Vec::new()),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
@@ -1361,6 +1363,14 @@ impl SequencerState {
 
     pub fn neural_visualization(&self) -> NeuralVisualizationSnapshot {
         self.neural_visualization.lock().unwrap().clone()
+    }
+
+    pub fn set_graph_visualizations(&self, snapshots: Vec<GraphVisualizationSnapshot>) {
+        *self.graph_visualizations.lock().unwrap() = snapshots;
+    }
+
+    pub fn graph_visualizations(&self) -> Vec<GraphVisualizationSnapshot> {
+        self.graph_visualizations.lock().unwrap().clone()
     }
 
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {

@@ -1,6 +1,8 @@
 ;; metal-seq-mixer-v2.lisp — Horizontal DAW-style mixer.
 ;; Renders to *mixer* buffer. Loaded by metal-seq-grid.lisp.
 
+(load "metal-seq-track-collapse.lisp")
+
 (def track-peak (i)
   (bind-seq (str "track-peak-" i)))
 
@@ -496,9 +498,63 @@
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (mixer-v2-select-track i))
+          :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
           (label (substring (nth SEQ.track-names i) 0 10)
             :width 9.8
             :font-size 10
+            :h-align :center
+            :color (if muted :dim :black)
+            :active (mixer-v2-track-delete-target-binding i)
+            :active-color :white
+            :bg :transparent))))))
+
+(def mixer-v2-track-collapsed-label (i)
+  (str (+ i 1) " " (substring (nth SEQ.track-names i) 0 3)))
+
+(def mixer-v2-track-collapsed-strip (i)
+  (let ((muted (mixer-v2-muted? i)))
+    (box :width 4.7 :height 12.15
+      :selected (mixer-v2-track-selected-binding i)
+      :muted muted
+      :background-color :mixer-strip-bg
+      :selected-background-color :mixer-strip-selected-bg
+      :muted-background-color :mixer-strip-muted-bg
+      :border-width 2
+      :corner-radius 10
+      :border-color :mixer-strip-border
+      :selected-border-color :mixer-strip-selected-border
+      :muted-border-color :mixer-strip-border
+      :drop-hover-border-color :mixer-strip-selected-border
+      :padding 0.45
+      :drop-types (list "sample" "audio-effect" "midi-effect")
+      :drop-meta (dict :kind "track" :track i)
+      :on-drop (lambda (event) (mixer-v2-drop-on-track event))
+      :on-click (lambda (event) (mixer-v2-select-track i))
+      (v-stack :gap 0.42 :align :center
+        (box :width :fill :height 3.45 :bg :transparent)
+        (mixer-v2-track-meter-control i)
+        (button "M"
+          :key (str "mixer-v2-track-collapsed-mute-" i)
+          :width 3.65 :height 1.0 :padding 0 :font-size 10
+          :background-color (mixer-v2-button-bg (nth SEQ.track-mutes i))
+          :color (if (nth SEQ.track-mutes i) :black :dim)
+          :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-mute i))))
+        (box
+          :key (str "mixer-v2-track-collapsed-label-" i)
+          :width 3.65 :height 1.0
+          :padding 0
+          :selected (mixer-v2-track-delete-target-binding i)
+          :background-color (rgba
+            (mixer-v2-track-color-r i muted)
+            (mixer-v2-track-color-g i muted)
+            (mixer-v2-track-color-b i muted)
+            1.0)
+          :selected-background-color :fx-panel-header-selected-bg
+          :on-click (lambda (event) (mixer-v2-select-track i))
+          :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
+          (label (mixer-v2-track-collapsed-label i)
+            :width 3.65
+            :font-size 9
             :h-align :center
             :color (if muted :dim :black)
             :active (mixer-v2-track-delete-target-binding i)
@@ -632,7 +688,9 @@
   (h-stack :padding 0.2 :gap 0.0
     (each (range 0 SEQ.num-tracks) |i|
       (subtree :key (str "mixer-v2-track-" i)
-        (mixer-v2-track-strip i)))
+        (if (seq-track-collapsed? i)
+          (mixer-v2-track-collapsed-strip i)
+          (mixer-v2-track-strip i))))
     (box :width 1.0 :height 11.0)
     (mixer-v2-sample-drop-zone)
     (box :width 1.0 :height 11.0)

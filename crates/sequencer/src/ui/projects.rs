@@ -1134,6 +1134,11 @@ impl App {
             .enumerate()
             .map(|(track_idx, name)| {
                 let color = self.track_colors.get(track_idx).copied();
+                let collapsed = self
+                    .track_collapsed
+                    .get(track_idx)
+                    .copied()
+                    .unwrap_or(false);
                 if self.is_sampler_track(track_idx) {
                     let path = self
                         .sampler_path_for_track(track_idx)
@@ -1144,11 +1149,12 @@ impl App {
                     Ok(ProjectTrack::Sampler {
                         sample_path: path.to_string_lossy().to_string(),
                         color,
+                        collapsed,
                     })
                 } else if self.graph.track_instrument_types.get(track_idx)
                     == Some(&InstrumentType::Modulator)
                 {
-                    Ok(ProjectTrack::Modulator { color })
+                    Ok(ProjectTrack::Modulator { color, collapsed })
                 } else {
                     let instrument_name = self
                         .graph
@@ -1161,6 +1167,7 @@ impl App {
                     Ok(ProjectTrack::Custom {
                         instrument_name,
                         color,
+                        collapsed,
                     })
                 }
             })
@@ -1334,6 +1341,7 @@ impl App {
                     };
                 } else {
                     let saved_color = pending.project.tracks[track_idx].color();
+                    let saved_collapsed = pending.project.tracks[track_idx].collapsed();
                     match &pending.project.tracks[track_idx] {
                         ProjectTrack::Sampler { sample_path, .. } => {
                             eprintln!(
@@ -1363,6 +1371,7 @@ impl App {
                     if let Some(color) = saved_color {
                         self.set_track_color(track_idx, color);
                     }
+                    self.set_track_collapsed(track_idx, saved_collapsed);
                     pending.phase = super::PendingProjectLoadPhase::AddTrack(track_idx + 1);
                 }
             }
@@ -1494,6 +1503,7 @@ impl App {
                 .map(|snapshot| snapshot.track_bits.as_slice()),
         );
         self.normalize_track_colors();
+        self.normalize_track_collapsed();
 
         {
             let mut pattern_bank = self.state.pattern.pattern_bank.lock().unwrap();
@@ -2306,6 +2316,7 @@ mod tests {
             tracks: vec![ProjectTrack::Sampler {
                 sample_path: "samples/kick.wav".to_string(),
                 color: None,
+                collapsed: false,
             }],
             custom_effects: vec![custom_effects],
             scratch: ProjectScratchState::default(),

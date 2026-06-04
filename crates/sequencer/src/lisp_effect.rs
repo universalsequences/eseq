@@ -10433,16 +10433,14 @@ fn graph_node_numeric_value(
     match field {
         "delay" | "delay-steps" => {
             let value = resolved_graph_node_value(state, manifest, instance, field)?;
-            graph_number(&value)
-                .ok_or_else(|| format!("bind-graph field :{field} is not numeric"))
+            graph_number(&value).ok_or_else(|| format!("bind-graph field :{field} is not numeric"))
         }
         "resolution" | "res" | "quantize" | "q" | "route" | "seed-from" => Err(format!(
             "bind-graph field :{field} is an enum; pass an options list to bind its index"
         )),
         _ => {
             let value = resolved_graph_param_value(state, manifest, instance, field)?;
-            graph_number(&value)
-                .ok_or_else(|| format!("bind-graph param :{field} is not numeric"))
+            graph_number(&value).ok_or_else(|| format!("bind-graph param :{field} is not numeric"))
         }
     }
 }
@@ -12756,7 +12754,14 @@ mod tests {
             (0..8).map(|_| default_empty_effect_chain()).collect(),
         ));
         let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![("current-pattern", Value::Number(0.0))], true);
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+            ],
+            true,
+        );
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
 
@@ -12791,16 +12796,31 @@ mod tests {
             })
             .expect("graph 8x8 script should publish widget tree");
         let layout = runtime
-            .layout_snapshot_for_tree_with_viewport(&tree, Some((40.0, 28.0)))
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((40.0, 48.0)))
             .expect("graph 8x8 widget tree should lay out");
 
         let mut matrices = Vec::new();
         collect_widgets(&layout, "matrix", &mut matrices);
-        assert_eq!(matrices.len(), 1, "expected one editable weight matrix");
-        assert_measured(matrices[0]);
+        assert_eq!(
+            matrices.len(),
+            4,
+            "expected editable weight matrix plus trigger/energy/dampening telemetry"
+        );
+        for matrix in &matrices {
+            assert_measured(matrix);
+        }
         let matrix = find_by_stable_key(&layout, "graph-8x8-weight-matrix")
             .expect("weight matrix stable key");
         assert_measured(matrix);
+        for key in [
+            "graph-8x8-trigger-matrix",
+            "graph-8x8-energy-matrix",
+            "graph-8x8-dampening-matrix",
+        ] {
+            let widget = find_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("missing telemetry matrix {key}"));
+            assert_measured(widget);
+        }
 
         // Five number-pickers per node (delay + transpose + vel-decay + dampening +
         // recovery) plus the two top-of-panel config pickers (reset-bars + max-poly);
@@ -13217,7 +13237,14 @@ mod tests {
         }
 
         let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![("current-pattern", Value::Number(0.0))], true);
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+            ],
+            true,
+        );
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -13488,7 +13515,9 @@ mod tests {
             .expect("reactive-set edge key");
         assert_eq!(
             runtime
-                .eval_str("(reactive-value (bind \"GRAPH\" (graph-edge-key \"neural\" 0 1 :weight)))")
+                .eval_str(
+                    "(reactive-value (bind \"GRAPH\" (graph-edge-key \"neural\" 0 1 :weight)))"
+                )
                 .expect("read edge slot"),
             Some(Value::Number(0.2))
         );

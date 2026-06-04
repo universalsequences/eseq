@@ -1625,6 +1625,22 @@ pub(crate) fn build_track_colors(app: &ui::App) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn build_track_collapsed_from_slice(collapsed: &[bool], track_count: usize) -> Value {
+    Value::List(
+        (0..track_count)
+            .map(|track| {
+                Rc::new(RefCell::new(Value::Bool(
+                    collapsed.get(track).copied().unwrap_or(false),
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_track_collapsed(app: &ui::App) -> Value {
+    build_track_collapsed_from_slice(&app.track_collapsed, app.tracks.len())
+}
+
 pub(crate) fn build_track_ids(app: &ui::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = app
         .graph
@@ -1707,6 +1723,7 @@ pub(crate) fn sync_track_name_state(
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
+    rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
 }
 
 /// Build a Lisp Value::List of per-track volumes (0.0–1.0).
@@ -1961,6 +1978,7 @@ pub(crate) fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
 
 pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Arc<SequencerState>) {
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
+    rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
     rt.set_reactive(
         "SEQ",
         "track-instrument-types",
@@ -2051,6 +2069,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-mixer-pans", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
@@ -2483,6 +2502,13 @@ pub(crate) fn sync_neural_visualization_fields(
             build_neural_dampening_matrix_value(state),
         )
         .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "graph-visualizations",
+            build_graph_visualizations_value(state),
+        )
+        .effects_dirty;
     effects_dirty
 }
 
@@ -2739,6 +2765,11 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "neural-dampening-matrix",
         build_neural_dampening_matrix_value(state),
     );
+    rt.set_reactive(
+        "SEQ",
+        "graph-visualizations",
+        build_graph_visualizations_value(state),
+    );
 }
 
 pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value {
@@ -2788,6 +2819,188 @@ pub(crate) fn build_neural_trigger_matrix_value(state: &Arc<SequencerState>) -> 
     )
 }
 
+pub(crate) fn build_graph_visualizations_value(state: &Arc<SequencerState>) -> Value {
+    Value::List(
+        state
+            .graph_visualizations()
+            .iter()
+            .map(|snapshot| Rc::new(RefCell::new(graph_visualization_value(snapshot))))
+            .collect(),
+    )
+}
+
+fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisualizationSnapshot) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "id".to_string(),
+        value_cell(Value::Number(snapshot.id as f64)),
+    );
+    map.insert(
+        "name".to_string(),
+        value_cell(Value::String(snapshot.name.clone())),
+    );
+    map.insert(
+        "active".to_string(),
+        value_cell(Value::Bool(snapshot.active)),
+    );
+    map.insert(
+        "num-nodes".to_string(),
+        value_cell(Value::Number(snapshot.num_nodes as f64)),
+    );
+    map.insert(
+        "energy-matrix".to_string(),
+        value_cell(neural_column_matrix_value(
+            snapshot
+                .energy
+                .iter()
+                .take(snapshot.num_nodes)
+                .map(|value| graph_energy_display_value(*value)),
+        )),
+    );
+    map.insert(
+        "trigger-matrix".to_string(),
+        value_cell(neural_column_matrix_value(
+            snapshot
+                .trigger_activity
+                .iter()
+                .take(snapshot.num_nodes)
+                .map(|value| neural_trigger_display_value(*value)),
+        )),
+    );
+    map.insert(
+        "weight-matrix".to_string(),
+        value_cell(graph_dense_edge_matrix_value(snapshot, |edge| {
+            graph_weight_display_value(edge.weight)
+        })),
+    );
+    map.insert(
+        "dampening-matrix".to_string(),
+        value_cell(graph_dense_edge_matrix_value(snapshot, |edge| {
+            neural_dampening_display_value(edge.dampening as f32)
+        })),
+    );
+    map.insert(
+        "edges".to_string(),
+        value_cell(Value::List(
+            snapshot
+                .edges
+                .iter()
+                .map(|edge| Rc::new(RefCell::new(graph_edge_value(*edge))))
+                .collect(),
+        )),
+    );
+    map.insert(
+        "node-events".to_string(),
+        value_cell(Value::List(
+            snapshot
+                .node_events
+                .iter()
+                .take(snapshot.num_nodes)
+                .map(|event| Rc::new(RefCell::new(graph_optional_event_value(*event))))
+                .collect(),
+        )),
+    );
+    map.insert(
+        "events".to_string(),
+        value_cell(Value::List(
+            snapshot
+                .node_events
+                .iter()
+                .take(snapshot.num_nodes)
+                .flatten()
+                .copied()
+                .map(|event| Rc::new(RefCell::new(graph_event_value(event))))
+                .collect(),
+        )),
+    );
+    Value::Map(map)
+}
+
+fn value_cell(value: Value) -> Rc<RefCell<Value>> {
+    Rc::new(RefCell::new(value))
+}
+
+fn graph_dense_edge_matrix_value(
+    snapshot: &sequencer::graph::GraphVisualizationSnapshot,
+    value: impl Fn(sequencer::graph::GraphVisualizationEdge) -> f64,
+) -> Value {
+    let mut matrix = vec![vec![0.0; snapshot.num_nodes]; snapshot.num_nodes];
+    for edge in &snapshot.edges {
+        if edge.from < snapshot.num_nodes && edge.to < snapshot.num_nodes {
+            matrix[edge.from][edge.to] = value(*edge);
+        }
+    }
+    Value::List(
+        matrix
+            .into_iter()
+            .map(|row| {
+                Rc::new(RefCell::new(Value::List(
+                    row.into_iter()
+                        .map(|cell| Rc::new(RefCell::new(Value::Number(cell))))
+                        .collect(),
+                )))
+            })
+            .collect(),
+    )
+}
+
+fn graph_edge_value(edge: sequencer::graph::GraphVisualizationEdge) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "from".to_string(),
+        value_cell(Value::Number(edge.from as f64)),
+    );
+    map.insert("to".to_string(), value_cell(Value::Number(edge.to as f64)));
+    map.insert(
+        "weight".to_string(),
+        value_cell(Value::Number(graph_weight_display_value(edge.weight))),
+    );
+    map.insert(
+        "dampening".to_string(),
+        value_cell(Value::Number(neural_dampening_display_value(
+            edge.dampening as f32,
+        ))),
+    );
+    Value::Map(map)
+}
+
+fn graph_optional_event_value(event: Option<sequencer::graph::GraphVisualizationEvent>) -> Value {
+    event.map(graph_event_value).unwrap_or(Value::Nil)
+}
+
+fn graph_event_value(event: sequencer::graph::GraphVisualizationEvent) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "node".to_string(),
+        value_cell(Value::Number(event.node_index as f64)),
+    );
+    map.insert(
+        "track".to_string(),
+        value_cell(
+            event
+                .track
+                .map(|track| Value::Number(track as f64))
+                .unwrap_or(Value::Nil),
+        ),
+    );
+    map.insert(
+        "sample".to_string(),
+        value_cell(Value::Number(event.sample_time as f64)),
+    );
+    map.insert("beat".to_string(), value_cell(Value::Number(event.beat)));
+    map.insert(
+        "transpose".to_string(),
+        value_cell(Value::Number(graph_weight_display_value(
+            event.transpose as f64,
+        ))),
+    );
+    map.insert(
+        "velocity".to_string(),
+        value_cell(Value::Number(neural_trigger_display_value(event.velocity))),
+    );
+    Value::Map(map)
+}
+
 fn neural_column_matrix_value(values: impl Iterator<Item = f64>) -> Value {
     Value::List(
         values
@@ -2802,6 +3015,15 @@ fn neural_column_matrix_value(values: impl Iterator<Item = f64>) -> Value {
 
 fn neural_energy_display_value(value: f32) -> f64 {
     let value = value.clamp(0.0, 4.0) as f64;
+    (value * 100.0).round() / 100.0
+}
+
+fn graph_energy_display_value(value: f64) -> f64 {
+    let value = value.clamp(0.0, 4.0);
+    (value * 100.0).round() / 100.0
+}
+
+fn graph_weight_display_value(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
@@ -6140,6 +6362,104 @@ mod tests {
         };
         assert_eq!(*first_trigger_row[0].borrow(), Value::Number(0.0));
         assert_eq!(*second_trigger_row[0].borrow(), Value::Number(1.0));
+    }
+
+    #[test]
+    fn graph_visualizations_value_reflects_runtime_snapshot() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.set_graph_visualizations(vec![sequencer::graph::GraphVisualizationSnapshot {
+            id: 9,
+            name: "graph".to_string(),
+            active: true,
+            num_nodes: 2,
+            energy: vec![0.125, 8.0],
+            trigger_activity: vec![0.0, 1.0],
+            node_events: vec![
+                None,
+                Some(sequencer::graph::GraphVisualizationEvent {
+                    node_index: 1,
+                    track: Some(3),
+                    sample_time: 12_345,
+                    beat: 1.5,
+                    transpose: -7.25,
+                    velocity: 0.625,
+                }),
+            ],
+            edges: vec![sequencer::graph::GraphVisualizationEdge {
+                from: 0,
+                to: 1,
+                weight: 0.333,
+                dampening: 0.625,
+            }],
+        }]);
+
+        let Value::List(graphs) = build_graph_visualizations_value(&state) else {
+            panic!("expected graph visualization list");
+        };
+        assert_eq!(graphs.len(), 1);
+        let Value::Map(graph) = &*graphs[0].borrow() else {
+            panic!("expected graph map");
+        };
+        assert_eq!(
+            graph.get("name").map(|value| value.borrow().clone()),
+            Some(Value::String("graph".to_string()))
+        );
+
+        let Value::List(weight_rows) = &*graph.get("weight-matrix").unwrap().borrow() else {
+            panic!("expected weight matrix");
+        };
+        let Value::List(weight_row_0) = &*weight_rows[0].borrow() else {
+            panic!("expected weight matrix row");
+        };
+        assert_eq!(*weight_row_0[0].borrow(), Value::Number(0.0));
+        assert_eq!(*weight_row_0[1].borrow(), Value::Number(0.33));
+
+        let Value::List(dampening_rows) = &*graph.get("dampening-matrix").unwrap().borrow() else {
+            panic!("expected dampening matrix");
+        };
+        let Value::List(dampening_row_0) = &*dampening_rows[0].borrow() else {
+            panic!("expected dampening matrix row");
+        };
+        assert_eq!(*dampening_row_0[1].borrow(), Value::Number(0.63));
+
+        let Value::List(energy_rows) = &*graph.get("energy-matrix").unwrap().borrow() else {
+            panic!("expected energy matrix");
+        };
+        let Value::List(energy_row_1) = &*energy_rows[1].borrow() else {
+            panic!("expected energy matrix row");
+        };
+        assert_eq!(*energy_row_1[0].borrow(), Value::Number(4.0));
+
+        let Value::List(trigger_rows) = &*graph.get("trigger-matrix").unwrap().borrow() else {
+            panic!("expected trigger matrix");
+        };
+        let Value::List(trigger_row_1) = &*trigger_rows[1].borrow() else {
+            panic!("expected trigger matrix row");
+        };
+        assert_eq!(*trigger_row_1[0].borrow(), Value::Number(1.0));
+
+        let Value::List(node_events) = &*graph.get("node-events").unwrap().borrow() else {
+            panic!("expected node events");
+        };
+        assert_eq!(*node_events[0].borrow(), Value::Nil);
+        let Value::Map(event) = &*node_events[1].borrow() else {
+            panic!("expected event map");
+        };
+        assert_eq!(
+            event.get("track").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+        assert_eq!(
+            event.get("transpose").map(|value| value.borrow().clone()),
+            Some(Value::Number(-7.25))
+        );
+        assert_eq!(
+            event.get("velocity").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.625))
+        );
     }
 
     #[test]
@@ -10976,6 +11296,11 @@ mod tests {
             .register_native("seq-halve-track-pattern", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
+        editor
+            .runtime_mut()
+            .register_native("seq-toggle-track-collapsed", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
@@ -11020,6 +11345,7 @@ mod tests {
                 ("track-ids", test_number_list(&[0.0])),
                 ("track-names", test_string_list(&["bd02"])),
                 ("track-colors", test_track_colors()),
+                ("track-collapsed", test_bool_list(&[false])),
                 ("current-track", Value::Number(0.0)),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
@@ -11249,6 +11575,11 @@ mod tests {
         rt.set_reactive("SEQ", "track-ids", test_list(ids));
         rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
         rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
+        rt.set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_repeated_bool_list(false, track_count),
+        );
         rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
         rt.set_reactive(
             "SEQ",
@@ -11542,6 +11873,11 @@ mod tests {
         rt.set_reactive("SEQ", "track-ids", test_list(ids));
         rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
         rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
+        rt.set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_repeated_bool_list(false, track_count),
+        );
         rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
         rt.set_reactive(
             "SEQ",
@@ -12650,6 +12986,208 @@ mod tests {
             expand.props.get("background"),
             Some(&Value::String("seqv-ellipsis-button".to_string())),
             "sequencer row expand control should use the SDF ellipsis widget instead of text"
+        );
+    }
+
+    #[test]
+    fn metal_seq_collapsed_tracks_render_compact_mixer_strip_and_hide_sequencer_row() {
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        editor
+            .runtime_mut()
+            .register_native("seq-toggle-track-collapsed", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(3.0)),
+                ("track-ids", test_number_list(&[0.0, 1.0, 2.0])),
+                ("track-names", test_string_list(&["kick", "snare", "hat"])),
+                ("track-colors", test_multi_track_colors(3)),
+                ("track-collapsed", test_bool_list(&[false, true, false])),
+                ("current-track", Value::Number(0.0)),
+                ("delete-target-version", Value::Number(0.0)),
+                ("record-armed", test_repeated_bool_list(false, 3)),
+                ("track-mutes", test_repeated_bool_list(false, 3)),
+                ("track-solos", test_repeated_bool_list(false, 3)),
+                ("track-muted-by-solo", test_repeated_bool_list(false, 3)),
+                (
+                    "track-instrument-types",
+                    test_string_list(&["sampler", "sampler", "sampler"]),
+                ),
+                (
+                    "track-mod-output-available",
+                    test_repeated_bool_list(false, 3),
+                ),
+                ("mod-routes", test_list(vec![])),
+                ("track-volumes", test_number_list(&[1.0, 1.0, 1.0])),
+                ("track-mixer-pans", test_number_list(&[0.0, 0.0, 0.0])),
+                ("track-outputs", test_string_list(&["main", "main", "main"])),
+                (
+                    "track-output-options",
+                    test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
+                ),
+                (
+                    "track-bus-sends",
+                    test_list(
+                        (0..3)
+                            .map(|_| {
+                                test_list(vec![
+                                    test_track_bus_send(1, "Bus A", 0.0),
+                                    test_track_bus_send(2, "Bus B", 0.0),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+                ("track-num-steps", test_number_list(&[16.0, 16.0, 16.0])),
+                ("track-timebases", test_string_list(&["16", "16", "16"])),
+                ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
+                ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
+                ("bus-mutes", test_repeated_bool_list(false, 3)),
+                ("bus-solos", test_repeated_bool_list(false, 3)),
+                ("master-peak-l", Value::Number(0.0)),
+                ("master-peak-r", Value::Number(0.0)),
+                ("bus-peak-0", Value::Number(0.0)),
+                ("bus-peak-1", Value::Number(0.0)),
+                ("bus-peak-2", Value::Number(0.0)),
+            ],
+            true,
+        );
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        {
+            let rt = editor.runtime_mut();
+            for track in 0..3 {
+                rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
+                rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
+                rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
+                rt.set_reactive(
+                    "SEQ",
+                    &format!("mixer-track-delete-target-{track}"),
+                    Value::Bool(false),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &format!("track-selected-{track}"),
+                    Value::Bool(track == 0),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_row_field(track, 0),
+                    Value::Number(if track == 0 { 0.0 } else { -1.0 }),
+                );
+                for bus in 1..=2 {
+                    rt.set_reactive(
+                        "SEQ",
+                        &format!("track-{track}-bus-{bus}-send"),
+                        Value::Number(0.0),
+                    );
+                }
+                for step in 0..16 {
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_active_field(track, step),
+                        Value::Bool(step.is_multiple_of(2)),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_plocked_field(track, step),
+                        Value::Bool(false),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_selected_field(track, step),
+                        Value::Bool(false),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_duration_field(track, step),
+                        Value::Bool(false),
+                    );
+                }
+            }
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (load "metal-seq-themes.lisp")
+                  (seq-theme-mac-osx-dark)
+                  (load "metal-seq-materials.lisp")
+                  (defstate selected-bus -1)
+                  (load "metal-seq-mixer-v2.lisp")
+                  (load "metal-seq-sequencer.lisp")
+                "#,
+            )
+            .expect("load mixer and sequencer lisp");
+        editor.refresh_runtime_side_effects();
+
+        let mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer buffer should exist")
+            .id;
+        editor.set_active_buffer(mixer_id);
+        editor.set_layout_viewport(120, 16);
+        let mixer_layout = editor
+            .widget_layout()
+            .expect("collapsed mixer layout should build");
+
+        let compact_badge =
+            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-collapsed-label-1")
+                .expect("collapsed track badge should render");
+        assert_finite_nonzero_rect(compact_badge, "collapsed mixer track badge");
+        assert!(
+            compact_badge.props.contains_key("on-double-click"),
+            "collapsed mixer badge should keep double-click collapse toggling"
+        );
+        let compact_mute =
+            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-collapsed-mute-1")
+                .expect("collapsed track mute should render");
+        assert_finite_nonzero_rect(compact_mute, "collapsed mixer mute");
+        let compact_meter = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-meter-1")
+            .expect("collapsed track meter should render");
+        assert_finite_nonzero_rect(compact_meter, "collapsed mixer meter");
+        assert!(
+            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-label-1").is_none(),
+            "collapsed mixer track should not render the full-width label"
+        );
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 30);
+        let sequencer_layout = editor
+            .widget_layout()
+            .expect("collapsed sequencer layout should build");
+
+        assert!(
+            find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-1").is_none(),
+            "collapsed track should be omitted from the sequencer row list"
+        );
+        assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-0").is_some());
+        assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-2").is_some());
+        assert_eq!(
+            count_stable_key_prefix(&sequencer_layout, "seqv-step-cell-"),
+            32,
+            "sequencer should render step cells only for visible tracks"
         );
     }
 
@@ -14241,6 +14779,7 @@ mod tests {
                     test_list(vec![Value::String("kick".to_string())]),
                 ),
                 ("track-colors", test_track_colors()),
+                ("track-collapsed", test_bool_list(&[false])),
                 ("num-tracks", Value::Number(1.0)),
                 ("current-track", Value::Number(0.0)),
                 ("delete-target-version", Value::Number(0.0)),
@@ -20870,6 +21409,10 @@ mod tests {
                     ]),
                 ),
                 ("track-colors", test_track_colors()),
+                (
+                    "track-collapsed",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
                 ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
                 ("track-selected-0", Value::Bool(true)),

@@ -43,6 +43,10 @@ pub const GRAPH_RESOLUTION_REF_STEPS: usize = GENERATOR_RESOLUTION_REF_STEPS;
 /// resolution. Matches `neural::finest_decay_index`.
 const DEFAULT_DECAY_STEP_BEATS: f64 = 0.25;
 
+/// How long a fired graph node stays visible in the runtime telemetry. Matches the
+/// native neural visualization hold so both layers read similarly in the UI.
+const TRIGGER_VISUAL_HOLD_BEATS: f64 = 0.25;
+
 /// How a node folds the several edge currents arriving in one boundary into the
 /// single `node-input` scalar its `:update` reads. `gather` lives on the edge;
 /// `reduce` lives on the node (spec §1.3).
@@ -93,6 +97,39 @@ pub struct GraphEdge {
     pub weight: f64,
     pub dampening: f64,
     pub delay_steps: u32,
+}
+
+/// One materialized graph edge as exposed through runtime visualization. This is a
+/// read-only snapshot of [`GraphRuntime`]'s flat edge list; it is not serialized and is
+/// never a second source of truth for live dampening.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphVisualizationEdge {
+    pub from: usize,
+    pub to: usize,
+    pub weight: f64,
+    pub dampening: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphVisualizationEvent {
+    pub node_index: usize,
+    pub track: Option<usize>,
+    pub sample_time: u64,
+    pub beat: f64,
+    pub transpose: f32,
+    pub velocity: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphVisualizationSnapshot {
+    pub id: u64,
+    pub name: String,
+    pub active: bool,
+    pub num_nodes: usize,
+    pub energy: Vec<f64>,
+    pub trigger_activity: Vec<f32>,
+    pub node_events: Vec<Option<GraphVisualizationEvent>>,
+    pub edges: Vec<GraphVisualizationEdge>,
 }
 
 impl GraphEdge {
@@ -455,6 +492,9 @@ pub struct GraphRuntime {
     // ── per-node runtime state ──
     node_params: Vec<HashMap<String, f64>>,
     energy: Vec<f64>,
+    trigger_activity: Vec<f32>,
+    trigger_visual_until_beats: Vec<f64>,
+    node_events: Vec<Option<GraphVisualizationEvent>>,
     input_accum: Vec<f64>,
     input_seen: Vec<bool>,
     /// The payload that last arrived at each node (Ext 1), consumed by its next fire.
@@ -547,6 +587,9 @@ impl GraphRuntime {
             random_state: config.id,
             node_params: config.node_params,
             energy: vec![0.0; num_nodes],
+            trigger_activity: vec![0.0; num_nodes],
+            trigger_visual_until_beats: vec![0.0; num_nodes],
+            node_events: vec![None; num_nodes],
             input_accum: vec![0.0; num_nodes],
             input_seen: vec![false; num_nodes],
             source_event: vec![None; num_nodes],
@@ -566,6 +609,28 @@ impl GraphRuntime {
     /// the static manifest.
     pub fn max_poly(&self) -> u32 {
         self.max_poly
+    }
+
+    pub fn visualization_snapshot(&self) -> GraphVisualizationSnapshot {
+        GraphVisualizationSnapshot {
+            id: self.id,
+            name: self.name.clone(),
+            active: self.active,
+            num_nodes: self.num_nodes,
+            energy: self.energy.clone(),
+            trigger_activity: self.trigger_activity.clone(),
+            node_events: self.node_events.clone(),
+            edges: self
+                .edges
+                .iter()
+                .map(|edge| GraphVisualizationEdge {
+                    from: edge.from,
+                    to: edge.to,
+                    weight: edge.weight,
+                    dampening: edge.dampening,
+                })
+                .collect(),
+        }
     }
 
     pub fn config_compatible(&self, config: &GraphRuntimeConfig) -> bool {
@@ -676,6 +741,9 @@ impl GraphRuntime {
                 .filter(|prop| prop.external_seed && prop.ready_after_beats + 1e-9 >= total_beats)
                 .collect::<Vec<_>>();
             self.energy[idx] = self.nodes[idx].seed_on_reset;
+            self.trigger_activity[idx] = 0.0;
+            self.trigger_visual_until_beats[idx] = 0.0;
+            self.node_events[idx] = None;
             self.input_accum[idx] = 0.0;
             self.input_seen[idx] = false;
             self.source_event[idx] = None;
@@ -862,6 +930,7 @@ impl GraphRuntime {
             self.reset(self.next_reset_beat);
         }
         self.apply_energy_decay(end_beats);
+        self.refresh_trigger_activity(end_beats);
 
         out[appended_from..].sort_by_key(|e| (e.sample_time, e.node_index));
     }
@@ -1016,11 +1085,22 @@ impl GraphRuntime {
         };
         event.resolved.transpose = payload.note;
         event.resolved.velocity = payload.velocity;
+        self.node_events[node_index] = Some(GraphVisualizationEvent {
+            node_index,
+            track: event.track,
+            sample_time: candidate.fire_sample,
+            beat: candidate.fire_beats,
+            transpose: payload.note,
+            velocity: payload.velocity,
+        });
         out.push(GraphEmission {
             sample_time: candidate.fire_sample,
             node_index,
             event,
         });
+        self.trigger_activity[node_index] = 1.0;
+        self.trigger_visual_until_beats[node_index] = self.trigger_visual_until_beats[node_index]
+            .max(candidate.fire_beats + TRIGGER_VISUAL_HOLD_BEATS);
         self.energy[node_index] = 0.0;
         if let Some(amount) = candidate.dampen_incoming {
             self.dampen_incoming(node_index, amount);
@@ -1054,6 +1134,17 @@ impl GraphRuntime {
 
     fn clear_incoming_triggers(&mut self, node_index: usize) {
         self.incoming_triggers[node_index].clear();
+    }
+
+    fn refresh_trigger_activity(&mut self, total_beats: f64) {
+        for idx in 0..self.num_nodes {
+            self.trigger_activity[idx] = if total_beats <= self.trigger_visual_until_beats[idx] {
+                1.0
+            } else {
+                self.node_events[idx] = None;
+                0.0
+            };
+        }
     }
 
     fn max_poly_accept(&mut self, candidates: &[GraphFiringCandidate], max_poly: u32) -> Vec<bool> {
@@ -1863,6 +1954,97 @@ mod tests {
     }
 
     #[test]
+    fn accepted_firing_sets_trigger_activity_and_event_payload() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(7, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(
+            0,
+            0.0,
+            GraphPayload {
+                note: 5.0,
+                velocity: 0.7,
+            },
+        );
+
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            0,
+            |eval| NodeFire {
+                fired: eval.node_index == 1 && eval.input > 0.0,
+                emit: Some(EmitSpec {
+                    note: Some(12.0),
+                    velocity: Some(0.42),
+                }),
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+
+        let snapshot = runtime.visualization_snapshot();
+        assert_eq!(snapshot.trigger_activity, vec![0.0, 1.0]);
+        let event = snapshot.node_events[1].expect("node 1 event telemetry");
+        assert_eq!(event.node_index, 1);
+        assert_eq!(event.track, None);
+        assert_eq!(event.sample_time, 48_000);
+        assert_eq!(event.beat, 1.0);
+        assert_eq!(event.transpose, 12.0);
+        assert_eq!(event.velocity, 0.42);
+    }
+
+    #[test]
+    fn trigger_activity_and_event_payload_expire_and_reset() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            0,
+            always_fire_with_dampen(0.0),
+            &mut out,
+        );
+        assert_eq!(runtime.visualization_snapshot().trigger_activity[1], 1.0);
+
+        runtime.process_block(
+            1.0,
+            1.26,
+            48_000,
+            48_000.0,
+            0,
+            |_eval| NodeFire::default(),
+            &mut out,
+        );
+        let expired = runtime.visualization_snapshot();
+        assert_eq!(expired.trigger_activity[1], 0.0);
+        assert!(expired.node_events[1].is_none());
+
+        runtime.push_propagation(0, 1.26, GraphPayload::default());
+        runtime.process_block(
+            1.26,
+            2.0,
+            60_480,
+            48_000.0,
+            0,
+            always_fire_with_dampen(0.0),
+            &mut out,
+        );
+        assert_eq!(runtime.visualization_snapshot().trigger_activity[1], 1.0);
+        runtime.reset(2.0);
+        let reset = runtime.visualization_snapshot();
+        assert_eq!(reset.trigger_activity[1], 0.0);
+        assert!(reset.node_events[1].is_none());
+    }
+
+    #[test]
     fn dampen_incoming_mutates_only_triggered_edges() {
         let nodes = vec![
             node(Timebase::Quarter),
@@ -1880,6 +2062,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].node_index, 2);
         assert_eq!(runtime.edges[0].dampening, 0.5);
+        assert_eq!(runtime.visualization_snapshot().edges[0].dampening, 0.5);
         assert_eq!(
             runtime.edges[1].dampening, 0.0,
             "untriggered incoming edge must not be dampened"
@@ -1941,6 +2124,7 @@ mod tests {
         );
         assert!(out.is_empty());
         assert!((runtime.edges[0].dampening - 0.4).abs() < f64::EPSILON);
+        assert!((runtime.visualization_snapshot().edges[0].dampening - 0.4).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1975,6 +2159,11 @@ mod tests {
         assert_eq!(out[0].node_index, 1);
         assert_eq!(runtime.edges[0].dampening, 0.5);
         assert_eq!(runtime.edges[1].dampening, 0.0);
+        let snapshot = runtime.visualization_snapshot();
+        assert_eq!(snapshot.trigger_activity[1], 1.0);
+        assert_eq!(snapshot.trigger_activity[2], 0.0);
+        assert!(snapshot.node_events[1].is_some());
+        assert!(snapshot.node_events[2].is_none());
     }
 
     #[test]

@@ -781,6 +781,15 @@ fn seed_graph_runtimes(
     }
 }
 
+fn publish_graph_visualizations(state: &SequencerState, graphs: &[crate::graph::GraphRuntime]) {
+    state.set_graph_visualizations(
+        graphs
+            .iter()
+            .map(crate::graph::GraphRuntime::visualization_snapshot)
+            .collect(),
+    );
+}
+
 fn graph_overrides_for_manifest<'a>(
     manifest: &crate::graph::GraphManifest,
     overrides: &'a [crate::graph::ProjectGraphOverrides],
@@ -2766,6 +2775,7 @@ pub fn spawn_scheduler_thread(
                         &mut graph_manifests,
                         clock.total_beats,
                     );
+                    publish_graph_visualizations(&state, &graph_runtimes);
                     if debug_graph {
                         eprintln!(
                             "[graph-reconcile] published={} graph_manifests={} runtimes={} overrides={}",
@@ -2786,6 +2796,7 @@ pub fn spawn_scheduler_thread(
                         &mut graph_manifests,
                         clock.total_beats,
                     );
+                    publish_graph_visualizations(&state, &graph_runtimes);
                     loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
                 }
 
@@ -2861,6 +2872,7 @@ pub fn spawn_scheduler_thread(
                     for graph in &mut graph_runtimes {
                         graph.reset(0.0);
                     }
+                    publish_graph_visualizations(&state, &graph_runtimes);
                     state.set_neural_visualization(neural_runtime.visualization_snapshot());
                     thread::sleep(Duration::from_millis(if live_active { 1 } else { 2 }));
                     continue;
@@ -3788,6 +3800,7 @@ pub fn spawn_scheduler_thread(
                             break;
                         }
                     }
+                    publish_graph_visualizations(&state, &graph_runtimes);
                     if log_graph_drive_chunk {
                         debug_graph_drive_chunks += 1;
                     }
@@ -3815,9 +3828,8 @@ mod tests {
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, midi_fx_window_events_from_step,
         quantized_live_tick_sample, reconcile_graph_runtimes, resolve_effect_params,
         resolve_instrument_plocks, resolve_sampler_params, run_midi_fx_chain_for_track,
-        sample_time_to_beats, should_reload_neural_runtime, swung_network_sample_time,
-        track_active_note_spans_at_beat, track_note_spans_for_trigger, MidiFxEvent,
-        SnapshotSequencerClock,
+        should_reload_neural_runtime, swung_network_sample_time, track_active_note_spans_at_beat,
+        track_note_spans_for_trigger, MidiFxEvent, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};

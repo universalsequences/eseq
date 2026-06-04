@@ -2,6 +2,8 @@
 ;; Renders to *sequencer* buffer. Shows every track's step grid laid out
 ;; vertically. Loaded by metal-seq-grid.lisp.
 
+(load "metal-seq-track-collapse.lisp")
+
 (def seqv-track-peak (i)
   (reactive-get "SEQ" (str "track-peak-" i)))
 
@@ -1102,7 +1104,7 @@
 
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.00 :gap 0.0
-    (each (range 0 (len SEQ.track-names)) |i|
+    (each (seq-visible-track-indices) |i|
       (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
         (let ((muted (seqv-muted? i)))
           (box :width :fill

@@ -213,6 +213,7 @@ pub(crate) fn init_runtime(
     state: Arc<SequencerState>,
     track_names: &[String],
     track_pan_ids: Arc<Mutex<Vec<i32>>>,
+    track_collapsed: Arc<Mutex<Vec<bool>>>,
     buses: Arc<Mutex<Vec<ui::BusChannelState>>>,
     bus_node_ids: Arc<Mutex<Vec<ui::BusNodeIds>>>,
     current_track: Arc<AtomicUsize>,
@@ -283,6 +284,10 @@ pub(crate) fn init_runtime(
                     "neural-dampening-matrix",
                     build_neural_dampening_matrix_value(&state),
                 ),
+                (
+                    "graph-visualizations",
+                    build_graph_visualizations_value(&state),
+                ),
                 ("auto-follow", Value::Bool(true)),
                 ("playhead", Value::Number(0.0)),
                 ("transport-playhead", Value::Number(0.0)),
@@ -298,6 +303,7 @@ pub(crate) fn init_runtime(
                     build_track_instrument_run_modes(&app),
                 ),
                 ("track-names", build_track_names(&track_names)),
+                ("track-collapsed", build_track_collapsed(app)),
                 (
                     "track-num-steps",
                     build_all_track_num_steps_value(&state, app),
@@ -1372,6 +1378,33 @@ pub(crate) fn init_runtime(
             );
         }
         Ok(Value::Bool(muted))
+    });
+
+    // seq-toggle-track-collapsed — (seq-toggle-track-collapsed track-idx)
+    let st = state.clone();
+    let collapsed_tracks = track_collapsed.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-toggle-track-collapsed", move |args, _ctx| {
+        let Some(Value::Number(track)) = args.first() else {
+            return Err("seq-toggle-track-collapsed: expected track".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-toggle-track-collapsed: track {track} out of range").into());
+        }
+        let collapsed = {
+            let mut tracks = collapsed_tracks.lock().unwrap();
+            if tracks.len() < st.active_track_count() {
+                tracks.resize(st.active_track_count(), false);
+            }
+            tracks[track] = !tracks[track];
+            tracks[track]
+        };
+        ui_inv.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Collapsed,
+        });
+        Ok(Value::Bool(collapsed))
     });
 
     // seq-toggle-track-solo — (seq-toggle-track-solo track-idx)
@@ -3821,6 +3854,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-record",
             "(seq-toggle-record)",
             "Toggle recording when at least one track is armed.",
+        ),
+        (
+            "seq-toggle-track-collapsed",
+            "(seq-toggle-track-collapsed track)",
+            "Toggle whether a track is collapsed in track overview UIs.",
         ),
         (
             "seq-toggle-record-arm",

@@ -168,15 +168,21 @@ pub enum ProjectTrack {
         sample_path: String,
         #[serde(default)]
         color: Option<TrackColor>,
+        #[serde(default)]
+        collapsed: bool,
     },
     Custom {
         instrument_name: String,
         #[serde(default)]
         color: Option<TrackColor>,
+        #[serde(default)]
+        collapsed: bool,
     },
     Modulator {
         #[serde(default)]
         color: Option<TrackColor>,
+        #[serde(default)]
+        collapsed: bool,
     },
 }
 
@@ -185,7 +191,15 @@ impl ProjectTrack {
         match self {
             Self::Sampler { color, .. }
             | Self::Custom { color, .. }
-            | Self::Modulator { color } => color.map(TrackColor::clamped),
+            | Self::Modulator { color, .. } => color.map(TrackColor::clamped),
+        }
+    }
+
+    pub fn collapsed(&self) -> bool {
+        match self {
+            Self::Sampler { collapsed, .. }
+            | Self::Custom { collapsed, .. }
+            | Self::Modulator { collapsed, .. } => *collapsed,
         }
     }
 }
@@ -1263,10 +1277,12 @@ mod tests {
                 ProjectTrack::Custom {
                     instrument_name: "prophet-5".to_string(),
                     color: Some(TrackColor::new(0.96, 0.28, 0.52)),
+                    collapsed: true,
                 },
                 ProjectTrack::Sampler {
                     sample_path: "samples/drums/kick.wav".to_string(),
                     color: Some(TrackColor::new(0.98, 0.56, 0.20)),
+                    collapsed: false,
                 },
             ],
             custom_effects: vec![vec![Some("widener".to_string()), None], vec![None, None]],
@@ -1486,6 +1502,8 @@ mod tests {
             restored.tracks[1].color(),
             Some(TrackColor::new(0.98, 0.56, 0.20))
         );
+        assert!(restored.tracks[0].collapsed());
+        assert!(!restored.tracks[1].collapsed());
         assert_eq!(restored.patterns.len(), 1);
         assert_eq!(restored.patterns[0].track_bits[0], [0b1011, 0, 0, 0]);
         assert_eq!(restored.patterns[0].track_bits[1], [0b0101, 1, 0, 0]);

@@ -1106,6 +1106,7 @@ impl GraphController<'_> {
 
         self.app.tracks.clear();
         self.app.track_colors.clear();
+        self.app.track_collapsed.clear();
         self.app.sampler_paths.clear();
         self.app.graph.track_node_ids.clear();
         self.app.graph.track_buffer_ids.clear();
@@ -1803,6 +1804,9 @@ impl GraphController<'_> {
         self.app.tracks.remove(track_idx);
         if track_idx < self.app.track_colors.len() {
             self.app.track_colors.remove(track_idx);
+        }
+        if track_idx < self.app.track_collapsed.len() {
+            self.app.track_collapsed.remove(track_idx);
         }
         self.app.sampler_paths.remove(track_idx);
         self.app.graph.track_node_ids.remove(track_idx);
@@ -3274,6 +3278,7 @@ impl GraphController<'_> {
 
         self.app.tracks.push(track_name.clone());
         self.app.push_next_track_color();
+        self.app.push_default_track_collapsed();
         self.app
             .graph
             .effect_descriptors

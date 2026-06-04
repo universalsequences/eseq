@@ -957,7 +957,10 @@ mod tests {
         props.insert("cols".to_string(), Value::Number(2.0));
         props.insert("min".to_string(), Value::Number(0.0));
         props.insert("max".to_string(), Value::Number(1.0));
-        props.insert("on-cell-change".to_string(), Value::String("cb".to_string()));
+        props.insert(
+            "on-cell-change".to_string(),
+            Value::String("cb".to_string()),
+        );
         props.insert(
             "value".to_string(),
             list(vec![

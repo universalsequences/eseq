@@ -109,6 +109,25 @@
 (def g8-set-cell (w r c v)
   (set-nth w r (set-nth (nth w r) c v)))
 
+(def g8-zero-row ()
+  (map (lambda (n) 0) (range 0 g8-node-count)))
+
+(def g8-zero-matrix ()
+  (map (lambda (n) (g8-zero-row)) (range 0 g8-node-count)))
+
+(def g8-zero-column-matrix ()
+  (map (lambda (n) (list 0)) (range 0 g8-node-count)))
+
+(def g8-viz (visualizations)
+  (let ((hits (filter (lambda (viz) (= (get viz :name) g8-name)) visualizations)))
+    (if (> (len hits) 0) (nth hits 0) nil)))
+
+(def g8-viz-matrix (viz field fallback)
+  (if viz
+    (let ((value (get viz field)))
+      (if value value fallback))
+    fallback))
+
 ;; ── init helpers (explicit-only; loading the file does NOT call these) ──
 
 (def g8-apply-weights (w)
@@ -212,51 +231,93 @@
     (label "res"    :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
     (label "quant"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)))
 
-(def g8-panel (current-pattern)
+(def g8-panel (current-pattern graph-visualizations)
   (do
     ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
     ;; per-node knobs need no sync — `bind-graph` re-seeds their slots as the rows
     ;; render below.
     current-pattern
     (set! g8-weights (g8-read-weights))
-    (box
-      :padding 0.85
-      :gap 0.6
-      :width 37
-      :height 24
-      (v-stack :gap 0.5
-      ;; ── sequencer-level config (on top) ──
-      (h-stack :gap 0.6 :align :center
-        (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
-        (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-        (g8-num "graph-8x8-reset-bars"
-          (bind-graph-config g8-name :reset-bars) 0 64 1 0
-          (lambda (v) (g8-edit-config :reset-bars v)))
-        (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-        (g8-num "graph-8x8-max-poly"
-          (bind-graph-config g8-name :max-poly) 0 16 1 0
-          (lambda (v) (g8-edit-config :max-poly v))))
-      (h-stack
-      (v-stack :gap 0.5
-        (h-stack :gap 0.5 :align :center
-          (label "per-node knobs" :width 14 :height 1.2 :font-size 9 :color :dim))
-        (v-stack :gap 0.2
-          (g8-header)
-          (each (range 0 g8-node-count) |n| (g8-row n))))
-        (v-stack :gap 0.35
-          (label "weights (from row -> to col)" :width 18 :height 2.5 :font-size 8 :color :dim)
-          (matrix
-            :key "graph-8x8-weight-matrix"
-            :rows 8
-            :cols 8
-            :width 26
-            :height 12
-            :min 0
-            :max 1
-            :value g8-weights
-            :on-cell-change (lambda (r c v)
-              (do
-                (set! g8-weights (g8-set-cell g8-weights r c v))
-                (graph-edge g8-name :from r :to c :weight v))))))))))
+    (let ((viz (g8-viz graph-visualizations)))
+      (box
+        :padding 0.85
+        :gap 0.6
+        :width 37
+        :height 45
+        (v-stack :gap 0.5
+          ;; ── sequencer-level config (on top) ──
+          (h-stack :gap 0.6 :align :center
+            (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
+            (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+            (g8-num "graph-8x8-reset-bars"
+              (bind-graph-config g8-name :reset-bars) 0 64 1 0
+              (lambda (v) (g8-edit-config :reset-bars v)))
+            (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+            (g8-num "graph-8x8-max-poly"
+              (bind-graph-config g8-name :max-poly) 0 16 1 0
+              (lambda (v) (g8-edit-config :max-poly v))))
+          (h-stack
+            (v-stack :gap 0.5
+              (h-stack :gap 0.5 :align :center
+                (label "per-node knobs" :width 14 :height 1.2 :font-size 9 :color :dim))
+              (v-stack :gap 0.2
+                (g8-header)
+                (each (range 0 g8-node-count) |n| (g8-row n))))
+            
+            (v-stack :gap 0.35
+              (label "trig" :width 2 :height 2.5 :font-size 8 :color :dim)
+              (matrix
+                :key "graph-8x8-trigger-matrix"
+                :rows 8
+                :cols 1
+                :width 1
+                :height 12
+                :min 0
+                :max 1
+                :value (g8-viz-matrix viz :trigger-matrix (g8-zero-column-matrix))))            
+            
+            (v-stack :gap 0.35
+              (label "energy" :width 3 :height 2.5 :font-size 8 :color :dim)
+              (matrix
+                :key "graph-8x8-energy-matrix"
+                :rows 8
+                :cols 1
+                :width 2
+                :height 12
+                :min 0
+                :max 4
+                :value (g8-viz-matrix viz :energy-matrix (g8-zero-column-matrix))))            
+            (v-stack :gap 0.35
+              (label "weights (from row -> to col)" :width 18 :height 2.5 :font-size 8 :color :dim)
+              (matrix
+                :key "graph-8x8-weight-matrix"
+                :rows 8
+                :cols 8
+                :width 26
+                :height 12
+                :min 0
+                :max 1
+                :value g8-weights
+                :on-cell-change (lambda (r c v)
+                  (do
+                    (set! g8-weights (g8-set-cell g8-weights r c v))
+                    (graph-edge g8-name :from r :to c :weight v))))))
+          (v-stack :gap 0.5
+            
+            
+            (label "live dampening (from row -> to col)" :width 18 :height 1.2 :font-size 8 :color :dim)
+            (matrix
+              :key "graph-8x8-dampening-matrix"
+              :rows 8
+              :cols 8
+              :width 26
+              :height 12
+              
+            :control :grid
+            :background :black
+            :fill :primary
+              :min 0
+              :max 1
+              :value (g8-viz-matrix viz :dampening-matrix (g8-zero-matrix)))))))))
 
-(effect-buffer "*8x8*" (g8-panel SEQ.current-pattern))
+(effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations))
