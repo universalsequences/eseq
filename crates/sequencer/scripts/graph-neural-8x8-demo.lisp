@@ -128,9 +128,39 @@
                                   15)))))))))))))))))
 
 (def g8-route-label (route)
-  (if route
-    (nth g8-route-options route)
-    "Off"))
+  (if (= route 0)
+    "Track 1"
+    (if (= route 1)
+      "Track 2"
+      (if (= route 2)
+        "Track 3"
+        (if (= route 3)
+          "Track 4"
+          (if (= route 4)
+            "Track 5"
+            (if (= route 5)
+              "Track 6"
+              (if (= route 6)
+                "Track 7"
+                (if (= route 7)
+                  "Track 8"
+                  (if (= route 8)
+                    "Track 9"
+                    (if (= route 9)
+                      "Track 10"
+                      (if (= route 10)
+                        "Track 11"
+                        (if (= route 11)
+                          "Track 12"
+                          (if (= route 12)
+                            "Track 13"
+                            (if (= route 13)
+                              "Track 14"
+                              (if (= route 14)
+                                "Track 15"
+                                (if (= route 15)
+                                  "Track 16"
+                                  "Off")))))))))))))))))
 
 ;; ── apply helpers: push a value into the published graph's override layer ──
 

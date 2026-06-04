@@ -12528,7 +12528,7 @@ mod tests {
                     resolution: None,
                     delay_steps: None,
                     quantize: None,
-                    route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),
+                    route: Some(crate::graph::ProjectGraphRouteOverride::Track(0)),
                     seed_from: None,
                 });
             graph
@@ -12564,8 +12564,8 @@ mod tests {
             runtime
                 .eval_str("g8-route-4")
                 .expect("read synced route state"),
-            Some(Value::String("Track 2".to_string())),
-            "pattern switch should reload route control state"
+            Some(Value::String("Track 1".to_string())),
+            "pattern switch should display internal route 0 as Track 1"
         );
         assert_eq!(
             runtime
