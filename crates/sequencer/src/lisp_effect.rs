@@ -12351,6 +12351,10 @@ mod tests {
         ))
         .expect("read graph 8x8 demo script");
         runtime.eval_str(&source).expect("evaluate graph 8x8 demo");
+        assert!(
+            state.current_graph_overrides().is_empty(),
+            "loading the graph demo must publish graph/UI without writing pattern overrides"
+        );
         let manifest = state
             .published_sequencers()
             .into_iter()
@@ -12427,6 +12431,33 @@ mod tests {
                 "missing quantize triplet option {label}"
             );
         }
+
+        runtime
+            .eval_str("(g8-init-ring-defaults)")
+            .expect("explicitly initialize graph demo defaults");
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-8x8-demo")
+            .expect("graph overrides after explicit init");
+        assert_eq!(
+            graph.edge_params.len(),
+            64,
+            "explicit init should write the full ring weight matrix"
+        );
+        assert!(
+            graph.edge_params.iter().any(|edge| {
+                edge.from == 0 && edge.to == 1 && edge.param == "weight" && edge.value == 1.0
+            }),
+            "explicit init should write the first ring edge"
+        );
+        assert!(
+            graph.node_intrinsics.iter().any(|node| {
+                node.instance == 0
+                    && node.seed_from == Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0]))
+            }),
+            "explicit init should seed node 0 from track 0"
+        );
 
         // transpose picker -> per-node behavioral param override.
         let transpose_change = find_by_stable_key(&layout, "graph-8x8-transpose-2")
@@ -12705,6 +12736,130 @@ mod tests {
         assert!(
             emissions.is_empty(),
             "zero matrix should silence graph propagation"
+        );
+    }
+
+    #[test]
+    fn graph_8x8_demo_scratch_load_preserves_saved_overrides() {
+        let state = Arc::new(SequencerState::new(
+            8,
+            (0..8).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let expected = crate::graph::ProjectGraphOverrides {
+            sequencer_id: super::stable_sequencer_id("neural-8x8-demo"),
+            sequencer_name: "neural-8x8-demo".to_string(),
+            node_intrinsics: vec![
+                crate::graph::ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance: 0,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: None,
+                    seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
+                },
+                crate::graph::ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance: 3,
+                    resolution: None,
+                    delay_steps: Some(6),
+                    quantize: None,
+                    route: None,
+                    seed_from: None,
+                },
+                crate::graph::ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance: 4,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: Some(crate::graph::ProjectGraphRouteOverride::Track(0)),
+                    seed_from: None,
+                },
+            ],
+            node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
+                group: "nrn".to_string(),
+                instance: 2,
+                param: "transpose".to_string(),
+                value: -12.0,
+            }],
+            edge_params: vec![crate::graph::ProjectGraphEdgeParamOverride {
+                group: "nrn->nrn".to_string(),
+                from: 0,
+                to: 1,
+                param: "weight".to_string(),
+                value: 0.25,
+            }],
+        };
+        {
+            let mut bank = state.pattern.pattern_bank.lock().unwrap();
+            bank[0].graph_overrides = vec![expected.clone()];
+        }
+
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![("current-pattern", Value::Number(0.0))], true);
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|crates_dir| crates_dir.parent())
+            .expect("sequencer crate should live under workspace crates dir")
+            .join(".eseqlisp-scratch");
+        let report = runtime.eval_source_transactional(
+            Some(workspace_root),
+            r#"(load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")"#,
+            Vec::new(),
+        );
+        assert!(
+            report.success,
+            "scratch-style load failed: {}",
+            report.failure_message()
+        );
+        assert_eq!(
+            runtime.eval_str("g8-name").expect("read loaded graph name"),
+            Some(Value::String("neural-8x8-demo".to_string())),
+            "scratch-style load should define the graph demo UI state"
+        );
+
+        assert!(
+            state
+                .published_sequencers()
+                .into_iter()
+                .any(|published| published.name == "neural-8x8-demo" && published.graph.is_some()),
+            "scratch load should republish the graph manifest"
+        );
+        assert_eq!(
+            state.current_graph_overrides(),
+            vec![expected],
+            "scratch load must not clobber saved graph overrides"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("g8-transp-2")
+                .expect("read synced transpose state"),
+            Some(Value::Number(-12.0)),
+            "loaded UI should sync node params from saved overrides"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("g8-delay-3")
+                .expect("read synced delay state"),
+            Some(Value::Number(6.0)),
+            "loaded UI should sync node intrinsics from saved overrides"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("g8-route-4")
+                .expect("read synced route state"),
+            Some(Value::String("Track 1".to_string())),
+            "loaded UI should display saved internal route 0 as Track 1"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth (nth g8-weights 0) 1)")
+                .expect("read synced weight"),
+            Some(Value::Number(0.25)),
+            "loaded UI should sync matrix weights from saved overrides"
         );
     }
 

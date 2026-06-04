@@ -13,6 +13,13 @@
 ;; NOTE: each per-node knob is a *scalar* defstate bound directly (`:value g8-...-N`).
 ;; That direct binding is what makes the widgets live-editable — a single list-valued
 ;; state read by index does NOT bind per-widget in the reactive renderer.
+;;
+;; Project scratch entrypoint:
+;;   (load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")
+;;
+;; Loading this file only publishes the graph/UI and syncs controls from the current
+;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
+;;   (g8-init-ring-defaults)
 
 (def-sequencer "neural-8x8-demo"
   :shape (line 8)
@@ -74,7 +81,7 @@
 (defstate g8-quant-4 "16") (defstate g8-quant-5 "16") (defstate g8-quant-6 "16") (defstate g8-quant-7 "16")
 
 ;; Connection weights: a forward ring (i -> i+1) so a seed walks all eight nodes.
-(defstate g8-weights
+(def g8-ring-weights ()
   (list
     (list 0 1 0 0 0 0 0 0)
     (list 0 0 1 0 0 0 0 0)
@@ -84,6 +91,8 @@
     (list 0 0 0 0 0 0 1 0)
     (list 0 0 0 0 0 0 0 1)
     (list 1 0 0 0 0 0 0 0)))
+
+(defstate g8-weights (g8-ring-weights))
 
 (def g8-res-options (list "1" "2" "4" "8" "16" "32" "64"))
 (def g8-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
@@ -180,9 +189,11 @@
         (range 8)))
     (range 8)))
 
-;; Seed the override layer once at load: ring weights live, node 0 is the seed point.
-(g8-apply-weights g8-weights)
-(graph-node g8-name 0 :seed-from 0)
+(def g8-init-ring-defaults ()
+  (do
+    (set! g8-weights (g8-ring-weights))
+    (g8-apply-weights g8-weights)
+    (graph-node g8-name 0 :seed-from 0)))
 
 ;; Pattern switches update the graph override layer outside these scalar defstates.
 ;; Refresh the UI controls from the resolved current-pattern graph before rendering.
@@ -286,8 +297,8 @@
 ;; ── UI ──
 
 (def g8-row-height 1.3)
-(def g8-node-width 2.4)
-(def g8-control-width 5.0)
+(def g8-node-width 2.0)
+(def g8-control-width 7.0)
 
 (def g8-num (key value lo hi stp dec on-change)
   (number-picker

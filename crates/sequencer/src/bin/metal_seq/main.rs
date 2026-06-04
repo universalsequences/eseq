@@ -3377,6 +3377,9 @@ mod tests {
         *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
         *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
         push_project_scratch_to_named_buffer(&mut editor, &app);
+        if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
+            editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
+        }
 
         let cached_track_peak_levels = vec![0.0; track_names.len()];
         let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
@@ -4833,6 +4836,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "new-project" => {
                         app.start_new_project();
                         push_project_scratch_to_named_buffer(&mut editor, &app);
+                        if let Err(error) =
+                            evaluate_project_scratch_on_ui_runtime(&mut editor, &app)
+                        {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Scratch UI eval error: {error}"
+                            )));
+                        }
                         selected_steps.lock().unwrap().clear();
                         piano_roll_selection.lock().unwrap().clear();
                         track_names = app.tracks.clone();
@@ -11418,6 +11428,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                        if let Err(error) =
+                            evaluate_project_scratch_on_ui_runtime(&mut editor, &app)
+                        {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Scratch UI eval error: {error}"
+                            )));
+                        }
                         ui_invalidations.clear();
                         expanded_step_projection.clear();
 

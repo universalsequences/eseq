@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 fn sampler_modulation_depth_display_range(
     depth_desc: &sequencer::effects::ParamDescriptor,
@@ -4978,11 +4979,24 @@ pub(crate) fn sync_project_state(rt: &mut Runtime, app: &ui::App) {
 
 pub(crate) const PROJECT_SCRATCH_BUFFER_NAME: &str = "*scratch*";
 
+fn project_scratch_source_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(|crates_dir| crates_dir.parent())
+        .unwrap_or(&manifest_dir)
+        .join(".eseqlisp-scratch")
+}
+
 pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ui::App) {
     let scratch_text = app.editor.scratch_buffer.clone();
     let scratch_cursor = app.editor.scratch_cursor;
 
-    editor.upsert_scratch_buffer(PROJECT_SCRATCH_BUFFER_NAME, &scratch_text);
+    let id = editor.upsert_scratch_buffer(PROJECT_SCRATCH_BUFFER_NAME, &scratch_text);
+    let scratch_path = project_scratch_source_path();
+    if let Some(buffer) = editor.buffers.iter_mut().find(|buffer| buffer.id == id) {
+        buffer.path = Some(scratch_path);
+    }
 
     if editor.active_buffer().name == PROJECT_SCRATCH_BUFFER_NAME {
         let buffer = editor.active_buffer_mut();
@@ -4990,6 +5004,33 @@ pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ui
         let col = scratch_cursor.1.min(buffer.lines[row].len());
         buffer.cursor = (row, col);
     }
+}
+
+pub(crate) fn evaluate_project_scratch_on_ui_runtime(
+    editor: &mut Editor,
+    app: &ui::App,
+) -> Result<(), String> {
+    let scratch_text = app.editor.scratch_buffer.clone();
+    if scratch_text.trim().is_empty() {
+        return Ok(());
+    }
+
+    let overlays = editor.snapshot_file_backed_sources();
+    let report = editor.runtime_mut().eval_source_transactional(
+        Some(project_scratch_source_path()),
+        &scratch_text,
+        overlays,
+    );
+    let result = if report.success {
+        Ok(())
+    } else {
+        Err(report.failure_message())
+    };
+    editor.process_lisp_reload_report(report);
+    if let Some(status) = editor.runtime_mut().take_status_message() {
+        editor.show_transient_message(status);
+    }
+    result
 }
 
 pub(crate) fn pull_named_scratch_buffer_into_project(editor: &Editor, app: &mut ui::App) {

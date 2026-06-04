@@ -1695,10 +1695,6 @@ impl App {
         self.state
             .set_scratch_source(self.editor.scratch_buffer.clone());
         self.clear_control_hooks();
-        if let Err(error) = self.rebuild_scratch_runtime_from_buffer() {
-            self.editor.status_message =
-                Some((format!("Scratch eval error: {error}"), Instant::now()));
-        }
         let repaired_sidechains = self.repair_stale_sidechain_effect_slots()?;
         let status = if pending.fallback_samples > 0 {
             format!(
