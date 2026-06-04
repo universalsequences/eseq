@@ -1456,6 +1456,8 @@ mod tests {
                         param: "weight".to_string(),
                         value: 0.5,
                     }],
+                    reset_every_beats: None,
+                    max_poly: None,
                 }],
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],

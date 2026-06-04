@@ -1348,6 +1348,9 @@ impl SequencerState {
     pub fn scheduler_snapshot_version(&self) -> u64 {
         self.scheduler_snapshot_version.load(Ordering::Acquire)
     }
+    pub fn current_pattern_index(&self) -> usize {
+        self.pattern.current_pattern.load(Ordering::Relaxed) as usize
+    }
     pub fn latest_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         self.scheduler_snapshot.lock().unwrap().clone()
     }

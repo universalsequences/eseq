@@ -258,8 +258,44 @@ fn handle_drag(node: &LayoutNode, local_row: f32) -> MouseEventOutcome {
     let cell_height = (node.rect.height / rows as f32).max(0.001);
     let delta_cells = (state.drag_start_row - local_row) / cell_height;
     let new_value = state.drag_start_value + delta_cells * range;
-    let matrix = change_for_cell(node, cell, new_value, rows, cols);
-    MouseEventOutcome::Dispatch(WidgetEvent::Custom(matrix_value(matrix)))
+    dispatch_cell_change(node, cell, new_value, rows, cols)
+}
+
+/// Build the change event for a single cell. When the widget declares an
+/// `on-cell-change` callback we dispatch only the changed cell `(row col value)`
+/// so the host can persist one entry instead of re-serializing (and re-applying)
+/// the entire matrix on every drag frame. Without it we fall back to the legacy
+/// `on-change` full-matrix payload.
+fn dispatch_cell_change(
+    node: &LayoutNode,
+    cell: usize,
+    new_value: f32,
+    rows: usize,
+    cols: usize,
+) -> MouseEventOutcome {
+    if has_callback(node, "on-cell-change") {
+        let value = quantize_value(&node.props, new_value);
+        MouseEventOutcome::Dispatch(WidgetEvent::Custom(cell_change_value(
+            cell / cols,
+            cell % cols,
+            value,
+        )))
+    } else {
+        let matrix = change_for_cell(node, cell, new_value, rows, cols);
+        MouseEventOutcome::Dispatch(WidgetEvent::Custom(matrix_value(matrix)))
+    }
+}
+
+fn has_callback(node: &LayoutNode, key: &str) -> bool {
+    matches!(node.props.get(key), Some(value) if !matches!(value, Value::Nil | Value::Bool(false)))
+}
+
+fn cell_change_value(row: usize, col: usize, value: f32) -> Value {
+    Value::List(vec![
+        value_cell(Value::Number(row as f64)),
+        value_cell(Value::Number(col as f64)),
+        value_cell(Value::Number(value as f64)),
+    ])
 }
 
 fn handle_toggle(node: &LayoutNode, local_col: f32, local_row: f32) -> MouseEventOutcome {
@@ -278,7 +314,7 @@ fn handle_toggle(node: &LayoutNode, local_col: f32, local_row: f32) -> MouseEven
         state.clicked_cell = Some(cell);
         state.release_time = 0.0;
     });
-    MouseEventOutcome::Dispatch(WidgetEvent::Custom(matrix_value(matrix)))
+    dispatch_cell_change(node, cell, new_value, rows, cols)
 }
 
 fn color_mix(a: Color, b: Color, t: f32) -> Color {
@@ -547,6 +583,16 @@ impl WidgetDefinition for MatrixWidget {
         let WidgetEvent::Custom(value) = event else {
             return None;
         };
+        // Per-cell path: `dispatch_cell_change` packed a `(row col value)` list and
+        // the widget declares `on-cell-change`. Spread it into three positional args.
+        if has_callback(node, "on-cell-change") {
+            let callback = node.props.get("on-cell-change")?.clone();
+            let args = match &value {
+                Value::List(items) => items.iter().map(|cell| cell.borrow().clone()).collect(),
+                other => vec![other.clone()],
+            };
+            return Some(EventOutput { callback, args });
+        }
         let callback = node.props.get("on-change")?.clone();
         Some(EventOutput {
             callback,
@@ -902,6 +948,69 @@ mod tests {
             1.0,
         );
         assert!(matches!(drag, MouseEventOutcome::Consume));
+    }
+
+    #[test]
+    fn on_cell_change_dispatches_only_the_edited_cell() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(2.0));
+        props.insert("cols".to_string(), Value::Number(2.0));
+        props.insert("min".to_string(), Value::Number(0.0));
+        props.insert("max".to_string(), Value::Number(1.0));
+        props.insert("on-cell-change".to_string(), Value::String("cb".to_string()));
+        props.insert(
+            "value".to_string(),
+            list(vec![
+                list(vec![Value::Number(0.0), Value::Number(0.25)]),
+                list(vec![Value::Number(0.5), Value::Number(0.75)]),
+            ]),
+        );
+
+        let node = matrix_node(props);
+        // Anchor on cell (row 0, col 1) whose current value is 0.25.
+        let _ = MATRIX_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            5.0,
+            1.0,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        let drag = MATRIX_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Drag(MouseButton::Left),
+            5.0,
+            -1.0,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(payload)) = drag else {
+            panic!("expected per-cell dispatch");
+        };
+        {
+            let Value::List(cell) = &payload else {
+                panic!("expected a single (row col value) cell, not a full matrix");
+            };
+            assert_eq!(cell.len(), 3, "row, col, value");
+            assert_eq!(*cell[0].borrow(), Value::Number(0.0));
+            assert_eq!(*cell[1].borrow(), Value::Number(1.0));
+            assert_eq!(*cell[2].borrow(), Value::Number(0.75));
+        }
+        // handle_event spreads the cell into three positional args on on-cell-change.
+        let output = MATRIX_WIDGET
+            .handle_event(&node, WidgetEvent::Custom(payload))
+            .expect("cell-change output");
+        assert_eq!(output.callback, Value::String("cb".to_string()));
+        assert_eq!(output.args.len(), 3);
+        assert_eq!(output.args[0], Value::Number(0.0));
+        assert_eq!(output.args[1], Value::Number(1.0));
+        assert_eq!(output.args[2], Value::Number(0.75));
     }
 
     #[cfg(target_os = "macos")]

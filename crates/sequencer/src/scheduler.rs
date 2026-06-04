@@ -3443,12 +3443,7 @@ pub fn spawn_scheduler_thread(
                                         chunk_enqueued = false;
                                         break;
                                     }
-                                    let seed_beats = sample_time_to_beats(
-                                        chunk_start_beats,
-                                        scheduled_until_sample,
-                                        sample_time,
-                                        samples_per_quarter as f64,
-                                    );
+                                    let seed_beats = trigger.absolute_beats;
                                     neural_runtime.process_seed_at(&seed_event, seed_beats);
                                     seed_graph_runtimes(&mut graph_runtimes, &seed_event, seed_beats);
                                 } else {
@@ -3471,12 +3466,7 @@ pub fn spawn_scheduler_thread(
                                         sample_time,
                                         step_event.clone(),
                                     );
-                                    let seed_beats = sample_time_to_beats(
-                                        chunk_start_beats,
-                                        scheduled_until_sample,
-                                        sample_time,
-                                        samples_per_quarter as f64,
-                                    );
+                                    let seed_beats = trigger.absolute_beats;
                                     neural_runtime.process_seed_at(&step_event, seed_beats);
                                     seed_graph_runtimes(&mut graph_runtimes, &step_event, seed_beats);
                                     if !ok {
@@ -3503,12 +3493,7 @@ pub fn spawn_scheduler_thread(
                                     sample_time,
                                     step_event.clone(),
                                 );
-                                let seed_beats = sample_time_to_beats(
-                                    chunk_start_beats,
-                                    scheduled_until_sample,
-                                    sample_time,
-                                    samples_per_quarter as f64,
-                                );
+                                let seed_beats = trigger.absolute_beats;
                                 neural_runtime.process_seed_at(&step_event, seed_beats);
                                 seed_graph_runtimes(&mut graph_runtimes, &step_event, seed_beats);
                                 if !ok {
@@ -3711,7 +3696,8 @@ pub fn spawn_scheduler_thread(
                         let mut graph_eval_count = 0_usize;
                         if let Some(scratch) = scratch_runtime.as_mut() {
                             let manifest = &graph_manifests[graph_index];
-                            let max_poly = manifest.max_poly;
+                            // Resolved (override-or-manifest) cap, carried on the runtime.
+                            let max_poly = graph_runtimes[graph_index].max_poly();
                             graph_runtimes[graph_index].process_block(
                                 chunk_start_beats,
                                 chunk_end_beats,
@@ -3829,8 +3815,9 @@ mod tests {
         enqueue_resolved_trigger, enqueue_step_event_with_midi_fx, midi_fx_window_events_from_step,
         quantized_live_tick_sample, reconcile_graph_runtimes, resolve_effect_params,
         resolve_instrument_plocks, resolve_sampler_params, run_midi_fx_chain_for_track,
-        should_reload_neural_runtime, swung_network_sample_time, track_active_note_spans_at_beat,
-        track_note_spans_for_trigger, MidiFxEvent, SnapshotSequencerClock,
+        sample_time_to_beats, should_reload_neural_runtime, swung_network_sample_time,
+        track_active_note_spans_at_beat, track_note_spans_for_trigger, MidiFxEvent,
+        SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
@@ -3921,6 +3908,8 @@ mod tests {
             }],
             node_params: Vec::new(),
             edge_params: Vec::new(),
+            reset_every_beats: None,
+            max_poly: None,
         }
     }
 
@@ -4028,6 +4017,77 @@ mod tests {
         assert_eq!(out_b.len(), 1);
         assert_eq!(out_a[0].event.track, Some(3));
         assert_eq!(out_b[0].event.track, Some(0));
+    }
+
+    #[test]
+    fn graph_reset_boundary_preserves_seed_from_snapshot_clock_trigger() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        state.toggle_play();
+        state.toggle_step_and_clear_plocks(0, 0);
+        let snapshot = state.latest_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+
+        let mut seed_node = crate::graph::GraphNode {
+            resolution: Timebase::Sixteenth,
+            seed_track_mask: crate::graph::seed_track_mask(&[0]),
+            ..crate::graph::GraphNode::default()
+        };
+        seed_node.route = Some(0);
+        let routed_node = crate::graph::GraphNode {
+            resolution: Timebase::Sixteenth,
+            route: Some(1),
+            ..crate::graph::GraphNode::default()
+        };
+        let mut runtime = crate::graph::GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![seed_node, routed_node],
+            vec![crate::graph::GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            4.0,
+        );
+
+        let mut scheduled_until_sample = 0_u64;
+        let mut emitted = Vec::new();
+        while clock.total_beats < 4.5 {
+            let chunk_start_beats = clock.total_beats;
+            let triggers = clock.process_chunk(512, &snapshot, &state);
+            let chunk_end_beats = clock.total_beats;
+            for trigger in triggers {
+                if trigger.track == 0 && trigger.step == 0 {
+                    let seed_beats = trigger.absolute_beats;
+                    runtime.seed(
+                        trigger.track,
+                        seed_beats,
+                        crate::graph::GraphPayload::default(),
+                    );
+                }
+            }
+            runtime.process_block(
+                chunk_start_beats,
+                chunk_end_beats,
+                scheduled_until_sample,
+                samples_per_quarter,
+                0,
+                |eval: &NodeEval| NodeFire {
+                    fired: eval.energy >= 1.0,
+                    ..NodeFire::default()
+                },
+                &mut emitted,
+            );
+            scheduled_until_sample = scheduled_until_sample.saturating_add(512);
+        }
+
+        assert!(
+            emitted
+                .iter()
+                .any(|emission| emission.event.track == Some(1) && emission.sample_time > 96_000),
+            "bar-start seed should survive the one-bar reset and re-drive the graph: {emitted:?}"
+        );
     }
 
     #[test]

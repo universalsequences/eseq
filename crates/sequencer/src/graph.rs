@@ -217,6 +217,11 @@ pub struct ProjectGraphOverrides {
     pub node_params: Vec<ProjectGraphNodeParamOverride>,
     #[serde(default)]
     pub edge_params: Vec<ProjectGraphEdgeParamOverride>,
+    /// Sequencer-level overrides (None = inherit the manifest default).
+    #[serde(default)]
+    pub reset_every_beats: Option<f64>,
+    #[serde(default)]
+    pub max_poly: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -342,6 +347,7 @@ struct GraphPropagation {
     remaining_steps: u32,
     ready_after_beats: f64,
     payload: GraphPayload,
+    external_seed: bool,
 }
 
 /// A fired node awaiting `max_poly` selection within one boundary.
@@ -370,6 +376,7 @@ pub struct GraphRuntimeConfig {
     pub in_edges: Vec<Vec<usize>>,
     pub energy_decay: f64,
     pub reset_interval_beats: f64,
+    pub max_poly: u32,
     pub max_poly_selection: NeuralMaxPolySelection,
     pub node_params: Vec<HashMap<String, f64>>,
 }
@@ -382,6 +389,7 @@ impl GraphRuntimeConfig {
         edges: Vec<GraphEdge>,
         energy_decay: f64,
         reset_interval_beats: f64,
+        max_poly: u32,
         max_poly_selection: NeuralMaxPolySelection,
         node_params: Vec<HashMap<String, f64>>,
     ) -> Self {
@@ -407,6 +415,7 @@ impl GraphRuntimeConfig {
             in_edges,
             energy_decay: energy_decay.clamp(0.0, 1.0),
             reset_interval_beats: reset_interval_beats.max(0.0),
+            max_poly,
             max_poly_selection,
             node_params: normalized_node_params(num_nodes, node_params),
         }
@@ -439,6 +448,7 @@ pub struct GraphRuntime {
     // ── sequencer-level engine config ──
     energy_decay: f64,
     reset_interval_beats: f64,
+    max_poly: u32,
     max_poly_selection: NeuralMaxPolySelection,
     random_state: u64,
 
@@ -488,6 +498,7 @@ impl GraphRuntime {
             edges,
             energy_decay,
             reset_interval_beats,
+            0,
             NeuralMaxPolySelection::Deterministic,
             node_params,
         )
@@ -500,6 +511,7 @@ impl GraphRuntime {
         edges: Vec<GraphEdge>,
         energy_decay: f64,
         reset_interval_beats: f64,
+        max_poly: u32,
         max_poly_selection: NeuralMaxPolySelection,
         node_params: Vec<HashMap<String, f64>>,
     ) -> Self {
@@ -510,6 +522,7 @@ impl GraphRuntime {
             edges,
             energy_decay,
             reset_interval_beats,
+            max_poly,
             max_poly_selection,
             node_params,
         ))
@@ -529,6 +542,7 @@ impl GraphRuntime {
             in_edges: config.in_edges,
             energy_decay: config.energy_decay,
             reset_interval_beats: config.reset_interval_beats,
+            max_poly: config.max_poly,
             max_poly_selection: config.max_poly_selection,
             random_state: config.id,
             node_params: config.node_params,
@@ -545,6 +559,13 @@ impl GraphRuntime {
         };
         runtime.reset(0.0);
         runtime
+    }
+
+    /// Voice-steal cap applied per boundary. Resolved (override-or-manifest) into the
+    /// config at reconcile time, so the scheduler reads it from the runtime rather than
+    /// the static manifest.
+    pub fn max_poly(&self) -> u32 {
+        self.max_poly
     }
 
     pub fn config_compatible(&self, config: &GraphRuntimeConfig) -> bool {
@@ -581,6 +602,7 @@ impl GraphRuntime {
         self.in_edges = config.in_edges;
         self.energy_decay = config.energy_decay;
         self.reset_interval_beats = config.reset_interval_beats;
+        self.max_poly = config.max_poly;
         self.max_poly_selection = config.max_poly_selection;
         self.node_params = config.node_params;
 
@@ -648,12 +670,17 @@ impl GraphRuntime {
     /// recomputed (mirrors `neural::reset_state`).
     pub fn reset(&mut self, total_beats: f64) {
         for idx in 0..self.num_nodes {
+            let preserved_external_seeds = self.pending[idx]
+                .iter()
+                .copied()
+                .filter(|prop| prop.external_seed && prop.ready_after_beats + 1e-9 >= total_beats)
+                .collect::<Vec<_>>();
             self.energy[idx] = self.nodes[idx].seed_on_reset;
             self.input_accum[idx] = 0.0;
             self.input_seen[idx] = false;
             self.source_event[idx] = None;
             self.tick_count[idx] = 0;
-            self.pending[idx].clear();
+            self.pending[idx] = preserved_external_seeds;
             self.incoming_triggers[idx].clear();
             let step_beats = self.node_step_beats(idx);
             self.last_eval_indices[idx] = grid_index_at(total_beats, step_beats);
@@ -691,7 +718,7 @@ impl GraphRuntime {
         let mut seeded = 0;
         for idx in 0..self.num_nodes {
             if self.nodes[idx].seed_track_mask & bit != 0 {
-                self.push_propagation(idx, seed_beats, payload);
+                self.push_seed_propagation(idx, seed_beats, payload);
                 seeded += 1;
             }
         }
@@ -1105,11 +1132,31 @@ impl GraphRuntime {
         ready_after_beats: f64,
         payload: GraphPayload,
     ) {
+        self.push_propagation_with_origin(node_index, ready_after_beats, payload, false);
+    }
+
+    fn push_seed_propagation(
+        &mut self,
+        node_index: usize,
+        ready_after_beats: f64,
+        payload: GraphPayload,
+    ) {
+        self.push_propagation_with_origin(node_index, ready_after_beats, payload, true);
+    }
+
+    fn push_propagation_with_origin(
+        &mut self,
+        node_index: usize,
+        ready_after_beats: f64,
+        payload: GraphPayload,
+        external_seed: bool,
+    ) {
         let remaining = self.nodes[node_index].delay_steps.max(1);
         self.pending[node_index].push(GraphPropagation {
             remaining_steps: remaining,
             ready_after_beats,
             payload,
+            external_seed,
         });
     }
 }
@@ -1443,13 +1490,19 @@ impl GraphManifest {
             }
         }
 
+        let reset_every_beats = overrides
+            .and_then(|o| o.reset_every_beats)
+            .unwrap_or(self.reset_every_beats);
+        let max_poly = overrides.and_then(|o| o.max_poly).unwrap_or(self.max_poly);
+
         GraphRuntimeConfig::new(
             self.id,
             self.name.clone(),
             nodes,
             edges,
             self.energy_decay,
-            self.reset_every_beats,
+            reset_every_beats,
+            max_poly,
             self.max_poly_selection,
             node_params,
         )
@@ -1506,6 +1559,7 @@ mod tests {
             edges,
             1.0,
             0.0,
+            0,
             NeuralMaxPolySelection::Deterministic,
             Vec::new(),
         )
@@ -1683,6 +1737,32 @@ mod tests {
         let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
         assert_eq!(samples, vec![48_000, 240_000]);
         assert!(out.iter().all(|e| e.node_index == 0));
+    }
+
+    #[test]
+    fn reset_every_preserves_external_seed_at_reset_boundary() {
+        let mut n0 = node(Timebase::Sixteenth);
+        n0.seed_track_mask = seed_track_mask(&[0]);
+        let mut n1 = node(Timebase::Sixteenth);
+        n1.route = Some(1);
+        let nodes = vec![n0, n1];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 1.0);
+
+        runtime.seed(0, 1.0, GraphPayload::default());
+
+        let out = run(&mut runtime, 1.25, 0, vec![1.0, 1.0]);
+        let observed = out
+            .iter()
+            .map(|emission| {
+                (
+                    emission.sample_time,
+                    emission.node_index,
+                    emission.event.track,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![(60_000, 1, Some(1))]);
     }
 
     #[test]
@@ -1911,6 +1991,7 @@ mod tests {
             vec![GraphEdge::new(0, 2, 0.1), GraphEdge::new(1, 2, 1.0)],
             1.0,
             0.0,
+            0,
             NeuralMaxPolySelection::Propagation,
             Vec::new(),
         );
@@ -1934,6 +2015,7 @@ mod tests {
             Vec::new(),
             1.0,
             0.0,
+            0,
             NeuralMaxPolySelection::Random,
             Vec::new(),
         );
@@ -1976,6 +2058,7 @@ mod tests {
             vec![GraphEdge::new(0, 1, 1.0)],
             1.0,
             8.0,
+            0,
             NeuralMaxPolySelection::Deterministic,
             Vec::new(),
         );
@@ -1991,6 +2074,7 @@ mod tests {
             remaining_steps: 3,
             ready_after_beats: 2.0,
             payload: GraphPayload::default(),
+            external_seed: false,
         });
         runtime.incoming_triggers[1].push(0);
         runtime.random_state = 123;
@@ -2012,6 +2096,7 @@ mod tests {
             vec![GraphEdge::new(0, 1, 0.2)],
             0.5,
             4.0,
+            0,
             NeuralMaxPolySelection::Propagation,
             params,
         );
@@ -2110,6 +2195,7 @@ mod tests {
             Vec::new(),
             1.0,
             0.0,
+            0,
             NeuralMaxPolySelection::Deterministic,
             vec![params],
         );

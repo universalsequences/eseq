@@ -353,6 +353,7 @@ struct DelayedPropagation {
     remaining_steps: u32,
     ready_after_beats: f64,
     event: StepEvent,
+    external_seed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -371,6 +372,11 @@ impl Default for DelayQueue {
 impl DelayQueue {
     fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    fn retain_external_seeds_at_or_after(&mut self, total_beats: f64) {
+        self.entries
+            .retain(|entry| entry.external_seed && entry.ready_after_beats + 1e-9 >= total_beats);
     }
 
     fn push(&mut self, entry: DelayedPropagation) {
@@ -563,7 +569,7 @@ impl NeuralRuntime {
         self.dampening = [[0.0; NUM_NEURONS]; NUM_NEURONS];
         self.incoming_triggers = [[0.0; NUM_NEURONS]; NUM_NEURONS];
         for queue in &mut self.pending {
-            queue.clear();
+            queue.retain_external_seeds_at_or_after(total_beats);
         }
         for event in &mut self.source_events {
             *event = None;
@@ -601,6 +607,7 @@ impl NeuralRuntime {
                     remaining_steps: self.neurons[idx].delay_steps.max(1),
                     ready_after_beats: seed_beats,
                     event: event.clone(),
+                    external_seed: true,
                 });
             }
         }
@@ -878,6 +885,7 @@ impl NeuralRuntime {
             remaining_steps: self.neurons[neuron_idx].delay_steps.max(1),
             ready_after_beats: candidate.fire_beats,
             event: candidate.event,
+            external_seed: false,
         });
         self.trigger_activity[neuron_idx] = 1.0;
         self.trigger_visual_until_beats[neuron_idx] = self.trigger_visual_until_beats[neuron_idx]
@@ -1869,6 +1877,31 @@ mod tests {
         out.clear();
         runtime.process_boundaries(1.0, 1.25, 48_000, 48_000.0, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn reset_interval_preserves_external_seed_at_reset_boundary() {
+        let mut network = ProjectNeuralNetwork::default();
+        network.num_neurons = 2;
+        network.weights = vec![vec![0.0, 1.0], vec![0.0, 0.0]];
+        network.neurons[0].route = Some(0);
+        network.neurons[0].threshold = 0.5;
+        network.neurons[1].route = Some(1);
+        network.neurons[1].threshold = 0.5;
+        network.reset_interval_bars = 0.25;
+
+        let mut runtime = NeuralRuntime::default();
+        runtime.load_from_networks(&[network], 0.0);
+        runtime.process_seed_at(&test_event(0), 1.0);
+
+        let mut out = Vec::new();
+        runtime.process_boundaries(0.0, 1.25, 0, 48_000.0, &mut out);
+
+        let observed = out
+            .iter()
+            .map(|(sample, event)| (*sample, event.track, output_neuron(event)))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, vec![(60_000, 1, 1)]);
     }
 
     #[test]

@@ -4313,6 +4313,10 @@ pub fn register_graph_authoring_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
 ) {
+    // Writable mirror of resolved graph values; `bind-graph` reads it, `reactive-set`
+    // dirties it. Dynamic-field namespace (no declared fields), like SEQV.
+    runtime.register_reactive(GRAPH_REACTIVE_NS, vec![], true);
+
     let state_for_graph_list = Arc::clone(&state);
     runtime.register_native_with_docs(
         "graph-list",
@@ -4483,6 +4487,209 @@ pub fn register_graph_authoring_natives(
                 "updated graph '{sequencer_name}' edge {param_name}"
             ));
             Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_bind_graph = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "bind-graph",
+        "(bind-graph sequencer node-index :delay [options])",
+        "Reactive handle to a graph node param/intrinsic, seeded with the resolved \
+         current-pattern value. Numeric fields bind directly; pass an options list to \
+         bind an enum field (route/resolution/quantize) as a dropdown index.",
+        move |args, _ctx| {
+            if args.len() < 3 {
+                return Err("bind-graph expects graph, node index, and field".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_bind_graph, &args[0])?;
+            let instance = parse_nonnegative_usize(&args[1], "node index")?;
+            if instance >= manifest.shape.num_nodes() {
+                return Err("bind-graph node index out of range".to_string());
+            }
+            let field = graph_key_string(&args[2])
+                .ok_or_else(|| "bind-graph expects a field name".to_string())?;
+            let value = match args.get(3) {
+                Some(options) => {
+                    let display = graph_node_display_value(
+                        &state_for_bind_graph,
+                        &manifest,
+                        instance,
+                        &field,
+                    )?;
+                    graph_option_index(options, &display)
+                }
+                None => {
+                    graph_node_numeric_value(&state_for_bind_graph, &manifest, instance, &field)?
+                }
+            };
+            Ok(graph_seeded_reactive_ref(
+                graph_node_reactive_field(manifest.id, instance, &field),
+                value,
+            ))
+        },
+    );
+
+    let state_for_graph_key = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-key",
+        "(graph-key sequencer node-index :delay)",
+        "Canonical GRAPH reactive field name for a node field. Use with \
+         `(reactive-set \"GRAPH\" (graph-key ...) value)` to dirty a `bind-graph` handle.",
+        move |args, _ctx| {
+            if args.len() != 3 {
+                return Err("graph-key expects graph, node index, and field".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_key, &args[0])?;
+            let instance = parse_nonnegative_usize(&args[1], "node index")?;
+            let field = graph_key_string(&args[2])
+                .ok_or_else(|| "graph-key expects a field name".to_string())?;
+            Ok(EValue::String(graph_node_reactive_field(
+                manifest.id,
+                instance,
+                &field,
+            )))
+        },
+    );
+
+    let state_for_bind_graph_edge = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "bind-graph-edge",
+        "(bind-graph-edge sequencer from to :weight)",
+        "Reactive handle to a graph edge param (weight/dampening/delay), seeded with \
+         the resolved current-pattern value.",
+        move |args, _ctx| {
+            if args.len() != 4 {
+                return Err("bind-graph-edge expects graph, from, to, and a param".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_bind_graph_edge, &args[0])?;
+            let from = parse_nonnegative_usize(&args[1], "from")?;
+            let to = parse_nonnegative_usize(&args[2], "to")?;
+            let param = graph_key_string(&args[3])
+                .ok_or_else(|| "bind-graph-edge expects a param name".to_string())?;
+            let edge_set = manifest
+                .edge_sets
+                .first()
+                .ok_or_else(|| "bind-graph-edge requires an edge set".to_string())?;
+            if from >= manifest.shape.num_nodes() || to >= manifest.shape.num_nodes() {
+                return Err("bind-graph-edge from/to index out of range".to_string());
+            }
+            let query = GraphEdgeQuery {
+                group: crate::graph::edge_set_group_id(edge_set),
+                from,
+                to,
+                param: param.clone(),
+            };
+            let value = graph_number(&resolved_graph_edge_value(
+                &state_for_bind_graph_edge,
+                &manifest,
+                query,
+            )?)
+            .ok_or_else(|| format!("bind-graph-edge param :{param} is not numeric"))?;
+            Ok(graph_seeded_reactive_ref(
+                graph_edge_reactive_field(manifest.id, from, to, &param),
+                value,
+            ))
+        },
+    );
+
+    let state_for_graph_edge_key = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-edge-key",
+        "(graph-edge-key sequencer from to :weight)",
+        "Canonical GRAPH reactive field name for an edge param.",
+        move |args, _ctx| {
+            if args.len() != 4 {
+                return Err("graph-edge-key expects graph, from, to, and a param".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_edge_key, &args[0])?;
+            let from = parse_nonnegative_usize(&args[1], "from")?;
+            let to = parse_nonnegative_usize(&args[2], "to")?;
+            let param = graph_key_string(&args[3])
+                .ok_or_else(|| "graph-edge-key expects a param name".to_string())?;
+            Ok(EValue::String(graph_edge_reactive_field(
+                manifest.id,
+                from,
+                to,
+                &param,
+            )))
+        },
+    );
+
+    let state_for_graph_config_value = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-config-value",
+        "(graph-config-value sequencer :reset-bars)",
+        "Resolved sequencer-level config (:reset-bars or :max-poly), override-or-manifest.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("graph-config-value expects graph and field".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_config_value, &args[0])?;
+            let field = graph_key_string(&args[1])
+                .ok_or_else(|| "graph-config-value expects a field name".to_string())?;
+            resolved_graph_config_value(&state_for_graph_config_value, &manifest, &field)
+                .map(EValue::Number)
+        },
+    );
+
+    let state_for_graph_config = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-config",
+        "(graph-config sequencer :reset-bars 4)",
+        "Set a sequencer-level config override (:reset-bars in bars, or :max-poly).",
+        move |args, ctx| {
+            if args.len() != 3 {
+                return Err("graph-config expects graph, field, value".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_config, &args[0])?;
+            let field = graph_key_string(&args[1])
+                .ok_or_else(|| "graph-config expects a field name".to_string())?;
+            let value = graph_number(&args[2])
+                .ok_or_else(|| "graph-config value must be numeric".to_string())?;
+            let sequencer_name = manifest.name.clone();
+            set_graph_config_value(&state_for_graph_config, &manifest, &field, value)?;
+            ctx.set_status(format!("updated graph '{sequencer_name}' config {field}"));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_graph_config_key = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-config-key",
+        "(graph-config-key sequencer :reset-bars)",
+        "Canonical GRAPH reactive field name for a sequencer-level config field.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("graph-config-key expects graph and field".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_config_key, &args[0])?;
+            let field = graph_key_string(&args[1])
+                .ok_or_else(|| "graph-config-key expects a field name".to_string())?;
+            Ok(EValue::String(graph_config_reactive_field(
+                manifest.id,
+                &field,
+            )))
+        },
+    );
+
+    let state_for_bind_graph_config = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "bind-graph-config",
+        "(bind-graph-config sequencer :reset-bars)",
+        "Reactive handle to a sequencer-level config field, seeded with the resolved value.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("bind-graph-config expects graph and field".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_bind_graph_config, &args[0])?;
+            let field = graph_key_string(&args[1])
+                .ok_or_else(|| "bind-graph-config expects a field name".to_string())?;
+            let value =
+                resolved_graph_config_value(&state_for_bind_graph_config, &manifest, &field)?;
+            Ok(graph_seeded_reactive_ref(
+                graph_config_reactive_field(manifest.id, &field),
+                value,
+            ))
         },
     );
 }
@@ -10137,6 +10344,213 @@ fn graph_runtime_config_for_current_pattern(
     manifest.runtime_config_with_overrides(graph_overrides.as_ref())
 }
 
+/// Reactive namespace that mirrors resolved graph node/edge values so the UI can
+/// bind widgets directly (`bind-graph`) instead of shadowing every knob in a
+/// per-node `defstate`. Writes flow back via `reactive-set` + `graph-*` setters.
+const GRAPH_REACTIVE_NS: &str = "GRAPH";
+
+struct GraphConfigCacheEntry {
+    manifest_id: u64,
+    pattern: usize,
+    snapshot_version: u64,
+    published_version: u64,
+    config: Rc<crate::graph::GraphRuntimeConfig>,
+}
+
+thread_local! {
+    // Materializing the runtime config locks the pattern bank, clones the override
+    // vec, and allocates a HashMap per node. A single panel render resolves dozens
+    // of node/edge values at the same (pattern, version); memoize so the whole
+    // render collapses to one materialization. Any edit bumps snapshot_version and
+    // invalidates the entry, so reads can never observe a stale config.
+    static GRAPH_CONFIG_CACHE: RefCell<Option<GraphConfigCacheEntry>> = const { RefCell::new(None) };
+}
+
+fn cached_graph_runtime_config(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+) -> Rc<crate::graph::GraphRuntimeConfig> {
+    let pattern = state.current_pattern_index();
+    let snapshot_version = state.scheduler_snapshot_version();
+    let published_version = state.published_sequencers_version();
+    GRAPH_CONFIG_CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if let Some(entry) = slot.as_ref() {
+            if entry.manifest_id == manifest.id
+                && entry.pattern == pattern
+                && entry.snapshot_version == snapshot_version
+                && entry.published_version == published_version
+            {
+                return Rc::clone(&entry.config);
+            }
+        }
+        let config = Rc::new(graph_runtime_config_for_current_pattern(state, manifest));
+        *slot = Some(GraphConfigCacheEntry {
+            manifest_id: manifest.id,
+            pattern,
+            snapshot_version,
+            published_version,
+            config: Rc::clone(&config),
+        });
+        config
+    })
+}
+
+fn graph_node_reactive_field(manifest_id: u64, instance: usize, field: &str) -> String {
+    format!("{manifest_id}|n{instance}|{field}")
+}
+
+fn graph_edge_reactive_field(manifest_id: u64, from: usize, to: usize, param: &str) -> String {
+    format!("{manifest_id}|e{from}_{to}|{param}")
+}
+
+/// Seed the GRAPH reactive slot with `value` (a plain float write that does NOT
+/// dirty bound widgets — safe to call during render) and return a reactive handle
+/// pointing at the same slot. Re-running the producing lisp on a pattern switch
+/// re-seeds the slot; live edits keep it current via `reactive-set`.
+fn graph_seeded_reactive_ref(field: String, value: f64) -> EValue {
+    eseqlisp::reactive::write_float_slot(GRAPH_REACTIVE_NS, &field, value);
+    let slot = eseqlisp::reactive::reactive_float_slot(GRAPH_REACTIVE_NS, &field);
+    EValue::ReactiveRef {
+        namespace: GRAPH_REACTIVE_NS.to_string(),
+        field,
+        index: None,
+        kind: eseqlisp::vm::BindingKind::Float,
+        slot,
+    }
+}
+
+/// Resolve a node field to a single float for `bind-graph`. `delay` is an
+/// intrinsic; everything else falls through to behavioral params. Enum intrinsics
+/// (route/resolution/quantize) are not scalars — callers must pass an options list
+/// and go through the index path instead.
+fn graph_node_numeric_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+    field: &str,
+) -> Result<f64, String> {
+    match field {
+        "delay" | "delay-steps" => {
+            let value = resolved_graph_node_value(state, manifest, instance, field)?;
+            graph_number(&value)
+                .ok_or_else(|| format!("bind-graph field :{field} is not numeric"))
+        }
+        "resolution" | "res" | "quantize" | "q" | "route" | "seed-from" => Err(format!(
+            "bind-graph field :{field} is an enum; pass an options list to bind its index"
+        )),
+        _ => {
+            let value = resolved_graph_param_value(state, manifest, instance, field)?;
+            graph_number(&value)
+                .ok_or_else(|| format!("bind-graph param :{field} is not numeric"))
+        }
+    }
+}
+
+/// Render an enum node field to the label a dropdown would display, so it can be
+/// matched against the author's options list. Centralizes the route/timebase
+/// formatting that the lisp demo used to spell out as nested `if` ladders.
+fn graph_node_display_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+    field: &str,
+) -> Result<String, String> {
+    let value = resolved_graph_node_value(state, manifest, instance, field)?;
+    Ok(match field {
+        "route" => match value {
+            EValue::Number(track) => format!("Track {}", track as usize + 1),
+            _ => "Off".to_string(),
+        },
+        _ => match value {
+            EValue::String(label) => label,
+            EValue::Nil => "off".to_string(),
+            EValue::Number(number) => graph_format_number(number),
+            other => eseqlisp::vm::format_lisp_value(&other),
+        },
+    })
+}
+
+fn graph_format_number(number: f64) -> String {
+    if number.fract() == 0.0 {
+        format!("{}", number as i64)
+    } else {
+        format!("{number}")
+    }
+}
+
+fn graph_option_index(options: &EValue, display: &str) -> f64 {
+    if let EValue::List(items) = options {
+        for (index, item) in items.iter().enumerate() {
+            let item = item.borrow();
+            let matches = match &*item {
+                EValue::String(label) => label == display,
+                other => eseqlisp::vm::format_lisp_value(other) == display,
+            };
+            if matches {
+                return index as f64;
+            }
+        }
+    }
+    0.0
+}
+
+/// Beats per bar for the demo's 4/4 reset clock, matching `graph_bars_or_beats`'s
+/// `(bars n) -> n * 4` parse.
+const GRAPH_BEATS_PER_BAR: f64 = 4.0;
+
+fn graph_config_reactive_field(manifest_id: u64, field: &str) -> String {
+    format!("{manifest_id}|cfg|{field}")
+}
+
+/// Resolve a sequencer-level config field (override-or-manifest) to a UI scalar.
+/// `:reset-bars` reports bars (engine stores beats); `:max-poly` reports the cap.
+fn resolved_graph_config_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    field: &str,
+) -> Result<f64, String> {
+    let overrides = resolved_graph_overrides_for_manifest(state, manifest);
+    match field {
+        "reset-bars" | "reset-every-bars" => {
+            let beats = overrides
+                .as_ref()
+                .and_then(|o| o.reset_every_beats)
+                .unwrap_or(manifest.reset_every_beats);
+            Ok(beats / GRAPH_BEATS_PER_BAR)
+        }
+        "max-poly" => {
+            let value = overrides
+                .as_ref()
+                .and_then(|o| o.max_poly)
+                .unwrap_or(manifest.max_poly);
+            Ok(value as f64)
+        }
+        other => Err(format!("graph config unknown field :{other}")),
+    }
+}
+
+fn set_graph_config_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    field: &str,
+    value: f64,
+) -> Result<(), String> {
+    state.edit_current_graph_overrides(|graphs| {
+        let graph = ensure_graph_overrides(graphs, manifest);
+        match field {
+            "reset-bars" | "reset-every-bars" => {
+                graph.reset_every_beats = Some((value * GRAPH_BEATS_PER_BAR).max(0.0));
+            }
+            "max-poly" => {
+                graph.max_poly = Some(value.max(0.0).round() as u32);
+            }
+            other => return Err(format!("graph config unknown field :{other}")),
+        }
+        Ok(())
+    })
+}
+
 fn graph_timebase_value(timebase: crate::sequencer::Timebase) -> EValue {
     EValue::String(timebase.label().to_string())
 }
@@ -10162,7 +10576,7 @@ fn resolved_graph_node_value(
     instance: usize,
     field: &str,
 ) -> Result<EValue, String> {
-    let config = graph_runtime_config_for_current_pattern(state, manifest);
+    let config = cached_graph_runtime_config(state, manifest);
     let node = config
         .nodes
         .get(instance)
@@ -10186,7 +10600,7 @@ fn resolved_graph_param_value(
     instance: usize,
     param: &str,
 ) -> Result<EValue, String> {
-    let config = graph_runtime_config_for_current_pattern(state, manifest);
+    let config = cached_graph_runtime_config(state, manifest);
     let params = config
         .node_params
         .get(instance)
@@ -10285,7 +10699,7 @@ fn resolved_graph_edge_value(
     manifest: &crate::graph::GraphManifest,
     query: GraphEdgeQuery,
 ) -> Result<EValue, String> {
-    let config = graph_runtime_config_for_current_pattern(state, manifest);
+    let config = cached_graph_runtime_config(state, manifest);
     let edge = config
         .edges
         .iter()
@@ -12124,6 +12538,7 @@ mod tests {
             vec![GraphEdge::new(0, 1, 1.0)],
             1.0,
             0.0,
+            0,
             NeuralMaxPolySelection::Deterministic,
             vec![param_defaults.clone(), param_defaults],
         );
@@ -12387,14 +12802,15 @@ mod tests {
             .expect("weight matrix stable key");
         assert_measured(matrix);
 
-        // Three number-pickers (delay + transpose + vel-decay) and three dropdowns
-        // (route + resolution + quantize) per node — the per-node knobs the Ext B DSL reads.
+        // Five number-pickers per node (delay + transpose + vel-decay + dampening +
+        // recovery) plus the two top-of-panel config pickers (reset-bars + max-poly);
+        // three dropdowns per node (route + resolution + quantize).
         let mut pickers = Vec::new();
         collect_widgets(&layout, "number-picker", &mut pickers);
         assert_eq!(
             pickers.len(),
-            24,
-            "expected delay + transpose + vel-decay per node"
+            8 * 5 + 2,
+            "expected delay/transpose/vel/dampening/recovery per node + reset-bars + max-poly"
         );
         let mut dropdowns = Vec::new();
         collect_widgets(&layout, "dropdown", &mut dropdowns);
@@ -12403,12 +12819,19 @@ mod tests {
             24,
             "expected route + resolution + quantize per node"
         );
+        for key in ["graph-8x8-reset-bars", "graph-8x8-max-poly"] {
+            let widget = find_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("missing config control {key}"));
+            assert_measured(widget);
+        }
         for idx in 0..8 {
             for key in [
                 format!("graph-8x8-route-{idx}"),
                 format!("graph-8x8-delay-{idx}"),
                 format!("graph-8x8-transpose-{idx}"),
                 format!("graph-8x8-vel-decay-{idx}"),
+                format!("graph-8x8-dampening-{idx}"),
+                format!("graph-8x8-recovery-{idx}"),
                 format!("graph-8x8-resolution-{idx}"),
                 format!("graph-8x8-quantize-{idx}"),
             ] {
@@ -12579,24 +13002,24 @@ mod tests {
         runtime.run_reactive_cycle();
         assert_eq!(
             runtime
-                .eval_str("g8-transp-2")
-                .expect("read synced transpose state"),
+                .eval_str("(reactive-value (bind-graph g8-name 2 :transpose))")
+                .expect("read bound transpose value"),
             Some(Value::Number(-12.0)),
             "pattern switch should reload transpose control state"
         );
         assert_eq!(
             runtime
-                .eval_str("g8-delay-3")
-                .expect("read synced delay state"),
+                .eval_str("(reactive-value (bind-graph g8-name 3 :delay))")
+                .expect("read bound delay value"),
             Some(Value::Number(6.0)),
             "pattern switch should reload delay control state"
         );
         assert_eq!(
             runtime
-                .eval_str("g8-route-4")
-                .expect("read synced route state"),
-            Some(Value::String("Track 1".to_string())),
-            "pattern switch should display internal route 0 as Track 1"
+                .eval_str("(reactive-value (bind-graph g8-name 4 :route g8-route-options))")
+                .expect("read bound route index"),
+            Some(Value::Number(0.0)),
+            "pattern switch should display internal route 0 as Track 1 (index 0)"
         );
         assert_eq!(
             runtime
@@ -12659,26 +13082,18 @@ mod tests {
             graph.edge_params.len()
         );
 
-        let make_matrix = |fill: &dyn Fn(usize, usize) -> f64| {
-            gv_list(
-                (0..8)
-                    .map(|r| gv_list((0..8).map(|c| gv_num(fill(r, c))).collect()))
-                    .collect(),
-            )
-        };
-
-        let matrix_change = matrix
+        let matrix_cell_change = matrix
             .props
-            .get("on-change")
+            .get("on-cell-change")
             .cloned()
-            .expect("matrix callback");
-        // Each cell = (to-column + 1) / 10, so cell (from=3, to=4) == 0.5.
+            .expect("matrix cell callback");
+        // A single cell edit writes exactly one edge override; (from=3, to=4) == 0.5.
         runtime
             .invoke(
-                matrix_change,
-                vec![make_matrix(&|_r, c| (c as f64 + 1.0) / 10.0)],
+                matrix_cell_change.clone(),
+                vec![gv_num(3.0), gv_num(4.0), gv_num(0.5)],
             )
-            .expect("invoke matrix callback");
+            .expect("invoke matrix cell callback");
         let overrides = state.current_graph_overrides();
         let graph = overrides
             .iter()
@@ -12689,14 +13104,17 @@ mod tests {
             edge.from == 3 && edge.to == 4 && edge.param == "weight" && edge.value == 0.5
         }));
 
-        let matrix_change = matrix
-            .props
-            .get("on-change")
-            .cloned()
-            .expect("matrix callback");
-        runtime
-            .invoke(matrix_change, vec![make_matrix(&|_r, _c| 0.0)])
-            .expect("invoke zero matrix callback");
+        // Zero every weight one cell at a time (the per-cell edit path) to silence the net.
+        for r in 0..8 {
+            for c in 0..8 {
+                runtime
+                    .invoke(
+                        matrix_cell_change.clone(),
+                        vec![gv_num(r as f64), gv_num(c as f64), gv_num(0.0)],
+                    )
+                    .expect("invoke zero matrix cell callback");
+            }
+        }
 
         let overrides = state.current_graph_overrides();
         let graph = overrides
@@ -12790,6 +13208,8 @@ mod tests {
                 param: "weight".to_string(),
                 value: 0.25,
             }],
+            reset_every_beats: None,
+            max_poly: None,
         };
         {
             let mut bank = state.pattern.pattern_bank.lock().unwrap();
@@ -12835,24 +13255,24 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .eval_str("g8-transp-2")
-                .expect("read synced transpose state"),
+                .eval_str("(reactive-value (bind-graph g8-name 2 :transpose))")
+                .expect("read bound transpose value"),
             Some(Value::Number(-12.0)),
             "loaded UI should sync node params from saved overrides"
         );
         assert_eq!(
             runtime
-                .eval_str("g8-delay-3")
-                .expect("read synced delay state"),
+                .eval_str("(reactive-value (bind-graph g8-name 3 :delay))")
+                .expect("read bound delay value"),
             Some(Value::Number(6.0)),
             "loaded UI should sync node intrinsics from saved overrides"
         );
         assert_eq!(
             runtime
-                .eval_str("g8-route-4")
-                .expect("read synced route state"),
-            Some(Value::String("Track 1".to_string())),
-            "loaded UI should display saved internal route 0 as Track 1"
+                .eval_str("(reactive-value (bind-graph g8-name 4 :route g8-route-options))")
+                .expect("read bound route index"),
+            Some(Value::Number(0.0)),
+            "loaded UI should display saved internal route 0 as Track 1 (index 0)"
         );
         assert_eq!(
             runtime
@@ -12958,6 +13378,214 @@ mod tests {
                 .expect("graph-edge-value positional syntax"),
             Some(Value::Number(0.5))
         );
+    }
+
+    #[test]
+    fn bind_graph_seeds_reactive_slots_and_keys_round_trip() {
+        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
+        use crate::sequencer::{PublishedSequencer, Timebase};
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let manifest = GraphManifest {
+            id: 77,
+            name: "neural".into(),
+            shape: ShapeSpec::Line(2),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 2,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            node: NodeProto {
+                name: "nrn".into(),
+                params: vec![ParamSpec {
+                    name: "transpose".into(),
+                    min: -48.0,
+                    max: 48.0,
+                    default: 0.0,
+                    is_int: true,
+                }],
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "nrn".into(),
+                to: "nrn".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    is_int: false,
+                }],
+            }],
+        };
+        state.publish_sequencer(PublishedSequencer {
+            id: manifest.id,
+            name: manifest.name.clone(),
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            graph: Some(manifest),
+        });
+
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(graph-node \"neural\" 1 :delay 4 :route 2)")
+            .expect("graph-node");
+        runtime
+            .eval_str("(graph-param \"neural\" 1 :transpose -7)")
+            .expect("graph-param");
+        runtime
+            .eval_str("(graph-edge \"neural\" :from 0 :to 1 :weight 0.5)")
+            .expect("graph-edge");
+
+        // Numeric intrinsic + param bind-graph handles read the resolved value from the slot.
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph \"neural\" 1 :delay))")
+                .expect("bind-graph delay"),
+            Some(Value::Number(4.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph \"neural\" 1 :transpose))")
+                .expect("bind-graph transpose"),
+            Some(Value::Number(-7.0))
+        );
+        // Enum intrinsic binds to the dropdown index within the supplied options
+        // (route 2 -> "Track 3" -> index 2).
+        assert_eq!(
+            runtime
+                .eval_str(
+                    "(reactive-value (bind-graph \"neural\" 1 :route \
+                     (list \"Track 1\" \"Track 2\" \"Track 3\" \"Off\")))"
+                )
+                .expect("bind-graph route index"),
+            Some(Value::Number(2.0))
+        );
+        // Edge handle.
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph-edge \"neural\" 0 1 :weight))")
+                .expect("bind-graph-edge weight"),
+            Some(Value::Number(0.5))
+        );
+
+        // graph-key / graph-edge-key name the exact slot a reactive-set dirties, so a
+        // plain `bind` to that key observes the new value (this is the edit-writeback path).
+        runtime
+            .eval_str("(reactive-set \"GRAPH\" (graph-key \"neural\" 1 :delay) 9)")
+            .expect("reactive-set node key");
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind \"GRAPH\" (graph-key \"neural\" 1 :delay)))")
+                .expect("read node slot"),
+            Some(Value::Number(9.0))
+        );
+        runtime
+            .eval_str("(reactive-set \"GRAPH\" (graph-edge-key \"neural\" 0 1 :weight) 0.2)")
+            .expect("reactive-set edge key");
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind \"GRAPH\" (graph-edge-key \"neural\" 0 1 :weight)))")
+                .expect("read edge slot"),
+            Some(Value::Number(0.2))
+        );
+    }
+
+    #[test]
+    fn graph_config_overrides_round_trip_and_reach_runtime() {
+        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
+        use crate::sequencer::{PublishedSequencer, Timebase};
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let manifest = GraphManifest {
+            id: 88,
+            name: "neural".into(),
+            shape: ShapeSpec::Line(2),
+            energy_decay: 1.0,
+            reset_every_beats: 16.0, // 4 bars
+            seed_on_reset: 0.0,
+            max_poly: 4,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            node: NodeProto {
+                name: "nrn".into(),
+                params: vec![ParamSpec {
+                    name: "threshold".into(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "nrn".into(),
+                to: "nrn".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    is_int: false,
+                }],
+            }],
+        };
+        state.publish_sequencer(PublishedSequencer {
+            id: manifest.id,
+            name: manifest.name.clone(),
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            graph: Some(manifest.clone()),
+        });
+
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+
+        // Manifest defaults reported in UI units (16 beats / 4 = 4 bars; cap 4).
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"neural\" :reset-bars)")
+                .expect("reset-bars default"),
+            Some(Value::Number(4.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"neural\" :max-poly)")
+                .expect("max-poly default"),
+            Some(Value::Number(4.0))
+        );
+
+        // Override both; reset-bars persists as beats (2 bars -> 8 beats).
+        runtime
+            .eval_str("(graph-config \"neural\" :reset-bars 2)")
+            .expect("set reset-bars");
+        runtime
+            .eval_str("(graph-config \"neural\" :max-poly 1)")
+            .expect("set max-poly");
+        let overrides = state.current_graph_overrides();
+        assert_eq!(overrides[0].reset_every_beats, Some(8.0));
+        assert_eq!(overrides[0].max_poly, Some(1));
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"neural\" :reset-bars)")
+                .expect("reset-bars override"),
+            Some(Value::Number(2.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph-config \"neural\" :max-poly))")
+                .expect("bound max-poly"),
+            Some(Value::Number(1.0))
+        );
+
+        // The overrides actually reach the materialized runtime config.
+        let config = manifest.runtime_config_with_overrides(Some(&overrides[0]));
+        assert_eq!(config.reset_interval_beats, 8.0);
+        assert_eq!(config.max_poly, 1);
     }
 
     #[test]
