@@ -61,9 +61,9 @@ mod dynamics;
 pub mod effects;
 #[allow(dead_code)]
 mod filter;
-pub mod generator;
 #[allow(dead_code)]
 mod gatepitch;
+pub mod generator;
 pub mod graph;
 #[allow(dead_code)]
 mod limiter;

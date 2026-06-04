@@ -4350,6 +4350,61 @@ pub fn register_graph_authoring_natives(
         },
     );
 
+    let state_for_graph_node_value = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-value",
+        "(graph-node-value sequencer node-index :delay)",
+        "Return one resolved current-pattern graph node intrinsic value.",
+        move |args, _ctx| {
+            if args.len() != 3 {
+                return Err(
+                    "graph-node-value expects graph id/name, node index, and field".to_string(),
+                );
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_node_value, &args[0])?;
+            let instance = parse_nonnegative_usize(&args[1], "node index")?;
+            let field = graph_key_string(&args[2])
+                .ok_or_else(|| "graph-node-value expects a field name".to_string())?;
+            resolved_graph_node_value(&state_for_graph_node_value, &manifest, instance, &field)
+        },
+    );
+
+    let state_for_graph_param_value = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-param-value",
+        "(graph-param-value sequencer node-index :threshold)",
+        "Return one resolved current-pattern graph node param value.",
+        move |args, _ctx| {
+            if args.len() != 3 {
+                return Err(
+                    "graph-param-value expects graph id/name, node index, and param".to_string(),
+                );
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_param_value, &args[0])?;
+            let instance = parse_nonnegative_usize(&args[1], "node index")?;
+            let param = graph_key_string(&args[2])
+                .ok_or_else(|| "graph-param-value expects a param name".to_string())?;
+            resolved_graph_param_value(&state_for_graph_param_value, &manifest, instance, &param)
+        },
+    );
+
+    let state_for_graph_edge_value = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-edge-value",
+        "(graph-edge-value sequencer :from 0 :to 1 :weight)",
+        "Return one resolved current-pattern graph edge param value.",
+        move |args, _ctx| {
+            if args.len() < 4 {
+                return Err(
+                    "graph-edge-value expects graph, from/to coordinates, and param".to_string(),
+                );
+            }
+            let manifest = resolve_graph_manifest(&state_for_graph_edge_value, &args[0])?;
+            let query = parse_graph_edge_query(&manifest, &args[1..])?;
+            resolved_graph_edge_value(&state_for_graph_edge_value, &manifest, query)
+        },
+    );
+
     let state_for_graph_node = Arc::clone(&state);
     runtime.register_native_with_docs(
         "graph-node",
@@ -10044,6 +10099,13 @@ struct GraphEdgeEdit {
     value: f64,
 }
 
+struct GraphEdgeQuery {
+    group: String,
+    from: usize,
+    to: usize,
+    param: String,
+}
+
 fn graph_key_string(value: &EValue) -> Option<String> {
     match value {
         EValue::Keyword(k) | EValue::Symbol(k) | EValue::String(k) => Some(
@@ -10052,6 +10114,191 @@ fn graph_key_string(value: &EValue) -> Option<String> {
                 .to_string(),
         ),
         _ => None,
+    }
+}
+
+fn resolved_graph_overrides_for_manifest(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+) -> Option<crate::graph::ProjectGraphOverrides> {
+    state
+        .current_graph_overrides()
+        .into_iter()
+        .find(|overrides| {
+            overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
+        })
+}
+
+fn graph_runtime_config_for_current_pattern(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+) -> crate::graph::GraphRuntimeConfig {
+    let graph_overrides = resolved_graph_overrides_for_manifest(state, manifest);
+    manifest.runtime_config_with_overrides(graph_overrides.as_ref())
+}
+
+fn graph_timebase_value(timebase: crate::sequencer::Timebase) -> EValue {
+    EValue::String(timebase.label().to_string())
+}
+
+fn graph_route_value(route: Option<usize>) -> EValue {
+    route
+        .map(|track| EValue::Number(track as f64))
+        .unwrap_or(EValue::Nil)
+}
+
+fn graph_seed_from_value(mask: u128) -> EValue {
+    lisp_list(
+        (0..128)
+            .filter(|track| mask & (1_u128 << track) != 0)
+            .map(|track| EValue::Number(track as f64))
+            .collect(),
+    )
+}
+
+fn resolved_graph_node_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+    field: &str,
+) -> Result<EValue, String> {
+    let config = graph_runtime_config_for_current_pattern(state, manifest);
+    let node = config
+        .nodes
+        .get(instance)
+        .ok_or_else(|| "graph-node-value node index out of range".to_string())?;
+    match field {
+        "resolution" | "res" => Ok(graph_timebase_value(node.resolution)),
+        "delay" | "delay-steps" => Ok(EValue::Number(node.delay_steps as f64)),
+        "quantize" | "q" => Ok(node
+            .quantize
+            .map(graph_timebase_value)
+            .unwrap_or_else(|| EValue::String("off".to_string()))),
+        "route" => Ok(graph_route_value(node.route)),
+        "seed-from" => Ok(graph_seed_from_value(node.seed_track_mask)),
+        other => Err(format!("graph-node-value unknown field :{other}")),
+    }
+}
+
+fn resolved_graph_param_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+    param: &str,
+) -> Result<EValue, String> {
+    let config = graph_runtime_config_for_current_pattern(state, manifest);
+    let params = config
+        .node_params
+        .get(instance)
+        .ok_or_else(|| "graph-param-value node index out of range".to_string())?;
+    params
+        .get(param)
+        .copied()
+        .or_else(|| manifest.node.param_default(param))
+        .map(EValue::Number)
+        .ok_or_else(|| format!("graph-param-value unknown param :{param}"))
+}
+
+fn parse_graph_edge_query(
+    manifest: &crate::graph::GraphManifest,
+    args: &[EValue],
+) -> Result<GraphEdgeQuery, String> {
+    let edge_set = manifest
+        .edge_sets
+        .first()
+        .ok_or_else(|| "graph-edge-value requires an edge set".to_string())?;
+    let default_group = crate::graph::edge_set_group_id(edge_set);
+    if args.len() == 3 {
+        let from = parse_nonnegative_usize(&args[0], "from")?;
+        let to = parse_nonnegative_usize(&args[1], "to")?;
+        let param = graph_key_string(&args[2])
+            .ok_or_else(|| "graph-edge-value expects a param name".to_string())?;
+        if from >= manifest.shape.num_nodes() || to >= manifest.shape.num_nodes() {
+            return Err("graph-edge-value from/to index out of range".to_string());
+        }
+        return Ok(GraphEdgeQuery {
+            group: default_group,
+            from,
+            to,
+            param,
+        });
+    }
+
+    let mut group = default_group.clone();
+    let mut from = None;
+    let mut to = None;
+    let mut param = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = graph_keyword(&args[idx])
+            .ok_or_else(|| "graph-edge-value expects keyword/value pairs".to_string())?;
+        idx += 1;
+        match key.as_str() {
+            "from" => {
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "graph-edge-value :from expects a value".to_string())?;
+                from = Some(parse_nonnegative_usize(value, "from")?);
+                idx += 1;
+            }
+            "to" => {
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "graph-edge-value :to expects a value".to_string())?;
+                to = Some(parse_nonnegative_usize(value, "to")?);
+                idx += 1;
+            }
+            "group" => {
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| "graph-edge-value :group expects a value".to_string())?;
+                group = graph_key_string(value)
+                    .ok_or_else(|| "graph-edge-value :group expects a symbol/string".to_string())?;
+                idx += 1;
+            }
+            other => {
+                if param.is_some() {
+                    return Err("graph-edge-value expects one param".to_string());
+                }
+                param = Some(other.to_string());
+            }
+        }
+    }
+    let from = from.ok_or_else(|| "graph-edge-value requires :from".to_string())?;
+    let to = to.ok_or_else(|| "graph-edge-value requires :to".to_string())?;
+    if group != default_group {
+        return Err(format!("graph-edge-value edge group not found: {group}"));
+    }
+    if from >= manifest.shape.num_nodes() || to >= manifest.shape.num_nodes() {
+        return Err("graph-edge-value from/to index out of range".to_string());
+    }
+    Ok(GraphEdgeQuery {
+        group,
+        from,
+        to,
+        param: param.ok_or_else(|| "graph-edge-value requires an edge param".to_string())?,
+    })
+}
+
+fn resolved_graph_edge_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    query: GraphEdgeQuery,
+) -> Result<EValue, String> {
+    let config = graph_runtime_config_for_current_pattern(state, manifest);
+    let edge = config
+        .edges
+        .iter()
+        .find(|edge| edge.from == query.from && edge.to == query.to)
+        .ok_or_else(|| "graph-edge-value edge not found".to_string())?;
+    match query.param.as_str() {
+        "weight" => Ok(EValue::Number(edge.weight)),
+        "dampening" => Ok(EValue::Number(edge.dampening)),
+        "delay" | "delay-steps" => Ok(EValue::Number(edge.delay_steps as f64)),
+        other => Err(format!(
+            "graph-edge-value unknown edge param :{} for group {}",
+            other, query.group
+        )),
     }
 }
 
@@ -12094,6 +12341,7 @@ mod tests {
             (0..8).map(|_| default_empty_effect_chain()).collect(),
         ));
         let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![("current-pattern", Value::Number(0.0))], true);
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
 
@@ -12135,8 +12383,8 @@ mod tests {
             .expect("weight matrix stable key");
         assert_measured(matrix);
 
-        // Three number-pickers (delay + transpose + vel-decay) and two dropdowns
-        // (resolution + quantize) per node — the per-node knobs the Ext B DSL reads.
+        // Three number-pickers (delay + transpose + vel-decay) and three dropdowns
+        // (route + resolution + quantize) per node — the per-node knobs the Ext B DSL reads.
         let mut pickers = Vec::new();
         collect_widgets(&layout, "number-picker", &mut pickers);
         assert_eq!(
@@ -12148,11 +12396,12 @@ mod tests {
         collect_widgets(&layout, "dropdown", &mut dropdowns);
         assert_eq!(
             dropdowns.len(),
-            16,
-            "expected resolution + quantize per node"
+            24,
+            "expected route + resolution + quantize per node"
         );
         for idx in 0..8 {
             for key in [
+                format!("graph-8x8-route-{idx}"),
                 format!("graph-8x8-delay-{idx}"),
                 format!("graph-8x8-transpose-{idx}"),
                 format!("graph-8x8-vel-decay-{idx}"),
@@ -12163,6 +12412,20 @@ mod tests {
                     .unwrap_or_else(|| panic!("missing control {key}"));
                 assert_measured(widget);
             }
+        }
+        let quantize_options = find_by_stable_key(&layout, "graph-8x8-quantize-0")
+            .and_then(|node| node.props.get("options"))
+            .expect("quantize options");
+        let Value::List(options) = quantize_options else {
+            panic!("quantize options should be a list");
+        };
+        for label in ["2T", "4T", "8T", "16T", "32T", "64T"] {
+            assert!(
+                options.iter().any(
+                    |option| matches!(&*option.borrow(), Value::String(value) if value == label)
+                ),
+                "missing quantize triplet option {label}"
+            );
         }
 
         // transpose picker -> per-node behavioral param override.
@@ -12189,6 +12452,14 @@ mod tests {
         runtime
             .invoke(resolution_change, vec![Value::String("8".into())])
             .expect("invoke resolution callback");
+        // route dropdown -> per-node intrinsic route override.
+        let route_change = find_by_stable_key(&layout, "graph-8x8-route-4")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("route callback");
+        runtime
+            .invoke(route_change, vec![Value::String("Track 3".into())])
+            .expect("invoke route callback");
 
         let overrides = state.current_graph_overrides();
         let graph = overrides
@@ -12214,6 +12485,98 @@ mod tests {
             }),
             "resolution dropdown should write an intrinsic override"
         );
+        assert!(
+            graph.node_intrinsics.iter().any(|node| {
+                node.instance == 4
+                    && node.route == Some(crate::graph::ProjectGraphRouteOverride::Track(2))
+            }),
+            "route dropdown should write an intrinsic override"
+        );
+
+        {
+            let mut bank = state.pattern.pattern_bank.lock().unwrap();
+            let mut pattern = bank[0].clone();
+            let graph = pattern
+                .graph_overrides
+                .iter_mut()
+                .find(|graph| graph.sequencer_name == "neural-8x8-demo")
+                .expect("cloned graph overrides");
+            graph
+                .node_params
+                .push(crate::graph::ProjectGraphNodeParamOverride {
+                    group: "nrn".to_string(),
+                    instance: 2,
+                    param: "transpose".to_string(),
+                    value: -12.0,
+                });
+            graph
+                .node_intrinsics
+                .push(crate::graph::ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance: 3,
+                    resolution: None,
+                    delay_steps: Some(6),
+                    quantize: None,
+                    route: None,
+                    seed_from: None,
+                });
+            graph
+                .node_intrinsics
+                .push(crate::graph::ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance: 4,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),
+                    seed_from: None,
+                });
+            graph
+                .edge_params
+                .push(crate::graph::ProjectGraphEdgeParamOverride {
+                    group: "nrn->nrn".to_string(),
+                    from: 0,
+                    to: 1,
+                    param: "weight".to_string(),
+                    value: 0.25,
+                });
+            bank.push(pattern);
+        }
+        state.pattern.num_patterns.store(2, Ordering::Relaxed);
+        state.pattern.current_pattern.store(1, Ordering::Relaxed);
+        runtime.set_reactive("SEQ", "current-pattern", Value::Number(1.0));
+        runtime.run_reactive_cycle();
+        assert_eq!(
+            runtime
+                .eval_str("g8-transp-2")
+                .expect("read synced transpose state"),
+            Some(Value::Number(-12.0)),
+            "pattern switch should reload transpose control state"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("g8-delay-3")
+                .expect("read synced delay state"),
+            Some(Value::Number(6.0)),
+            "pattern switch should reload delay control state"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("g8-route-4")
+                .expect("read synced route state"),
+            Some(Value::String("Track 2".to_string())),
+            "pattern switch should reload route control state"
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth (nth g8-weights 0) 1)")
+                .expect("read synced weight"),
+            Some(Value::Number(0.25)),
+            "pattern switch should reload matrix state"
+        );
+        state.pattern.current_pattern.store(0, Ordering::Relaxed);
+        runtime.set_reactive("SEQ", "current-pattern", Value::Number(0.0));
+        runtime.run_reactive_cycle();
 
         let mut graph_runtime = manifest.materialize_with_overrides(Some(graph));
         assert_eq!(graph_runtime.seed_track_mask_for_node(0), Some(1));
@@ -12410,6 +12773,36 @@ mod tests {
         assert_eq!(overrides[0].node_intrinsics[0].delay_steps, Some(3));
         assert_eq!(overrides[0].node_params[0].value, 0.75);
         assert_eq!(overrides[0].edge_params[0].value, 0.5);
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value \"neural\" 1 :delay)")
+                .expect("graph-node-value delay"),
+            Some(Value::Number(3.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value \"neural\" 1 :route)")
+                .expect("graph-node-value route"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-param-value \"neural\" 1 :threshold)")
+                .expect("graph-param-value threshold"),
+            Some(Value::Number(0.75))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-edge-value \"neural\" :from 0 :to 1 :weight)")
+                .expect("graph-edge-value keyword syntax"),
+            Some(Value::Number(0.5))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-edge-value \"neural\" 0 1 :weight)")
+                .expect("graph-edge-value positional syntax"),
+            Some(Value::Number(0.5))
+        );
     }
 
     #[test]

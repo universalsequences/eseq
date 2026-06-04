@@ -226,7 +226,8 @@ impl GeneratorRuntime {
             self.instances[generator_index].random_state = random_state;
             self.instances[generator_index].state = state;
         }
-        out[appended_from..].sort_by_key(|emission| (emission.sample_time, emission.generator_index));
+        out[appended_from..]
+            .sort_by_key(|emission| (emission.sample_time, emission.generator_index));
     }
 
     #[cfg(test)]
@@ -289,11 +290,18 @@ mod tests {
         runtime.sync_definitions(&[def(1, Timebase::Sixteenth)], 0.0);
 
         let mut out = Vec::new();
-        runtime.process_block(0.0, 4.0, 0, 48_000.0, |input| {
-            let mut result = emit_one();
-            result.random_state = input.random_state;
-            result
-        }, &mut out);
+        runtime.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            |input| {
+                let mut result = emit_one();
+                result.random_state = input.random_state;
+                result
+            },
+            &mut out,
+        );
 
         assert_eq!(out.len(), 16);
         // First boundary at 0.25 beats -> 12000 samples; last at 4.0 -> 192000.
@@ -309,10 +317,21 @@ mod tests {
 
         let mut seen = Vec::new();
         let mut out = Vec::new();
-        runtime.process_block(0.0, 4.0, 0, 48_000.0, |input| {
-            seen.push(input.tick_index);
-            GeneratorTickResult { emitted: Vec::new(), random_state: input.random_state, state: input.state }
-        }, &mut out);
+        runtime.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            |input| {
+                seen.push(input.tick_index);
+                GeneratorTickResult {
+                    emitted: Vec::new(),
+                    random_state: input.random_state,
+                    state: input.state,
+                }
+            },
+            &mut out,
+        );
 
         assert_eq!(seen, vec![0, 1, 2, 3]);
         assert_eq!(runtime.tick_count(1), Some(4));
@@ -327,11 +346,18 @@ mod tests {
         );
 
         let mut out = Vec::new();
-        runtime.process_block(0.0, 1.0, 0, 48_000.0, |input| {
-            let mut result = emit_one();
-            result.random_state = input.random_state;
-            result
-        }, &mut out);
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| {
+                let mut result = emit_one();
+                result.random_state = input.random_state;
+                result
+            },
+            &mut out,
+        );
 
         // Both fire at beat 1.0 (sample 48000); ordering is by generator index.
         assert_eq!(out.len(), 2);
@@ -347,12 +373,23 @@ mod tests {
         runtime.sync_definitions(&[def(1, Timebase::Quarter)], 0.0);
 
         let mut out = Vec::new();
-        runtime.process_block(0.0, 1.0, 0, 48_000.0, |input| {
-            let mut event = emit_one().emitted.remove(0);
-            // emit a sixteenth (0.25 beat) after the boundary
-            event.offset_beats = 0.25;
-            GeneratorTickResult { emitted: vec![event], random_state: input.random_state, state: input.state }
-        }, &mut out);
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            |input| {
+                let mut event = emit_one().emitted.remove(0);
+                // emit a sixteenth (0.25 beat) after the boundary
+                event.offset_beats = 0.25;
+                GeneratorTickResult {
+                    emitted: vec![event],
+                    random_state: input.random_state,
+                    state: input.state,
+                }
+            },
+            &mut out,
+        );
 
         // boundary at beat 1.0 (48000) + 0.25 beat (12000) = 60000
         assert_eq!(out.len(), 1);
@@ -365,9 +402,18 @@ mod tests {
         runtime.sync_definitions(&[def(1, Timebase::Quarter)], 0.0);
 
         let mut out = Vec::new();
-        runtime.process_block(0.0, 2.0, 0, 48_000.0, |input| {
-            GeneratorTickResult { emitted: Vec::new(), random_state: input.random_state, state: input.state }
-        }, &mut out);
+        runtime.process_block(
+            0.0,
+            2.0,
+            0,
+            48_000.0,
+            |input| GeneratorTickResult {
+                emitted: Vec::new(),
+                random_state: input.random_state,
+                state: input.state,
+            },
+            &mut out,
+        );
         assert_eq!(runtime.tick_count(1), Some(2));
 
         // Same id + resolution: preserve the tick counter.
@@ -383,9 +429,18 @@ mod tests {
     fn empty_runtime_emits_nothing() {
         let mut runtime = GeneratorRuntime::default();
         let mut out = Vec::new();
-        runtime.process_block(0.0, 4.0, 0, 48_000.0, |input| {
-            GeneratorTickResult { emitted: vec![], random_state: input.random_state, state: input.state }
-        }, &mut out);
+        runtime.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            |input| GeneratorTickResult {
+                emitted: vec![],
+                random_state: input.random_state,
+                state: input.state,
+            },
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 }
