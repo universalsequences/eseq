@@ -443,7 +443,7 @@
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (mixer-v2-drop-on-track event))
       :on-click (lambda (event) (mixer-v2-select-track i))
-      (v-stack :gap 0.25
+      (v-stack :gap 0.20
         (dropdown :value (nth SEQ.track-outputs i)
           :key (str "mixer-v2-track-output-" i)
           :options SEQ.track-output-options

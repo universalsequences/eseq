@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -231,8 +231,16 @@ impl TrackPatternPool {
         id
     }
 
+    pub fn contains(&self, id: PatternId) -> bool {
+        self.patterns.contains_key(&id)
+    }
+
     pub fn get(&self, id: PatternId) -> Option<&TrackPatternData> {
         self.patterns.get(&id)
+    }
+
+    pub fn get_mut(&mut self, id: PatternId) -> Option<&mut TrackPatternData> {
+        self.patterns.get_mut(&id)
     }
 }
 
@@ -314,6 +322,159 @@ impl ProjectScenes {
                     .copied()
                     .flatten()
             })
+    }
+
+    pub fn effective_track_pattern(&self, track: usize) -> Option<&TrackPatternData> {
+        let id = self.effective_pattern_id(track)?;
+        self.track_pools.get(track)?.get(id)
+    }
+
+    pub fn save_effective_track_pattern(&mut self, track: usize, data: TrackPatternData) -> bool {
+        let Some(id) = self.effective_pattern_id(track) else {
+            return false;
+        };
+        let Some(slot) = self
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(id))
+        else {
+            return false;
+        };
+        *slot = data;
+        true
+    }
+
+    pub fn launch_scene(&mut self, scene: usize) -> Option<Vec<Option<TrackPatternData>>> {
+        let scene_cells = self.scenes.get(scene)?.cells.clone();
+        let mut track_patterns = Vec::with_capacity(scene_cells.len());
+        for (track, cell) in scene_cells.iter().copied().enumerate() {
+            let data = match cell {
+                Some(id) => Some(self.track_pools.get(track)?.get(id)?.clone()),
+                None => None,
+            };
+            track_patterns.push(data);
+        }
+
+        self.current_scene = scene;
+        self.track_overrides.fill(None);
+        Some(track_patterns)
+    }
+
+    pub fn launch_track_pattern(
+        &mut self,
+        track: usize,
+        id: PatternId,
+    ) -> Option<TrackPatternData> {
+        let data = self.track_pools.get(track)?.get(id)?.clone();
+        *self.track_overrides.get_mut(track)? = Some(id);
+        Some(data)
+    }
+
+    pub fn set_cell(&mut self, scene: usize, track: usize, id: PatternId) -> bool {
+        let Some(pool) = self.track_pools.get(track) else {
+            return false;
+        };
+        if !pool.contains(id) {
+            return false;
+        }
+        let Some(scene) = self.scenes.get_mut(scene) else {
+            return false;
+        };
+        if track >= scene.cells.len() {
+            return false;
+        }
+
+        scene.cells[track] = Some(id);
+        true
+    }
+
+    pub fn clear_cell(&mut self, scene: usize, track: usize) -> Option<PatternId> {
+        let scene = self.scenes.get_mut(scene)?;
+        let cell = scene.cells.get_mut(track)?;
+        let cleared = cell.take();
+        if let Some(id) = cleared {
+            if self.track_overrides.get(track).copied().flatten() == Some(id) {
+                self.track_overrides[track] = None;
+            }
+        }
+        cleared
+    }
+
+    pub fn fork_track_pattern(&mut self, track: usize) -> Option<PatternId> {
+        let source = self.effective_track_pattern(track)?.clone();
+        let id = self.track_pools.get_mut(track)?.insert(source);
+        *self.track_overrides.get_mut(track)? = Some(id);
+        Some(id)
+    }
+
+    pub fn new_scene(&mut self) -> usize {
+        let source_scene = self.scenes.get(self.current_scene).cloned();
+        let mut cells = vec![None; self.track_pools.len()];
+        for track in 0..self.track_pools.len() {
+            if let Some(source) = self.effective_track_pattern(track).cloned() {
+                cells[track] = Some(self.track_pools[track].insert(source));
+            }
+        }
+
+        let scene_idx = self.scenes.len();
+        let (mod_connections, neural_networks, graph_overrides) = source_scene
+            .map(|scene| {
+                (
+                    scene.mod_connections,
+                    scene.neural_networks,
+                    scene.graph_overrides,
+                )
+            })
+            .unwrap_or_default();
+        self.scenes.push(Scene {
+            name: format!("Scene {}", scene_idx + 1),
+            cells,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+        });
+        self.current_scene = scene_idx;
+        self.track_overrides.fill(None);
+        scene_idx
+    }
+
+    pub fn remove_track(&mut self, track: usize) -> bool {
+        if track >= self.track_pools.len() {
+            return false;
+        }
+
+        self.track_pools.remove(track);
+        for scene in &mut self.scenes {
+            if track < scene.cells.len() {
+                scene.cells.remove(track);
+            }
+        }
+        if track < self.track_overrides.len() {
+            self.track_overrides.remove(track);
+        }
+        true
+    }
+
+    pub fn purge_unused_track_patterns(&mut self) -> usize {
+        let mut removed = 0;
+        for track in 0..self.track_pools.len() {
+            let mut referenced = HashSet::new();
+            for scene in &self.scenes {
+                if let Some(id) = scene.cells.get(track).copied().flatten() {
+                    referenced.insert(id);
+                }
+            }
+            if let Some(id) = self.track_overrides.get(track).copied().flatten() {
+                referenced.insert(id);
+            }
+
+            let before = self.track_pools[track].patterns.len();
+            self.track_pools[track]
+                .patterns
+                .retain(|id, _| referenced.contains(id));
+            removed += before - self.track_pools[track].patterns.len();
+        }
+        removed
     }
 }
 
@@ -3004,6 +3165,204 @@ mod tests {
         scenes.track_overrides[1] = Some(override_pattern);
 
         assert_eq!(scenes.effective_pattern_id(1), Some(override_pattern));
+    }
+
+    #[test]
+    fn project_scenes_new_scene_forks_current_effective_pattern_per_track() {
+        let first = sample_pattern_snapshot(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 3,
+        };
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first], 0);
+        scenes.scenes[0].mod_connections.push(route);
+        let track_zero_original = scenes.scenes[0].cells[0].unwrap();
+        let track_one_original = scenes.scenes[0].cells[1].unwrap();
+
+        let track_one_override = scenes.fork_track_pattern(1).unwrap();
+        scenes.track_pools[1]
+            .get_mut(track_one_override)
+            .unwrap()
+            .track_bits[0] = 77;
+
+        let new_scene = scenes.new_scene();
+
+        assert_eq!(new_scene, 1);
+        assert_eq!(scenes.current_scene, 1);
+        assert_eq!(scenes.track_overrides, vec![None, None]);
+        assert_eq!(scenes.track_pools[0].patterns.len(), 2);
+        assert_eq!(scenes.track_pools[1].patterns.len(), 3);
+        assert_eq!(scenes.scenes[1].mod_connections, vec![route]);
+
+        let track_zero_new = scenes.scenes[1].cells[0].unwrap();
+        let track_one_new = scenes.scenes[1].cells[1].unwrap();
+        assert_ne!(track_zero_original, track_zero_new);
+        assert_ne!(track_one_original, track_one_new);
+        assert_ne!(track_one_override, track_one_new);
+        assert_eq!(
+            scenes.track_pools[0]
+                .get(track_zero_new)
+                .unwrap()
+                .track_bits[0],
+            scenes.track_pools[0]
+                .get(track_zero_original)
+                .unwrap()
+                .track_bits[0]
+        );
+        assert_eq!(
+            scenes.track_pools[1].get(track_one_new).unwrap().track_bits[0],
+            77
+        );
+    }
+
+    #[test]
+    fn project_scenes_set_cell_shares_pool_entry_and_fork_diverges() {
+        let first = sample_pattern_snapshot(1);
+        let mut second = sample_pattern_snapshot(1);
+        second.track_bits[0][0] = 42;
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 1);
+
+        let shared = scenes.scenes[0].cells[0].unwrap();
+        assert!(scenes.set_cell(1, 0, shared));
+        scenes.track_pools[0].get_mut(shared).unwrap().track_bits[0] = 123;
+
+        assert_eq!(
+            scenes.effective_track_pattern(0).unwrap().track_bits[0],
+            123
+        );
+
+        let forked = scenes.fork_track_pattern(0).unwrap();
+        scenes.track_pools[0].get_mut(forked).unwrap().track_bits[0] = 999;
+
+        assert_eq!(
+            scenes.track_pools[0].get(shared).unwrap().track_bits[0],
+            123
+        );
+        assert_eq!(
+            scenes.track_pools[0].get(forked).unwrap().track_bits[0],
+            999
+        );
+        assert_eq!(scenes.effective_pattern_id(0), Some(forked));
+    }
+
+    #[test]
+    fn project_scenes_clear_cell_keeps_orphan_re_shareable() {
+        let first = sample_pattern_snapshot(1);
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first], 0);
+        let id = scenes.scenes[0].cells[0].unwrap();
+        scenes.track_overrides[0] = Some(id);
+
+        assert_eq!(scenes.clear_cell(0, 0), Some(id));
+
+        assert_eq!(scenes.scenes[0].cells[0], None);
+        assert_eq!(scenes.track_overrides[0], None);
+        assert!(scenes.track_pools[0].contains(id));
+        assert!(scenes.set_cell(0, 0, id));
+        assert_eq!(scenes.scenes[0].cells[0], Some(id));
+    }
+
+    #[test]
+    fn project_scenes_launch_scene_clears_overrides_and_preserves_empty_cells() {
+        let first = sample_pattern_snapshot(2);
+        let second = sample_pattern_snapshot(2);
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
+        let override_id = scenes.scenes[1].cells[0].unwrap();
+        scenes.track_overrides[0] = Some(override_id);
+        scenes.clear_cell(1, 1);
+
+        let launched = scenes.launch_scene(1).unwrap();
+
+        assert_eq!(scenes.current_scene, 1);
+        assert_eq!(scenes.track_overrides, vec![None, None]);
+        assert_eq!(launched.len(), 2);
+        assert_eq!(launched[0].as_ref().unwrap().track_bits[0], 1);
+        assert!(launched[1].is_none());
+    }
+
+    #[test]
+    fn project_scenes_launch_track_pattern_sets_override_and_returns_restore_data() {
+        let first = sample_pattern_snapshot(1);
+        let mut second = sample_pattern_snapshot(1);
+        second.track_bits[0][0] = 88;
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
+        let id = scenes.scenes[1].cells[0].unwrap();
+
+        let data = scenes.launch_track_pattern(0, id).unwrap();
+
+        assert_eq!(data.track_bits[0], 88);
+        assert_eq!(scenes.track_overrides[0], Some(id));
+        assert_eq!(scenes.effective_pattern_id(0), Some(id));
+    }
+
+    #[test]
+    fn project_scenes_save_effective_track_pattern_makes_edits_durable_across_launches() {
+        let first = sample_pattern_snapshot(1);
+        let second = sample_pattern_snapshot(1);
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
+        let original_id = scenes.scenes[0].cells[0].unwrap();
+        let other_id = scenes.scenes[1].cells[0].unwrap();
+        let mut edited = scenes.effective_track_pattern(0).unwrap().clone();
+        edited.track_bits[0] = 321;
+
+        assert!(scenes.save_effective_track_pattern(0, edited));
+        scenes.launch_track_pattern(0, other_id).unwrap();
+        assert_eq!(
+            scenes.effective_track_pattern(0).unwrap().track_bits[0],
+            scenes.track_pools[0].get(other_id).unwrap().track_bits[0]
+        );
+        scenes.launch_scene(0).unwrap();
+
+        assert_eq!(scenes.effective_pattern_id(0), Some(original_id));
+        assert_eq!(
+            scenes.effective_track_pattern(0).unwrap().track_bits[0],
+            321
+        );
+    }
+
+    #[test]
+    fn project_scenes_remove_track_drops_pool_scene_column_and_override() {
+        let first = sample_pattern_snapshot(3);
+        let mut second = sample_pattern_snapshot(3);
+        second.track_bits[2][0] = 44;
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
+        let track_two_id = scenes.scenes[1].cells[2].unwrap();
+        scenes.track_overrides[2] = Some(track_two_id);
+
+        assert!(scenes.remove_track(1));
+
+        assert_eq!(scenes.track_pools.len(), 2);
+        assert_eq!(scenes.track_overrides.len(), 2);
+        assert_eq!(scenes.scenes[0].cells.len(), 2);
+        assert_eq!(scenes.scenes[1].cells.len(), 2);
+        assert_eq!(scenes.track_overrides[1], Some(track_two_id));
+        assert_eq!(scenes.scenes[1].cells[1], Some(track_two_id));
+        assert_eq!(
+            scenes.track_pools[1]
+                .get(scenes.scenes[1].cells[1].unwrap())
+                .unwrap()
+                .track_bits[0],
+            44
+        );
+    }
+
+    #[test]
+    fn project_scenes_purge_unused_track_patterns_removes_only_unreferenced_orphans() {
+        let first = sample_pattern_snapshot(1);
+        let second = sample_pattern_snapshot(1);
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
+        let scene_zero_id = scenes.scenes[0].cells[0].unwrap();
+        let scene_one_id = scenes.scenes[1].cells[0].unwrap();
+        let override_only_id = scenes.fork_track_pattern(0).unwrap();
+        let orphan_id = scenes.clear_cell(1, 0).unwrap();
+
+        assert_eq!(orphan_id, scene_one_id);
+        assert_eq!(scenes.purge_unused_track_patterns(), 1);
+
+        assert!(scenes.track_pools[0].contains(scene_zero_id));
+        assert!(scenes.track_pools[0].contains(override_only_id));
+        assert!(!scenes.track_pools[0].contains(orphan_id));
+        assert_eq!(scenes.track_overrides[0], Some(override_only_id));
     }
 
     #[test]
