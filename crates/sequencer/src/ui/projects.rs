@@ -12,8 +12,8 @@ use crate::project::{
     ProjectScratchState, ProjectTrack,
 };
 use crate::sequencer::{
-    BusId, CustomInstrumentRunMode, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS,
-    TRACK_PATTERN_WORDS,
+    BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
+    PatternSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
 };
 
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
@@ -517,7 +517,7 @@ fn is_generated_mod_runtime_param_name(name: &str) -> bool {
 }
 
 fn project_bus_gate_sequence_from_ui(
-    sequence: &super::BusGateSequence,
+    sequence: &BusGateSequence,
 ) -> project::ProjectBusGateSequence {
     project::ProjectBusGateSequence {
         steps: sequence.steps.to_vec(),
@@ -542,10 +542,8 @@ fn project_bus_gate_sequence_from_ui(
     }
 }
 
-fn project_bus_gate_sequence_to_ui(
-    sequence: project::ProjectBusGateSequence,
-) -> super::BusGateSequence {
-    let mut restored = super::BusGateSequence::default();
+fn project_bus_gate_sequence_to_ui(sequence: project::ProjectBusGateSequence) -> BusGateSequence {
+    let mut restored = BusGateSequence::default();
     for (idx, value) in sequence.steps.into_iter().take(MAX_STEPS).enumerate() {
         restored.steps[idx] = value;
     }
@@ -592,7 +590,7 @@ fn project_bus_gate_sequence_to_ui(
 }
 
 fn project_bus_pattern_snapshot_from_ui(
-    snapshot: &super::BusPatternSnapshot,
+    snapshot: &BusPatternSnapshot,
 ) -> ProjectBusPatternSnapshot {
     ProjectBusPatternSnapshot {
         id: snapshot.id.0,
@@ -613,10 +611,8 @@ fn project_bus_pattern_snapshot_from_ui(
     }
 }
 
-fn project_bus_pattern_snapshot_to_ui(
-    snapshot: ProjectBusPatternSnapshot,
-) -> super::BusPatternSnapshot {
-    super::BusPatternSnapshot {
+fn project_bus_pattern_snapshot_to_ui(snapshot: ProjectBusPatternSnapshot) -> BusPatternSnapshot {
+    BusPatternSnapshot {
         id: BusId(snapshot.id),
         gate_sequence: project_bus_gate_sequence_to_ui(snapshot.gate_sequence),
         effect_plocks: snapshot
@@ -700,9 +696,9 @@ impl App {
             self.graph_controller()
                 .ensure_bus_graph_node(bus.id, &bus.name);
         }
-        self.bus_pattern_bank.clear();
-        self.ensure_bus_pattern_bank_len(1);
         let default_bus_snapshot = self.capture_bus_pattern_snapshot();
+        self.state
+            .replace_bus_pattern_repository(Vec::new(), &default_bus_snapshot);
         self.restore_bus_pattern_snapshot(&default_bus_snapshot);
         for bus in &self.buses {
             let Some(nodes) = self
@@ -1035,8 +1031,12 @@ impl App {
         self.save_current_bus_pattern();
 
         let bank = self.state.export_pattern_repository();
-        self.ensure_bus_pattern_bank_len(bank.len());
-        let bus_pattern_bank = self.bus_pattern_bank.clone();
+        let default_bus_snapshot = self.capture_bus_pattern_snapshot();
+        self.state
+            .ensure_bus_pattern_repository_len(bank.len(), &default_bus_snapshot);
+        let bus_pattern_bank = self
+            .state
+            .export_bus_pattern_repository(&default_bus_snapshot);
         let tracks = self.capture_project_tracks()?;
         let custom_effects = self.capture_custom_effects();
         let patterns = bank
@@ -1484,7 +1484,7 @@ impl App {
             patterns: _,
         } = pending.project;
         let bank = pending.built_patterns;
-        let mut bus_pattern_bank = pending.built_bus_patterns;
+        let bus_pattern_bank = pending.built_bus_patterns;
         let current_pattern = saved_current_pattern.min(bank.len().saturating_sub(1));
         let current_track = resolve_project_current_track(
             saved_current_track,
@@ -1569,18 +1569,12 @@ impl App {
             // on create, so only override for a non-default reference).
             self.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref());
         }
-        if bus_pattern_bank.is_empty() {
-            bus_pattern_bank = (0..self.state.scene_count())
-                .map(|_| self.capture_bus_pattern_snapshot())
-                .collect();
-        }
-        self.bus_pattern_bank = bus_pattern_bank;
-        self.ensure_bus_pattern_bank_len(self.state.scene_count());
+        let default_bus_snapshot = self.capture_bus_pattern_snapshot();
+        self.state
+            .replace_bus_pattern_repository(bus_pattern_bank, &default_bus_snapshot);
         let current_bus_snapshot = self
-            .bus_pattern_bank
-            .get(current_pattern)
-            .cloned()
-            .unwrap_or_else(|| self.capture_bus_pattern_snapshot());
+            .state
+            .bus_pattern_snapshot_or_default(current_pattern, &default_bus_snapshot);
         self.restore_bus_pattern_snapshot(&current_bus_snapshot);
         for bus in &self.buses {
             let Some(nodes) = self
@@ -1710,7 +1704,7 @@ impl App {
     fn project_pattern_into_snapshot(
         &mut self,
         pattern: ProjectPattern,
-    ) -> Result<(PatternSnapshot, Vec<super::BusPatternSnapshot>, usize), String> {
+    ) -> Result<(PatternSnapshot, Vec<BusPatternSnapshot>, usize), String> {
         let num_tracks = self.tracks.len();
         let mut sample_ids = Vec::with_capacity(num_tracks);
         let mut fallback_count = 0;

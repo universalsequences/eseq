@@ -61,7 +61,7 @@ use sequencer::agent::actions::{
 use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
-    CustomInstrumentRunMode, KeyboardTrigger, MidiFxPosition, SequencerState, StepParam,
+    CustomInstrumentRunMode, KeyboardTrigger, MidiFxPosition, PatternId, SequencerState, StepParam,
     SwingResolution, Timebase, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::ui;
@@ -8525,6 +8525,145 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "Error deleting MIDI FX: {e}"
                             ))),
                         }
+                    }
+                    "launch-track-pattern" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Track pattern launch failed: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let track = map.get("track").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        });
+                        let pattern_id = map
+                            .get("pattern-id")
+                            .or_else(|| map.get("pattern_id"))
+                            .and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) if *n >= 1.0 => Some(*n as u64),
+                                _ => None,
+                            });
+                        let (Some(track), Some(pattern_id)) = (track, pattern_id) else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Track pattern launch failed: missing track or pattern id"
+                                    .to_string(),
+                            ));
+                            continue;
+                        };
+                        let num_tracks = app.tracks.len();
+                        if track >= num_tracks {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Track pattern launch failed: track {} is out of range",
+                                track + 1
+                            )));
+                            continue;
+                        }
+                        let launched = app.state.launch_track_pattern(
+                            track,
+                            PatternId(pattern_id),
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        );
+                        if !launched {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Track pattern launch failed: pattern id {} is unavailable",
+                                pattern_id
+                            )));
+                            continue;
+                        }
+
+                        let sample_ids = app.state.effective_pattern_sample_ids(num_tracks);
+                        app.graph_controller().apply_sample_ids(&sample_ids);
+                        if let Err(error) = app
+                            .graph_controller()
+                            .sync_track_instrument_run_modes_from_live_state()
+                        {
+                            app.editor.status_message = Some((
+                                format!("Track pattern launch failed: {error}"),
+                                Instant::now(),
+                            ));
+                        }
+                        app.push_all_restored_defaults();
+
+                        let ct = current_track_for_app(&mut app, &current_track).unwrap_or(track);
+                        let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+                        let selected_neural_snapshot =
+                            selected_neural_neurons.lock().unwrap().clone();
+                        let rt = editor.runtime_mut();
+                        sync_shared_track_collapsed(&track_collapsed, &app);
+                        sync_track_name_state(rt, &mut track_names, &app);
+                        sync_pattern_state(rt, &state);
+                        set_current_track_reactive(rt, app.tracks.len(), ct);
+                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                        sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
+                        sync_step_param_lists(rt, &state, ct);
+                        sync_track_mixer_state(rt, &app, &state);
+                        sync_track_peak_fields(rt, &cached_track_peak_levels);
+                        if fx_visible {
+                            rt.set_reactive(
+                                "SEQ",
+                                "effects",
+                                build_effects_value(
+                                    &state,
+                                    ct,
+                                    &app.graph.effect_descriptors,
+                                    &selected_steps,
+                                ),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "midi-effects",
+                                build_midi_effects_value(&state, ct, &selected_steps),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "instrument-panel",
+                                build_instrument_panel_value(&app, ct, &selected_steps),
+                            );
+                            *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                        } else {
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                        }
+                        sync_track_params_with_neural_selection(
+                            rt,
+                            &app,
+                            &state,
+                            ct,
+                            &selected_steps,
+                            Some(&selected_neural_snapshot),
+                        );
+                        sync_fx_param_binding_fields_with_neural_selection(
+                            rt,
+                            &app,
+                            &state,
+                            ct,
+                            &selected_steps,
+                            Some(&selected_neural_snapshot),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "step-has-plocks",
+                            build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                        );
+                        sync_sidebar_browser(rt, &app, ct);
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        if editor_has_visible_buffer(&editor, "*mixer*") {
+                            editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+                        }
+                        prev_pattern_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
+                        prev_track_button_states = track_button_state_snapshot(&state);
+                        prev_track_playheads = track_playheads_snapshot(&state, &app);
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Launched track {} pattern {}",
+                            track + 1,
+                            pattern_id
+                        )));
                     }
                     "switch-pattern" => {
                         let profile_switch = pattern_switch_profile_enabled();

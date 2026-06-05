@@ -49,6 +49,22 @@ pub(crate) fn build_all_track_steps_value(state: &Arc<SequencerState>, app: &ui:
     Value::List(tracks)
 }
 
+pub(crate) fn build_track_pattern_cells_value(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+) -> Value {
+    list_value((0..track_count).map(|track| {
+        list_value(state.track_pattern_cells(track).into_iter().map(|cell| {
+            map_value([
+                ("id", Value::Number(cell.pattern_id.0 as f64)),
+                ("assigned", Value::Bool(cell.assigned_to_current_scene)),
+                ("active", Value::Bool(cell.active_effective)),
+                ("override", Value::Bool(cell.overridden)),
+            ])
+        }))
+    }))
+}
+
 pub(crate) fn build_all_track_num_steps_value(state: &Arc<SequencerState>, app: &ui::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
         .map(|t| {
@@ -1973,6 +1989,11 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
     rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
     rt.set_reactive(
         "SEQ",
+        "track-pattern-cells",
+        build_track_pattern_cells_value(state, app.tracks.len()),
+    );
+    rt.set_reactive(
+        "SEQ",
         "track-instrument-types",
         build_track_instrument_types(app),
     );
@@ -2062,6 +2083,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
@@ -2740,6 +2762,11 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "SEQ",
         "num-patterns",
         Value::Number(state.scene_count() as f64),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-pattern-cells",
+        build_track_pattern_cells_value(state, state.active_track_count()),
     );
     rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
     rt.set_reactive(
@@ -9224,6 +9251,53 @@ mod tests {
         Value::Map(map)
     }
 
+    fn test_track_pattern_cell(
+        id: f64,
+        assigned: bool,
+        active: bool,
+        override_active: bool,
+    ) -> Value {
+        map_value([
+            ("id", Value::Number(id)),
+            ("assigned", Value::Bool(assigned)),
+            ("active", Value::Bool(active)),
+            ("override", Value::Bool(override_active)),
+        ])
+    }
+
+    #[test]
+    fn build_track_pattern_cells_value_exports_cell_maps() {
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        let value = build_track_pattern_cells_value(&state, 1);
+        let Value::List(tracks) = value else {
+            panic!("track pattern cells should be a track list");
+        };
+        assert_eq!(tracks.len(), 1);
+        let Value::List(cells) = &*tracks[0].borrow() else {
+            panic!("track pattern cells should contain per-track cell lists");
+        };
+        assert_eq!(cells.len(), 1);
+        let Value::Map(cell) = &*cells[0].borrow() else {
+            panic!("track pattern cell should be a map");
+        };
+        assert_eq!(
+            cell.get("id").map(|value| value.borrow().clone()),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            cell.get("assigned").map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            cell.get("active").map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            cell.get("override").map(|value| value.borrow().clone()),
+            Some(Value::Bool(false))
+        );
+    }
+
     fn test_delete_target_number(payload: &Value, field: &str) -> Option<usize> {
         let Value::Map(map) = payload else {
             return None;
@@ -11388,6 +11462,13 @@ mod tests {
                 ("track-names", test_string_list(&["bd02"])),
                 ("track-colors", test_track_colors()),
                 ("track-collapsed", test_bool_list(&[false])),
+                (
+                    "track-pattern-cells",
+                    test_list(vec![test_list(vec![
+                        test_track_pattern_cell(1.0, true, true, false),
+                        test_track_pattern_cell(2.0, false, false, false),
+                    ])]),
+                ),
                 ("current-track", Value::Number(0.0)),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
@@ -11621,6 +11702,22 @@ mod tests {
             "SEQ",
             "track-collapsed",
             test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-pattern-cells",
+            test_list(
+                (0..track_count)
+                    .map(|track| {
+                        test_list(vec![test_track_pattern_cell(
+                            (track + 1) as f64,
+                            true,
+                            track == 0,
+                            false,
+                        )])
+                    })
+                    .collect(),
+            ),
         );
         rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
         rt.set_reactive(
@@ -21610,6 +21707,19 @@ mod tests {
                     "track-collapsed",
                     test_list(vec![Value::Bool(false), Value::Bool(false)]),
                 ),
+                (
+                    "track-pattern-cells",
+                    test_list(vec![
+                        test_list(vec![
+                            test_track_pattern_cell(1.0, true, true, false),
+                            test_track_pattern_cell(2.0, false, false, false),
+                        ]),
+                        test_list(vec![
+                            test_track_pattern_cell(3.0, true, false, true),
+                            test_track_pattern_cell(4.0, false, true, true),
+                        ]),
+                    ]),
+                ),
                 ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
                 ("track-selected-0", Value::Bool(true)),
@@ -22130,6 +22240,38 @@ mod tests {
             mod_out.rect,
             mod_in.rect
         );
+        let pattern_cell = find_node_by_stable_key(&layout, "mixer-v2-track-pattern-cell-1-4")
+            .expect("track 2 active override pattern cell");
+        assert!(
+            pattern_cell.rect.width > 0.0 && pattern_cell.rect.height > 0.0,
+            "track pattern cell should have a finite visible rect: {:?}",
+            pattern_cell.rect
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-launch-track-pattern 1 (nth (mixer-v2-track-pattern-cells 1) 1))")
+            .expect("launch track pattern from mixer grid");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "launch-track-pattern");
+                let Value::Map(payload) = payload else {
+                    panic!("launch-track-pattern payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("pattern-id")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(4.0))
+                );
+            }
+            other => panic!("expected launch-track-pattern host command, got {other:?}"),
+        }
         editor
             .runtime_mut()
             .eval_str("(mixer-v2-select-track 0)")

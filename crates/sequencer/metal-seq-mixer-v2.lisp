@@ -242,7 +242,7 @@
               (if pending (rgba 0.48 0.86 1.0 1.0) (rgba 0.10 0.58 1.0 1.0))
               (rgba 1.0 0.52 0.16 1.0)))
           (rgba 0.10 0.11 0.13 1.0)))
-        (inner (if active
+      (inner (if active
           (if output (rgba 0.015 0.035 0.055 1.0) (rgba 0.035 0.018 0.006 1.0))
           (rgba 0.02 0.025 0.03 1.0))))
     (sdf/layer
@@ -250,6 +250,57 @@
         (material :color outer))
       (sdf/fill (sdf/circle 0.43)
         (material :color inner)))))
+
+(defwidget track-pattern-cell-bg
+  :width 0.88 :height 0.38
+  :paint-margin 0.04
+  :state (active assigned override)
+  :shader
+  (let ((outer (if (= active 1)
+          (rgba 0.82 0.96 1.0 1.0)
+          (if (= 1 (* assigned override))
+            (rgba 0.95 0.48 0.18 1.0)
+            (if (= assigned 1)
+              (rgba 0.52 0.58 0.68 1.0)
+              (rgba 0.18 0.19 0.21 1.0)))))
+        (inner (if (= 1 active)
+          (rgba 0.42 0.88 1.0 1.0)
+          (if (= 1 assigned)
+            (rgba 0.16 0.18 0.21 1.0)
+            (rgba 0.09 0.10 0.11 1.0)))))
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect width height 0.03)
+        (material :color outer))
+      (sdf/fill (sdf/rounded-rect (* width 0.62) (* height 0.62) 0.015)
+        (material :color inner)))))
+
+(def mixer-v2-track-pattern-cells (track)
+  (if (< track (len SEQ.track-pattern-cells))
+    (nth SEQ.track-pattern-cells track)
+    (list)))
+
+(def mixer-v2-launch-track-pattern (track cell)
+  (do
+    (mixer-v2-activate-track-control track)
+    (seq-set-track track)
+    (host-command "launch-track-pattern"
+      (dict :track track :pattern-id (get cell :id)))))
+
+(def mixer-v2-track-pattern-grid (track)
+  (let ((cells (mixer-v2-track-pattern-cells track)))
+    (box :width :fill :height 0.92 :align :center :bg :transparent
+      (grid :cols 16 :col-width 1.00 :row-height 0.53 :align :center
+        (each cells |cell cell-idx|
+          (box
+            :key (str "mixer-v2-track-pattern-cell-" track "-" (get cell :id))
+            :width 1.08 :height 0.58
+            :padding 0
+            :bg :transparent
+            :background "track-pattern-cell-bg"
+            :active (get cell :active)
+            :assigned (get cell :assigned)
+            :override (get cell :override)
+            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell))))))))
 
 (def mixer-v2-mod-output-style
   (ui/style
@@ -426,7 +477,7 @@
 (def mixer-v2-track-strip (i)
   (let ((muted (mixer-v2-muted? i))
       (sends (nth SEQ.track-bus-sends i)))
-    (box :width 10.9 :height 12.15
+    (box :width 10.9 :height 13.15
       :selected (mixer-v2-track-selected-binding i)
       :muted muted
       :background-color :mixer-strip-bg
@@ -453,6 +504,7 @@
               (host-command "set-track-output" (dict :track i :label v))))
           :width 9.8 :height 1.2 :font-size 10)
         (mixer-v2-mod-port-row i)
+        (mixer-v2-track-pattern-grid i)
         (h-stack :gap 0.05
           (each sends |send send-idx|
             (mixer-v2-send-knob i send)))
@@ -635,7 +687,7 @@
 
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
-    (box :width 9.3 :height 12.0
+    (box :width 10.3 :height 12.0
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
       :corner-radius 10

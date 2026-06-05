@@ -721,21 +721,12 @@ impl App {
     }
 
     fn sync_other_bus_pattern_effect_insert(&mut self, bus_idx: usize, slot_idx: usize) {
-        let current_pattern = self.state.current_scene_index();
-        self.ensure_bus_pattern_bank_len(current_pattern + 1);
-        for (pattern_idx, buses) in self.bus_pattern_bank.iter_mut().enumerate() {
-            if pattern_idx == current_pattern {
-                continue;
-            }
-            let Some(bus) = buses.get_mut(bus_idx) else {
-                continue;
-            };
-            if slot_idx > bus.effect_plocks.len() {
-                continue;
-            }
-            bus.effect_plocks.insert(slot_idx, Vec::new());
-            bus.effect_plocks.truncate(MAX_CUSTOM_FX);
-        }
+        let default_snapshot = self.capture_bus_pattern_snapshot();
+        self.state.insert_bus_effect_slot_in_other_scene_patterns(
+            bus_idx,
+            slot_idx,
+            &default_snapshot,
+        );
     }
 
     fn sync_other_bus_pattern_effect_move(
@@ -744,26 +735,13 @@ impl App {
         source_slot: usize,
         target_slot: usize,
     ) {
-        let current_pattern = self.state.current_scene_index();
-        self.ensure_bus_pattern_bank_len(current_pattern + 1);
-        for (pattern_idx, buses) in self.bus_pattern_bank.iter_mut().enumerate() {
-            if pattern_idx == current_pattern {
-                continue;
-            }
-            let Some(bus) = buses.get_mut(bus_idx) else {
-                continue;
-            };
-            if source_slot >= bus.effect_plocks.len() {
-                continue;
-            }
-            let plocks = bus.effect_plocks.remove(source_slot);
-            let mut target = target_slot.min(bus.effect_plocks.len());
-            if source_slot < target {
-                target = target.saturating_sub(1);
-            }
-            bus.effect_plocks.insert(target, plocks);
-            bus.effect_plocks.truncate(MAX_CUSTOM_FX);
-        }
+        let default_snapshot = self.capture_bus_pattern_snapshot();
+        self.state.move_bus_effect_slot_in_other_scene_patterns(
+            bus_idx,
+            source_slot,
+            target_slot,
+            &default_snapshot,
+        );
     }
 
     fn prepare_custom_effect_insert_slot(

@@ -302,6 +302,10 @@ pub(crate) fn init_runtime(
                 ("track-names", build_track_names(&track_names)),
                 ("track-collapsed", build_track_collapsed(app)),
                 (
+                    "track-pattern-cells",
+                    build_track_pattern_cells_value(&state, track_count),
+                ),
+                (
                     "track-num-steps",
                     build_all_track_num_steps_value(&state, app),
                 ),

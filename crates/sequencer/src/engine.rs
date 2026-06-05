@@ -293,7 +293,7 @@ fn init_engine_parts(
             .map(|nodes| BusGateRuntimeState {
                 id: nodes.id,
                 gate_id: nodes.gate_id,
-                sequence: crate::ui::BusGateSequence::default(),
+                sequence: crate::sequencer::BusGateSequence::default(),
                 effect_slots: crate::ui::BusChannelState::default_effect_slots(),
             })
             .collect(),

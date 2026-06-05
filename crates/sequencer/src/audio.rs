@@ -1893,7 +1893,10 @@ fn publish_sampler_modulator_activity(data: &AudioCallbackData) {
     }
 }
 
-fn bus_gate_state_at(sequence: &crate::ui::BusGateSequence, total_beats: f64) -> (f32, usize) {
+fn bus_gate_state_at(
+    sequence: &crate::sequencer::BusGateSequence,
+    total_beats: f64,
+) -> (f32, usize) {
     const EPS: f64 = 1e-9;
     let ns = sequence.num_steps.clamp(1, crate::sequencer::MAX_STEPS);
     let mut starts = [0.0f64; crate::sequencer::MAX_STEPS];
@@ -1946,7 +1949,7 @@ fn bus_gate_state_at(sequence: &crate::ui::BusGateSequence, total_beats: f64) ->
     }
 }
 
-fn bus_gate_target_at(sequence: &crate::ui::BusGateSequence, total_beats: f64) -> f32 {
+fn bus_gate_target_at(sequence: &crate::sequencer::BusGateSequence, total_beats: f64) -> f32 {
     bus_gate_state_at(sequence, total_beats).0
 }
 
@@ -4211,7 +4214,7 @@ mod tests {
 
     #[test]
     fn bus_gate_default_sequence_stays_open_across_steps() {
-        let sequence = crate::ui::BusGateSequence::default();
+        let sequence = crate::sequencer::BusGateSequence::default();
         assert_eq!(bus_gate_target_at(&sequence, 0.0), 1.0);
         assert_eq!(bus_gate_target_at(&sequence, 0.24), 1.0);
         assert_eq!(bus_gate_target_at(&sequence, 0.25), 1.0);
@@ -4220,7 +4223,7 @@ mod tests {
 
     #[test]
     fn bus_gate_sequence_follows_step_activity_and_duration() {
-        let mut sequence = crate::ui::BusGateSequence::default();
+        let mut sequence = crate::sequencer::BusGateSequence::default();
         sequence.num_steps = 4;
         sequence.timebase = crate::sequencer::Timebase::Quarter;
         sequence.steps = [false; crate::sequencer::MAX_STEPS];
@@ -4236,7 +4239,7 @@ mod tests {
 
     #[test]
     fn bus_gate_sync_steps_snap_boundaries_to_grid() {
-        let mut sequence = crate::ui::BusGateSequence::default();
+        let mut sequence = crate::sequencer::BusGateSequence::default();
         sequence.num_steps = 4;
         sequence.timebase = crate::sequencer::Timebase::Sixteenth;
         sequence.steps = [false; crate::sequencer::MAX_STEPS];

@@ -98,7 +98,7 @@
       0.2 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42)
       0.8 (list :rows :gap 1
         0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
-        0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13)))
+        0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 14 :max-height 14)))
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
 (def seq-patcher-bottom-bar-layout-spec ()

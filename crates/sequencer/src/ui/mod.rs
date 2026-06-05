@@ -21,8 +21,8 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScali
 use crate::lisp_effect::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
-    BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState, StepParam,
-    StepSnapshot, SwingResolution, Timebase, MAX_STEPS, STEPS_PER_PAGE,
+    BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
+    KeyboardTrigger, SequencerState, StepParam, StepSnapshot, MAX_STEPS, STEPS_PER_PAGE,
 };
 use crate::track_color::TrackColor;
 
@@ -637,85 +637,6 @@ pub struct BusChannelState {
     pub custom_effect_names: Vec<Option<String>>,
 }
 
-#[derive(Clone)]
-pub struct BusPatternSnapshot {
-    pub id: BusId,
-    pub gate_sequence: BusGateSequence,
-    pub effect_plocks: Vec<Vec<Vec<Option<f32>>>>,
-}
-
-#[derive(Clone)]
-pub struct BusGateSequence {
-    pub steps: [bool; MAX_STEPS],
-    pub velocities: [f32; MAX_STEPS],
-    pub durations: [f32; MAX_STEPS],
-    pub syncs: [f32; MAX_STEPS],
-    pub num_steps: usize,
-    pub timebase: Timebase,
-    pub swing: f32,
-    pub swing_resolution: SwingResolution,
-    pub timebase_plocks: [Option<Timebase>; MAX_STEPS],
-    pub swing_plocks: [Option<f32>; MAX_STEPS],
-    pub swing_resolution_plocks: [Option<SwingResolution>; MAX_STEPS],
-}
-
-impl Default for BusGateSequence {
-    fn default() -> Self {
-        Self {
-            steps: [true; MAX_STEPS],
-            velocities: [1.0; MAX_STEPS],
-            durations: [1.0; MAX_STEPS],
-            syncs: [0.0; MAX_STEPS],
-            num_steps: 16,
-            timebase: Timebase::Sixteenth,
-            swing: 50.0,
-            swing_resolution: SwingResolution::Sixteenth,
-            timebase_plocks: [None; MAX_STEPS],
-            swing_plocks: [None; MAX_STEPS],
-            swing_resolution_plocks: [None; MAX_STEPS],
-        }
-    }
-}
-
-impl BusGateSequence {
-    pub fn toggle_step(&mut self, step: usize) -> Option<bool> {
-        let value = self.steps.get_mut(step)?;
-        *value = !*value;
-        Some(*value)
-    }
-
-    pub fn set_step_velocity(&mut self, step: usize, value: f32) -> Option<f32> {
-        let slot = self.velocities.get_mut(step)?;
-        *slot = value.clamp(0.0, 1.0);
-        Some(*slot)
-    }
-
-    pub fn set_step_duration(&mut self, step: usize, value: f32) -> Option<f32> {
-        let slot = self.durations.get_mut(step)?;
-        *slot = value.clamp(0.1, 2.0);
-        Some(*slot)
-    }
-
-    pub fn set_step_sync(&mut self, step: usize, value: f32) -> Option<f32> {
-        let slot = self.syncs.get_mut(step)?;
-        *slot = value
-            .round()
-            .clamp(0.0, (crate::sequencer::SYNC_COUNT - 1) as f32);
-        Some(*slot)
-    }
-
-    pub fn set_num_steps(&mut self, value: usize) {
-        self.num_steps = value.clamp(1, MAX_STEPS);
-    }
-
-    pub fn has_step_plock(&self, step: usize) -> bool {
-        step < MAX_STEPS
-            && (self.timebase_plocks[step].is_some()
-                || self.swing_plocks[step].is_some()
-                || self.swing_resolution_plocks[step].is_some())
-    }
-}
-
 impl BusChannelState {
     pub fn new(id: BusId, name: impl Into<String>) -> Self {
         Self {
@@ -820,7 +741,6 @@ pub struct App {
     pub track_colors: Vec<TrackColor>,
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
-    pub bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
@@ -995,45 +915,40 @@ impl App {
         self.publish_bus_gate_runtime();
     }
 
-    pub fn save_current_bus_pattern(&mut self) {
-        let current_pattern = self.state.current_scene_index();
-        let num_patterns = self.state.scene_count();
-        self.ensure_bus_pattern_bank_len(num_patterns.max(current_pattern + 1));
-        self.bus_pattern_bank[current_pattern] = self.capture_bus_pattern_snapshot();
+    pub fn save_current_bus_pattern(&self) {
+        self.state
+            .save_current_bus_pattern_snapshot(self.capture_bus_pattern_snapshot());
     }
 
     pub fn ensure_bus_pattern_bank_len(&mut self, len: usize) {
-        while self.bus_pattern_bank.len() < len {
-            self.bus_pattern_bank
-                .push(self.capture_bus_pattern_snapshot());
-        }
+        let default_snapshot = self.capture_bus_pattern_snapshot();
+        self.state
+            .ensure_bus_pattern_repository_len(len, &default_snapshot);
     }
 
     pub fn switch_bus_pattern(&mut self, new_idx: usize) {
         self.save_current_bus_pattern();
-        self.ensure_bus_pattern_bank_len(new_idx + 1);
-        let snapshot = self.bus_pattern_bank[new_idx].clone();
+        let default_snapshot = self.capture_bus_pattern_snapshot();
+        let snapshot = self
+            .state
+            .bus_pattern_snapshot_or_default(new_idx, &default_snapshot);
         self.restore_bus_pattern_snapshot(&snapshot);
     }
 
     pub fn clone_bus_pattern_from_to(&mut self, source_idx: usize, new_idx: usize) {
         self.save_current_bus_pattern();
+        let default_snapshot = self.capture_bus_pattern_snapshot();
         let source = self
-            .bus_pattern_bank
-            .get(source_idx)
-            .cloned()
-            .unwrap_or_else(|| self.capture_bus_pattern_snapshot());
-        self.ensure_bus_pattern_bank_len(new_idx + 1);
-        self.bus_pattern_bank[new_idx] = source.clone();
+            .state
+            .clone_bus_pattern_snapshot(source_idx, new_idx, &default_snapshot);
         self.restore_bus_pattern_snapshot(&source);
     }
 
     pub fn delete_bus_pattern_at(&mut self, deleted_idx: usize, new_idx: usize) {
-        if self.bus_pattern_bank.len() > 1 && deleted_idx < self.bus_pattern_bank.len() {
-            self.bus_pattern_bank.remove(deleted_idx);
-        }
-        self.ensure_bus_pattern_bank_len(new_idx + 1);
-        let snapshot = self.bus_pattern_bank[new_idx].clone();
+        let default_snapshot = self.capture_bus_pattern_snapshot();
+        let snapshot =
+            self.state
+                .delete_bus_pattern_snapshot(deleted_idx, new_idx, &default_snapshot);
         self.restore_bus_pattern_snapshot(&snapshot);
     }
 
@@ -1110,7 +1025,6 @@ impl App {
             track_colors: Vec::new(),
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
-            bus_pattern_bank: Vec::new(),
             sampler_paths: Vec::new(),
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),
