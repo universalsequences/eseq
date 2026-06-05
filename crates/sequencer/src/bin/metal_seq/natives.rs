@@ -2395,61 +2395,9 @@ pub(crate) fn init_runtime(
     let st_def_sequencer = state.clone();
     let ui_ep_def_sequencer = ui_epoch.clone();
     runtime.register_native("def-sequencer", move |args, _ctx| {
-        let name = match args.first() {
-            Some(Value::String(s) | Value::Symbol(s) | Value::Keyword(s)) => {
-                s.trim_start_matches('@').to_string()
-            }
-            _ => return Err("def-sequencer expects a name".to_string()),
-        };
-        // Graph mode (presence of a `def-node` sub-form): parse the whole-body
-        // manifest and ship it in-process. tick_source/resolution are unused.
-        if sequencer::lisp_effect::graph_mode_present(&args) {
-            let manifest = sequencer::lisp_effect::parse_graph_manifest(&args)?;
-            st_def_sequencer.publish_sequencer(sequencer::sequencer::PublishedSequencer {
-                id: manifest.id,
-                name: name.clone(),
-                resolution: Timebase::Sixteenth as u8,
-                tick_source: String::new(),
-                graph: Some(manifest),
-            });
-            ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
-            return Ok(Value::String(name));
-        }
-        let mut resolution: u8 = Timebase::Sixteenth as u8;
-        let mut tick_source: Option<String> = None;
-        let mut idx = 1;
-        while idx < args.len() {
-            let key = match &args[idx] {
-                Value::Keyword(k) | Value::String(k) | Value::Symbol(k) => {
-                    k.trim_start_matches(':').to_ascii_lowercase()
-                }
-                _ => return Err("def-sequencer expects keyword/value pairs".to_string()),
-            };
-            idx += 1;
-            let Some(value) = args.get(idx) else {
-                return Err(format!("def-sequencer missing value for :{key}"));
-            };
-            match key.as_str() {
-                "resolution" | "res" => {
-                    resolution = sequencer::lisp_effect::sequencer_resolution_index(value)
-                }
-                "tick" => tick_source = Some(sequencer::lisp_effect::sequencer_tick_source(value)),
-                "init" => { /* reserved for future one-time init */ }
-                _ => return Err(format!("def-sequencer unknown key :{key}")),
-            }
-            idx += 1;
-        }
-        let Some(tick_source) = tick_source else {
-            return Err("def-sequencer requires :tick".to_string());
-        };
-        let id = sequencer::lisp_effect::stable_sequencer_id(&name);
-        st_def_sequencer.publish_sequencer(sequencer::sequencer::PublishedSequencer {
-            id,
-            name: name.clone(),
-            resolution,
-            tick_source,
-            graph: None,
-        });
+        let published = sequencer::lisp_effect::published_sequencer_from_def_args(&args)?;
+        let name = published.name.clone();
+        st_def_sequencer.publish_sequencer(published);
         ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(name))
     });

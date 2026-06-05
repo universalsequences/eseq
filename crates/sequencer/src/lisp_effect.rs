@@ -25,7 +25,9 @@ use crate::neural::{
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
-use crate::sequencer::{CustomInstrumentRunMode, StepParam, StepSnapshot, Timebase};
+use crate::sequencer::{
+    CustomInstrumentRunMode, PublishedSequencer, StepParam, StepSnapshot, Timebase,
+};
 
 /// Monotonic counter so each compile produces a unique dylib filename,
 /// preventing dlopen from returning a stale cached handle.
@@ -5502,7 +5504,7 @@ fn register_sequencer_natives_with_accumulators(
     let pending_params_for_param = Arc::clone(&pending_midi_fx_params);
     runtime.register_native_with_docs(
         "midi-fx-param",
-        "(midi-fx-param \"name\" :default value :min value :max value :enum \"a\" \"b\" ...)",
+        "(midi-fx-param \"name\" :default value :min value :max value :role symbol :enum \"a\" \"b\" ...)",
         "Declare a plockable parameter for the next def-midi-fx in a folder MIDI FX source.",
         move |args, _ctx| {
             let Some(name_value) = args.first() else {
@@ -8544,6 +8546,58 @@ pub fn stable_sequencer_id(name: &str) -> u64 {
     }
 }
 
+pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSequencer, String> {
+    let name = match args.first() {
+        Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => {
+            s.trim_start_matches('@').to_string()
+        }
+        _ => return Err("def-sequencer expects a name".to_string()),
+    };
+    if graph_mode_present(args) {
+        let manifest = parse_graph_manifest(args)?;
+        return Ok(PublishedSequencer {
+            id: manifest.id,
+            name,
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            graph: Some(manifest),
+        });
+    }
+
+    let mut resolution: u8 = Timebase::Sixteenth as u8;
+    let mut tick_source: Option<String> = None;
+    let mut idx = 1;
+    while idx < args.len() {
+        let key = match &args[idx] {
+            EValue::Keyword(k) | EValue::String(k) | EValue::Symbol(k) => {
+                k.trim_start_matches(':').to_ascii_lowercase()
+            }
+            _ => return Err("def-sequencer expects keyword/value pairs".to_string()),
+        };
+        idx += 1;
+        let Some(value) = args.get(idx) else {
+            return Err(format!("def-sequencer missing value for :{key}"));
+        };
+        match key.as_str() {
+            "resolution" | "res" => resolution = sequencer_resolution_index(value),
+            "tick" => tick_source = Some(sequencer_tick_source(value)),
+            "init" => { /* reserved for future one-time init */ }
+            _ => return Err(format!("def-sequencer unknown key :{key}")),
+        }
+        idx += 1;
+    }
+    let Some(tick_source) = tick_source else {
+        return Err("def-sequencer requires :tick".to_string());
+    };
+    Ok(PublishedSequencer {
+        id: stable_sequencer_id(&name),
+        name,
+        resolution,
+        tick_source,
+        graph: None,
+    })
+}
+
 fn gen_splitmix64(mut value: u64) -> u64 {
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -9131,6 +9185,7 @@ fn parse_midi_fx_param_descriptor(
     let mut min = 0.0_f32;
     let mut max = 1.0_f32;
     let mut unit = None;
+    let mut role = None;
     let mut labels: Option<Vec<String>> = None;
     let mut idx = 0;
     while idx < args.len() {
@@ -9157,6 +9212,15 @@ fn parse_midi_fx_param_descriptor(
                     | Some(EValue::Keyword(value))
                     | Some(EValue::Symbol(value)) => Some(value.clone()),
                     _ => return Err("midi-fx-param :unit expects string/symbol".to_string()),
+                };
+                idx += 1;
+            }
+            "role" => {
+                role = match args.get(idx) {
+                    Some(EValue::String(value))
+                    | Some(EValue::Keyword(value))
+                    | Some(EValue::Symbol(value)) => Some(value.clone()),
+                    _ => return Err("midi-fx-param :role expects string/symbol".to_string()),
                 };
                 idx += 1;
             }
@@ -9196,7 +9260,7 @@ fn parse_midi_fx_param_descriptor(
         node_param_idx: 0,
         node_param_span: 1,
         host_control: None,
-        ui_metadata: None,
+        ui_metadata: crate::effects::ParamUiMetadata::new(None, None, role),
     })
 }
 
@@ -11748,6 +11812,27 @@ pub fn scratch_runtime_with_fallbacks(
     runtime
 }
 
+fn midi_fx_library_root_candidates() -> Vec<PathBuf> {
+    let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("midi-fx");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let candidates = [
+        cwd.join("midi-fx"),
+        cwd.join("crates").join("sequencer").join("midi-fx"),
+        manifest_root,
+    ];
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        if !candidate.is_dir() {
+            continue;
+        }
+        let canonical = candidate.canonicalize().unwrap_or(candidate);
+        if !unique.iter().any(|existing| existing == &canonical) {
+            unique.push(canonical);
+        }
+    }
+    unique
+}
+
 pub fn load_midi_fx_library_source() -> String {
     fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -11773,9 +11858,10 @@ pub fn load_midi_fx_library_source() -> String {
         }
     }
 
-    let root = Path::new("midi-fx");
     let mut sources = Vec::new();
-    collect(root, root, &mut sources);
+    for root in midi_fx_library_root_candidates() {
+        collect(&root, &root, &mut sources);
+    }
     sources.sort_by(|a, b| a.0.cmp(&b.0));
     sources
         .into_iter()
@@ -16354,6 +16440,24 @@ mod tests {
     }
 
     #[test]
+    fn builtin_midi_fx_source_resolves_crate_local_library() {
+        let manifest_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("midi-fx")
+            .canonicalize()
+            .expect("crate-local midi-fx directory");
+        assert!(
+            super::midi_fx_library_root_candidates()
+                .iter()
+                .any(|candidate| candidate == &manifest_root),
+            "builtin MIDI FX roots should include the crate-local library"
+        );
+
+        let source = super::load_midi_fx_library_source();
+        assert!(source.contains("(def-midi-fx \"arp\""));
+        assert!(source.contains("(def-midi-fx \"trigger-to-track\""));
+    }
+
+    #[test]
     fn folder_midi_fx_registers_params_and_syncs_track_slot() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(
@@ -16377,6 +16481,18 @@ mod tests {
         let params = &state.pattern.track_params[0];
         let slot = &state.pattern.midi_fx_slots[0][0];
         assert!(runtime.midi_fx_names().iter().any(|name| name == "arp"));
+        let arp_desc = runtime
+            .midi_fx_descriptors()
+            .into_iter()
+            .find(|desc| desc.name == "arp")
+            .expect("arp descriptor");
+        assert_eq!(
+            arp_desc.params[0]
+                .ui_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.role.as_deref()),
+            Some("clock-rate")
+        );
         assert_eq!(params.midi_fx_chain(), vec!["arp".to_string()]);
         assert_eq!(slot.num_params.load(Ordering::Relaxed), 6);
         assert_eq!(slot.defaults.get(0), 3.0);

@@ -37,6 +37,17 @@ fn project_slot_into_synced_snapshot_with_modulator(
     snapshot
 }
 
+fn project_midi_fx_slot_into_synced_snapshot(
+    slot: project::ProjectEffectSlot,
+    fx_name: Option<&str>,
+) -> crate::effects::EffectSlotSnapshot {
+    if let Some(desc) = fx_name.and_then(crate::lisp_effect::load_midi_fx_descriptor) {
+        project_slot_into_synced_snapshot(slot, &desc, 0)
+    } else {
+        slot.into_snapshot_with_node_id(0)
+    }
+}
+
 fn slot_param_node_relative_idx(raw_idx: u32) -> Option<u32> {
     if raw_idx == u32::MAX {
         return None;
@@ -1838,6 +1849,10 @@ impl App {
             .iter()
             .map(|tp| (tp.attack_ms, tp.release_ms))
             .collect();
+        let midi_fx_chains: Vec<Vec<String>> = track_params
+            .iter()
+            .map(|tp| tp.midi_fx_chain.clone())
+            .collect();
 
         let mut snapshot = PatternSnapshot {
             track_bits,
@@ -1876,7 +1891,16 @@ impl App {
                         .cloned()
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|slot| slot.into_snapshot_with_node_id(0))
+                        .enumerate()
+                        .map(|(slot_idx, slot)| {
+                            project_midi_fx_slot_into_synced_snapshot(
+                                slot,
+                                midi_fx_chains
+                                    .get(track_idx)
+                                    .and_then(|chain| chain.get(slot_idx))
+                                    .map(String::as_str),
+                            )
+                        })
                         .collect()
                 })
                 .collect(),
@@ -2155,6 +2179,28 @@ mod tests {
         );
         assert_eq!(resolve_project_current_track(None, 3, None), 0);
         assert_eq!(resolve_project_current_track(None, 0, Some(&track_bits)), 0);
+    }
+
+    #[test]
+    fn project_restore_syncs_midi_fx_slot_to_chain_descriptor() {
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: 1,
+            defaults: vec![5.0],
+            plocks: (0..MAX_STEPS).map(|_| vec![None]).collect(),
+            plock_param_ids: (0..MAX_STEPS).map(|_| vec![None]).collect(),
+            param_node_indices: vec![0],
+            param_node_spans: vec![1],
+            ir: None,
+        };
+
+        let restored =
+            project_midi_fx_slot_into_synced_snapshot(saved_slot, Some("trigger-to-track"));
+
+        assert_eq!(restored.num_params, 2);
+        assert_eq!(restored.defaults[0], 5.0);
+        assert_eq!(restored.defaults[1], 1.0);
+        assert_eq!(restored.param_node_indices, vec![0, 1]);
+        assert_eq!(restored.param_node_spans, vec![1, 1]);
     }
 
     fn test_slot_snapshot(
