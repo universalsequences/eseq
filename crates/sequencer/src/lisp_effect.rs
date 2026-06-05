@@ -4047,7 +4047,7 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
             let amount = match args.get(1).or_else(|| args.first()) {
                 Some(EValue::Number(n)) => *n,
                 _ => {
-                    return Err("dampen-incoming expects (dampen-incoming self amount)".to_string())
+                    return Err("dampen-incoming expects (dampen-incoming self amount)".to_string());
                 }
             };
             let mut guard = gn.lock().map_err(|_| "graph node context".to_string())?;
@@ -4071,7 +4071,7 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
                 _ => {
                     return Err(
                         "recover-incoming expects (recover-incoming self factor)".to_string()
-                    )
+                    );
                 }
             };
             let mut guard = gn.lock().map_err(|_| "graph node context".to_string())?;
@@ -8559,8 +8559,8 @@ fn gen_splitmix64(mut value: u64) -> u64 {
 // `def-node` sub-form (its absence keeps the existing tick-mode path).
 
 use crate::graph::{
-    EdgeSetSpec, GraphManifest, LeakSpec, NodeProto, ParamSpec, Reduce as GraphReduce, SeedFrom,
-    ShapeSpec, StateSpec, Topology,
+    EdgeSetSpec, EventSelect, GraphManifest, LeakSpec, NodeProto, ParamSpec, Reduce as GraphReduce,
+    SeedFrom, ShapeSpec, StateSpec, Topology,
 };
 
 /// Clone a list value's items out of their cells, or `None` if not a list.
@@ -8616,6 +8616,17 @@ fn graph_reduce(value: &EValue) -> GraphReduce {
         Some("product") => GraphReduce::Product,
         Some("count") => GraphReduce::Count,
         _ => GraphReduce::Sum,
+    }
+}
+
+/// `:event` payload-selection policy on `def-node` (Layer A). Unknown/absent keeps the
+/// historical last-writer-wins (`:newest`).
+fn graph_event_select(value: &EValue) -> EventSelect {
+    match graph_keyword(value).as_deref() {
+        Some("loudest") => EventSelect::Loudest,
+        Some("seed-priority") | Some("seed") => EventSelect::SeedPriority,
+        Some("strongest") => EventSelect::Strongest,
+        _ => EventSelect::Newest,
     }
 }
 
@@ -8816,6 +8827,7 @@ fn graph_parse_node_proto(items: &[EValue]) -> Result<NodeProto, String> {
             "route" => proto.route = graph_route(value),
             "seed-from" => proto.seed_from = graph_seed_from(value),
             "reduce" => proto.reduce = graph_reduce(value),
+            "event" | "event-select" => proto.event_select = graph_event_select(value),
             "params" => proto.params = graph_parse_param_list(value),
             "state" => proto.state = graph_parse_state_list(value),
             "update" => proto.update_source = Some(eseqlisp::vm::format_lisp_source(value)),
@@ -9388,7 +9400,7 @@ fn parse_neural_max_poly_selection(value: &EValue) -> Result<NeuralMaxPolySelect
         _ => {
             return Err(
                 "max-poly selection expects deterministic, propagation, or random".to_string(),
-            )
+            );
         }
     };
     match name.as_str() {
@@ -9397,7 +9409,19 @@ fn parse_neural_max_poly_selection(value: &EValue) -> Result<NeuralMaxPolySelect
             Ok(NeuralMaxPolySelection::Propagation)
         }
         "random" | "rand" => Ok(NeuralMaxPolySelection::Random),
-        _ => Err("max-poly selection expects deterministic, propagation, or random".to_string()),
+        "loudest" | "loud" | "velocity" => Ok(NeuralMaxPolySelection::Loudest),
+        "lowest-transpose" | "lowest" | "low-transpose" => {
+            Ok(NeuralMaxPolySelection::LowestTranspose)
+        }
+        "highest-transpose" | "highest" | "high-transpose" => {
+            Ok(NeuralMaxPolySelection::HighestTranspose)
+        }
+        "seed-first" | "seed" => Ok(NeuralMaxPolySelection::SeedFirst),
+        _ => Err(
+            "max-poly selection expects deterministic, propagation, random, loudest, \
+             lowest-transpose, highest-transpose, or seed-first"
+                .to_string(),
+        ),
     }
 }
 
@@ -9830,8 +9854,7 @@ fn upsert_neural_instrument_plock(
     }
     eprintln!(
         "[neural-plock] instrument network={network_id} name={network_name:?} neuron={neuron_idx} target_track={target_track} param={param_index} logical_id={} node_param_idx={} value={value}",
-        param_id.logical_id,
-        param_id.node_param_idx,
+        param_id.logical_id, param_id.node_param_idx,
     );
     Ok(())
 }
@@ -9869,8 +9892,7 @@ fn upsert_neural_effect_plock(
     }
     eprintln!(
         "[neural-plock] effect network={network_id} name={network_name:?} neuron={neuron_idx} target_track={target_track} slot={slot_index} param={param_index} logical_id={} node_param_idx={} value={value}",
-        param_id.logical_id,
-        param_id.node_param_idx,
+        param_id.logical_id, param_id.node_param_idx,
     );
     Ok(())
 }
@@ -12764,6 +12786,9 @@ mod tests {
         );
         register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
+            .expect("install sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
             "{}/scripts/graph-neural-8x8-demo.lisp",
@@ -13254,7 +13279,10 @@ mod tests {
             .join(".eseqlisp-scratch");
         let report = runtime.eval_source_transactional(
             Some(workspace_root),
-            r#"(load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")"#,
+            r#"
+            (def seq-register-step-sequencer-tab (label buffer) nil)
+            (load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")
+            "#,
             Vec::new(),
         );
         assert!(

@@ -1235,6 +1235,65 @@ fn hot_reload_preserves_existing_defstate_values() {
 }
 
 #[test]
+fn eval_current_buffer_native_uses_transactional_reload() {
+    let dir = hot_reload_temp_dir("eseqlisp-eval-current-buffer");
+    let root = dir.join("root.lisp");
+    std::fs::write(
+        &root,
+        r#"(defstate hot-state "initial")
+(effect-buffer "*hot-state*" (label hot-state))"#,
+    )
+    .unwrap();
+
+    let init = r#"
+        (bind-key "C-x C-b" "eval-current-buffer")
+    "#;
+    let mut editor = Editor::new(
+        Runtime::new(),
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_or_create_file_buffer(&root).unwrap();
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+
+    editor
+        .runtime
+        .eval_str(r#"(set! hot-state "changed")"#)
+        .unwrap();
+    editor.runtime.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let root_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.path.as_ref() == Some(&root))
+        .unwrap();
+    editor.buffers[root_idx].set_text(
+        r#"(defstate hot-state "new-initial")
+(effect-buffer "*hot-state*" (label hot-state))"#,
+    );
+    editor.buffers[root_idx].dirty = true;
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+
+    let hot = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*hot-state*")
+        .expect("hot-state buffer");
+    assert_eq!(
+        hot.widget_tree
+            .as_ref()
+            .and_then(widget_label_text)
+            .as_deref(),
+        Some("changed")
+    );
+}
+
+#[test]
 fn dragging_vertical_tile_border_updates_split_ratio() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

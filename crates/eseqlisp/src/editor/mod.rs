@@ -3132,6 +3132,68 @@ impl Editor {
         false
     }
 
+    pub fn set_tabs_in_tile_showing(
+        &mut self,
+        current_name: &str,
+        tabs: Vec<crate::runtime::LayoutTabSpec>,
+    ) -> Result<bool, String> {
+        let Some(current_idx) = self.buffers.iter().position(|b| b.name == current_name) else {
+            return Ok(false);
+        };
+        if self
+            .tile_root
+            .find_leaf_by_buffer_idx(current_idx)
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        let mut resolved_tabs = Vec::with_capacity(tabs.len());
+        for tab in tabs {
+            let Some(buffer_idx) = self
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == tab.buffer_name)
+            else {
+                return Err(format!(
+                    "tab '{}' references missing buffer '{}'",
+                    tab.label, tab.buffer_name
+                ));
+            };
+            resolved_tabs.push(TileBufferTab {
+                label: tab.label,
+                buffer_idx,
+            });
+        }
+        if !resolved_tabs
+            .iter()
+            .any(|tab| tab.buffer_idx == current_idx)
+        {
+            return Err(format!(
+                "tabs for '{current_name}' must include the current buffer"
+            ));
+        }
+
+        if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(current_idx) {
+            leaf.tabs = resolved_tabs;
+            leaf.selected_tab = leaf
+                .tabs
+                .iter()
+                .position(|tab| tab.buffer_idx == current_idx);
+            leaf.cached_inactive_frame = None;
+            leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
+        }
+
+        if current_idx == self.active_buffer_idx() {
+            self.sync_layout_to_active_leaf();
+            self.remap_focused_widget_after_layout_change();
+            self.mark_needs_redraw();
+        } else {
+            self.refresh_inactive_tile_layouts_for_buffer(current_idx);
+        }
+        Ok(true)
+    }
+
     /// Read the text content of a buffer by name.
     pub fn read_buffer_text(&self, name: &str) -> Option<String> {
         self.buffers
@@ -4757,12 +4819,8 @@ impl Editor {
         }
 
         if fn_name == "eval-buffer-command" {
-            let path = self.active_buffer().path.clone();
-            let overlays = self.snapshot_file_backed_sources();
-            let report = self
-                .runtime
-                .eval_source_transactional(path, &source, overlays);
-            self.process_lisp_reload_report(report);
+            let buffer_id = self.active_buffer().id;
+            self.evaluate_buffer_transactional(buffer_id);
             self.completion = None;
             return;
         }
@@ -4778,6 +4836,24 @@ impl Editor {
         self.refresh_runtime_side_effects();
         self.sync_runtime_context();
         self.completion = None;
+    }
+
+    fn evaluate_buffer_transactional(&mut self, buffer_id: BufferId) {
+        let Some(buffer_idx) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.id == buffer_id)
+        else {
+            self.show_transient_message(format!("Buffer #{buffer_id} no longer exists"));
+            return;
+        };
+        let path = self.buffers[buffer_idx].path.clone();
+        let source = self.buffers[buffer_idx].text();
+        let overlays = self.snapshot_file_backed_sources();
+        let report = self
+            .runtime
+            .eval_source_transactional(path, &source, overlays);
+        self.process_lisp_reload_report(report);
     }
 
     fn save_active_buffer(&mut self) -> Result<PathBuf, EditorError> {
@@ -5518,6 +5594,10 @@ impl Editor {
         self.lisp_bindings = self.default_lisp_bindings.clone();
         self.lisp_bindings.extend(self.runtime.lisp_bindings());
 
+        if let Some(buffer_id) = self.runtime.take_pending_eval_buffer() {
+            self.evaluate_buffer_transactional(buffer_id);
+        }
+
         if let Some(read_only) = self.runtime.take_pending_set_read_only() {
             self.active_buffer_mut().read_only = read_only;
         }
@@ -5986,6 +6066,12 @@ impl Editor {
                     if !self.swap_buffer_in_tile_showing(&current, &new_name) {
                         self.minibuffer =
                             Some(format!("Could not swap '{current}' → '{new_name}'"));
+                    }
+                }
+                crate::runtime::TileOp::SetWindowTabsFor { current, tabs } => {
+                    if let Err(error) = self.set_tabs_in_tile_showing(&current, tabs) {
+                        self.minibuffer =
+                            Some(format!("Could not update tabs for '{current}': {error}"));
                     }
                 }
             }

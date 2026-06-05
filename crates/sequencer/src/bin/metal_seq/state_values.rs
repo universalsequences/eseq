@@ -5175,16 +5175,19 @@ pub(crate) fn midi_fx_option_index(fx_name: &str, param_idx: usize, label: &str)
         })
 }
 
+const METER_FLOOR_DBFS: f32 = -60.0;
+
 pub(crate) fn master_meter_level(peak: f32) -> f64 {
-    if peak <= 0.0 {
+    if peak <= 0.0 || !peak.is_finite() {
         0.0
     } else {
-        peak.sqrt().min(1.2) as f64
+        let db = 20.0 * peak.log10();
+        ((db - METER_FLOOR_DBFS) / -METER_FLOOR_DBFS).clamp(0.0, 1.0) as f64
     }
 }
 
 pub(crate) fn quantize_meter_level(level: f64) -> f64 {
-    ((level.clamp(0.0, 1.2) * METER_LEVEL_STEPS).round()) / METER_LEVEL_STEPS
+    ((level.clamp(0.0, 1.0) * METER_LEVEL_STEPS).round()) / METER_LEVEL_STEPS
 }
 
 pub(crate) fn meter_display_level(peak: f32) -> f64 {
@@ -6212,6 +6215,32 @@ mod tests {
             );
             Ok(Value::Map(map))
         });
+    }
+
+    #[test]
+    fn meter_level_maps_linear_audio_peak_to_dbfs_display_scale() {
+        let epsilon = 0.0001;
+        assert!((master_meter_level(1.0) - 1.0).abs() < epsilon);
+        assert!((master_meter_level(10.0_f32.powf(-6.0 / 20.0)) - 0.9).abs() < epsilon);
+        assert!((master_meter_level(10.0_f32.powf(-12.0 / 20.0)) - 0.8).abs() < epsilon);
+        assert!((master_meter_level(0.01) - (20.0 / 60.0)).abs() < epsilon);
+        assert_eq!(master_meter_level(0.001), 0.0);
+        assert_eq!(master_meter_level(0.0), 0.0);
+        assert_eq!(master_meter_level(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn quantized_meter_display_keeps_audible_low_levels_visible() {
+        let minus_forty_db = meter_display_level(0.01);
+        assert!(
+            minus_forty_db >= 0.31,
+            "-40 dBFS should light several meter segments"
+        );
+        assert!(
+            minus_forty_db <= 0.35,
+            "-40 dBFS should remain near one third scale"
+        );
+        assert_eq!(meter_display_level(0.0005), 0.0);
     }
 
     #[test]
@@ -9529,6 +9558,27 @@ mod tests {
         names
     }
 
+    fn tile_tabs_for_buffer(editor: &eseqlisp::Editor, buffer_name: &str) -> Vec<(String, String)> {
+        let buffer_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == buffer_name)
+            .unwrap_or_else(|| panic!("missing buffer {buffer_name}"));
+        let leaf = editor
+            .tile_root
+            .find_leaf_by_buffer_idx(buffer_idx)
+            .unwrap_or_else(|| panic!("missing tile for buffer {buffer_name}"));
+        leaf.tabs
+            .iter()
+            .map(|tab| {
+                (
+                    tab.label.clone(),
+                    editor.buffers[tab.buffer_idx].name.clone(),
+                )
+            })
+            .collect()
+    }
+
     fn layout_bottom(node: &eseqlisp::layout::LayoutNode) -> f32 {
         node.children
             .iter()
@@ -12155,6 +12205,159 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_default_step_panel_has_no_matrix_tab_or_buffer() {
+        let editor = full_grid_editor_for_scroll_tests();
+
+        assert!(
+            !editor
+                .buffers
+                .iter()
+                .any(|buffer| buffer.name == "*matrix*"),
+            "default grid load must not create the legacy matrix buffer"
+        );
+        assert!(
+            collect_tile_buffer_names(&editor)
+                .iter()
+                .all(|name| name != "*matrix*"),
+            "default layout must not reference the legacy matrix buffer"
+        );
+        assert!(
+            tile_tabs_for_buffer(&editor, "*sequencer*").is_empty(),
+            "default sequencer tile should not render a one-item tab bar"
+        );
+    }
+
+    #[test]
+    fn metal_seq_register_step_sequencer_tab_adds_tab_without_selecting_custom_buffer() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*fake-seq*" (label "fake sequencer"))
+                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                "#,
+            )
+            .expect("register fake sequencer tab");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("remembered-step-panel-buffer")
+                .unwrap(),
+            Some(Value::String("*sequencer*".to_string()))
+        );
+        assert!(
+            collect_tile_buffer_names(&editor).contains(&"*sequencer*".to_string()),
+            "registration should preserve the visible sequencer panel"
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Fake".to_string(), "*fake-seq*".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn metal_seq_register_step_sequencer_tab_upserts_by_buffer_and_preserves_selection() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*fake-seq*" (label "fake sequencer"))
+                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                (seq-register-step-sequencer-tab "Renamed" "*fake-seq*")
+                "#,
+            )
+            .expect("register and rename fake sequencer tab");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Renamed".to_string(), "*fake-seq*".to_string())
+            ],
+            "re-registering the same buffer should update the label without duplicating the tab"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-apply-fx-layout)")
+            .expect("reapply main layout");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string()))
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Renamed".to_string(), "*fake-seq*".to_string())
+            ],
+            "reapplying the layout should keep the registered tabs without selecting the custom tab"
+        );
+    }
+
+    #[test]
+    fn metal_seq_register_step_sequencer_tab_does_not_restore_main_layout_when_step_tile_absent() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.create_scratch_buffer("*code*", "", eseqlisp::BufferMode::ESeqLisp);
+        editor.create_scratch_buffer("*fake-seq*", "", eseqlisp::BufferMode::ESeqLisp);
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (set-layout
+                  (list :cols :gap 1
+                    0.5 (list :buf "*code*" :hide-status true)
+                    0.5 (list :buf "*fake-seq*" :hide-status true)))
+                "#,
+            )
+            .expect("install custom code/ui layout");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*fake-seq*" (label "fake sequencer"))
+                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                "#,
+            )
+            .expect("register fake sequencer tab");
+        editor.refresh_runtime_side_effects();
+
+        let tile_buffers = collect_tile_buffer_names(&editor);
+        assert_eq!(
+            tile_buffers,
+            vec!["*code*".to_string(), "*fake-seq*".to_string()],
+            "registration should not rebuild the main sequencer layout when no step tile is present"
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*fake-seq*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Fake".to_string(), "*fake-seq*".to_string())
+            ],
+            "registration should still add tabs to an already visible custom sequencer tile"
+        );
+    }
+
+    #[test]
     fn metal_seq_piano_roll_placement_preference_controls_next_tab() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
@@ -14352,7 +14555,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            sequencer_updates, 0,
+            sequencer_updates,
+            0,
             "page-boundary projection should update bound slot props without rebuilding sequencer rows; got {} pending updates",
             pending.len()
         );
@@ -15460,7 +15664,8 @@ mod tests {
                     && node.rect.col + eps >= parent.rect.col
                     && node.rect.row + eps >= parent.rect.row
                     && node.rect.col + node.rect.width <= parent.rect.col + parent.rect.width + eps
-                    && node.rect.row + node.rect.height <= parent.rect.row + parent.rect.height + eps,
+                    && node.rect.row + node.rect.height
+                        <= parent.rect.row + parent.rect.height + eps,
                 "{label} should have a finite nonzero rect inside its parent; node={:?}; parent={:?}",
                 node.rect,
                 parent.rect

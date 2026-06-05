@@ -15,6 +15,15 @@ pub enum NeuralMaxPolySelection {
     Deterministic,
     Propagation,
     Random,
+    /// Keep the highest-velocity firings.
+    Loudest,
+    /// Keep the firings with the lowest emitted transpose.
+    LowestTranspose,
+    /// Keep the firings with the highest emitted transpose.
+    HighestTranspose,
+    /// Keep seed-originated firings before neural-only ones (graph engine; the native
+    /// neural engine has no per-candidate seed tag and falls back to deterministic).
+    SeedFirst,
 }
 
 impl NeuralMaxPolySelection {
@@ -23,6 +32,10 @@ impl NeuralMaxPolySelection {
             Self::Deterministic => "deterministic",
             Self::Propagation => "propagation",
             Self::Random => "random",
+            Self::Loudest => "loudest",
+            Self::LowestTranspose => "lowest-transpose",
+            Self::HighestTranspose => "highest-transpose",
+            Self::SeedFirst => "seed-first",
         }
     }
 }
@@ -995,6 +1008,67 @@ impl NeuralRuntime {
                 }
                 for candidate_idx in indices.into_iter().take(accepted_count) {
                     accepted[candidates[candidate_idx].neuron_idx] = true;
+                }
+            }
+            NeuralMaxPolySelection::Loudest => {
+                let mut indices = (0..candidates.len()).collect::<Vec<_>>();
+                indices.sort_by(|left, right| {
+                    candidates[*right]
+                        .event
+                        .resolved
+                        .velocity
+                        .total_cmp(&candidates[*left].event.resolved.velocity)
+                        .then(
+                            candidates[*left]
+                                .fire_sample
+                                .cmp(&candidates[*right].fire_sample),
+                        )
+                        .then(
+                            candidates[*left]
+                                .neuron_idx
+                                .cmp(&candidates[*right].neuron_idx),
+                        )
+                });
+                for candidate_idx in indices.into_iter().take(accepted_count) {
+                    accepted[candidates[candidate_idx].neuron_idx] = true;
+                }
+            }
+            NeuralMaxPolySelection::LowestTranspose | NeuralMaxPolySelection::HighestTranspose => {
+                let highest = matches!(
+                    self.max_poly_selection,
+                    NeuralMaxPolySelection::HighestTranspose
+                );
+                let mut indices = (0..candidates.len()).collect::<Vec<_>>();
+                indices.sort_by(|left, right| {
+                    let left_t = candidates[*left].event.resolved.transpose;
+                    let right_t = candidates[*right].event.resolved.transpose;
+                    let ordered = if highest {
+                        right_t.total_cmp(&left_t)
+                    } else {
+                        left_t.total_cmp(&right_t)
+                    };
+                    ordered
+                        .then(
+                            candidates[*left]
+                                .fire_sample
+                                .cmp(&candidates[*right].fire_sample),
+                        )
+                        .then(
+                            candidates[*left]
+                                .neuron_idx
+                                .cmp(&candidates[*right].neuron_idx),
+                        )
+                });
+                for candidate_idx in indices.into_iter().take(accepted_count) {
+                    accepted[candidates[candidate_idx].neuron_idx] = true;
+                }
+            }
+            // The native neural engine has no per-candidate seed tag; fall back to the
+            // deterministic earliest-sample order. `seed-first` is meaningful on the graph
+            // engine (def-sequencer/def-node), which carries the seed origin.
+            NeuralMaxPolySelection::SeedFirst => {
+                for candidate in candidates.iter().take(accepted_count) {
+                    accepted[candidate.neuron_idx] = true;
                 }
             }
         }

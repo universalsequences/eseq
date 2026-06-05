@@ -86,6 +86,50 @@ impl Reduce {
     }
 }
 
+/// How a node picks *which* incoming payload (note/velocity) survives when several
+/// propagations deposit into it in one boundary. This is the payload analogue of
+/// [`Reduce`]: `reduce` folds the scalar *energy*, `EventSelect` folds the *event*.
+/// `Newest` is the historical "last-writer-wins" behavior; the others let a loud seed
+/// keep its velocity instead of being clobbered by a decayed neural payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EventSelect {
+    /// Last propagation to deposit this boundary wins (historical behavior).
+    #[default]
+    Newest,
+    /// Keep the payload with the highest velocity.
+    Loudest,
+    /// Prefer an external seed's payload over any non-seed; else newest.
+    SeedPriority,
+    /// Keep the payload carried by the edge with the largest `gather()`.
+    Strongest,
+}
+
+impl EventSelect {
+    /// Whether an incoming payload should replace the one currently held this boundary.
+    /// Ties resolve to the incoming (newest) payload so behavior matches `Newest` when
+    /// the deciding field is equal.
+    fn prefer(
+        self,
+        cur_seed: bool,
+        cur_strength: f64,
+        cur_vel: f32,
+        new_seed: bool,
+        new_strength: f64,
+        new_vel: f32,
+    ) -> bool {
+        match self {
+            EventSelect::Newest => true,
+            EventSelect::Loudest => new_vel >= cur_vel,
+            EventSelect::Strongest => new_strength >= cur_strength,
+            EventSelect::SeedPriority => match (cur_seed, new_seed) {
+                (false, true) => true,
+                (true, false) => false,
+                _ => true,
+            },
+        }
+    }
+}
+
 /// One directed edge in the graph. `weight`/`dampening` are edge fields read by the
 /// native gather kernel; `dampening` is mutated at runtime by Ext 2 (v1c) and is 0 in
 /// v1a. `delay_steps` is per-edge transport delay (0 in v1a; node `delay_steps`
@@ -269,6 +313,8 @@ pub struct GraphNode {
     pub route: Option<usize>,
     pub seed_track_mask: u128,
     pub reduce: Reduce,
+    /// Which incoming payload survives when several arrive in one boundary (Layer A).
+    pub event_select: EventSelect,
     /// Initial value of the `energy` state cell on reset/seed (per-node, spec §3.3).
     pub seed_on_reset: f64,
     /// Semitone offset added to the carried payload note each time this node fires
@@ -288,6 +334,7 @@ impl Default for GraphNode {
             route: None,
             seed_track_mask: 0,
             reduce: Reduce::Sum,
+            event_select: EventSelect::Newest,
             seed_on_reset: 0.0,
             transpose: 0.0,
             threshold: 1.0,
@@ -395,6 +442,13 @@ struct GraphFiringCandidate {
     fire_beats: f64,
     emit: Option<EmitSpec>,
     dampen_incoming: Option<f64>,
+    /// The velocity this firing would emit, for velocity-aware `max_poly` selection.
+    velocity: f32,
+    /// The note this firing would emit, for transpose-aware `max_poly` selection.
+    note: f32,
+    /// Whether the surviving incoming payload originated from an external seed, for
+    /// `seed-first` `max_poly` selection.
+    from_seed: bool,
 }
 
 /// Fully materialized, override-resolved graph configuration.
@@ -499,6 +553,11 @@ pub struct GraphRuntime {
     input_seen: Vec<bool>,
     /// The payload that last arrived at each node (Ext 1), consumed by its next fire.
     source_event: Vec<Option<GraphPayload>>,
+    /// Per-node, valid for the current boundary only (gated by `input_seen`): whether the
+    /// held `source_event` came from an external seed, and the `gather()` strength of the
+    /// edge that delivered it. Used by `EventSelect::SeedPriority` / `Strongest`.
+    source_event_seed: Vec<bool>,
+    source_event_strength: Vec<f64>,
     tick_count: Vec<u64>,
     pending: Vec<Vec<GraphPropagation>>,
     /// Edge indices that contributed positive current to each target since that target
@@ -593,6 +652,8 @@ impl GraphRuntime {
             input_accum: vec![0.0; num_nodes],
             input_seen: vec![false; num_nodes],
             source_event: vec![None; num_nodes],
+            source_event_seed: vec![false; num_nodes],
+            source_event_strength: vec![0.0; num_nodes],
             tick_count: vec![0; num_nodes],
             pending: vec![Vec::new(); num_nodes],
             incoming_triggers: vec![Vec::new(); num_nodes],
@@ -747,6 +808,8 @@ impl GraphRuntime {
             self.input_accum[idx] = 0.0;
             self.input_seen[idx] = false;
             self.source_event[idx] = None;
+            self.source_event_seed[idx] = false;
+            self.source_event_strength[idx] = 0.0;
             self.tick_count[idx] = 0;
             self.pending[idx] = preserved_external_seeds;
             self.incoming_triggers[idx].clear();
@@ -881,12 +944,25 @@ impl GraphRuntime {
                         sample_time,
                         samples_per_quarter,
                     );
+                    // Mirror commit_firing's payload resolution so max_poly selection
+                    // ranks on the velocity/note this firing will actually emit.
+                    let incoming = self.source_event[idx].unwrap_or_default();
+                    let (note, velocity) = match &decision.emit {
+                        Some(spec) => (
+                            spec.note.unwrap_or(incoming.note),
+                            spec.velocity.unwrap_or(incoming.velocity),
+                        ),
+                        None => (incoming.note + self.nodes[idx].transpose, incoming.velocity),
+                    };
                     candidates.push(GraphFiringCandidate {
                         node_index: idx,
                         fire_sample,
                         fire_beats,
                         emit: decision.emit,
                         dampen_incoming: decision.dampen_incoming,
+                        velocity,
+                        note,
+                        from_seed: self.source_event_seed[idx],
                     });
                 }
             }
@@ -988,20 +1064,20 @@ impl GraphRuntime {
     /// `gather()` along its out-edges into the targets' input accumulators, carrying the
     /// scatter's payload into each target's `source_event` (Ext 1).
     fn deposit_ready_propagations(&mut self, node_index: usize, boundary_beats: f64) {
-        let mut ready: Vec<GraphPayload> = Vec::new();
+        let mut ready: Vec<(GraphPayload, bool)> = Vec::new();
         let mut kept = Vec::with_capacity(self.pending[node_index].len());
         for mut prop in std::mem::take(&mut self.pending[node_index]) {
             if boundary_beats > prop.ready_after_beats + 1e-9 {
                 prop.remaining_steps = prop.remaining_steps.saturating_sub(1);
             }
             if prop.remaining_steps == 0 {
-                ready.push(prop.payload);
+                ready.push((prop.payload, prop.external_seed));
             } else {
                 kept.push(prop);
             }
         }
         self.pending[node_index] = kept;
-        for payload in ready {
+        for (payload, is_seed) in ready {
             for &edge_idx in &self.out_edges[node_index] {
                 let edge = self.edges[edge_idx];
                 let amount = edge.gather();
@@ -1013,7 +1089,22 @@ impl GraphRuntime {
                 let first = !self.input_seen[target];
                 self.input_accum[target] = reduce.fold(self.input_accum[target], amount, first);
                 self.input_seen[target] = true;
-                self.source_event[target] = Some(payload);
+                // Energy always accumulates; the *payload* is chosen by the node's
+                // EventSelect so a loud seed isn't clobbered by a quiet neural hit.
+                let take = first
+                    || self.nodes[target].event_select.prefer(
+                        self.source_event_seed[target],
+                        self.source_event_strength[target],
+                        self.source_event[target].map(|p| p.velocity).unwrap_or(0.0),
+                        is_seed,
+                        amount,
+                        payload.velocity,
+                    );
+                if take {
+                    self.source_event[target] = Some(payload);
+                    self.source_event_seed[target] = is_seed;
+                    self.source_event_strength[target] = amount;
+                }
                 if !self.incoming_triggers[target].contains(&edge_idx) {
                     self.incoming_triggers[target].push(edge_idx);
                 }
@@ -1184,8 +1275,55 @@ impl GraphRuntime {
                     accepted[candidate_idx] = true;
                 }
             }
+            NeuralMaxPolySelection::Loudest => {
+                self.accept_top_n(candidates, accepted_count, &mut accepted, |l, r| {
+                    r.velocity
+                        .total_cmp(&l.velocity)
+                        .then(l.fire_sample.cmp(&r.fire_sample))
+                        .then(l.node_index.cmp(&r.node_index))
+                });
+            }
+            NeuralMaxPolySelection::LowestTranspose => {
+                self.accept_top_n(candidates, accepted_count, &mut accepted, |l, r| {
+                    l.note
+                        .total_cmp(&r.note)
+                        .then(l.fire_sample.cmp(&r.fire_sample))
+                        .then(l.node_index.cmp(&r.node_index))
+                });
+            }
+            NeuralMaxPolySelection::HighestTranspose => {
+                self.accept_top_n(candidates, accepted_count, &mut accepted, |l, r| {
+                    r.note
+                        .total_cmp(&l.note)
+                        .then(l.fire_sample.cmp(&r.fire_sample))
+                        .then(l.node_index.cmp(&r.node_index))
+                });
+            }
+            NeuralMaxPolySelection::SeedFirst => {
+                self.accept_top_n(candidates, accepted_count, &mut accepted, |l, r| {
+                    r.from_seed
+                        .cmp(&l.from_seed)
+                        .then(l.fire_sample.cmp(&r.fire_sample))
+                        .then(l.node_index.cmp(&r.node_index))
+                });
+            }
         }
         accepted
+    }
+
+    /// Sort candidate indices by `cmp` (best first) and mark the first `accepted_count`.
+    fn accept_top_n(
+        &self,
+        candidates: &[GraphFiringCandidate],
+        accepted_count: usize,
+        accepted: &mut [bool],
+        cmp: impl Fn(&GraphFiringCandidate, &GraphFiringCandidate) -> std::cmp::Ordering,
+    ) {
+        let mut indices = (0..candidates.len()).collect::<Vec<_>>();
+        indices.sort_by(|left, right| cmp(&candidates[*left], &candidates[*right]));
+        for candidate_idx in indices.into_iter().take(accepted_count) {
+            accepted[candidate_idx] = true;
+        }
     }
 
     fn propagation_selection_score(&self, source: usize) -> f64 {
@@ -1380,6 +1518,7 @@ pub struct NodeProto {
     pub route: Option<usize>,
     pub seed_from: SeedFrom,
     pub reduce: Reduce,
+    pub event_select: EventSelect,
     pub params: Vec<ParamSpec>,
     pub state: Vec<StateSpec>,
     pub update_source: Option<String>,
@@ -1395,6 +1534,7 @@ impl Default for NodeProto {
             route: None,
             seed_from: SeedFrom::Route,
             reduce: Reduce::Sum,
+            event_select: EventSelect::Newest,
             params: Vec::new(),
             state: Vec::new(),
             update_source: None,
@@ -1539,6 +1679,7 @@ impl GraphManifest {
                 route,
                 seed_track_mask,
                 reduce: self.node.reduce,
+                event_select: self.node.event_select,
                 seed_on_reset: self.seed_on_reset,
                 transpose: node_params[idx].get("transpose").copied().unwrap_or(0.0) as f32,
                 threshold: node_params[idx].get("threshold").copied().unwrap_or(1.0),
@@ -2187,6 +2328,139 @@ mod tests {
         let out = run(&mut runtime, 1.0, 1, vec![1.0, 1.0, 99.0]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].node_index, 1);
+    }
+
+    // Two sources scatter into one target in the same boundary, carrying different
+    // velocities. Source 0 (loud, vel 1.0) deposits before source 1 (quiet, vel 0.2)
+    // because deposit runs in node-index order, so `Newest` keeps the quiet payload and
+    // `Loudest` keeps the loud one. This is the seed-vs-neural velocity clobber.
+    fn two_source_velocity_runtime(event_select: EventSelect) -> GraphRuntime {
+        let n0 = node(Timebase::Quarter);
+        let n1 = node(Timebase::Quarter);
+        let mut target = node(Timebase::Quarter);
+        target.event_select = event_select;
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![n0, n1, target],
+            vec![GraphEdge::new(0, 2, 1.0), GraphEdge::new(1, 2, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.push_propagation(
+            0,
+            0.0,
+            GraphPayload {
+                note: 0.0,
+                velocity: 1.0,
+            },
+        );
+        runtime.push_propagation(
+            1,
+            0.0,
+            GraphPayload {
+                note: 0.0,
+                velocity: 0.2,
+            },
+        );
+        runtime
+    }
+
+    #[test]
+    fn event_select_newest_keeps_last_deposited_velocity() {
+        let mut runtime = two_source_velocity_runtime(EventSelect::Newest);
+        let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0, 1.0]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 2);
+        assert_eq!(out[0].event.resolved.velocity, 0.2);
+    }
+
+    #[test]
+    fn event_select_loudest_keeps_highest_velocity() {
+        let mut runtime = two_source_velocity_runtime(EventSelect::Loudest);
+        let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0, 1.0]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 2);
+        assert_eq!(out[0].event.resolved.velocity, 1.0);
+    }
+
+    #[test]
+    fn event_select_seed_priority_prefers_seed_payload() {
+        let n0 = node(Timebase::Quarter);
+        let n1 = node(Timebase::Quarter);
+        let mut target = node(Timebase::Quarter);
+        target.event_select = EventSelect::SeedPriority;
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![n0, n1, target],
+            vec![GraphEdge::new(0, 2, 1.0), GraphEdge::new(1, 2, 1.0)],
+            1.0,
+            0.0,
+        );
+        // Source 0 carries the loud seed; source 1 is a louder *non-seed* that deposits
+        // afterward. Seed-priority keeps the seed's payload regardless of velocity order.
+        runtime.push_seed_propagation(
+            0,
+            0.0,
+            GraphPayload {
+                note: 7.0,
+                velocity: 0.5,
+            },
+        );
+        runtime.push_propagation(
+            1,
+            0.0,
+            GraphPayload {
+                note: 0.0,
+                velocity: 1.0,
+            },
+        );
+        let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0, 1.0]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event.resolved.velocity, 0.5);
+        assert_eq!(out[0].event.resolved.transpose, 7.0);
+    }
+
+    #[test]
+    fn max_poly_loudest_selection_keeps_highest_velocity_fire() {
+        // Two nodes fire in the same boundary off seeded energy; node 1's incoming payload
+        // is louder, so `loudest` keeps it over the earlier-indexed node 0.
+        let mut n0 = node(Timebase::Quarter);
+        n0.seed_track_mask = seed_track_mask(&[0]);
+        let mut n1 = node(Timebase::Quarter);
+        n1.seed_track_mask = seed_track_mask(&[1]);
+        let mut runtime = GraphRuntime::new_with_config(
+            1,
+            "g".into(),
+            vec![n0, n1],
+            vec![GraphEdge::new(0, 0, 1.0), GraphEdge::new(1, 1, 1.0)],
+            1.0,
+            0.0,
+            1,
+            NeuralMaxPolySelection::Loudest,
+            Vec::new(),
+        );
+        runtime.seed(
+            0,
+            0.0,
+            GraphPayload {
+                note: 0.0,
+                velocity: 0.3,
+            },
+        );
+        runtime.seed(
+            1,
+            0.0,
+            GraphPayload {
+                note: 0.0,
+                velocity: 0.9,
+            },
+        );
+        let out = run(&mut runtime, 1.0, 1, vec![1.0, 1.0]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].event.resolved.velocity, 0.9);
     }
 
     #[test]

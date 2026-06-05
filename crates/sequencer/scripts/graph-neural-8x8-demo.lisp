@@ -32,6 +32,9 @@
   :reset-every (bars 4)
   :seed-on-reset 0
   :max-poly 4
+  ;; Which fires survive when more than :max-poly land in one boundary. Options:
+  ;; :deterministic :propagation :random :loudest :lowest-transpose :highest-transpose
+  ;; :seed-first (seed-originated fires win their slots before neural-only ones).
   :max-poly-selection :propagation
 
   (def-node nrn
@@ -41,6 +44,12 @@
     :route 0
     :seed-from ()
     :reduce :sum
+    ;; :reduce folds the ENERGY of coinciding inputs; :event folds the PAYLOAD
+    ;; (note/velocity). :loudest keeps the highest-velocity arrival, so a full-velocity
+    ;; seed punches through instead of being clobbered by a decayed neural hit (the old
+    ;; :newest = last-writer-wins behavior). Options: :newest :loudest :seed-priority
+    ;; :strongest.
+    :event :loudest
     :params ((threshold :float 0 4 :default 0.55)
              (transpose :int -48 48 :default 0)
              (vel-decay :float 0 2 :default 0.9)
@@ -99,7 +108,7 @@
     (list 0 0 0 0 0 0 0 1)
     (list 1 0 0 0 0 0 0 0)))
 
-(defstate g8-weights (g8-ring-weights))
+(defstate g8-weights (list))
 
 (def g8-read-weights ()
   (map
@@ -321,3 +330,4 @@
               :value (g8-viz-matrix viz :dampening-matrix (g8-zero-matrix)))))))))
 
 (effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations))
+(seq-register-step-sequencer-tab "8x8" "*8x8*")

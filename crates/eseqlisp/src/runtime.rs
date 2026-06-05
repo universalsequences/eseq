@@ -660,6 +660,10 @@ pub enum TileOp {
         current: String,
         new_name: String,
     },
+    SetWindowTabsFor {
+        current: String,
+        tabs: Vec<LayoutTabSpec>,
+    },
     SetLayout(LayoutSpec),
 }
 
@@ -712,6 +716,7 @@ pub(crate) struct RuntimeBridgeState {
     pub status_message: Option<String>,
     pub queued_commands: Vec<HostCommand>,
     pub lisp_bindings: HashMap<String, String>,
+    pub pending_eval_buffer: Option<BufferId>,
     pub pending_save: bool,
     pub pending_save_as: Option<PathBuf>,
     pub pending_load: bool,
@@ -801,6 +806,10 @@ impl NativeContext {
 
     pub fn request_load(&mut self) {
         self.shared.borrow_mut().pending_load = true;
+    }
+
+    pub fn request_eval_buffer(&mut self) {
+        self.shared.borrow_mut().pending_eval_buffer = self.current_buffer_id();
     }
 
     pub fn current_buffer_read_only(&self) -> bool {
@@ -969,6 +978,13 @@ impl NativeContext {
             .borrow_mut()
             .pending_tile_ops
             .push(TileOp::SetWindowBufferFor { current, new_name });
+    }
+
+    pub fn set_window_tabs_for(&mut self, current: String, tabs: Vec<LayoutTabSpec>) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::SetWindowTabsFor { current, tabs });
     }
 
     pub fn window_hide_status(&mut self) {
@@ -2328,6 +2344,11 @@ impl Runtime {
 
     pub(crate) fn lisp_bindings(&self) -> HashMap<String, String> {
         self.shared.borrow().lisp_bindings.clone()
+    }
+
+    pub(crate) fn take_pending_eval_buffer(&mut self) -> Option<BufferId> {
+        let mut shared = self.shared.borrow_mut();
+        shared.pending_eval_buffer.take()
     }
 
     pub(crate) fn take_pending_save(&mut self) -> bool {

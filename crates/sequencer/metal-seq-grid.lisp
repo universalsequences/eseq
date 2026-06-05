@@ -33,27 +33,56 @@
 (defstate step-panel-buffer "*sequencer*")
 (defstate remembered-step-panel-buffer "*sequencer*")
 (defstate lower-panel-buffer "*fx*")
+(defstate seq-registered-step-tabs '())
 
 (def lower-fx-layout-height 10.5)
 
+(def seq-step-tab-buffer (tab)
+  (nth tab 1))
+
+(def seq-step-tab-matches-buffer? (tab buffer)
+  (= (seq-step-tab-buffer tab) buffer))
+
+(def seq-main-step-tabs ()
+  (append (list (list "Seq" "*sequencer*")) seq-registered-step-tabs))
+
+(def seq-main-step-tab-buffer? (buffer)
+  (> (len (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
+            (seq-main-step-tabs))) 0))
+
 (def seq-step-buffer? (buffer)
-  (or (= buffer "*metal*") (or (= buffer "*matrix*") (= buffer "*sequencer*"))))
+  (or (= buffer "*metal*") (seq-main-step-tab-buffer? buffer)))
 
 (def seq-sanitized-step-buffer (buffer)
   (if (seq-step-buffer? buffer) buffer "*sequencer*"))
 
 (def seq-visible-step-panel-buffer ()
-  step-panel-buffer)
+  (seq-sanitized-step-buffer step-panel-buffer))
 
 (def seq-main-step-tile-layout-spec ()
-  (let ((buffer (seq-visible-step-panel-buffer)))
-    (if (seq-step-buffer? buffer)
+  (let ((buffer (seq-visible-step-panel-buffer))
+        (tabs (seq-main-step-tabs)))
+    (if (and (> (len tabs) 1) (seq-main-step-tab-buffer? buffer))
       (list :buf buffer
-        :tabs (list
-          (list "Seq" "*sequencer*")
-          (list "Matrix" "*matrix*"))
+        :tabs tabs
         :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
       (list :buf buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25))))
+
+(def seq-refresh-step-tabs-if-present ()
+  (do
+    (set-window-tabs-for "*sequencer*" (seq-main-step-tabs))
+    (for-each
+      (lambda (tab) (set-window-tabs-for (seq-step-tab-buffer tab) (seq-main-step-tabs)))
+      seq-registered-step-tabs)))
+
+(def seq-register-step-sequencer-tab (label buffer)
+  (do
+    (set! seq-registered-step-tabs
+      (append
+        (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
+          seq-registered-step-tabs)
+        (list (list label buffer))))
+    (seq-refresh-step-tabs-if-present)))
 
 (def seq-step-and-track-panel-layout-spec (lower-buffer)
   (if (= lower-buffer "*piano-roll*")
@@ -844,7 +873,6 @@
 
 (load "metal-seq-metal.lisp")
 (load "metal-seq-sequencer.lisp")
-(load "scripts/neural-8x8-track-router.lisp")
 
 ; Layout: samples on the left; metal + mixer on the right; fx spans the bottom.
 (seq-apply-fx-layout)
