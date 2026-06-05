@@ -49,7 +49,7 @@
     ;; seed punches through instead of being clobbered by a decayed neural hit (the old
     ;; :newest = last-writer-wins behavior). Options: :newest :loudest :seed-priority
     ;; :strongest.
-    :event :loudest
+    :event :newest
     :params ((threshold :float 0 4 :default 0.55)
              (transpose :int -48 48 :default 0)
              (vel-decay :float 0 2 :default 0.9)
