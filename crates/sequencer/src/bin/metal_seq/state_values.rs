@@ -1907,15 +1907,7 @@ pub(crate) fn sync_current_track_bus_send_binding_fields(
 }
 
 pub(crate) fn build_mod_routes(state: &Arc<SequencerState>) -> Value {
-    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-    let routes = state
-        .pattern
-        .pattern_bank
-        .lock()
-        .unwrap()
-        .get(current_pattern)
-        .map(|pattern| pattern.mod_connections.clone())
-        .unwrap_or_default();
+    let routes = state.current_mod_connections();
     Value::List(
         routes
             .into_iter()
@@ -2742,12 +2734,12 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
     rt.set_reactive(
         "SEQ",
         "current-pattern",
-        Value::Number(state.pattern.current_pattern.load(Ordering::Relaxed) as f64),
+        Value::Number(state.current_scene_index() as f64),
     );
     rt.set_reactive(
         "SEQ",
         "num-patterns",
-        Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
+        Value::Number(state.scene_count() as f64),
     );
     rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
     rt.set_reactive(
@@ -5724,7 +5716,7 @@ pub(crate) fn build_track_plocks_value_with_neural_selection(
     let Some(selection) = selected_neural_neurons else {
         return build_track_plocks_value(app, state, track, selected);
     };
-    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let current_pattern = state.current_scene_index();
     if !selection
         .iter()
         .any(|selected| selected.pattern_idx == current_pattern)
@@ -5741,7 +5733,7 @@ fn build_selected_neural_plocks_value(
 ) -> Value {
     use sequencer::effects::ParamKind;
 
-    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let current_pattern = state.current_scene_index();
     let networks = state.current_neural_networks();
     let mut items = Vec::new();
 

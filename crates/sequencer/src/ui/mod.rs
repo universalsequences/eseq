@@ -996,16 +996,8 @@ impl App {
     }
 
     pub fn save_current_bus_pattern(&mut self) {
-        let current_pattern = self
-            .state
-            .pattern
-            .current_pattern
-            .load(std::sync::atomic::Ordering::Relaxed) as usize;
-        let num_patterns = self
-            .state
-            .pattern
-            .num_patterns
-            .load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let current_pattern = self.state.current_scene_index();
+        let num_patterns = self.state.scene_count();
         self.ensure_bus_pattern_bank_len(num_patterns.max(current_pattern + 1));
         self.bus_pattern_bank[current_pattern] = self.capture_bus_pattern_snapshot();
     }

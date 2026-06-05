@@ -3,13 +3,14 @@ use std::collections::{BTreeSet, HashMap};
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::os::raw::{c_char, c_float, c_int, c_void};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use eseqlisp::frame as eseq_frame;
+use eseqlisp::parser::{ASTParser, Expression, Parser};
 use eseqlisp::tui as eseq_tui;
 use eseqlisp::vm::Value as EValue;
 use eseqlisp::{BufferMode, CompileKind, Editor, EditorConfig, HostCommand, HostEvent, Runtime};
@@ -33,12 +34,8 @@ use crate::sequencer::{
 /// preventing dlopen from returning a stale cached handle.
 static COMPILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-struct MidiFxDescriptorCache {
-    source: String,
-    descriptors: Vec<EffectDescriptor>,
-}
-
-static MIDI_FX_DESCRIPTOR_CACHE: OnceLock<Mutex<Option<MidiFxDescriptorCache>>> = OnceLock::new();
+static MIDI_FX_DESCRIPTOR_CACHE: OnceLock<Mutex<HashMap<String, Vec<EffectDescriptor>>>> =
+    OnceLock::new();
 
 fn read_eseqlisp_init_source() -> String {
     eseqlisp_init_candidates()
@@ -4781,10 +4778,7 @@ pub fn register_neural_authoring_natives_with_selection(
             if neuron_idx >= network.num_neurons {
                 return Err("neuron index out of range".to_string());
             }
-            let pattern_idx = state_for_neural_select
-                .pattern
-                .current_pattern
-                .load(Ordering::Relaxed) as usize;
+            let pattern_idx = state_for_neural_select.current_scene_index();
             let mut selection = selection_for_neural_select.lock().unwrap();
             selection.clear();
             selection.insert(SelectedNeuralNeuron {
@@ -4840,10 +4834,7 @@ pub fn register_neural_authoring_natives_with_selection(
                 _ => return Err("network id must be a non-negative number".to_string()),
             };
             let neuron_idx = parse_nonnegative_usize(&args[1], "neuron index")?;
-            let pattern_idx = state_for_neural_selected_predicate
-                .pattern
-                .current_pattern
-                .load(Ordering::Relaxed) as usize;
+            let pattern_idx = state_for_neural_selected_predicate.current_scene_index();
             let selection = selection_for_neural_selected_predicate.lock().unwrap();
             Ok(EValue::Bool(selection.contains(&SelectedNeuralNeuron {
                 pattern_idx,
@@ -4868,10 +4859,7 @@ pub fn register_neural_authoring_natives_with_selection(
                 let idx = neural_network_index(networks, &reference)?;
                 Ok(networks.remove(idx))
             })?;
-            let pattern_idx = state_for_neural_delete
-                .pattern
-                .current_pattern
-                .load(Ordering::Relaxed) as usize;
+            let pattern_idx = state_for_neural_delete.current_scene_index();
             selection_for_neural_delete
                 .lock()
                 .unwrap()
@@ -10031,7 +10019,7 @@ pub fn set_selected_neural_instrument_plocks(
     param_idx: usize,
     value: f32,
 ) -> Result<bool, String> {
-    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let current_pattern = state.current_scene_index();
     let selected = selection
         .iter()
         .copied()
@@ -10076,7 +10064,7 @@ pub fn set_selected_neural_effect_plocks(
     param_idx: usize,
     value: f32,
 ) -> Result<bool, String> {
-    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let current_pattern = state.current_scene_index();
     let selected = selection
         .iter()
         .copied()
@@ -10120,7 +10108,7 @@ pub fn selected_neural_instrument_plock_value(
     target_track: usize,
     param_idx: usize,
 ) -> Option<f32> {
-    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let current_pattern = state.current_scene_index();
     let param_id = neural_instrument_param_id(state, target_track, param_idx).ok()?;
     let networks = state.current_neural_networks();
     selection
@@ -10149,7 +10137,7 @@ pub fn selected_neural_effect_plock_value(
     slot_idx: usize,
     param_idx: usize,
 ) -> Option<f32> {
-    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let current_pattern = state.current_scene_index();
     let param_id = neural_effect_param_id(state, target_track, slot_idx, param_idx).ok()?;
     let networks = state.current_neural_networks();
     selection
@@ -11833,6 +11821,55 @@ fn midi_fx_library_root_candidates() -> Vec<PathBuf> {
     unique
 }
 
+fn midi_fx_name_components(name: &str) -> Option<Vec<&str>> {
+    let trimmed = name.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut components = Vec::new();
+    for component in Path::new(trimmed).components() {
+        match component {
+            Component::Normal(value) => components.push(value.to_str()?),
+            _ => return None,
+        }
+    }
+    if components.is_empty() {
+        None
+    } else {
+        Some(components)
+    }
+}
+
+fn midi_fx_source_path(name: &str) -> Option<PathBuf> {
+    let components = midi_fx_name_components(name)?;
+    for root in midi_fx_library_root_candidates() {
+        let mut folder = root.clone();
+        for component in &components {
+            folder.push(component);
+        }
+        let folder_dsp = folder.join("dsp.lisp");
+        if folder_dsp.exists() {
+            return Some(folder_dsp);
+        }
+
+        let mut file = root;
+        for component in &components[..components.len().saturating_sub(1)] {
+            file.push(component);
+        }
+        file.push(format!("{}.lisp", components[components.len() - 1]));
+        if file.exists() {
+            return Some(file);
+        }
+    }
+    None
+}
+
+fn load_midi_fx_source(name: &str) -> io::Result<String> {
+    let path = midi_fx_source_path(name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MIDI FX source not found"))?;
+    std::fs::read_to_string(path)
+}
+
 pub fn load_midi_fx_library_source() -> String {
     fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -11870,28 +11907,26 @@ pub fn load_midi_fx_library_source() -> String {
         .join("\n")
 }
 
-pub fn midi_fx_library_source_with_user_source(user_source: &str) -> String {
-    let library = load_midi_fx_library_source();
-    if library.trim().is_empty() {
-        user_source.to_string()
-    } else if user_source.trim().is_empty() {
-        library
-    } else {
-        format!("{library}\n; *scratch*\n{user_source}")
-    }
-}
-
-pub fn load_midi_fx_descriptors() -> Vec<EffectDescriptor> {
-    let source = load_midi_fx_library_source();
+fn load_midi_fx_descriptors_from_source(source: String) -> Vec<EffectDescriptor> {
     if source.trim().is_empty() {
         return Vec::new();
     }
 
-    let cache = MIDI_FX_DESCRIPTOR_CACHE.get_or_init(|| Mutex::new(None));
+    let cache = MIDI_FX_DESCRIPTOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     {
         let guard = cache.lock().expect("midi fx descriptor cache poisoned");
-        if let Some(cached) = guard.as_ref().filter(|cached| cached.source == source) {
-            return cached.descriptors.clone();
+        if let Some(cached) = guard.get(&source) {
+            return cached.clone();
+        }
+    }
+
+    if let Ok(descriptors) = parse_midi_fx_descriptors_from_source(&source) {
+        if !descriptors.is_empty() {
+            cache
+                .lock()
+                .expect("midi fx descriptor cache poisoned")
+                .insert(source, descriptors.clone());
+            return descriptors;
         }
     }
 
@@ -11911,14 +11946,110 @@ pub fn load_midi_fx_descriptors() -> Vec<EffectDescriptor> {
     } else {
         runtime.midi_fx_descriptors()
     };
-    *cache.lock().expect("midi fx descriptor cache poisoned") = Some(MidiFxDescriptorCache {
-        source,
-        descriptors: descriptors.clone(),
-    });
+    cache
+        .lock()
+        .expect("midi fx descriptor cache poisoned")
+        .insert(source, descriptors.clone());
     descriptors
 }
 
+fn parse_midi_fx_descriptors_from_source(source: &str) -> Result<Vec<EffectDescriptor>, String> {
+    let tokens = Parser::new(source.to_string())
+        .parse()
+        .map_err(|error| format!("failed to tokenize MIDI FX source: {error:?}"))?;
+    let expressions = ASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("failed to parse MIDI FX source: {error:?}"))?;
+    let mut pending_params = Vec::new();
+    let mut descriptors: Vec<EffectDescriptor> = Vec::new();
+
+    for expression in expressions {
+        let Expression::List(items) = expression else {
+            continue;
+        };
+        let Some(Expression::Symbol(operator)) = items.first() else {
+            continue;
+        };
+        match operator.as_str() {
+            "midi-fx-param" => {
+                let Some(name) = items.get(1).and_then(midi_fx_metadata_name) else {
+                    return Err("midi-fx-param expects a name".to_string());
+                };
+                let args = items[2..]
+                    .iter()
+                    .map(midi_fx_metadata_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                pending_params.push(parse_midi_fx_param_descriptor(&name, &args)?);
+            }
+            "def-midi-fx" => {
+                let Some(name) = items.get(1).and_then(midi_fx_metadata_name) else {
+                    return Err("def-midi-fx expects a name".to_string());
+                };
+                let mut params = std::mem::take(&mut pending_params);
+                ensure_enabled_param(&mut params);
+                for (idx, param) in params.iter_mut().enumerate() {
+                    param.node_param_idx = idx as u32;
+                }
+                let mut descriptor = EffectDescriptor::empty_custom_slot();
+                descriptor.name = name.clone();
+                descriptor.params = params;
+                if let Some(existing) = descriptors.iter_mut().find(|desc| desc.name == name) {
+                    *existing = descriptor;
+                } else {
+                    descriptors.push(descriptor);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(descriptors)
+}
+
+fn midi_fx_metadata_name(expression: &Expression) -> Option<String> {
+    match expression {
+        Expression::String(name) | Expression::Symbol(name) | Expression::Keyword(name) => {
+            Some(name.trim_start_matches('@').to_string())
+        }
+        _ => None,
+    }
+}
+
+fn midi_fx_metadata_value(expression: &Expression) -> Result<EValue, String> {
+    match expression {
+        Expression::String(value) => Ok(EValue::String(value.clone())),
+        Expression::Symbol(value) => Ok(EValue::Symbol(value.clone())),
+        Expression::Keyword(value) => Ok(EValue::Keyword(value.clone())),
+        Expression::Number(value) => Ok(EValue::Number(*value)),
+        _ => Err("MIDI FX metadata supports only literal parameter attributes".to_string()),
+    }
+}
+
+pub fn midi_fx_library_source_with_user_source(user_source: &str) -> String {
+    let library = load_midi_fx_library_source();
+    if library.trim().is_empty() {
+        user_source.to_string()
+    } else if user_source.trim().is_empty() {
+        library
+    } else {
+        format!("{library}\n; *scratch*\n{user_source}")
+    }
+}
+
+pub fn load_midi_fx_descriptors() -> Vec<EffectDescriptor> {
+    load_midi_fx_descriptors_from_source(load_midi_fx_library_source())
+}
+
 pub fn load_midi_fx_descriptor(name: &str) -> Option<EffectDescriptor> {
+    if let Ok(source) = load_midi_fx_source(name) {
+        if let Some(descriptor) = load_midi_fx_descriptors_from_source(source)
+            .into_iter()
+            .find(|desc| desc.name.eq_ignore_ascii_case(name))
+        {
+            return Some(descriptor);
+        }
+    }
+
     load_midi_fx_descriptors()
         .into_iter()
         .find(|desc| desc.name.eq_ignore_ascii_case(name))
@@ -13079,7 +13210,7 @@ mod tests {
         );
 
         {
-            let mut bank = state.pattern.pattern_bank.lock().unwrap();
+            let mut bank = state.export_pattern_repository();
             let mut pattern = bank[0].clone();
             let graph = pattern
                 .graph_overrides
@@ -13126,9 +13257,8 @@ mod tests {
                     value: 0.25,
                 });
             bank.push(pattern);
+            state.replace_pattern_repository(bank, 1);
         }
-        state.pattern.num_patterns.store(2, Ordering::Relaxed);
-        state.pattern.current_pattern.store(1, Ordering::Relaxed);
         runtime.set_reactive("SEQ", "current-pattern", Value::Number(1.0));
         runtime.run_reactive_cycle();
         assert_eq!(
@@ -13159,7 +13289,8 @@ mod tests {
             Some(Value::Number(0.25)),
             "pattern switch should reload matrix state"
         );
-        state.pattern.current_pattern.store(0, Ordering::Relaxed);
+        let bank = state.export_pattern_repository();
+        state.replace_pattern_repository(bank, 0);
         runtime.set_reactive("SEQ", "current-pattern", Value::Number(0.0));
         runtime.run_reactive_cycle();
 
@@ -13342,10 +13473,12 @@ mod tests {
             reset_every_beats: None,
             max_poly: None,
         };
-        {
-            let mut bank = state.pattern.pattern_bank.lock().unwrap();
-            bank[0].graph_overrides = vec![expected.clone()];
-        }
+        state
+            .edit_current_graph_overrides(|overrides| {
+                *overrides = vec![expected.clone()];
+                Ok(())
+            })
+            .unwrap();
 
         let mut runtime = Runtime::new();
         runtime.register_reactive(

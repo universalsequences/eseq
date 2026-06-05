@@ -819,15 +819,7 @@ impl App {
         }
         self.graph_controller().delete_bus_graph_node(id);
         self.publish_bus_gate_runtime();
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for pattern in bank.iter_mut() {
-            for params in &mut pattern.track_params {
-                if params.output == TrackOutput::Bus(id) {
-                    params.output = TrackOutput::Mix;
-                }
-                params.sends.retain(|send| send.destination != id);
-            }
-        }
+        self.state.remove_bus_references_from_all_track_patterns(id);
         true
     }
 
@@ -1026,36 +1018,23 @@ impl App {
 
     fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
         let num_tracks = self.tracks.len();
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_pattern = self.state.current_scene_index();
         let current_track = if num_tracks == 0 {
             0
         } else {
             self.ui.cursor_track.min(num_tracks - 1)
         };
 
-        {
-            let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-            if current_pattern < bank.len() {
-                let current_mod_connections = bank[current_pattern].mod_connections.clone();
-                let current_neural_networks = bank[current_pattern].neural_networks.clone();
-                let current_graph_overrides = bank[current_pattern].graph_overrides.clone();
-                let mut snapshot = PatternSnapshot::capture(
-                    &self.state,
-                    num_tracks,
-                    &self.graph.track_buffer_ids,
-                    &self.graph.track_sample_rates,
-                    &self.tracks,
-                    &self.graph.track_instrument_types,
-                );
-                snapshot.mod_connections = current_mod_connections;
-                snapshot.neural_networks = current_neural_networks;
-                snapshot.graph_overrides = current_graph_overrides;
-                bank[current_pattern] = snapshot;
-            }
-        }
+        self.state.save_current_pattern_snapshot(
+            num_tracks,
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        );
         self.save_current_bus_pattern();
 
-        let bank = self.state.pattern.pattern_bank.lock().unwrap().clone();
+        let bank = self.state.export_pattern_repository();
         self.ensure_bus_pattern_bank_len(bank.len());
         let bus_pattern_bank = self.bus_pattern_bank.clone();
         let tracks = self.capture_project_tracks()?;
@@ -1223,7 +1202,7 @@ impl App {
         buffer_id: i32,
         sample_name: &str,
     ) -> Result<Option<PathBuf>, String> {
-        if self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize == pattern_idx {
+        if self.state.current_scene_index() == pattern_idx {
             if let Some(path) = self.sampler_path_for_track(track_idx) {
                 return Ok(Some(path));
             }
@@ -1516,26 +1495,16 @@ impl App {
         self.normalize_track_colors();
         self.normalize_track_collapsed();
 
-        {
-            let mut pattern_bank = self.state.pattern.pattern_bank.lock().unwrap();
-            *pattern_bank = if bank.is_empty() {
-                vec![PatternSnapshot::new_default(
-                    self.tracks.len(),
-                    &self.graph.effect_descriptors,
-                )]
-            } else {
-                bank
-            };
-        }
-
-        self.state.pattern.num_patterns.store(
-            self.state.pattern.pattern_bank.lock().unwrap().len() as u32,
-            Ordering::Relaxed,
-        );
+        let pattern_repository = if bank.is_empty() {
+            vec![PatternSnapshot::new_default(
+                self.tracks.len(),
+                &self.graph.effect_descriptors,
+            )]
+        } else {
+            bank
+        };
         self.state
-            .pattern
-            .current_pattern
-            .store(current_pattern as u32, Ordering::Relaxed);
+            .replace_pattern_repository(pattern_repository, current_pattern);
         self.state
             .transport
             .pattern_epoch
@@ -1601,15 +1570,12 @@ impl App {
             self.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref());
         }
         if bus_pattern_bank.is_empty() {
-            bus_pattern_bank = (0..self.state.pattern.num_patterns.load(Ordering::Relaxed)
-                as usize)
+            bus_pattern_bank = (0..self.state.scene_count())
                 .map(|_| self.capture_bus_pattern_snapshot())
                 .collect();
         }
         self.bus_pattern_bank = bus_pattern_bank;
-        self.ensure_bus_pattern_bank_len(
-            self.state.pattern.num_patterns.load(Ordering::Relaxed) as usize
-        );
+        self.ensure_bus_pattern_bank_len(self.state.scene_count());
         let current_bus_snapshot = self
             .bus_pattern_bank
             .get(current_pattern)
@@ -1665,11 +1631,10 @@ impl App {
             self.effective_sidebar_mode()
         };
 
-        let current_sample_ids = {
-            let bank = self.state.pattern.pattern_bank.lock().unwrap();
-            bank[current_pattern].restore(&self.state);
-            bank[current_pattern].sample_ids.clone()
-        };
+        let current_sample_ids = self
+            .state
+            .restore_current_pattern_from_repository()
+            .unwrap_or_default();
         {
             let mut graph = self.graph_controller();
             graph.sync_track_instrument_run_modes_from_live_state()?;

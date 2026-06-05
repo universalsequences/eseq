@@ -75,7 +75,7 @@ impl SequencerSnapshot {
 
     pub fn capture(state: &SequencerState) -> Self {
         let num_tracks = state.active_track_count();
-        let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_pattern = state.current_scene_index();
         let transport = SequencerTransportSnapshot {
             bpm: state.transport.bpm.load(Ordering::Relaxed),
             playing: state.transport.playing.load(Ordering::Relaxed),
@@ -186,20 +186,7 @@ impl SequencerSnapshot {
             });
         }
 
-        let (mod_connections, neural_networks, graph_overrides) = state
-            .pattern
-            .pattern_bank
-            .lock()
-            .unwrap()
-            .get(current_pattern)
-            .map(|pattern| {
-                (
-                    pattern.mod_connections.clone(),
-                    pattern.neural_networks.clone(),
-                    pattern.graph_overrides.clone(),
-                )
-            })
-            .unwrap_or_default();
+        let (mod_connections, neural_networks, graph_overrides) = state.current_scene_metadata();
 
         Self {
             transport,

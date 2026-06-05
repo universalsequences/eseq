@@ -871,8 +871,7 @@ impl App {
                             }
                             self.clamp_cursor_to_steps();
                             // Adjust page if current page is now past the end
-                            let num_pats =
-                                self.state.pattern.num_patterns.load(Ordering::Relaxed) as usize;
+                            let num_pats = self.state.scene_count();
                             let max_page = num_pats.saturating_sub(1) / 10;
                             if self.ui.pattern_page > max_page {
                                 self.ui.pattern_page = max_page;
@@ -1862,8 +1861,7 @@ impl App {
                 } else if let Ok(n) = self.ui.value_buffer.parse::<usize>() {
                     if n >= 1 {
                         let num_tracks = self.tracks.len();
-                        let num_patterns =
-                            self.state.pattern.num_patterns.load(Ordering::Relaxed) as usize;
+                        let num_patterns = self.state.scene_count();
                         let idx = n - 1;
                         if idx < num_patterns {
                             if let Some(sample_ids) = self.state.switch_pattern(

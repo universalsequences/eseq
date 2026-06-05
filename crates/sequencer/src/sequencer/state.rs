@@ -19,6 +19,7 @@ use super::data::{
     DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
+use super::{BusId, TrackOutput};
 
 #[derive(Clone)]
 pub struct StepSlotPlocks {
@@ -756,31 +757,7 @@ impl PatternSnapshot {
             step_data.push(steps);
 
             let tp = &state.pattern.track_params[t];
-            track_params.push(TrackParamsSnapshot {
-                gate: tp.is_gate_on(),
-                attack_ms: tp.get_attack_ms(),
-                release_ms: tp.get_release_ms(),
-                swing: tp.get_swing(),
-                swing_resolution: tp.get_swing_resolution(),
-                num_steps: tp.get_num_steps(),
-                volume: tp.get_volume(),
-                pan: tp.get_pan(),
-                mute: tp.is_muted(),
-                solo: tp.is_solo(),
-                send: tp.get_send(),
-                output: tp.output(),
-                sends: tp.sends(),
-                polyphonic: tp.is_polyphonic(),
-                max_polyphony: tp.get_max_polyphony(),
-                timebase: tp.get_timebase(),
-                accumulator_idx: tp.get_accumulator_idx(),
-                script_accumulator_name: tp.script_accumulator_name(),
-                midi_fx_chain: tp.midi_fx_chain(),
-                midi_fx_position: tp.get_midi_fx_position(),
-                accum_limit: tp.get_accum_limit(),
-                accum_mode: tp.get_accum_mode(),
-                fts_scale: tp.get_fts_scale(),
-            });
+            track_params.push(capture_track_params_snapshot(tp));
 
             let chain: Vec<EffectSlotSnapshot> = state.pattern.effect_chains[t]
                 .iter()
@@ -1417,9 +1394,9 @@ pub struct PatternState {
     pub track_params: Vec<TrackParams>,
     pub effect_chains: Vec<Vec<EffectSlotState>>,
     pub midi_fx_slots: Vec<Vec<EffectSlotState>>,
-    pub pattern_bank: Mutex<Vec<PatternSnapshot>>,
-    pub current_pattern: AtomicU32,
-    pub num_patterns: AtomicU32,
+    pattern_bank: Mutex<Vec<PatternSnapshot>>,
+    current_pattern: AtomicU32,
+    num_patterns: AtomicU32,
     pub timebase_plocks: Vec<TimebasePLockData>,
     pub swing_plocks: Vec<SwingPLockData>,
     pub swing_resolution_plocks: Vec<SwingResolutionPLockData>,
@@ -1526,6 +1503,34 @@ pub struct SequencerState {
 
 const TOPOLOGY_EDIT_NONE: u32 = 0;
 const TOPOLOGY_EDIT_DELETE_TRACK: u32 = 1;
+
+fn capture_track_params_snapshot(track_params: &TrackParams) -> TrackParamsSnapshot {
+    TrackParamsSnapshot {
+        gate: track_params.is_gate_on(),
+        attack_ms: track_params.get_attack_ms(),
+        release_ms: track_params.get_release_ms(),
+        swing: track_params.get_swing(),
+        swing_resolution: track_params.get_swing_resolution(),
+        num_steps: track_params.get_num_steps(),
+        volume: track_params.get_volume(),
+        pan: track_params.get_pan(),
+        mute: track_params.is_muted(),
+        solo: track_params.is_solo(),
+        send: track_params.get_send(),
+        output: track_params.output(),
+        sends: track_params.sends(),
+        polyphonic: track_params.is_polyphonic(),
+        max_polyphony: track_params.get_max_polyphony(),
+        timebase: track_params.get_timebase(),
+        accumulator_idx: track_params.get_accumulator_idx(),
+        script_accumulator_name: track_params.script_accumulator_name(),
+        midi_fx_chain: track_params.midi_fx_chain(),
+        midi_fx_position: track_params.get_midi_fx_position(),
+        accum_limit: track_params.get_accum_limit(),
+        accum_mode: track_params.get_accum_mode(),
+        fts_scale: track_params.get_fts_scale(),
+    }
+}
 
 impl SequencerState {
     pub fn capture_current_pattern_snapshot(
@@ -1732,6 +1737,328 @@ impl SequencerState {
     }
     pub fn current_pattern_index(&self) -> usize {
         self.pattern.current_pattern.load(Ordering::Relaxed) as usize
+    }
+
+    pub fn current_scene_index(&self) -> usize {
+        self.current_pattern_index()
+    }
+
+    pub fn scene_count(&self) -> usize {
+        self.pattern.num_patterns.load(Ordering::Relaxed) as usize
+    }
+
+    pub fn pattern_repository_len(&self) -> usize {
+        self.scene_count()
+    }
+
+    pub fn export_pattern_repository(&self) -> Vec<PatternSnapshot> {
+        self.pattern.pattern_bank.lock().unwrap().clone()
+    }
+
+    pub fn replace_pattern_repository(&self, snapshots: Vec<PatternSnapshot>, current_idx: usize) {
+        let len = snapshots.len().max(1);
+        {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            *bank = snapshots;
+        }
+        self.pattern
+            .num_patterns
+            .store(len as u32, Ordering::Relaxed);
+        self.pattern.current_pattern.store(
+            current_idx.min(len.saturating_sub(1)) as u32,
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn current_pattern_sample_ids(&self) -> Vec<(i32, String, u32)> {
+        let current_pattern = self.current_pattern_index();
+        self.pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|snapshot| snapshot.sample_ids.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn restore_current_pattern_from_repository(&self) -> Option<Vec<(i32, String, u32)>> {
+        let current_pattern = self.current_pattern_index();
+        let sample_ids = {
+            let bank = self.pattern.pattern_bank.lock().unwrap();
+            let snapshot = bank.get(current_pattern)?;
+            snapshot.restore(self);
+            snapshot.sample_ids.clone()
+        };
+        Some(sample_ids)
+    }
+
+    pub fn save_current_pattern_snapshot(
+        &self,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> bool {
+        let current_pattern = self.current_pattern_index();
+        let mut bank = self.pattern.pattern_bank.lock().unwrap();
+        if current_pattern >= bank.len() {
+            return false;
+        }
+        bank[current_pattern] = PatternSnapshot::capture_with_mod_connections(
+            self,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            bank[current_pattern].mod_connections.clone(),
+            bank[current_pattern].neural_networks.clone(),
+            bank[current_pattern].graph_overrides.clone(),
+        );
+        true
+    }
+
+    pub fn save_current_track_midi_fx_snapshot(&self, track: usize) -> bool {
+        let current_pattern = self.current_pattern_index();
+        let mut bank = self.pattern.pattern_bank.lock().unwrap();
+        let Some(snapshot) = bank.get_mut(current_pattern) else {
+            return false;
+        };
+        if track >= self.pattern.track_params.len()
+            || track >= self.pattern.midi_fx_slots.len()
+            || track >= snapshot.track_params.len()
+            || track >= snapshot.midi_fx_slots.len()
+        {
+            return false;
+        }
+
+        snapshot.track_params[track] =
+            capture_track_params_snapshot(&self.pattern.track_params[track]);
+        snapshot.midi_fx_slots[track] = self.pattern.midi_fx_slots[track]
+            .iter()
+            .map(EffectSlotSnapshot::capture)
+            .collect();
+        true
+    }
+
+    pub fn save_current_track_effect_snapshot(&self, track: usize) -> bool {
+        let current_pattern = self.current_pattern_index();
+        let mut bank = self.pattern.pattern_bank.lock().unwrap();
+        let Some(snapshot) = bank.get_mut(current_pattern) else {
+            return false;
+        };
+        if track >= self.pattern.effect_chains.len() || track >= snapshot.effect_slots.len() {
+            return false;
+        }
+
+        snapshot.effect_slots[track] = self.pattern.effect_chains[track]
+            .iter()
+            .map(EffectSlotSnapshot::capture)
+            .collect();
+        true
+    }
+
+    pub fn sync_effect_slot_with_modulator_in_track_patterns(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
+        self.save_current_track_effect_snapshot(track);
+        self.edit_non_current_pattern_snapshots(|snapshot| {
+            snapshot.sync_effect_slot_with_modulator(
+                track,
+                slot_idx,
+                descriptor,
+                node_id,
+                modulator_node_id,
+            );
+        });
+    }
+
+    pub fn normalize_current_pattern_instrument_run_mode(
+        &self,
+        track_count: usize,
+        slot_descriptors: &[Vec<EffectDescriptor>],
+        track: usize,
+        run_mode: CustomInstrumentRunMode,
+    ) {
+        self.edit_pattern_repository(|bank, current_pattern| {
+            let Some(snapshot) = bank.get_mut(current_pattern) else {
+                return;
+            };
+            snapshot.normalize_track_count(track_count, slot_descriptors);
+            if let Some(mode) = snapshot.instrument_run_modes.get_mut(track) {
+                *mode = run_mode;
+            }
+        });
+    }
+
+    pub fn extend_all_pattern_snapshots_to_track(
+        &self,
+        track_count: usize,
+        slot_descriptors: &[Vec<EffectDescriptor>],
+        track: usize,
+        run_mode: CustomInstrumentRunMode,
+        instrument: Option<(&EffectDescriptor, u32, InstrumentType)>,
+    ) {
+        self.edit_all_pattern_snapshots(|snapshot| {
+            snapshot.extend_to_tracks(track_count, slot_descriptors);
+            if let Some(mode) = snapshot.instrument_run_modes.get_mut(track) {
+                *mode = run_mode;
+            }
+            if let Some((descriptor, node_id, instrument_type)) = instrument {
+                snapshot.sync_instrument_slot(track, descriptor, node_id, instrument_type);
+            }
+        });
+    }
+
+    pub fn insert_effect_slot_in_other_track_patterns(&self, track: usize, slot_idx: usize) {
+        self.edit_non_current_pattern_snapshots(|snapshot| {
+            snapshot.insert_empty_effect_slot(track, slot_idx)
+        });
+    }
+
+    pub fn move_effect_slot_in_other_track_patterns(
+        &self,
+        track: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) {
+        self.edit_non_current_pattern_snapshots(|snapshot| {
+            snapshot.move_effect_slot_to(track, source_slot, target_slot);
+        });
+    }
+
+    pub fn remove_effect_slot_from_track_patterns(&self, track: usize, slot_idx: usize) {
+        self.save_current_track_effect_snapshot(track);
+        self.edit_non_current_pattern_snapshots(|snapshot| {
+            snapshot.remove_effect_slot(track, slot_idx);
+        });
+    }
+
+    pub fn insert_midi_fx_slot_in_other_track_patterns(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        name: String,
+        descriptor: &EffectDescriptor,
+    ) {
+        self.edit_non_current_pattern_snapshots(|snapshot| {
+            snapshot.insert_midi_fx_slot(track, slot_idx, name.clone(), descriptor);
+        });
+    }
+
+    pub fn move_midi_fx_slot_in_other_track_patterns(
+        &self,
+        track: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) {
+        self.edit_non_current_pattern_snapshots(|snapshot| {
+            snapshot.move_midi_fx_slot_to(track, source_slot, target_slot);
+        });
+    }
+
+    pub fn remove_midi_fx_slot_from_track_patterns(&self, track: usize, slot_idx: usize) {
+        self.save_current_track_midi_fx_snapshot(track);
+        self.edit_non_current_pattern_snapshots(|snapshot| {
+            snapshot.remove_midi_fx_slot(track, slot_idx);
+        });
+    }
+
+    pub fn remove_bus_references_from_all_track_patterns(&self, bus_id: BusId) {
+        self.edit_all_pattern_snapshots(|pattern| {
+            for params in &mut pattern.track_params {
+                if params.output == TrackOutput::Bus(bus_id) {
+                    params.output = TrackOutput::Mix;
+                }
+                params.sends.retain(|send| send.destination != bus_id);
+            }
+        });
+    }
+
+    pub fn edit_pattern_repository<F, R>(&self, edit: F) -> R
+    where
+        F: FnOnce(&mut Vec<PatternSnapshot>, usize) -> R,
+    {
+        let current_pattern = self.current_pattern_index();
+        let mut bank = self.pattern.pattern_bank.lock().unwrap();
+        edit(&mut bank, current_pattern)
+    }
+
+    pub fn edit_non_current_pattern_snapshots<F>(&self, mut edit: F)
+    where
+        F: FnMut(&mut PatternSnapshot),
+    {
+        self.edit_pattern_repository(|bank, current_pattern| {
+            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+                if pattern_idx != current_pattern {
+                    edit(snapshot);
+                }
+            }
+        });
+    }
+
+    pub fn edit_all_pattern_snapshots<F>(&self, mut edit: F)
+    where
+        F: FnMut(&mut PatternSnapshot),
+    {
+        self.edit_pattern_repository(|bank, _| {
+            for snapshot in bank.iter_mut() {
+                edit(snapshot);
+            }
+        });
+    }
+
+    pub fn current_scene_metadata(
+        &self,
+    ) -> (
+        Vec<ModConnection>,
+        Vec<ProjectNeuralNetwork>,
+        Vec<ProjectGraphOverrides>,
+    ) {
+        let current_pattern = self.current_pattern_index();
+        self.pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|snapshot| {
+                (
+                    snapshot.mod_connections.clone(),
+                    snapshot.neural_networks.clone(),
+                    snapshot.graph_overrides.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn current_mod_connections(&self) -> Vec<ModConnection> {
+        self.current_scene_metadata().0
+    }
+
+    pub fn edit_current_mod_connections<F, R>(&self, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ModConnection>) -> Result<R, String>,
+    {
+        let current_pattern = self.current_pattern_index();
+        let result = {
+            let mut bank = self
+                .pattern
+                .pattern_bank
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let snapshot = bank
+                .get_mut(current_pattern)
+                .ok_or_else(|| "current pattern out of range".to_string())?;
+            edit(&mut snapshot.mod_connections)?
+        };
+        self.publish_scheduler_snapshot();
+        Ok(result)
     }
     pub fn latest_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         self.scheduler_snapshot.lock().unwrap().clone()
@@ -2868,6 +3195,7 @@ mod tests {
     use super::*;
     use crate::effects::{
         EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+        BUILTIN_SLOT_COUNT,
     };
 
     fn sample_track_params(id: usize) -> TrackParamsSnapshot {
@@ -3045,6 +3373,114 @@ mod tests {
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn pattern_repository_ownership_stays_inside_state_module() {
+        fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read source dir") {
+                let entry = entry.expect("read source entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, out);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let source_dir = manifest_dir.join("src");
+        let state_file = source_dir.join("sequencer").join("state.rs");
+        let mut files = Vec::new();
+        collect_rs_files(&source_dir, &mut files);
+
+        let forbidden = [
+            ".pattern.pattern_bank",
+            ".pattern.current_pattern",
+            ".pattern.num_patterns",
+            ".edit_pattern_repository",
+            ".edit_non_current_pattern_snapshots",
+            ".edit_all_pattern_snapshots",
+        ];
+        let mut violations = Vec::new();
+        for file in files {
+            if file == state_file {
+                continue;
+            }
+            let source = std::fs::read_to_string(&file).expect("read Rust source");
+            let normalized: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
+            for pattern in forbidden {
+                if normalized.contains(pattern) {
+                    violations.push(format!(
+                        "{} contains direct {} access",
+                        file.strip_prefix(&manifest_dir).unwrap_or(&file).display(),
+                        pattern
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "pattern repository access must go through SequencerState facade:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn repository_effect_slot_insert_applies_to_other_patterns_for_one_track_only() {
+        let state = SequencerState::new(2, (0..2).map(|_| default_empty_effect_chain()).collect());
+        let descriptor_lane =
+            vec![EffectDescriptor::empty_custom_slot(); crate::lisp_effect::MAX_CUSTOM_FX];
+        let slot_descriptors = vec![descriptor_lane.clone(), descriptor_lane];
+        let mut current = PatternSnapshot::new_default(2, &slot_descriptors);
+        let mut other = PatternSnapshot::new_default(2, &slot_descriptors);
+        current.effect_slots[0][BUILTIN_SLOT_COUNT].node_id = 7;
+        other.effect_slots[0][BUILTIN_SLOT_COUNT].node_id = 42;
+        other.effect_slots[0][BUILTIN_SLOT_COUNT + 1].node_id = 43;
+        other.effect_slots[1][BUILTIN_SLOT_COUNT].node_id = 99;
+        state.replace_pattern_repository(vec![current, other], 0);
+
+        state.insert_effect_slot_in_other_track_patterns(0, BUILTIN_SLOT_COUNT);
+
+        let after = state.export_pattern_repository();
+        assert_eq!(after[0].effect_slots[0][BUILTIN_SLOT_COUNT].node_id, 7);
+        assert_eq!(after[1].effect_slots[1][BUILTIN_SLOT_COUNT].node_id, 99);
+        assert_eq!(after[1].effect_slots[0][BUILTIN_SLOT_COUNT].node_id, 0);
+        assert_eq!(after[1].effect_slots[0][BUILTIN_SLOT_COUNT].num_params, 0);
+        assert_eq!(after[1].effect_slots[0][BUILTIN_SLOT_COUNT + 1].node_id, 42);
+    }
+
+    #[test]
+    fn repository_midi_fx_insert_applies_to_other_patterns_for_one_track_only() {
+        let state = SequencerState::new(2, (0..2).map(|_| default_empty_effect_chain()).collect());
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ],
+            0,
+        );
+        let before = state.export_pattern_repository();
+        let mut descriptor = EffectDescriptor::empty_custom_slot();
+        descriptor.name = "arp".to_string();
+
+        state.insert_midi_fx_slot_in_other_track_patterns(0, 0, "arp".to_string(), &descriptor);
+
+        let after = state.export_pattern_repository();
+        assert_eq!(
+            after[0].track_params[0].midi_fx_chain,
+            before[0].track_params[0].midi_fx_chain
+        );
+        assert_eq!(
+            after[1].track_params[1].midi_fx_chain,
+            before[1].track_params[1].midi_fx_chain
+        );
+        assert_eq!(
+            after[1].track_params[0].midi_fx_chain,
+            vec!["arp".to_string()]
+        );
     }
 
     #[test]

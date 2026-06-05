@@ -3022,7 +3022,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     // Schedule accumulator reset on play-start or pattern change; consumed at next step 0.
     {
         let playing = data.state.transport.playing.load(Ordering::Relaxed);
-        let pattern = data.state.pattern.current_pattern.load(Ordering::Relaxed);
+        let pattern = data.state.current_scene_index() as u32;
         if (!data.last_playing && playing) || data.last_pattern != pattern {
             // Pattern changes and fresh playback should always reapply custom instrument params
             // even if a voice slot is being reused from an older sound state.

@@ -240,22 +240,7 @@ impl GraphController<'_> {
             }
         }
 
-        let current_pattern = self
-            .app
-            .state
-            .pattern
-            .current_pattern
-            .load(Ordering::Relaxed) as usize;
-        let connections = self
-            .app
-            .state
-            .pattern
-            .pattern_bank
-            .lock()
-            .unwrap()
-            .get(current_pattern)
-            .map(|pattern| pattern.mod_connections.clone())
-            .unwrap_or_default();
+        let connections = self.app.state.current_mod_connections();
         for connection in connections {
             if connection.source_track >= track_count
                 || connection.dest_track >= track_count
@@ -297,26 +282,17 @@ impl GraphController<'_> {
         if !self.app.graph.track_exposes_mod_output(source_track) {
             return Err("mod route source track has no mod output".to_string());
         }
-        let current_pattern = self
-            .app
-            .state
-            .pattern
-            .current_pattern
-            .load(Ordering::Relaxed) as usize;
-        {
-            let mut bank = self.app.state.pattern.pattern_bank.lock().unwrap();
-            let Some(pattern) = bank.get_mut(current_pattern) else {
-                return Err("current pattern is missing".to_string());
-            };
+        self.app.state.edit_current_mod_connections(|connections| {
             let connection = crate::sequencer::ModConnection {
                 source_track,
                 dest_track,
                 dest_input,
             };
-            if !pattern.mod_connections.contains(&connection) {
-                pattern.mod_connections.push(connection);
+            if !connections.contains(&connection) {
+                connections.push(connection);
             }
-        }
+            Ok(())
+        })?;
         self.sync_current_pattern_mod_routes();
         Ok(())
     }
@@ -327,23 +303,14 @@ impl GraphController<'_> {
         dest_track: usize,
         dest_input: usize,
     ) -> Result<(), String> {
-        let current_pattern = self
-            .app
-            .state
-            .pattern
-            .current_pattern
-            .load(Ordering::Relaxed) as usize;
-        {
-            let mut bank = self.app.state.pattern.pattern_bank.lock().unwrap();
-            let Some(pattern) = bank.get_mut(current_pattern) else {
-                return Err("current pattern is missing".to_string());
-            };
-            pattern.mod_connections.retain(|connection| {
+        self.app.state.edit_current_mod_connections(|connections| {
+            connections.retain(|connection| {
                 connection.source_track != source_track
                     || connection.dest_track != dest_track
                     || connection.dest_input != dest_input
             });
-        }
+            Ok(())
+        })?;
         self.sync_current_pattern_mod_routes();
         Ok(())
     }
@@ -1136,18 +1103,10 @@ impl GraphController<'_> {
             .transport
             .num_tracks
             .store(0, Ordering::Release);
-        self.app
-            .state
-            .pattern
-            .current_pattern
-            .store(0, Ordering::Relaxed);
-        self.app
-            .state
-            .pattern
-            .num_patterns
-            .store(1, Ordering::Relaxed);
-        *self.app.state.pattern.pattern_bank.lock().unwrap() =
-            vec![crate::sequencer::PatternSnapshot::new_default(0, &[])];
+        self.app.state.replace_pattern_repository(
+            vec![crate::sequencer::PatternSnapshot::new_default(0, &[])],
+            0,
+        );
         self.app
             .state
             .transport
@@ -1550,29 +1509,9 @@ impl GraphController<'_> {
             last_slot.clear();
         }
 
-        let current_pattern = self
-            .app
+        self.app
             .state
-            .pattern
-            .current_pattern
-            .load(Ordering::Relaxed) as usize;
-        let current_snapshot = self.app.state.capture_current_pattern_snapshot(
-            self.app.tracks.len(),
-            &self.app.graph.track_buffer_ids,
-            &self.app.graph.track_sample_rates,
-            &self.app.tracks,
-            &self.app.graph.track_instrument_types,
-        );
-        {
-            let mut bank = self.app.state.pattern.pattern_bank.lock().unwrap();
-            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-                if pattern_idx == current_pattern {
-                    *snapshot = current_snapshot.clone();
-                } else {
-                    snapshot.remove_effect_slot(track_idx, slot_idx);
-                }
-            }
-        }
+            .remove_effect_slot_from_track_patterns(track_idx, slot_idx);
 
         self.app.state.publish_scheduler_snapshot();
         self.app.refresh_effect_sidechain_labels();
@@ -2139,25 +2078,14 @@ impl GraphController<'_> {
         self.app.state.runtime.instrument_run_mode_flags[track]
             .store(normalized_mode.runtime_flag(), Ordering::Release);
 
-        let current_pattern = self
-            .app
+        self.app
             .state
-            .pattern
-            .current_pattern
-            .load(Ordering::Relaxed) as usize;
-        if let Some(snapshot) = self
-            .app
-            .state
-            .pattern
-            .pattern_bank
-            .lock()
-            .unwrap()
-            .get_mut(current_pattern)
-        {
-            snapshot
-                .normalize_track_count(self.app.tracks.len(), &self.app.graph.effect_descriptors);
-            snapshot.instrument_run_modes[track] = normalized_mode;
-        }
+            .normalize_current_pattern_instrument_run_mode(
+                self.app.tracks.len(),
+                &self.app.graph.effect_descriptors,
+                track,
+                normalized_mode,
+            );
         if normalized_mode == CustomInstrumentRunMode::FreePatch {
             self.apply_free_patch_idle_voice(track)?;
         } else {
@@ -3455,23 +3383,26 @@ impl GraphController<'_> {
             }
         }
 
-        let mut bank = self.app.state.pattern.pattern_bank.lock().unwrap();
-        for snap in bank.iter_mut() {
-            snap.extend_to_tracks(idx + 1, &self.app.graph.effect_descriptors);
-            if let Some(mode) = snap.instrument_run_modes.get_mut(idx) {
-                *mode = run_mode;
-            }
-            if instrument_type == InstrumentType::Custom
-                || instrument_type == InstrumentType::Modulator
-            {
-                let desc = self.app.graph.instrument_descriptors[idx].clone();
-                let node_id = self.app.state.pattern.instrument_slots[idx]
-                    .node_id
-                    .load(Ordering::Relaxed);
-                snap.sync_instrument_slot(idx, &desc, node_id, instrument_type);
-            }
-        }
-        drop(bank);
+        let instrument_snapshot = if instrument_type == InstrumentType::Custom
+            || instrument_type == InstrumentType::Modulator
+        {
+            let desc = self.app.graph.instrument_descriptors[idx].clone();
+            let node_id = self.app.state.pattern.instrument_slots[idx]
+                .node_id
+                .load(Ordering::Relaxed);
+            Some((desc, node_id, instrument_type))
+        } else {
+            None
+        };
+        self.app.state.extend_all_pattern_snapshots_to_track(
+            idx + 1,
+            &self.app.graph.effect_descriptors,
+            idx,
+            run_mode,
+            instrument_snapshot
+                .as_ref()
+                .map(|(desc, node_id, instrument_type)| (desc, *node_id, *instrument_type)),
+        );
         self.app.refresh_effect_sidechain_labels();
 
         self.app

@@ -508,22 +508,7 @@ impl App {
         self.state.pattern.track_params[track].set_midi_fx_chain(chain);
         self.state.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(&desc, 0);
 
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = self.state.capture_current_pattern_snapshot(
-            self.tracks.len(),
-            &self.graph.track_buffer_ids,
-            &self.graph.track_sample_rates,
-            &self.tracks,
-            &self.graph.track_instrument_types,
-        );
-        {
-            let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-                if pattern_idx == current_pattern {
-                    *snapshot = current_snapshot.clone();
-                }
-            }
-        }
+        self.state.save_current_track_midi_fx_snapshot(track);
 
         self.state.publish_scheduler_snapshot();
         Ok(slot_idx)
@@ -549,24 +534,8 @@ impl App {
             last_slot.clear();
         }
 
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = self.state.capture_current_pattern_snapshot(
-            self.tracks.len(),
-            &self.graph.track_buffer_ids,
-            &self.graph.track_sample_rates,
-            &self.tracks,
-            &self.graph.track_instrument_types,
-        );
-        {
-            let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-                if pattern_idx == current_pattern {
-                    *snapshot = current_snapshot.clone();
-                } else {
-                    snapshot.remove_midi_fx_slot(track, slot_idx);
-                }
-            }
-        }
+        self.state
+            .remove_midi_fx_slot_from_track_patterns(track, slot_idx);
 
         self.state.publish_scheduler_snapshot();
         Ok(())
@@ -703,34 +672,21 @@ impl App {
     }
 
     fn publish_effect_reorder(&mut self) {
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = self.state.capture_current_pattern_snapshot(
+        self.state.save_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
             &self.graph.track_sample_rates,
             &self.tracks,
             &self.graph.track_instrument_types,
         );
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx == current_pattern {
-                *snapshot = current_snapshot.clone();
-            }
-        }
-        drop(bank);
         self.state.publish_scheduler_snapshot();
         self.refresh_effect_sidechain_labels();
         self.push_all_restored_defaults();
     }
 
     fn sync_other_pattern_effect_insert(&mut self, track: usize, slot_idx: usize) {
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx != current_pattern {
-                snapshot.insert_empty_effect_slot(track, slot_idx);
-            }
-        }
+        self.state
+            .insert_effect_slot_in_other_track_patterns(track, slot_idx);
     }
 
     fn sync_other_pattern_effect_move(
@@ -739,13 +695,8 @@ impl App {
         source_slot: usize,
         target_slot: usize,
     ) {
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx != current_pattern {
-                snapshot.move_effect_slot_to(track, source_slot, target_slot);
-            }
-        }
+        self.state
+            .move_effect_slot_in_other_track_patterns(track, source_slot, target_slot);
     }
 
     fn sync_other_pattern_midi_fx_insert(
@@ -755,13 +706,8 @@ impl App {
         name: String,
         desc: &EffectDescriptor,
     ) {
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx != current_pattern {
-                snapshot.insert_midi_fx_slot(track, slot_idx, name.clone(), desc);
-            }
-        }
+        self.state
+            .insert_midi_fx_slot_in_other_track_patterns(track, slot_idx, name, desc);
     }
 
     fn sync_other_pattern_midi_fx_move(
@@ -770,17 +716,12 @@ impl App {
         source_slot: usize,
         target_slot: usize,
     ) {
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx != current_pattern {
-                snapshot.move_midi_fx_slot_to(track, source_slot, target_slot);
-            }
-        }
+        self.state
+            .move_midi_fx_slot_in_other_track_patterns(track, source_slot, target_slot);
     }
 
     fn sync_other_bus_pattern_effect_insert(&mut self, bus_idx: usize, slot_idx: usize) {
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_pattern = self.state.current_scene_index();
         self.ensure_bus_pattern_bank_len(current_pattern + 1);
         for (pattern_idx, buses) in self.bus_pattern_bank.iter_mut().enumerate() {
             if pattern_idx == current_pattern {
@@ -803,7 +744,7 @@ impl App {
         source_slot: usize,
         target_slot: usize,
     ) {
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_pattern = self.state.current_scene_index();
         self.ensure_bus_pattern_bank_len(current_pattern + 1);
         for (pattern_idx, buses) in self.bus_pattern_bank.iter_mut().enumerate() {
             if pattern_idx == current_pattern {
@@ -1409,28 +1350,14 @@ impl App {
             modulator_node_id.unwrap_or(0) as u32,
         );
 
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = self.state.capture_current_pattern_snapshot(
-            self.tracks.len(),
-            &self.graph.track_buffer_ids,
-            &self.graph.track_sample_rates,
-            &self.tracks,
-            &self.graph.track_instrument_types,
-        );
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx == current_pattern {
-                *snapshot = current_snapshot.clone();
-            } else {
-                snapshot.sync_effect_slot_with_modulator(
-                    track,
-                    slot_idx,
-                    &desc,
-                    node_id as u32,
-                    modulator_node_id.unwrap_or(0) as u32,
-                );
-            }
-        }
+        self.state
+            .sync_effect_slot_with_modulator_in_track_patterns(
+                track,
+                slot_idx,
+                &desc,
+                node_id as u32,
+                modulator_node_id.unwrap_or(0) as u32,
+            );
     }
 
     pub(super) fn load_builtin_effect_to_slot_sync(
@@ -1973,30 +1900,15 @@ impl App {
             );
         }
 
-        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = self.state.capture_current_pattern_snapshot(
-            self.tracks.len(),
-            &self.graph.track_buffer_ids,
-            &self.graph.track_sample_rates,
-            &self.tracks,
-            &self.graph.track_instrument_types,
-        );
         let desc = self.graph.effect_descriptors[track][slot_idx].clone();
-        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
-        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-            if pattern_idx == current_pattern {
-                *snapshot = current_snapshot.clone();
-            } else {
-                snapshot.sync_effect_slot_with_modulator(
-                    track,
-                    slot_idx,
-                    &desc,
-                    node_ids.effect_node_id as u32,
-                    node_ids.modulator_node_id.unwrap_or(0) as u32,
-                );
-            }
-        }
-        drop(bank);
+        self.state
+            .sync_effect_slot_with_modulator_in_track_patterns(
+                track,
+                slot_idx,
+                &desc,
+                node_ids.effect_node_id as u32,
+                node_ids.modulator_node_id.unwrap_or(0) as u32,
+            );
 
         self.push_track_effect_slot_defaults(track, slot_idx);
         self.push_all_delay_bpm();

@@ -259,12 +259,9 @@ pub(crate) fn init_runtime(
                 ("delete-target-version", Value::Number(0.0)),
                 (
                     "current-pattern",
-                    Value::Number(state.pattern.current_pattern.load(Ordering::Relaxed) as f64),
+                    Value::Number(state.current_scene_index() as f64),
                 ),
-                (
-                    "num-patterns",
-                    Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
-                ),
+                ("num-patterns", Value::Number(state.scene_count() as f64)),
                 ("neural-networks", build_neural_networks_value(&state)),
                 (
                     "selected-neural-neurons",
@@ -929,20 +926,11 @@ pub(crate) fn init_runtime(
                 if current_buffer != "*mixer*" {
                     return Ok(Value::Bool(false));
                 }
-                let current_pattern = st.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-                let route_exists = st
-                    .pattern
-                    .pattern_bank
-                    .lock()
-                    .unwrap()
-                    .get(current_pattern)
-                    .is_some_and(|pattern| {
-                        pattern.mod_connections.iter().any(|route| {
-                            route.source_track == source
-                                && route.dest_track == dest
-                                && route.dest_input == input
-                        })
-                    });
+                let route_exists = st.current_mod_connections().iter().any(|route| {
+                    route.source_track == source
+                        && route.dest_track == dest
+                        && route.dest_input == input
+                });
                 if !route_exists {
                     let mut guard = delete_target.lock().unwrap();
                     if guard.take().is_some() {

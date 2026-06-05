@@ -1092,7 +1092,7 @@ fn sync_selected_neural_neuron_bindings(
             sequencer::lisp_effect::selected_neural_neurons_to_value(selection),
         )
         .effects_dirty;
-    let pattern_idx = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let pattern_idx = state.current_scene_index();
     for network in state.current_neural_networks() {
         let neuron_count = network.num_neurons.min(sequencer::neural::NUM_NEURONS);
         for neuron_idx in 0..neuron_count {
@@ -8555,11 +8555,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let mut reactive_elapsed = Duration::ZERO;
                                 let mut side_effects_elapsed = Duration::ZERO;
                                 let num_tracks = app.tracks.len();
-                                let current_pattern =
-                                    app.state.pattern.current_pattern.load(Ordering::Relaxed)
-                                        as usize;
-                                let num_patterns =
-                                    app.state.pattern.num_patterns.load(Ordering::Relaxed) as usize;
+                                let current_pattern = app.state.current_scene_index();
+                                let num_patterns = app.state.scene_count();
                                 if idx != current_pattern && idx < num_patterns {
                                     let started = Instant::now();
                                     app.switch_bus_pattern(idx);
@@ -8744,8 +8741,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Value::Number(n) => n as usize,
                             _ => current_track.load(Ordering::Relaxed),
                         };
-                        let num_patterns =
-                            state.pattern.num_patterns.load(Ordering::Relaxed) as usize;
+                        let num_patterns = state.scene_count();
                         if track >= app.tracks.len() {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Track {} is out of range",
@@ -8778,8 +8774,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "clone-pattern" => {
                         let num_tracks = app.tracks.len();
                         app.save_current_bus_pattern();
-                        let source_pattern =
-                            app.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+                        let source_pattern = app.state.current_scene_index();
                         let new_idx = app.state.clone_pattern(
                             num_tracks,
                             &app.graph.track_buffer_ids,
@@ -8803,8 +8798,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "delete-pattern" => {
                         let num_tracks = app.tracks.len();
                         app.save_current_bus_pattern();
-                        let deleted_pattern =
-                            app.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+                        let deleted_pattern = app.state.current_scene_index();
                         if let Some(sample_ids) = app.state.delete_pattern(
                             num_tracks,
                             &app.graph.track_buffer_ids,
@@ -8815,8 +8809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.graph_controller().apply_sample_ids(&sample_ids);
                             app.graph_controller().sync_current_pattern_mod_routes();
                             app.push_all_restored_defaults();
-                            let new_pattern =
-                                app.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+                            let new_pattern = app.state.current_scene_index();
                             app.delete_bus_pattern_at(deleted_pattern, new_pattern);
                             let ct = current_track.load(Ordering::Relaxed);
                             let rt = editor.runtime_mut();
