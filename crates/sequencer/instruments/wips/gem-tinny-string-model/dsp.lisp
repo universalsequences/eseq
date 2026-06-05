@@ -59,7 +59,7 @@
 
 ; ── Safe Pitch Clamping ──
 (def safe_pitch (max pitch 35.0))
-(def delay_nominal (/ 44100.0 safe_pitch))
+(def delay_nominal (/ samplerate safe_pitch))
 
 ; ── Trigger & Note-On Action Detector ──
 (make-history gate_hist)
@@ -116,8 +116,8 @@
 
 ; String A (nominal pitch)
 (def lp_freq_a     (max (* safe_pitch 1.4) (+ 150.0 (* eff_bright 16500.0))))
-(def exp_a         (exp (/ (* -1.0 twopi lp_freq_a) 44100.0)))
-(def cos_term_a    (cos (* (/ safe_pitch 44100.0) twopi)))
+(def exp_a         (exp (/ (* -1.0 twopi lp_freq_a) samplerate)))
+(def cos_term_a    (cos (* (/ safe_pitch samplerate) twopi)))
 (def mag_sq_a      (max 0.000001 (+ 1.0 (* exp_a exp_a) (* -2.0 exp_a cos_term_a))))
 (def mag_h_a       (/ (- 1.0 exp_a) (sqrt mag_sq_a)))
 (def stretch_a     (min 0.99999
@@ -129,10 +129,10 @@
 ; String B (micro-detuned)
 (def detune_ratio  (+ 1.0 (* unison_detune 0.00015)))
 (def pitch_b       (* safe_pitch detune_ratio))
-(def delay_nominal_b (/ 44100.0 pitch_b))
+(def delay_nominal_b (/ samplerate pitch_b))
 (def lp_freq_b     (max (* pitch_b 1.4) (+ 150.0 (* eff_bright 16500.0))))
-(def exp_b         (exp (/ (* -1.0 twopi lp_freq_b) 44100.0)))
-(def cos_term_b    (cos (* (/ pitch_b 44100.0) twopi)))
+(def exp_b         (exp (/ (* -1.0 twopi lp_freq_b) samplerate)))
+(def cos_term_b    (cos (* (/ pitch_b samplerate) twopi)))
 (def mag_sq_b      (max 0.000001 (+ 1.0 (* exp_b exp_b) (* -2.0 exp_b cos_term_b))))
 (def mag_h_b       (/ (- 1.0 exp_b) (sqrt mag_sq_b)))
 (def stretch_b     (min 0.99999
@@ -158,8 +158,8 @@
 (def sym_amt        (clip (mod sympathetic) 0 1))
 (def halo_pitch     (* safe_pitch 1.0003)) ; slight detuning for build-up bloom
 (def halo_lp_freq   (max (* halo_pitch 1.6) (+ 280.0 (* eff_bright 5500.0))))
-(def halo_exp       (exp (/ (* -1.0 twopi halo_lp_freq) 44100.0)))
-(def halo_cos_term  (cos (* (/ halo_pitch 44100.0) twopi)))
+(def halo_exp       (exp (/ (* -1.0 twopi halo_lp_freq) samplerate)))
+(def halo_cos_term  (cos (* (/ halo_pitch samplerate) twopi)))
 (def halo_mag_sq    (max 0.000001 (+ 1.0 (* halo_exp halo_exp) (* -2.0 halo_exp halo_cos_term))))
 (def halo_mag_h     (/ (- 1.0 halo_exp) (sqrt halo_mag_sq)))
 (def halo_sustain   (max 1.2 (* scaled_sustain 1.3)))
@@ -167,7 +167,7 @@
                       (/ (pow 0.001 (/ 1.0 (* halo_sustain halo_pitch)))
                          halo_mag_h)))
 (def halo_group_dly (/ halo_exp (max 0.001 (- 1.0 halo_exp))))
-(def halo_delay_len (max 1.5 (- (/ 44100.0 halo_pitch) halo_group_dly)))
+(def halo_delay_len (max 1.5 (- (/ samplerate halo_pitch) halo_group_dly)))
 
 (make-history halo_hist)
 (def halo_prev      (read-history halo_hist))

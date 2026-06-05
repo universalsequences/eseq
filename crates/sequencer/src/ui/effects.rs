@@ -1950,8 +1950,9 @@ impl App {
         manifest: &lisp_effect::DGenManifest,
     ) {
         let old_desc = self.graph.effect_descriptors[track][slot_idx].clone();
-        let preserve_by_param_name =
-            old_desc.name == name && self.state.pattern.effect_chains[track][slot_idx].node_id
+        let preserve_by_param_name = old_desc.name == name
+            && self.state.pattern.effect_chains[track][slot_idx]
+                .node_id
                 .load(Ordering::Relaxed)
                 != 0;
         let desc = self.build_effect_descriptor(track, name, manifest);

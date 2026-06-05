@@ -1,5 +1,6 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use crate::neural::ParamNodeId;
 use crate::sequencer::MAX_STEPS;
 
 /// Baseline storage capacity for per-slot defaults, p-locks, and node mappings.
@@ -251,7 +252,11 @@ fn param_kinds_are_compatible(old: &ParamKind, new: &ParamKind) -> bool {
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use super::{EffectDescriptor, EffectSlotState, ParamDescriptor, ParamKind, ParamScaling};
+    use super::{
+        EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
+        ParamScaling,
+    };
+    use crate::neural::ParamNodeId;
 
     #[test]
     fn denormalize_boolean_snaps_to_zero_or_one() {
@@ -320,11 +325,65 @@ mod tests {
 
         let slot = EffectSlotState::new(&desc, 100);
         slot.defaults.set(149, 7.5);
-        slot.plocks.set(3, 149, -4.25);
+        slot.set_plock(3, 149, -4.25);
 
         assert_eq!(slot.defaults.get(149), 7.5);
         assert_eq!(slot.plocks.get(3, 149), Some(-4.25));
         assert_eq!(slot.resolve_node_idx(149), 1_149);
+    }
+
+    #[test]
+    fn sync_to_descriptor_rebinds_loaded_plock_ids_to_live_node_id() {
+        let desc = EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![ParamDescriptor {
+                name: "cutoff".to_string(),
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 15,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+        };
+        let mut snapshot = EffectSlotSnapshot {
+            node_id: 10,
+            modulator_node_id: 0,
+            num_params: 1,
+            defaults: vec![0.2],
+            plocks: (0..crate::sequencer::MAX_STEPS)
+                .map(|_| vec![None])
+                .collect(),
+            plock_param_ids: (0..crate::sequencer::MAX_STEPS)
+                .map(|_| vec![None])
+                .collect(),
+            param_node_indices: vec![15],
+            param_node_spans: vec![1],
+            ir: None,
+        };
+        snapshot.plocks[3][0] = Some(0.9);
+        snapshot.plock_param_ids[3][0] = Some(ParamNodeId {
+            logical_id: 10,
+            node_param_idx: 15,
+        });
+
+        snapshot.sync_to_descriptor(&desc, 42);
+
+        assert_eq!(snapshot.plocks[3][0], Some(0.9));
+        assert_eq!(
+            snapshot.plock_param_ids[3][0],
+            Some(ParamNodeId {
+                logical_id: 42,
+                node_param_idx: 15,
+            })
+        );
     }
 
     #[test]
@@ -355,7 +414,7 @@ mod tests {
         let slot = EffectSlotState::empty();
         slot.apply_descriptor(&desc, 100);
         slot.defaults.set(149, 6.25);
-        slot.plocks.set(7, 149, -3.5);
+        slot.set_plock(7, 149, -3.5);
 
         assert_eq!(slot.defaults.get(149), 6.25);
         assert_eq!(slot.plocks.get(7, 149), Some(-3.5));
@@ -434,8 +493,8 @@ mod tests {
         let slot = EffectSlotState::new(&original, 100);
         slot.defaults.set(0, 0.42);
         slot.defaults.set(1, 0.73);
-        slot.plocks.set(3, 0, 0.33);
-        slot.plocks.set(4, 1, 0.66);
+        slot.set_plock(3, 0, 0.33);
+        slot.set_plock(4, 1, 0.66);
 
         slot.sync_descriptor(&rebound, 200);
 
@@ -524,8 +583,8 @@ mod tests {
         let slot = EffectSlotState::new(&original, 100);
         slot.defaults.set(0, 880.0);
         slot.defaults.set(1, 0.73);
-        slot.plocks.set(3, 0, 440.0);
-        slot.plocks.set(4, 1, 0.66);
+        slot.set_plock(3, 0, 440.0);
+        slot.set_plock(4, 1, 0.66);
 
         slot.sync_descriptor_by_param_name(&original, &rebound, 200);
 
@@ -614,8 +673,8 @@ mod tests {
         let slot = EffectSlotState::new(&original, 100);
         slot.defaults.set(0, 2.0);
         slot.defaults.set(1, 7.0);
-        slot.plocks.set(3, 0, 1.0);
-        slot.plocks.set(4, 1, 8.0);
+        slot.set_plock(3, 0, 1.0);
+        slot.set_plock(4, 1, 8.0);
 
         slot.sync_descriptor_by_param_name(&original, &rebound, 200);
 
@@ -2801,6 +2860,8 @@ impl EffectDescriptor {
 /// No internal clamping — callers pass clamped values.
 pub struct SlotPLockData {
     data: Vec<AtomicU32>,
+    id_logical_ids: Vec<AtomicU64>,
+    id_node_param_indices: Vec<AtomicU32>,
     max_params: usize,
 }
 
@@ -2808,7 +2869,15 @@ impl SlotPLockData {
     pub fn new(max_params: usize) -> Self {
         let size = MAX_STEPS * max_params;
         let data: Vec<AtomicU32> = (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect();
-        Self { data, max_params }
+        let id_logical_ids: Vec<AtomicU64> = (0..size).map(|_| AtomicU64::new(0)).collect();
+        let id_node_param_indices: Vec<AtomicU32> =
+            (0..size).map(|_| AtomicU32::new(u32::MAX)).collect();
+        Self {
+            data,
+            id_logical_ids,
+            id_node_param_indices,
+            max_params,
+        }
     }
 
     fn index(&self, step: usize, param_idx: usize) -> usize {
@@ -2833,6 +2902,34 @@ impl SlotPLockData {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
             self.data[idx].store(val.to_bits(), Ordering::Relaxed);
+            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        }
+    }
+
+    pub fn set_with_id(&self, step: usize, param_idx: usize, val: f32, param_id: ParamNodeId) {
+        let idx = self.index(step, param_idx);
+        if idx < self.data.len() {
+            self.data[idx].store(val.to_bits(), Ordering::Relaxed);
+            self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
+        }
+    }
+
+    pub fn get_id(&self, step: usize, param_idx: usize) -> Option<ParamNodeId> {
+        let idx = self.index(step, param_idx);
+        if idx >= self.data.len() {
+            return None;
+        }
+        let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+        let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+        if logical_id == 0 || node_param_idx == u32::MAX {
+            None
+        } else {
+            Some(ParamNodeId {
+                logical_id,
+                node_param_idx,
+            })
         }
     }
 
@@ -2841,6 +2938,8 @@ impl SlotPLockData {
             let idx = self.index(step, p);
             if idx < self.data.len() {
                 self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
             }
         }
     }
@@ -2849,6 +2948,8 @@ impl SlotPLockData {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
             self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
@@ -2969,6 +3070,43 @@ impl EffectSlotState {
         }
     }
 
+    pub fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {
+        let raw_idx = self
+            .param_node_indices
+            .get(param_idx)?
+            .load(Ordering::Relaxed);
+        if raw_idx == u32::MAX {
+            return None;
+        }
+        if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+            let logical_id = self.modulator_node_id.load(Ordering::Relaxed) as u64;
+            if logical_id == 0 {
+                return None;
+            }
+            Some(ParamNodeId {
+                logical_id,
+                node_param_idx: raw_idx - crate::voice_modulator::MOD_PARAM_BASE,
+            })
+        } else {
+            let logical_id = self.node_id.load(Ordering::Relaxed) as u64;
+            if logical_id == 0 {
+                return None;
+            }
+            Some(ParamNodeId {
+                logical_id,
+                node_param_idx: raw_idx,
+            })
+        }
+    }
+
+    pub fn set_plock(&self, step: usize, param_idx: usize, val: f32) {
+        if let Some(param_id) = self.param_node_id(param_idx) {
+            self.plocks.set_with_id(step, param_idx, val, param_id);
+        } else {
+            self.plocks.set(step, param_idx, val);
+        }
+    }
+
     /// Create an empty slot (no effect loaded).
     pub fn empty() -> Self {
         Self {
@@ -3012,6 +3150,16 @@ impl EffectSlotState {
     /// Rebind this live slot to the current graph descriptor/node while
     /// preserving the stored defaults and p-locks as far as possible.
     pub fn sync_descriptor(&self, desc: &EffectDescriptor, node_id: u32) {
+        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
+        self.sync_descriptor_with_modulator(desc, node_id, modulator_node_id);
+    }
+
+    pub fn sync_descriptor_with_modulator(
+        &self,
+        desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
         let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
         let preserve = old_num_params.min(desc.params.len());
 
@@ -3021,15 +3169,18 @@ impl EffectSlotState {
         }
 
         let mut saved_plocks = Vec::with_capacity(MAX_STEPS);
+        let mut saved_plock_ids = Vec::with_capacity(MAX_STEPS);
         for step in 0..MAX_STEPS {
             let mut step_plocks = Vec::with_capacity(preserve);
+            let mut step_ids = Vec::with_capacity(preserve);
             for param_idx in 0..preserve {
                 step_plocks.push(self.plocks.get(step, param_idx));
+                step_ids.push(self.plocks.get_id(step, param_idx));
             }
             saved_plocks.push(step_plocks);
+            saved_plock_ids.push(step_ids);
         }
 
-        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
         self.apply_descriptor_with_modulator(desc, node_id, modulator_node_id);
 
         for param_idx in 0..preserve {
@@ -3038,7 +3189,13 @@ impl EffectSlotState {
         for step in 0..MAX_STEPS {
             for param_idx in 0..preserve {
                 match saved_plocks[step][param_idx] {
-                    Some(value) => self.plocks.set(step, param_idx, value),
+                    Some(value) => {
+                        if let Some(param_id) = saved_plock_ids[step][param_idx] {
+                            self.plocks.set_with_id(step, param_idx, value, param_id);
+                        } else {
+                            self.plocks.set(step, param_idx, value);
+                        }
+                    }
                     None => self.plocks.clear_param(step, param_idx),
                 }
             }
@@ -3057,6 +3214,22 @@ impl EffectSlotState {
         old_desc: &EffectDescriptor,
         new_desc: &EffectDescriptor,
         node_id: u32,
+    ) {
+        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
+        self.sync_descriptor_by_param_name_with_modulator(
+            old_desc,
+            new_desc,
+            node_id,
+            modulator_node_id,
+        );
+    }
+
+    pub fn sync_descriptor_by_param_name_with_modulator(
+        &self,
+        old_desc: &EffectDescriptor,
+        new_desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
     ) {
         let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
         let mut migrated = Vec::new();
@@ -3093,7 +3266,6 @@ impl EffectSlotState {
             migrated.push((new_idx, default, plocks));
         }
 
-        let modulator_node_id = self.modulator_node_id.load(Ordering::Relaxed);
         self.apply_descriptor_with_modulator(new_desc, node_id, modulator_node_id);
         for step in 0..MAX_STEPS {
             for param_idx in 0..MAX_SLOT_PARAMS {
@@ -3106,7 +3278,7 @@ impl EffectSlotState {
                 self.defaults.set(new_idx, value);
             }
             for (step, value) in plocks {
-                self.plocks.set(step, new_idx, value);
+                self.set_plock(step, new_idx, value);
             }
         }
         self.recompute_modulation_active_params(new_desc);
@@ -3153,8 +3325,7 @@ impl EffectSlotState {
                             .abs()
                             > f32::EPSILON
                     });
-                    self.plocks
-                        .set(step, active_idx, if active { 1.0 } else { 0.0 });
+                    self.set_plock(step, active_idx, if active { 1.0 } else { 0.0 });
                 } else {
                     self.plocks.clear_param(step, active_idx);
                 }
@@ -3221,6 +3392,7 @@ pub struct EffectSlotSnapshot {
     pub num_params: u32,
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
+    pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
     /// Convolution Reverb IR reference (sample hash/stem) carried through
@@ -3241,12 +3413,16 @@ impl EffectSlotSnapshot {
         }
 
         let mut plocks = Vec::with_capacity(MAX_STEPS);
+        let mut plock_param_ids = Vec::with_capacity(MAX_STEPS);
         for s in 0..MAX_STEPS {
             let mut step_plocks = Vec::with_capacity(np);
+            let mut step_param_ids = Vec::with_capacity(np);
             for i in 0..np {
                 step_plocks.push(slot.plocks.get(s, i));
+                step_param_ids.push(slot.plocks.get_id(s, i));
             }
             plocks.push(step_plocks);
+            plock_param_ids.push(step_param_ids);
         }
 
         let mut param_node_indices = Vec::with_capacity(np);
@@ -3270,6 +3446,7 @@ impl EffectSlotSnapshot {
             num_params,
             defaults,
             plocks,
+            plock_param_ids,
             param_node_indices,
             param_node_spans,
             ir: crate::conv_reverb::ir_ref_for(node_id as i32),
@@ -3302,7 +3479,19 @@ impl EffectSlotSnapshot {
                 for i in 0..np {
                     if i < self.plocks[s].len() {
                         match self.plocks[s][i] {
-                            Some(val) => slot.plocks.set(s, i, val),
+                            Some(val) => {
+                                if let Some(param_id) = self
+                                    .plock_param_ids
+                                    .get(s)
+                                    .and_then(|step| step.get(i))
+                                    .copied()
+                                    .flatten()
+                                {
+                                    slot.plocks.set_with_id(s, i, val, param_id);
+                                } else {
+                                    slot.plocks.set(s, i, val);
+                                }
+                            }
                             None => slot.plocks.clear_param(s, i),
                         }
                     }
@@ -3336,6 +3525,7 @@ impl EffectSlotSnapshot {
             num_params: np as u32,
             defaults,
             plocks,
+            plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; np]).collect(),
             param_node_indices,
             param_node_spans,
             ir: None,
@@ -3349,6 +3539,7 @@ impl EffectSlotSnapshot {
             num_params: 0,
             defaults: Vec::new(),
             plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+            plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             param_node_indices: Vec::new(),
             param_node_spans: Vec::new(),
             ir: None,
@@ -3384,6 +3575,7 @@ impl EffectSlotSnapshot {
             .map(|p| p.node_param_span.max(1))
             .collect();
         self.plocks = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
+        self.plock_param_ids = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
 
         let preserve = old_defaults.len().min(new_np);
         for i in 0..preserve {
@@ -3393,6 +3585,13 @@ impl EffectSlotSnapshot {
             if let Some(saved_step) = old_plocks.get(step) {
                 for param_idx in 0..preserve.min(saved_step.len()) {
                     self.plocks[step][param_idx] = saved_step[param_idx];
+                    self.plock_param_ids[step][param_idx] = self
+                        .param_node_indices
+                        .get(param_idx)
+                        .copied()
+                        .and_then(|raw_idx| {
+                            ParamNodeId::from_slot_param(node_id, modulator_node_id, raw_idx)
+                        });
                 }
             }
         }

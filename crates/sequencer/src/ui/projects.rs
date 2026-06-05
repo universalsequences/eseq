@@ -5,6 +5,7 @@ use std::time::Instant;
 use crossterm::event::KeyCode;
 
 use crate::effects::{EffectDescriptor, BUILTIN_SLOT_COUNT};
+use crate::neural::ParamNodeId;
 use crate::project::{
     self, chord_snapshot_from_steps_durations_and_delays, project_file_version, ProjectBusChannel,
     ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
@@ -22,9 +23,110 @@ fn project_slot_into_synced_snapshot(
     desc: &EffectDescriptor,
     node_id: u32,
 ) -> crate::effects::EffectSlotSnapshot {
-    let mut snapshot = slot.into_snapshot_with_node_id(node_id);
-    snapshot.sync_to_descriptor(desc, node_id);
+    project_slot_into_synced_snapshot_with_modulator(slot, desc, node_id, 0)
+}
+
+fn project_slot_into_synced_snapshot_with_modulator(
+    slot: project::ProjectEffectSlot,
+    desc: &EffectDescriptor,
+    node_id: u32,
+    modulator_node_id: u32,
+) -> crate::effects::EffectSlotSnapshot {
+    let mut snapshot = slot.into_snapshot_with_node_ids(node_id, modulator_node_id);
+    snapshot.sync_to_descriptor_with_modulator(desc, node_id, modulator_node_id);
     snapshot
+}
+
+fn project_midi_fx_slot_into_synced_snapshot(
+    slot: project::ProjectEffectSlot,
+    fx_name: Option<&str>,
+) -> crate::effects::EffectSlotSnapshot {
+    if let Some(desc) = fx_name.and_then(crate::lisp_effect::load_midi_fx_descriptor) {
+        project_slot_into_synced_snapshot(slot, &desc, 0)
+    } else {
+        slot.into_snapshot_with_node_id(0)
+    }
+}
+
+fn slot_param_node_relative_idx(raw_idx: u32) -> Option<u32> {
+    if raw_idx == u32::MAX {
+        return None;
+    }
+    Some(if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        raw_idx - crate::voice_modulator::MOD_PARAM_BASE
+    } else {
+        raw_idx
+    })
+}
+
+fn refreshed_slot_param_id(
+    slot: &crate::effects::EffectSlotSnapshot,
+    saved_param_idx: usize,
+    saved_param_id: ParamNodeId,
+) -> Option<(usize, ParamNodeId)> {
+    let live_param_id = |param_idx: usize| {
+        let raw_idx = slot.param_node_indices.get(param_idx).copied()?;
+        let node_relative_idx = slot_param_node_relative_idx(raw_idx)?;
+        (node_relative_idx == saved_param_id.node_param_idx)
+            .then(|| ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, raw_idx))?
+    };
+
+    if let Some(param_id) = live_param_id(saved_param_idx) {
+        return Some((saved_param_idx, param_id));
+    }
+
+    let matches = slot
+        .param_node_indices
+        .iter()
+        .enumerate()
+        .filter_map(|(param_idx, raw_idx)| {
+            let node_relative_idx = slot_param_node_relative_idx(*raw_idx)?;
+            (node_relative_idx == saved_param_id.node_param_idx).then(|| {
+                ParamNodeId::from_slot_param(slot.node_id, slot.modulator_node_id, *raw_idx)
+                    .map(|param_id| (param_idx, param_id))
+            })?
+        })
+        .collect::<Vec<_>>();
+
+    (matches.len() == 1).then(|| matches[0])
+}
+
+fn refresh_neural_output_override_param_ids(snapshot: &mut PatternSnapshot) {
+    for network in &mut snapshot.neural_networks {
+        for neuron in &mut network.neurons {
+            for override_param in &mut neuron.output_overrides.instrument {
+                let Some(slot) = snapshot.instrument_slots.get(override_param.target_track) else {
+                    continue;
+                };
+                if let Some((param_index, param_id)) = refreshed_slot_param_id(
+                    slot,
+                    override_param.param_index,
+                    override_param.param_id,
+                ) {
+                    override_param.param_index = param_index;
+                    override_param.param_id = param_id;
+                }
+            }
+
+            for override_param in &mut neuron.output_overrides.effects {
+                let Some(slot) = snapshot
+                    .effect_slots
+                    .get(override_param.target_track)
+                    .and_then(|slots| slots.get(override_param.slot_index))
+                else {
+                    continue;
+                };
+                if let Some((param_index, param_id)) = refreshed_slot_param_id(
+                    slot,
+                    override_param.param_index,
+                    override_param.param_id,
+                ) {
+                    override_param.param_index = param_index;
+                    override_param.param_id = param_id;
+                }
+            }
+        }
+    }
 }
 
 fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffectSlot {
@@ -33,6 +135,7 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
         num_params: num_params as u32,
         defaults: desc.params.iter().map(|param| param.default).collect(),
         plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+        plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
         param_node_indices: desc
             .params
             .iter()
@@ -237,9 +340,15 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     slot: project::ProjectEffectSlot,
     desc: &crate::effects::EffectDescriptor,
     node_id: u32,
+    modulator_node_id: u32,
 ) -> crate::effects::EffectSlotSnapshot {
     if project_slot_matches_descriptor_param_layout(&slot, desc) {
-        let mut snapshot = project_slot_into_synced_snapshot(slot, desc, node_id);
+        let mut snapshot = project_slot_into_synced_snapshot_with_modulator(
+            slot,
+            desc,
+            node_id,
+            modulator_node_id,
+        );
         snapshot.recompute_modulation_active_params(desc);
         return snapshot;
     }
@@ -340,6 +449,9 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     let mut plocks = (0..MAX_STEPS)
         .map(|_| vec![None; new_np])
         .collect::<Vec<_>>();
+    let mut plock_param_ids = (0..MAX_STEPS)
+        .map(|_| vec![None; new_np])
+        .collect::<Vec<_>>();
     for step in 0..MAX_STEPS {
         for (new_idx, param) in desc.params.iter().enumerate() {
             let Some(old_idx) = old_idx_for(new_idx, param) else {
@@ -353,16 +465,19 @@ fn project_custom_instrument_slot_into_synced_snapshot(
                 .flatten()
             {
                 plocks[step][new_idx] = Some(value);
+                plock_param_ids[step][new_idx] =
+                    ParamNodeId::from_slot_param(node_id, modulator_node_id, param.node_param_idx);
             }
         }
     }
 
     let mut snapshot = crate::effects::EffectSlotSnapshot {
         node_id,
-        modulator_node_id: 0,
+        modulator_node_id,
         num_params: new_np as u32,
         defaults,
         plocks,
+        plock_param_ids,
         param_node_indices: desc.params.iter().map(|p| p.node_param_idx).collect(),
         param_node_spans: desc
             .params
@@ -489,6 +604,7 @@ fn project_bus_pattern_snapshot_from_ui(
                 num_params: plocks.iter().map(Vec::len).max().unwrap_or(0) as u32,
                 defaults: Vec::new(),
                 plocks: plocks.clone(),
+                plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
                 ir: None,
@@ -921,6 +1037,8 @@ impl App {
             let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
             if current_pattern < bank.len() {
                 let current_mod_connections = bank[current_pattern].mod_connections.clone();
+                let current_neural_networks = bank[current_pattern].neural_networks.clone();
+                let current_graph_overrides = bank[current_pattern].graph_overrides.clone();
                 let mut snapshot = PatternSnapshot::capture(
                     &self.state,
                     num_tracks,
@@ -930,6 +1048,8 @@ impl App {
                     &self.graph.track_instrument_types,
                 );
                 snapshot.mod_connections = current_mod_connections;
+                snapshot.neural_networks = current_neural_networks;
+                snapshot.graph_overrides = current_graph_overrides;
                 bank[current_pattern] = snapshot;
             }
         }
@@ -1025,6 +1145,11 @@ impl App {
             .enumerate()
             .map(|(track_idx, name)| {
                 let color = self.track_colors.get(track_idx).copied();
+                let collapsed = self
+                    .track_collapsed
+                    .get(track_idx)
+                    .copied()
+                    .unwrap_or(false);
                 if self.is_sampler_track(track_idx) {
                     let path = self
                         .sampler_path_for_track(track_idx)
@@ -1035,11 +1160,12 @@ impl App {
                     Ok(ProjectTrack::Sampler {
                         sample_path: path.to_string_lossy().to_string(),
                         color,
+                        collapsed,
                     })
                 } else if self.graph.track_instrument_types.get(track_idx)
                     == Some(&InstrumentType::Modulator)
                 {
-                    Ok(ProjectTrack::Modulator { color })
+                    Ok(ProjectTrack::Modulator { color, collapsed })
                 } else {
                     let instrument_name = self
                         .graph
@@ -1052,6 +1178,7 @@ impl App {
                     Ok(ProjectTrack::Custom {
                         instrument_name,
                         color,
+                        collapsed,
                     })
                 }
             })
@@ -1225,6 +1352,7 @@ impl App {
                     };
                 } else {
                     let saved_color = pending.project.tracks[track_idx].color();
+                    let saved_collapsed = pending.project.tracks[track_idx].collapsed();
                     match &pending.project.tracks[track_idx] {
                         ProjectTrack::Sampler { sample_path, .. } => {
                             eprintln!(
@@ -1254,6 +1382,7 @@ impl App {
                     if let Some(color) = saved_color {
                         self.set_track_color(track_idx, color);
                     }
+                    self.set_track_collapsed(track_idx, saved_collapsed);
                     pending.phase = super::PendingProjectLoadPhase::AddTrack(track_idx + 1);
                 }
             }
@@ -1385,6 +1514,7 @@ impl App {
                 .map(|snapshot| snapshot.track_bits.as_slice()),
         );
         self.normalize_track_colors();
+        self.normalize_track_collapsed();
 
         {
             let mut pattern_bank = self.state.pattern.pattern_bank.lock().unwrap();
@@ -1586,10 +1716,6 @@ impl App {
         self.state
             .set_scratch_source(self.editor.scratch_buffer.clone());
         self.clear_control_hooks();
-        if let Err(error) = self.rebuild_scratch_runtime_from_buffer() {
-            self.editor.status_message =
-                Some((format!("Scratch eval error: {error}"), Instant::now()));
-        }
         let repaired_sidechains = self.repair_stale_sidechain_effect_slots()?;
         let status = if pending.fallback_samples > 0 {
             format!(
@@ -1689,6 +1815,7 @@ impl App {
 
         let crate::project::ProjectPattern {
             track_bits,
+            neural_reset_bits,
             step_data,
             track_params,
             effect_slots,
@@ -1704,6 +1831,8 @@ impl App {
             swing_resolution_plock_snapshots,
             bus_patterns,
             mod_connections,
+            neural_networks,
+            graph_overrides,
             instrument_types: _,
             instrument_run_modes,
             sample_paths: _,
@@ -1720,9 +1849,14 @@ impl App {
             .iter()
             .map(|tp| (tp.attack_ms, tp.release_ms))
             .collect();
+        let midi_fx_chains: Vec<Vec<String>> = track_params
+            .iter()
+            .map(|tp| tp.midi_fx_chain.clone())
+            .collect();
 
         let mut snapshot = PatternSnapshot {
             track_bits,
+            neural_reset_bits,
             step_data,
             track_params: track_params.into_iter().map(Into::into).collect(),
             effect_slots: effect_slots
@@ -1757,7 +1891,16 @@ impl App {
                         .cloned()
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|slot| slot.into_snapshot_with_node_id(0))
+                        .enumerate()
+                        .map(|(slot_idx, slot)| {
+                            project_midi_fx_slot_into_synced_snapshot(
+                                slot,
+                                midi_fx_chains
+                                    .get(track_idx)
+                                    .and_then(|chain| chain.get(slot_idx))
+                                    .map(String::as_str),
+                            )
+                        })
                         .collect()
                 })
                 .collect(),
@@ -1766,6 +1909,9 @@ impl App {
                     let node_id = self.state.pattern.instrument_slots[track_idx]
                         .node_id
                         .load(Ordering::Relaxed);
+                    let modulator_node_id = self.state.pattern.instrument_slots[track_idx]
+                        .modulator_node_id
+                        .load(Ordering::Relaxed);
                     if self.is_sampler_track(track_idx) {
                         let saved_slot =
                             instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
@@ -1773,6 +1919,7 @@ impl App {
                                     num_params: 0,
                                     defaults: Vec::new(),
                                     plocks: vec![Vec::new(); MAX_STEPS],
+                                    plock_param_ids: vec![Vec::new(); MAX_STEPS],
                                     param_node_indices: Vec::new(),
                                     param_node_spans: Vec::new(),
                                     ir: None,
@@ -1782,7 +1929,12 @@ impl App {
                             // Sampler params already saved; sync to pick up params added after
                             // the project was written, such as enabled.
                             let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
-                            project_slot_into_synced_snapshot(saved_slot, &sampler_desc, 0)
+                            project_slot_into_synced_snapshot_with_modulator(
+                                saved_slot,
+                                &sampler_desc,
+                                node_id,
+                                modulator_node_id,
+                            )
                         } else {
                             // Old project: migrate attack/release from TrackParams
                             let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
@@ -1796,11 +1948,12 @@ impl App {
                             defaults[1] = release;
                             // start=0.0, end=1.0 already set from defaults
                             crate::effects::EffectSlotSnapshot {
-                                node_id: 0,
-                                modulator_node_id: 0,
+                                node_id,
+                                modulator_node_id,
                                 num_params: defaults.len() as u32,
                                 defaults,
                                 plocks: vec![Vec::new(); MAX_STEPS],
+                                plock_param_ids: vec![Vec::new(); MAX_STEPS],
                                 param_node_indices: sampler_desc
                                     .params
                                     .iter()
@@ -1821,6 +1974,7 @@ impl App {
                                 num_params: 0,
                                 defaults: Vec::new(),
                                 plocks: vec![Vec::new(); MAX_STEPS],
+                                plock_param_ids: vec![Vec::new(); MAX_STEPS],
                                 param_node_indices: Vec::new(),
                                 param_node_spans: Vec::new(),
                                 ir: None,
@@ -1835,7 +1989,10 @@ impl App {
                             // added after save, while remapping custom-instrument params across
                             // the inserted enabled slot.
                             project_custom_instrument_slot_into_synced_snapshot(
-                                slot, &desc, node_id,
+                                slot,
+                                &desc,
+                                node_id,
+                                modulator_node_id,
                             )
                         }
                     }
@@ -1907,8 +2064,11 @@ impl App {
                 .map(CustomInstrumentRunMode::from)
                 .collect(),
             mod_connections: mod_connections.into_iter().map(Into::into).collect(),
+            neural_networks,
+            graph_overrides,
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
+        refresh_neural_output_override_param_ids(&mut snapshot);
 
         Ok((snapshot, bus_patterns, fallback_count))
     }
@@ -2022,6 +2182,138 @@ mod tests {
     }
 
     #[test]
+    fn project_restore_syncs_midi_fx_slot_to_chain_descriptor() {
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: 1,
+            defaults: vec![5.0],
+            plocks: (0..MAX_STEPS).map(|_| vec![None]).collect(),
+            plock_param_ids: (0..MAX_STEPS).map(|_| vec![None]).collect(),
+            param_node_indices: vec![0],
+            param_node_spans: vec![1],
+            ir: None,
+        };
+
+        let restored =
+            project_midi_fx_slot_into_synced_snapshot(saved_slot, Some("trigger-to-track"));
+
+        assert_eq!(restored.num_params, 2);
+        assert_eq!(restored.defaults[0], 5.0);
+        assert_eq!(restored.defaults[1], 1.0);
+        assert_eq!(restored.param_node_indices, vec![0, 1]);
+        assert_eq!(restored.param_node_spans, vec![1, 1]);
+    }
+
+    fn test_slot_snapshot(
+        node_id: u32,
+        modulator_node_id: u32,
+        param_node_indices: Vec<u32>,
+    ) -> crate::effects::EffectSlotSnapshot {
+        let num_params = param_node_indices.len();
+        crate::effects::EffectSlotSnapshot {
+            node_id,
+            modulator_node_id,
+            num_params: num_params as u32,
+            defaults: vec![0.0; num_params],
+            plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+            plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+            param_node_indices,
+            param_node_spans: vec![1; num_params],
+            ir: None,
+        }
+    }
+
+    #[test]
+    fn project_load_refreshes_neuron_plock_ids_to_live_slot_nodes() {
+        let mut snapshot = PatternSnapshot::new_default(2, &[Vec::new(), Vec::new()]);
+        snapshot.instrument_slots[1] = test_slot_snapshot(200, 0, vec![6, 15]);
+        snapshot.effect_slots[1] = vec![test_slot_snapshot(300, 0, vec![2])];
+
+        let mut network = crate::neural::ProjectNeuralNetwork {
+            id: 1,
+            num_neurons: 1,
+            neurons: vec![crate::neural::ProjectNeuron::default()],
+            ..crate::neural::ProjectNeuralNetwork::default()
+        };
+        network.neurons[0].output_overrides.instrument =
+            vec![crate::neural::ProjectParamOverride {
+                target_track: 1,
+                param_id: ParamNodeId {
+                    logical_id: 10,
+                    node_param_idx: 15,
+                },
+                param_index: 1,
+                value: 0.75,
+            }];
+        network.neurons[0].output_overrides.effects =
+            vec![crate::neural::ProjectEffectParamOverride {
+                target_track: 1,
+                slot_index: 0,
+                param_id: ParamNodeId {
+                    logical_id: 11,
+                    node_param_idx: 2,
+                },
+                param_index: 0,
+                value: 0.25,
+            }];
+        snapshot.neural_networks = vec![network];
+
+        refresh_neural_output_override_param_ids(&mut snapshot);
+
+        let neuron = &snapshot.neural_networks[0].neurons[0];
+        assert_eq!(
+            neuron.output_overrides.instrument[0].param_id,
+            ParamNodeId {
+                logical_id: 200,
+                node_param_idx: 15,
+            }
+        );
+        assert_eq!(
+            neuron.output_overrides.effects[0].param_id,
+            ParamNodeId {
+                logical_id: 300,
+                node_param_idx: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn project_load_remaps_neuron_plock_param_index_by_node_identity() {
+        let mut snapshot = PatternSnapshot::new_default(1, &[Vec::new()]);
+        snapshot.instrument_slots[0] = test_slot_snapshot(200, 0, vec![6, 7, 15]);
+        let mut network = crate::neural::ProjectNeuralNetwork {
+            id: 1,
+            num_neurons: 1,
+            neurons: vec![crate::neural::ProjectNeuron::default()],
+            ..crate::neural::ProjectNeuralNetwork::default()
+        };
+        network.neurons[0].output_overrides.instrument =
+            vec![crate::neural::ProjectParamOverride {
+                target_track: 0,
+                param_id: ParamNodeId {
+                    logical_id: 10,
+                    node_param_idx: 15,
+                },
+                param_index: 1,
+                value: 0.75,
+            }];
+        snapshot.neural_networks = vec![network];
+
+        refresh_neural_output_override_param_ids(&mut snapshot);
+
+        let override_param = &snapshot.neural_networks[0].neurons[0]
+            .output_overrides
+            .instrument[0];
+        assert_eq!(override_param.param_index, 2);
+        assert_eq!(
+            override_param.param_id,
+            ParamNodeId {
+                logical_id: 200,
+                node_param_idx: 15,
+            }
+        );
+    }
+
+    #[test]
     fn convolution_reverb_project_names_are_treated_as_builtin() {
         let project_name = format!(
             "{}{}",
@@ -2070,11 +2362,13 @@ mod tests {
             tracks: vec![ProjectTrack::Sampler {
                 sample_path: "samples/kick.wav".to_string(),
                 color: None,
+                collapsed: false,
             }],
             custom_effects: vec![custom_effects],
             scratch: ProjectScratchState::default(),
             patterns: vec![ProjectPattern {
                 track_bits: Vec::new(),
+                neural_reset_bits: Vec::new(),
                 step_data: Vec::new(),
                 track_params: Vec::new(),
                 effect_slots: vec![effect_slots],
@@ -2092,6 +2386,8 @@ mod tests {
                 bus_patterns: Vec::new(),
                 instrument_types: Vec::new(),
                 mod_connections: Vec::new(),
+                neural_networks: Vec::new(),
+                graph_overrides: Vec::new(),
                 sample_paths: Vec::new(),
                 sample_names: Vec::new(),
             }],
@@ -2113,6 +2409,7 @@ mod tests {
             num_params: 1,
             defaults: vec![0.42],
             plocks: vec![vec![None]; MAX_STEPS],
+            plock_param_ids: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![9],
             param_node_spans: vec![1],
             ir: None,
@@ -2150,6 +2447,7 @@ mod tests {
             num_params: 1,
             defaults: vec![0.24],
             plocks: vec![vec![None]; MAX_STEPS],
+            plock_param_ids: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![11],
             param_node_spans: vec![1],
             ir: None,
@@ -2189,6 +2487,7 @@ mod tests {
             num_params: 4,
             defaults: vec![0.12, 0.34, 0.56, 0.78],
             plocks,
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![
                 (crate::lisp_effect::HEADER_SLOTS - 1) as u32,
                 crate::lisp_effect::HEADER_SLOTS as u32,
@@ -2221,7 +2520,7 @@ mod tests {
             ],
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.num_params, 5);
@@ -2249,6 +2548,7 @@ mod tests {
             num_params: 4,
             defaults: vec![0.12, 0.34, 8.0, 9.0],
             plocks,
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![
                 crate::lisp_effect::HEADER_SLOTS as u32,
                 crate::lisp_effect::HEADER_SLOTS as u32 + 1,
@@ -2277,7 +2577,7 @@ mod tests {
             ],
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
         assert_eq!(restored.defaults, vec![0.12, 0.34, 1.0, 5.0]);
         assert_eq!(restored.plocks[7][2], None);
@@ -2302,6 +2602,7 @@ mod tests {
             num_params: 4,
             defaults: vec![0.12, 0.34, 0.56, 0.78],
             plocks,
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![10, 14, 18, 22],
             param_node_spans: vec![1, 1, 1, 1],
             ir: None,
@@ -2325,7 +2626,7 @@ mod tests {
             ],
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42, 0);
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.num_params, 8);
@@ -2365,6 +2666,7 @@ mod tests {
             num_params: desc.params.len() as u32,
             defaults: vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78],
             plocks,
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
             param_node_indices: desc
                 .params
                 .iter()
@@ -2378,7 +2680,8 @@ mod tests {
             ir: None,
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
+        let restored =
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42, 0);
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.num_params, desc.params.len() as u32);
@@ -2416,6 +2719,7 @@ mod tests {
             num_params: desc.params.len() as u32,
             defaults: vec![0.5, 7400.0, 0.0, 0.0],
             plocks: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
             param_node_indices: desc
                 .params
                 .iter()
@@ -2425,7 +2729,8 @@ mod tests {
             ir: None,
         };
 
-        let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
+        let restored =
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42, 0);
 
         assert_eq!(restored.defaults[1], 7400.0);
         assert_eq!(restored.param_node_indices, vec![10, 14, 15, 16]);
@@ -2456,6 +2761,7 @@ mod tests {
             num_params: desc.params.len() as u32,
             defaults: vec![0.12, 1.0, 0.31, 2.0, -0.27],
             plocks,
+            plock_param_ids: vec![vec![None; desc.params.len()]; MAX_STEPS],
             param_node_indices: desc
                 .params
                 .iter()
@@ -2481,7 +2787,7 @@ mod tests {
         };
 
         let restored =
-            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &renamed_desc, 42);
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &renamed_desc, 42, 0);
 
         assert_eq!(restored.node_id, 42);
         assert_eq!(restored.defaults, vec![0.12, 1.0, 0.31, 2.0, -0.27]);

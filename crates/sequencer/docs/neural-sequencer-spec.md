@@ -18,60 +18,73 @@ The neural layer is a pure transformation over a value-shaped event type. Today'
 - Audio-rate neural propagation. The neural layer advances on a *neural clock* derived from the transport (see "Neural clock" below), not per audio sample.
 - Pattern morphing / interpolation. Patterns swap atomically; cross-pattern weight crossfades are future work.
 - Multi-network composition. There is exactly one neural network per pattern in v1.
-- UI for editing the weight matrix. v1 ships with a data model + audio-side implementation; editing UI is a follow-up.
+- Building the editing UI. v1 ships with a data model + audio-side implementation. The intended editor design is captured in the "Editor UI" section (a tab in the Step sequencer view), but implementing it is a follow-up (Phase 5).
 
 ## Concepts
 
-### Neural clock (there are no "ticks" in this engine)
+### Neural clock — per-neuron resolution (there are no "ticks" in this engine)
 
 > **Grounding note.** The engine has **no tick unit**. Time is samples and `f64` quarter-note beats. The scheduler (`scheduler.rs`, `SnapshotSequencerClock::process_chunk`) advances a per-sample `total_beats: f64` and emits a `SnapshotTrigger` (scheduler.rs:40) when `total_beats` crosses a step boundary, computed from a per-track/per-step `Timebase` (data.rs:91, an enum of musical divisions — `Sixteenth`, `EighthTriplet`, `Polyrhythm`, etc.). "One tick = the finest enabled timebase" does not map onto anything real, because timebase is per-track and per-step (`StepParam::Sync`, plus `timebase_plock_snapshots` / `swing_*` snapshots in `ProjectPattern`).
 
-The neural layer defines its **own** clock:
+**Each neuron has its own clock.** There is no single network-wide neural step. Every neuron carries a `resolution: Timebase` (the per-row `resolution` dropdown in the editor — `1n`, `4n`, `16n`, `16nt`, `32n`, …). A neuron *evaluates* — checks its threshold, possibly fires — once per crossing of **its own** resolution grid. This is the literal "a network of tracks, each a gnarly sequencer" model: a neuron is a track with its own timebase.
 
-- The network owns a single `base_resolution: Timebase`. A **neural step** is one crossing of `total_beats` past `k * Timebase::step_beats()` for that resolution — detected inside `process_chunk` using the same boundary-crossing logic the step sequencer already uses (`derive_local_step`), including the cases where a block contains zero, one, or several boundaries, and where a boundary falls partway through a block.
-- Everywhere this spec previously said "tick," read **neural step**. The neuron `delay` field counts neural steps; `reset_interval` counts neural steps (derived from bars); `ticks_since_reset` becomes `steps_since_reset`.
-- Quantization boundaries, by contrast, are expressed in **samples** (`quantize_pending: [Option<u64>; N]`), because audio emission timing is sample-accurate. The neural clock (neural steps) and the quantize grid (samples) are two different units; see the quantize ordering note under Open Questions.
+Mechanics, expressed in terms of the existing engine:
 
-This keeps the neural layer aligned to the transport without inventing a unit the rest of the engine doesn't have.
+- The engine already advances a per-sample `total_beats: f64` in `process_chunk` and already detects boundary crossings for arbitrary `Timebase`s (that is exactly what per-track/per-step timebase does today). The neural layer reuses that machinery: for each neuron, detect crossings of `k * neuron.resolution.step_beats()` within the block — handling zero, one, or several crossings per block, and crossings that fall partway through a block, exactly as the step sequencer does (`derive_local_step`).
+- A neuron's `delay` is counted in **its own resolution steps** — `resolution = 16n, delay = 2` means "two sixteenth-notes after firing." This is what the per-row number column in the editor sets, and it is exactly the user's "a timebase the delays are expressed in."
+- Because there is no global step, energy does not advance in lockstep. Propagation is **event-driven** (see "Neuron evaluation" below): a fire adds that neuron's weight row into the energy vector; each neuron consumes accumulated energy when *its own* resolution boundary comes around. Two neurons at `4n` and `16n` interleave naturally on the shared sample clock.
+- Quantization boundaries are expressed in **samples** (`quantize_pending: [Option<u64>; N]`), because audio emission timing is sample-accurate. A neuron's `resolution` (its evaluation/delay grid) and the optional `quantize` snap (output-timing grid, in samples) are two different units; see the quantize ordering note under Open Questions.
+- `reset_interval` is still counted in **bars** (a global musical span), independent of any neuron's resolution — it is the network-wide "bar reset" control in the editor.
+
+This keeps every neuron aligned to the transport at its own rate without inventing a unit the rest of the engine doesn't have.
+
+> **No global "stretch" knob in v1.** The sparse/busy control is *per neuron* (its `resolution`). A single global multiplier that scales every neuron's grid at once — "the same network, sparser or busier, in one gesture" — is deferred (see Out of Scope / Open Questions). Per-neuron resolution already gives full control; the global knob is convenience on top.
 
 ### Neuron
 
 A neuron is a member of a fixed-size pool (`NUM_NEURONS = 16` in v1, configurable in storage). Each neuron has:
 
-- `weight[N]`: outgoing weights, one per other neuron. Row in the NxN matrix.
-- `threshold: f32` — energy level at which the neuron fires.
-- `delay: u32` — neural steps between fire-resolution and "set my last_trigger=1" (the propagation step). See "Neural clock."
+- `weight[N]`: outgoing weights, one per other neuron. Row in the NxN matrix. (Editor: the neuron's row in the 16×16 grid; circle size = weight magnitude.)
+- `resolution: Timebase` — the neuron's own clock. It evaluates (checks threshold, possibly fires) once per crossing of this grid, and its `delay` is counted in these units. See "Neural clock." (Editor: the per-row `resolution` dropdown.)
+- `delay: u32` — **counted in this neuron's `resolution` steps** — between firing and "set my last_trigger=1" (the propagation step), i.e. how long until this fire propagates to the neuron's targets. (Editor: the per-row number column with the drag arrow.)
+- `threshold: f32` — energy level at which the neuron fires when evaluated. Not on the main editor row in the screenshot; exposed in a per-neuron detail view (see UI section / Open Questions).
 - `transpose: f32` — semitone offset applied to events when they fire from this neuron.
-- `quantize: Quantization` — optional grid snap. When a neuron's threshold is met, the fire event is deferred to the next quantization boundary before its `delay` countdown begins.
-- `dampening: f32` — multiplier (0..1) applied to subsequent triggers after firing; recovers over time. Models "neuron fatigue."
-- `route: Option<TrackId>` — destination track. `None` = hidden neuron (participates in matrix propagation, no audio output).
+- `quantize: Quantization` — optional grid snap, in samples. When a neuron's threshold is met, the audio emission is deferred to the next quantization boundary. Distinct from `resolution` (the eval/delay grid).
+- `dampening: f32` — multiplier (0..1) applied to subsequent triggers after firing; recovers over time. Models "neuron fatigue." This is per-neuron and distinct from the network-wide `energy_decay` leak (see Matrix state).
+- `route: Option<TrackId>` — destination track. `None` = hidden neuron (participates in matrix propagation, no audio output). (Editor: the per-row `trig-N` dropdown.)
 
 A track can be the route of multiple neurons (many-to-one). A neuron can have at most one route (one-to-one in the other direction). This asymmetry is the key compositional primitive: one track can host multiple neural "voices" each with its own transpose / delay / quantize.
 
 ### Matrix state
 
-Per-neural-step state vectors over the neuron pool:
+State vectors over the neuron pool. Because each neuron runs on its own resolution, these are not advanced in lockstep — they are read/written as each neuron's resolution boundaries are crossed on the shared sample clock:
 
 - `last_triggers: [f32; N]` — most recent fire indicator (0 or 1; floats to allow future fractional triggers).
 - `energy: [f32; N]` — accumulated incoming weight contributions.
-- `pending_delays: [u32; N]` — countdown (in neural steps) until a fired neuron's propagation lands.
+- `pending_delays: [u32; N]` — per-neuron countdown until a fired neuron's propagation lands, each counted in **that neuron's own resolution steps**.
 - `dampening_level: [f32; N]` — current fatigue per neuron (0 = fully recovered, 1 = fully suppressed).
 
-### Step semantics
+Network-wide scalars (the global controls in the editor's top-left):
 
-On each **neural step** (one boundary crossing at the network's `base_resolution`; see "Neural clock"):
+- `energy_decay: f32` — a global leak applied to the whole `energy` vector over time (editor: `energy decay`, e.g. `0.994`). Distinct from per-neuron `dampening`: `dampening` suppresses a single neuron after *it* fires; `energy_decay` continuously bleeds accumulated energy across *all* neurons so a sub-threshold buildup doesn't persist forever. The grid this leak is applied on is specified under "Neuron evaluation" (and flagged in Open Questions).
+- `max_poly: u32` — cap on simultaneous voices the network emits per destination track on a single sample (editor: `max poly`, e.g. `2`). See "Velocity accumulation and polyphony."
 
-1. `incoming = weights · last_triggers` (NxN · Nx1 matmul).
-2. `energy += incoming * (1 - dampening_level)`.
-3. For each neuron where `energy[i] >= threshold[i]`:
+### Neuron evaluation (event-driven, not a global matmul)
+
+With per-neuron resolution there is no single step where the whole matrix multiplies at once. Instead, **propagation is event-driven**: a fire adds that neuron's weight *row* into the energy vector (the row-at-a-time form of the old `weights · last_triggers` matmul), and each neuron *consumes* energy when its own resolution boundary comes around.
+
+Within `process_chunk`, the per-sample loop advances `total_beats` and, for each neuron `i`, detects whether the block crossed a boundary of `neuron[i].resolution`. Crossings are processed in sample order; within the same sample, neurons are processed in index order `0..N` (the determinism contract — see Open Questions). When neuron `i` crosses its own resolution boundary, **evaluate neuron `i`**:
+
+1. Decrement `pending_delays[i]` (it counts neuron `i`'s own resolution steps). If it just reached zero, this is a *propagation step*: add neuron `i`'s weight row into the energy of its targets — `for j in 0..N: energy[j] += weight[i][j]` — scaled by `(1 - dampening_level[i])`, and set `last_triggers[i] = 1` for this evaluation (else `0`).
+2. If `energy[i] >= threshold[i]`, neuron `i` **fires**:
    - Build a `StepEvent` (see "StepEvent" below) from this firing.
-   - If `quantize[i].is_some()`, defer the fire to the next quantization boundary; once reached, continue.
-   - Schedule the propagation: `pending_delays[i] = delay[i]`. The propagation itself sets `last_triggers[i] = 1` after that countdown elapses.
-   - If `route[i].is_some()`, the audio event is emitted at the *moment of firing* (after quantization), not at propagation time. (The user's mental model: "trigger sounds when the neuron fires; the matrix sees it later.")
-   - Apply dampening: `dampening_level[i] = min(1.0, dampening_level[i] + neuron.dampening_amount)`.
+   - If `route[i].is_some()`, emit the audio event at the *moment of firing* — at the next `quantize[i]` sample boundary if quantization is set, otherwise this sample. (Mental model: "the trigger sounds when the neuron fires; the matrix sees the propagation `delay` steps later.")
+   - Arm the propagation: `pending_delays[i] = delay[i]` (in neuron `i`'s resolution steps). When it elapses, step 1 adds this neuron's weight row to its targets.
+   - Apply dampening: `dampening_level[i] = min(1.0, dampening_level[i] + neuron[i].dampening_amount)`.
    - Zero `energy[i]`.
-4. Decrement `pending_delays`; where a counter hits zero, set `last_triggers[i] = 1`. Other entries clear to `0`.
-5. Dampening recovers: `dampening_level *= dampening_recovery_factor` (per-network constant, e.g. 0.98 per neural step).
+3. Dampening recovers for neuron `i`: `dampening_level[i] *= dampening_recovery_factor` (per-neuron constant, e.g. 0.98 per *this neuron's* resolution step).
+
+Network-wide energy leak: `energy *= energy_decay` (the `energy decay` control). Because there is no global step to hang it on, the concrete grid for this leak must be pinned — apply it once per crossing of the *finest* configured neuron resolution, or per fixed sample interval. Lean "finest configured resolution"; see Open Questions. The intent is unambiguous (slow continuous bleed); only the discretization is open.
 
 ### Reset / seeding
 
@@ -88,9 +101,11 @@ When a step fires on a track, every neuron with `route == Some(that_track)` has 
 
 The seed step **also plays directly** at its scheduled time — it does not wait for the network. The network only ever *adds* events; it never delays or suppresses step-driven hits. This is the "parallel mode" decision: the matrix is purely additive.
 
-### Velocity accumulation
+### Velocity accumulation and polyphony
 
 When multiple neurons routed to the same track fire on the same audio sample, the resulting hits **accumulate velocity** into a single hit rather than producing N stacked note-ons. The semantic: same-sample coincidence is treated as accent, not polyphony.
+
+**`max_poly`** (editor: `max poly`) bounds how many *distinct-in-time* voices the network keeps alive per destination track. Velocity accumulation handles the same-sample case (collapse to one accented hit); `max_poly` handles the across-time case — when more than `max_poly` network-emitted voices would overlap on one track, the oldest is stolen (released) so no more than `max_poly` sound at once. With `max_poly = 1` the track is monophonic (each new network hit cuts the previous); the screenshot's `max_poly = 2` allows two overlapping tails. The seed step's own direct hit is *not* counted against `max_poly` — the network only ever adds, and voice-stealing applies to network-emitted voices. The exact steal policy (oldest-first vs quietest-first) is an Open Question.
 
 Pseudocode for the merge:
 
@@ -102,7 +117,7 @@ if multiple events, merge into one:
   duration, speed, pan, aux_a, aux_b, chop, chord = from the lowest-indexed firing neuron
 ```
 
-The merge fields are exactly the `ResolvedStep` fields (`duration, velocity, speed, aux_a, aux_b, transpose, pan, chop` — accumulator.rs:5) plus the chord. `Sync` and `Delay` (`StepParam::Sync=8`, `Delay=9`) are **not** part of `ResolvedStep` and therefore do not participate in the merge — sync drives per-step timebase selection upstream, not the resolved event. "Lowest-indexed firing neuron" is well-defined because step 3 iterates neurons `0..N` in order, so fire order is deterministic; the merge picks the first firing neuron in that iteration.
+The merge fields are exactly the `ResolvedStep` fields (`duration, velocity, speed, aux_a, aux_b, transpose, pan, chop` — accumulator.rs:5) plus the chord. `Sync` and `Delay` (`StepParam::Sync=8`, `Delay=9`) are **not** part of `ResolvedStep` and therefore do not participate in the merge — sync drives per-step timebase selection upstream, not the resolved event. "Lowest-indexed firing neuron" is well-defined because neurons that fire on the same sample are evaluated in index order `0..N` (see "Neuron evaluation"), so fire order is deterministic; the merge picks the first firing neuron in that iteration.
 
 > Two things still need pinning down — see Open Questions: (a) *where* this merge runs (a post-scheduling pass over the block's events vs. at voice-trigger time in `audio.rs`), and (b) the soft-vs-hard velocity cap.
 
@@ -138,7 +153,7 @@ ScheduledEvent { kind: ResolvedTrigger { track, step, samples_per_step, resolved
 
 For the neural layer, propagation must operate on value-shaped events, because:
 
-- A network-emitted event has no source step (hidden neurons, transposed copies, events scheduled N neural steps after the seed step was edited).
+- A network-emitted event has no source step (hidden neurons, transposed copies, events scheduled several resolution steps after the seed step was edited).
 - The step a propagation came from may be edited or deleted by the time the delayed fire lands.
 
 ### New type
@@ -284,8 +299,8 @@ The neural network is **per-pattern**, not per-project. In practice the weight m
 Switching the active pattern atomically swaps:
 - step sequencer state (existing behavior)
 - weight matrix
-- per-neuron config (threshold, delay, transpose, quantize, dampening, route)
-- reset interval, base resolution, seed-on-reset vector
+- per-neuron config (resolution, delay, threshold, transpose, quantize, dampening, route)
+- network globals: reset interval (bars), energy decay, max poly, seed-on-reset vector
 
 This lets the user write a network for the verse pattern and a completely different network for the chorus pattern, switched in the same gesture they use to switch step patterns today.
 
@@ -293,7 +308,7 @@ This lets the user write a network for the verse pattern and a completely differ
 
 How switching works today (verified): `switch_pattern` (sequencer/state.rs ~1685) locks the `pattern_bank: Mutex<Vec<PatternSnapshot>>`, captures live state into the outgoing slot, restores the incoming slot, stores `current_pattern` (`AtomicU32`), increments `pattern_epoch` (`AtomicU64`), and calls `publish_scheduler_snapshot()` (Arc-swap + `scheduler_snapshot_version.fetch_add`). The audio thread reads the new state via `latest_scheduler_snapshot()` and drops any in-flight `ScheduledEvent` whose `pattern_epoch` no longer matches (audio.rs epoch check). So "atomic swap" in this spec means *that* mutex + epoch + publish sequence, not a single atomic store.
 
-The neural config swap rides the same path. Pattern switching is also the hook to reset neural runtime state — `energy`, `last_triggers`, `pending_delays`, `dampening_level`, `quantize_pending`, `steps_since_reset`. Without this, the old pattern's accumulated energy bleeds into the new pattern with (possibly very different) weights, producing chaotic transients.
+The neural config swap rides the same path. Pattern switching is also the hook to reset neural runtime state — `energy`, `last_triggers`, `pending_delays`, `dampening_level`, `quantize_pending`, and the reset tracker (`next_reset_beat`). Without this, the old pattern's accumulated energy bleeds into the new pattern with (possibly very different) weights, producing chaotic transients.
 
 Default behavior: **reset runtime state on pattern switch**, performed on the audio thread when it observes the `pattern_epoch` change (the same signal that invalidates stale events). The seed vector for the *new* pattern is loaded into `last_triggers` immediately so the new pattern starts cleanly.
 
@@ -316,19 +331,21 @@ pub struct ProjectNeuralNetwork {
     pub num_neurons: usize,                       // 16 in v1
     pub weights: Vec<Vec<f32>>,                   // NxN
     pub neurons: Vec<ProjectNeuron>,              // length = num_neurons
-    pub reset_interval_bars: f32,
-    pub base_resolution: Timebase,
-    pub seed_on_reset: Vec<f32>,                  // length = num_neurons
+    pub reset_interval_bars: f32,                 // editor: "bar reset"
+    pub energy_decay: f32,                        // editor: "energy decay", global leak (e.g. 0.994)
+    pub max_poly: u32,                            // editor: "max poly", per-track voice cap
+    pub seed_on_reset: Vec<f32>,                  // length = num_neurons; editor: "clear" row
 }
 
 pub struct ProjectNeuron {
+    pub resolution: Timebase,                     // editor: per-row "resolution"; the neuron's own clock
+    pub delay_steps: u32,                         // counted in THIS neuron's resolution steps; editor: per-row number
     pub threshold: f32,
-    pub delay_steps: u32,                         // neural steps; was "delay_ticks"
     pub transpose: f32,
-    pub quantize: Option<Timebase>,
+    pub quantize: Option<Timebase>,               // sample-grid output snap; distinct from resolution
     pub dampening_amount: f32,
     pub dampening_recovery: f32,
-    pub route: Option<usize>,                     // track index, None = hidden
+    pub route: Option<usize>,                     // track index, None = hidden; editor: per-row "trig-N"
 }
 ```
 
@@ -357,24 +374,29 @@ Owned by the audio thread, allocated once at project load (no allocation during 
 ```rust
 pub struct NeuralNetwork {
     weights: [[f32; N]; N],
-    neurons: [NeuronConfig; N],
+    neurons: [NeuronConfig; N],          // each carries its own `resolution: Timebase`
     last_triggers: [f32; N],
     energy: [f32; N],
-    pending_delays: [u32; N],
-    quantize_pending: [Option<u64>; N],  // sample of next grid boundary
+    pending_delays: [u32; N],            // per-neuron, each in that neuron's resolution steps
+    quantize_pending: [Option<u64>; N],  // sample of next output grid boundary
     dampening_level: [f32; N],
-    reset_interval_steps: u32,   // neural steps, derived from reset_interval_bars + base_resolution
-    steps_since_reset: u32,
-    base_resolution: Timebase,
+    energy_decay: f32,                   // network-wide energy leak
+    max_poly: u32,                       // per-track voice cap
+    reset_interval_beats: f64,           // derived from reset_interval_bars; reset is bar-based, not neuron-clock-based
+    next_reset_beat: f64,                // absolute total_beats of the next reset boundary
     seed_on_reset: [f32; N],
 }
 ```
+
+There is **no** network-wide `base_resolution` field — each neuron's clock lives in `NeuronConfig.resolution`. Reset is tracked in beats (bar-based), independent of any neuron's resolution. Per-neuron resolution-boundary detection does not need stored phase: it is recomputed each block from `total_beats` and `neuron.resolution.step_beats()`, the same stateless way the step sequencer derives its boundaries.
 
 `N` is a compile-time constant in v1 (16). Growth to runtime-sized requires a separate allocation strategy and is out of scope.
 
 **`num_neurons` (stored, variable) vs `N` (runtime, fixed 16) needs an explicit load rule.** `ProjectNeuralNetwork.num_neurons` and the `Vec<Vec<f32>>` weights can in principle differ from `N`. On load/snapshot-copy: if `num_neurons == N`, copy directly; if `num_neurons < N`, copy into the leading rows/cols and zero the remainder (a smaller network is a valid sparse case); if `num_neurons > N`, reject the network (log + treat as empty) rather than truncating silently. State this so the load path is unambiguous.
 
-**`base_resolution` is a first-class, user-facing control.** Because every `delay` and the reset interval are expressed in neural steps at this resolution, changing `base_resolution` *stretches or compresses the whole network in time* — coarser resolution makes the generated output sparser and more spread out; finer makes it busier and denser. This is intended as a live performance/editing knob ("the same network, sparser or busier"), not just a storage field. The matrix and per-neuron config stay fixed; only the time grid they play out on changes. The neural network can be conceptualized as **a track that is itself a gnarly sequencer** — it has its own timebase the way any track does, and `base_resolution` is that track's step resolution.
+**Per-neuron `resolution` is the sparse/busy control.** Each neuron's `resolution` is a first-class, user-facing knob: it sets that neuron's evaluation rate, and every `delay` for that neuron is counted in its units. Coarser resolution on a neuron makes its contribution sparser and more spread out; finer makes it busier and denser. The matrix weights and the other per-neuron config stay fixed; only the time grid each neuron plays out on changes. The whole network is conceptualized as **a bank of tracks, each itself a gnarly sequencer** — every neuron has its own timebase the way any track does, and its `resolution` is that track's step resolution.
+
+A single **global stretch** multiplier that scales every neuron's grid at once (one gesture to make the entire network sparser/busier) is a natural convenience but is **out of scope for v1** (see Open Questions / Out of Scope) — per-neuron resolution already covers the capability.
 
 ## Pipeline Integration Point
 
@@ -387,17 +409,19 @@ SnapshotSequencerClock::process_chunk(nframes):   // scheduler.rs
     neural_network.process(step_event, &mut scratch);           // new; identity if empty, no alloc
     for event in scratch.drain():
       schedule(event);                              // stamps ScheduledEvent.pattern_epoch
-  for each neural-step boundary crossed this block:
-    neural_network.advance_step(&mut scratch);      // step loop: matmul, threshold, delay, quantize
+  // no single global neural step; instead, per-neuron resolution boundaries:
+  for each (sample, neuron i) boundary of neuron[i].resolution crossed this block, in sample then index order:
+    neural_network.evaluate_neuron(i, sample, &mut scratch);  // decrement delay/propagate, threshold, fire, dampen
     for event in scratch.drain():
       schedule(event);
+  // network-wide reset boundary (bar-based) and energy_decay leak handled at their own grids this block
 ```
 
-Note this runs inside the existing per-sample `process_chunk` loop, where neural-step boundaries are detected the same way step boundaries already are (multiple per block, or spanning blocks). `scratch` is a runtime-owned, pre-allocated buffer — see the no-allocation note under "Pipeline shape."
+Note this runs inside the existing per-sample `process_chunk` loop. Each neuron's resolution boundaries are detected the same way per-track/per-step timebase boundaries already are (multiple per block, or spanning blocks) — there is just one detector per neuron instead of one for the network. Ordering across neurons within a block is sample-time first, then neuron index `0..N` for same-sample ties (the determinism contract). `scratch` is a runtime-owned, pre-allocated buffer — see the no-allocation note under "Pipeline shape."
 
 Two emission sources merge into the same scheduled-event stream:
 1. **Step-seeded events** — a step fires, the network may emit additional events (delayed, transposed) in addition to the seed.
-2. **Autonomously generated events** — neurons whose energy crossed threshold this block fire of their own accord (only possible if seeded, directly or transitively, at some prior neural step).
+2. **Autonomously generated events** — neurons whose energy crossed threshold when evaluated this block fire of their own accord (only possible if seeded, directly or transitively, at some prior evaluation).
 
 Both paths end at `ScheduledEvent`. The clock and the network share the same sample-clock so their timing aligns.
 
@@ -416,11 +440,56 @@ This property is load-bearing: the refactor itself must be neutral, and the neur
 1. **Velocity accumulation cap** — `min(1.0, sum(velocities))` clamps hard; should there be a soft compression curve? Defer to v1 testing; clamp is fine to start.
 2. **Where does the velocity merge run?** Two candidate sites: (a) a post-scheduling pass over the block's `ScheduledEvent`s grouped by `(sample_time, track)`, or (b) at voice-trigger time in `audio.rs`. (a) keeps the merge in the scheduler where ordering/determinism is easy; (b) avoids a second pass but pushes merge logic into the voice path. Lean (a). Decide before Phase 3.
 3. **Quantize grid for neuron**: project-relative or track-relative? Lean project-relative (transport grid) for consistency.
-4. **Quantize ↔ delay ordering and clock mixing.** The fire sequence is "threshold met → defer to next quantize boundary (samples) → *then* start `delay` countdown (neural steps) → propagate." Two things to pin: (a) after a quantize defer, does `delay` count neural steps from the deferred moment, and (b) what happens if a second threshold crossing occurs for the same neuron while it is mid-defer (coalesce, ignore, or re-arm?). Spec a concrete answer before Phase 3.
-5. **Multiple seed tracks in one block**: if steps on track A and track B both seed neurons in the same block, propagations interleave deterministically because seeding and the tick loop both iterate by index (track index for seeding, neuron `0..N` for firing). Confirm the ordering contract in tests.
-6. **Reset-flag step — visibility**: when a step carries the dedicated reset flag (see "Reset trigger from a step"), does the UI show it distinctly? Probably yes — it's load-bearing for a song's structure.
-7. **Per-neuron mute/solo for editing**: not in v1, but worth keeping the data model future-compatible (one bit per neuron in storage — same spare-bit budget as the reset flag).
-8. **`base_resolution` as a live knob**: changing it stretches/compresses the network in time (see Runtime state). Is it automatable / p-lockable, or edit-time only in v1? Lean edit-time only for v1; flag automation as future work.
+4. **Quantize ↔ delay ordering and clock mixing.** The fire sequence is "threshold met → emit audio (snapped to the neuron's `quantize` sample boundary if set) → propagation arms `delay` in the neuron's resolution steps → propagate." Two things to pin: (a) audio output snaps on the `quantize` *sample* grid while `delay` counts the neuron's *resolution* steps — confirm these two grids compose as written (output timing independent of propagation timing), and (b) what happens if a second threshold crossing occurs for the same neuron while a propagation is still pending (coalesce, ignore, or re-arm?). Spec a concrete answer before Phase 3.
+5. **Multiple seed tracks / many neurons firing in one block**: ordering is sample-time first, then neuron index `0..N` for same-sample ties; seeding iterates by track index. Because neurons now run on independent resolutions, confirm in tests that the sample-then-index contract is stable across block boundaries (a neuron whose boundary lands at the very end of one block vs. the start of the next must be deterministic).
+6. **`energy_decay` discretization grid.** The leak is conceptually continuous but must be applied on a concrete grid (per finest-configured-resolution crossing, vs. a fixed sample interval). Lean finest-configured-resolution. Decide before Phase 3 — it affects reproducibility across sample-rate/block-size changes.
+7. **`max_poly` voice-steal policy.** When more than `max_poly` network voices would overlap on a track, steal oldest-first or quietest-first? Lean oldest-first (predictable). Confirm whether the seed step's direct hit truly stays exempt from the cap.
+8. **Where does `threshold` live in the editor?** The screenshot's per-row controls are route / resolution / delay / fire-LED — no visible threshold. Options: a per-neuron detail panel (click a row), a global default threshold with per-neuron overrides, or a second toggleable grid view. Pick before Phase 5; the data model already has per-neuron `threshold` regardless.
+9. **Reset-flag step — visibility**: when a step carries the dedicated reset flag (see "Reset trigger from a step"), does the UI show it distinctly? Probably yes — it's load-bearing for a song's structure.
+10. **Per-neuron mute/solo for editing**: not in v1, but worth keeping the data model future-compatible (one bit per neuron in storage — same spare-bit budget as the reset flag).
+11. **Global stretch multiplier**: a single knob scaling every neuron's resolution at once (sparse/busy in one gesture). Out of scope for v1 (per-neuron resolution covers it); revisit as a convenience layer. If added, is it automatable / p-lockable?
+
+## Editor UI
+
+The neural editor is a **tab inside the existing Step sequencer view** — the same panel gains a `Steps` / `Neural` switch, so a track's deterministic grid and its neural matrix share one surface and one mental "you are editing this pattern" context. Switching tabs does not change which pattern is active; it changes which layer of that pattern you see.
+
+Reference layout (from the patch-editor prototype):
+
+```
+┌─ globals (top-left) ────────┐   ┌─ seed row (top) ───────────────────────┐
+│  bar reset   [ 2 ]          │   │ [fire LEDs ▔ ▔ ▔ … per column]          │
+│  energy decay[ 0.994 ]      │   │ clear ◯   ● ·  ● · ●  · · · · ●  ·  …    │  ← seed_on_reset
+│  max poly    [ 2 ]          │   └─────────────────────────────────────────┘
+└─────────────────────────────┘        1  2  3  4  5  …                  16   ← column index
+┌─ per-neuron rows (left) ─────────────────┐  ┌─ weight matrix (NxN) ─────────┐
+│ trig-1 ▾ │ resolution 1n  ▾ │ [2] │ ◯     │  │  ●  ·  ·  ●  ·  ●  ·  …  ●    │ row 1
+│ trig-2 ▾ │ resolution 4n  ▾ │ [2] │ ◯     │  │  ●  ·  ●  ·  ·  ·  ·  …       │ row 2
+│ trig-1 ▾ │ resolution 16n ▾ │ [5] │ ◯     │  │  …                            │ …
+│   …      │      …           │ […] │ …     │  │  (circle size = weight mag)  │
+└──────────────────────────────────────────┘  └───────────────────────────────┘
+┌─ output timeline (bottom) — generated voices over bars (read-only viz) ──────┐
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Element → data mapping:
+
+| UI element | Backing field | Notes |
+|---|---|---|
+| `bar reset` | `reset_interval_bars` | global |
+| `energy decay` | `energy_decay` | global leak (0..1) |
+| `max poly` | `max_poly` | per-track voice cap |
+| `clear` row of sized circles | `seed_on_reset[i]` | circle size = seed magnitude; `clear` zeroes the vector |
+| top fire LEDs | runtime `last_triggers` viz | read-only activity indicator |
+| per-row `trig-N` dropdown | `neuron[i].route` | `None` / hidden when unset |
+| per-row `resolution` dropdown | `neuron[i].resolution` | the neuron's own timebase |
+| per-row number + drag arrow | `neuron[i].delay_steps` | counted in that row's resolution |
+| per-row circle (right of number) | runtime fire LED for that neuron | read-only |
+| 16×16 grid of sized circles | `weights[i][j]` | row = source neuron, col = target; size = magnitude |
+| bottom timeline strip | runtime output history | read-only visualization |
+
+`threshold` (and the other per-neuron fields not on the row: `transpose`, `quantize`, `dampening_amount`, `dampening_recovery`) are not in the compact row — they belong in a per-neuron detail view opened from the row (see Open Question 8).
+
+This section is the design target for Phase 5; it does not change the v1 audio-side scope.
 
 ## Implementation Phases
 
@@ -439,8 +508,11 @@ The phases below order the work so that each is independently shippable and the 
 - Verify identity behavior — no neural code yet.
 
 ### Phase 3: Neural network audio-thread implementation
-- `NeuralNetwork` struct, neural-step loop, matrix math, dampening, quantization, delays.
-- Integration into scheduler at the documented hook point.
+- `NeuralNetwork` struct; **per-neuron resolution-boundary detection** (one detector per neuron, reusing the existing timebase boundary logic), not a single global step.
+- Event-driven evaluation: per-neuron threshold → fire → arm `delay` (in that neuron's resolution) → propagate weight row; per-neuron dampening + recovery.
+- Network globals: `energy_decay` leak (on the agreed grid — Open Question 6), `max_poly` voice cap (Open Question 7).
+- Per-neuron `quantize` output snap (samples), distinct from resolution.
+- Integration into scheduler at the documented hook point; sample-then-index determinism contract.
 - Empty-network passthrough verified.
 
 ### Phase 4: Pattern integration + storage
@@ -452,14 +524,18 @@ The phases below order the work so that each is independently shippable and the 
 - **Neural-route remapping in the track-deletion protocol** — remap every pattern's `route` indices under the bank mutex before the epoch bump; add to `docs/track-deletion-implementation-checklist.md`.
 - JSON schema, load/save, backward-compat (`Option` + `#[serde(default)]`).
 
-### Phase 5: Editor UI (out of spec, follow-up)
-- Matrix editor, per-neuron config panel, route picker, real-time fire visualization.
+### Phase 5: Editor UI (see "Editor UI" section)
+- `Steps` / `Neural` tab switch inside the existing Step sequencer view.
+- 16×16 weight-matrix grid (size-encoded circles), seed row with `clear`, global controls (bar reset / energy decay / max poly).
+- Per-neuron row: route picker, resolution, delay; per-neuron detail view for threshold / transpose / quantize / dampening.
+- Real-time fire visualization (top LEDs, per-row LEDs, bottom output timeline).
 
 ## Out of Scope, Logged for Future
 
 - Learned weights / weight evolution from playing patterns.
 - Per-neuron chord-mode (root / full / voicing extract).
-- Network-as-track *as a literal feature* (a neural network appearing as its own track lane / routable instrument with a dedicated track index). The "track that is a gnarly sequencer" framing in this spec is a **mental model** for the per-pattern network with its own `base_resolution` timebase — it does **not** mean v1 allocates a real track slot for the network. Promoting the network to a first-class track lane (so it shows up in the track UI, can be muted/soloed, routed, etc.) is future work.
+- Network-as-track *as a literal feature* (a neural network appearing as its own track lane / routable instrument with a dedicated track index). The "bank of tracks, each a gnarly sequencer" framing in this spec is a **mental model** for the per-pattern network where each neuron has its own `resolution` timebase — it does **not** mean v1 allocates real track slots for the network or its neurons. Promoting the network to first-class track lanes (so it shows up in the track UI, can be muted/soloed, routed, etc.) is future work.
+- Global stretch multiplier (one knob scaling every neuron's resolution at once). Per-neuron resolution covers the capability in v1; the global convenience knob is deferred.
 - Multiple networks per pattern.
 - Cross-pattern weight morphing / interpolation.
 - `carry_state_on_switch` flag — preserve runtime state across pattern switches.

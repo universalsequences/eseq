@@ -13,6 +13,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "hslider",
         "vslider",
         "toggle",
+        "matrix",
         "knob",
         "knob-number",
         "adsr-editor",

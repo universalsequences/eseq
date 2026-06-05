@@ -40,7 +40,7 @@ use ui_invalidation::*;
 use values::*;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1075,6 +1075,249 @@ fn sync_step_selection_bindings(
     dirty
 }
 
+fn neural_neuron_selected_field(pattern_idx: usize, network_id: u64, neuron_idx: usize) -> String {
+    format!("neural-neuron-selected-{pattern_idx}-{network_id}-{neuron_idx}")
+}
+
+// Mirrors step selection: row widgets bind to targeted fields so selection dirties only those rows.
+fn sync_selected_neural_neuron_bindings(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+) -> bool {
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            "selected-neural-neurons",
+            sequencer::lisp_effect::selected_neural_neurons_to_value(selection),
+        )
+        .effects_dirty;
+    let pattern_idx = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    for network in state.current_neural_networks() {
+        let neuron_count = network.num_neurons.min(sequencer::neural::NUM_NEURONS);
+        for neuron_idx in 0..neuron_count {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &neural_neuron_selected_field(pattern_idx, network.id, neuron_idx),
+                    Value::Bool(selection.contains(
+                        &sequencer::lisp_effect::SelectedNeuralNeuron {
+                            pattern_idx,
+                            network_id: network.id,
+                            neuron_idx,
+                        },
+                    )),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
+}
+
+fn sync_track_plocks_for_neural_selection(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+) -> bool {
+    rt.set_reactive(
+        "SEQ",
+        "track-plocks",
+        build_track_plocks_value_with_neural_selection(
+            app,
+            state,
+            track,
+            selected_steps,
+            Some(selection),
+        ),
+    )
+    .effects_dirty
+}
+
+fn record_selected_neural_instrument_plock(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    selected_neural_neurons: &sequencer::lisp_effect::SharedSelectedNeuralNeurons,
+    track: usize,
+    param_idx: usize,
+    value: f32,
+) -> (BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>, bool) {
+    let neural_selection = selected_neural_neurons.lock().unwrap().clone();
+    let wrote_neural_plock = write_selected_neural_instrument_plock(
+        editor,
+        state,
+        &neural_selection,
+        track,
+        param_idx,
+        value,
+    );
+    (neural_selection, wrote_neural_plock)
+}
+
+fn write_selected_neural_instrument_plock(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    neural_selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    track: usize,
+    param_idx: usize,
+    value: f32,
+) -> bool {
+    sequencer::lisp_effect::set_selected_neural_instrument_plocks(
+        state,
+        neural_selection,
+        track,
+        param_idx,
+        value,
+    )
+    .unwrap_or_else(|error| {
+        editor.handle_host_event(HostEvent::Status(format!(
+            "Error setting neuron instrument p-lock: {error}"
+        )));
+        !neural_selection.is_empty()
+    })
+}
+
+fn record_selected_neural_effect_plock(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    selected_neural_neurons: &sequencer::lisp_effect::SharedSelectedNeuralNeurons,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    value: f32,
+) -> (BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>, bool) {
+    let neural_selection = selected_neural_neurons.lock().unwrap().clone();
+    let wrote_neural_plock = write_selected_neural_effect_plock(
+        editor,
+        state,
+        &neural_selection,
+        track,
+        slot_idx,
+        param_idx,
+        value,
+    );
+    (neural_selection, wrote_neural_plock)
+}
+
+fn write_selected_neural_effect_plock(
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    neural_selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    value: f32,
+) -> bool {
+    sequencer::lisp_effect::set_selected_neural_effect_plocks(
+        state,
+        neural_selection,
+        track,
+        slot_idx,
+        param_idx,
+        value,
+    )
+    .unwrap_or_else(|error| {
+        editor.handle_host_event(HostEvent::Status(format!(
+            "Error setting neuron effect p-lock: {error}"
+        )));
+        !neural_selection.is_empty()
+    })
+}
+
+struct InstrumentParamDisplaySync<'a> {
+    app: &'a ui::App,
+    state: &'a Arc<SequencerState>,
+    selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
+    selection: &'a BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    track: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+    sync_plock_list: bool,
+    sync_sampler_times: bool,
+}
+
+fn sync_instrument_param_authoring_display(
+    editor: &mut Editor,
+    sync: InstrumentParamDisplaySync<'_>,
+) {
+    let mut ui_dirty = false;
+    if sync.sync_plock_list {
+        ui_dirty |= sync_track_plocks_for_neural_selection(
+            editor.runtime_mut(),
+            sync.app,
+            sync.state,
+            sync.track,
+            sync.selected_steps,
+            sync.selection,
+        );
+    }
+    ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
+        editor.runtime_mut(),
+        sync.app,
+        sync.track,
+        sync.param_idx,
+        sync.display_step,
+        Some(sync.selection),
+    );
+    if sync.sync_sampler_times && (sync.param_idx == 2 || sync.param_idx == 3) {
+        ui_dirty |= sync_sampler_selection_time_fields(
+            editor.runtime_mut(),
+            sync.app,
+            sync.track,
+            sync.display_step,
+        );
+    }
+    flush_reactive_display_edit(editor, ui_dirty);
+}
+
+struct EffectParamDisplaySync<'a> {
+    state: &'a Arc<SequencerState>,
+    effect_descriptors: &'a [Vec<sequencer::effects::EffectDescriptor>],
+    app: &'a ui::App,
+    selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
+    selection: &'a BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+    sync_plock_list: bool,
+}
+
+fn sync_effect_param_authoring_display(editor: &mut Editor, sync: EffectParamDisplaySync<'_>) {
+    let mut ui_dirty = false;
+    if sync.sync_plock_list {
+        ui_dirty |= sync_track_plocks_for_neural_selection(
+            editor.runtime_mut(),
+            sync.app,
+            sync.state,
+            sync.track,
+            sync.selected_steps,
+            sync.selection,
+        );
+    }
+    ui_dirty |= sync_track_effect_param_value_field_with_neural_selection(
+        editor.runtime_mut(),
+        sync.state,
+        sync.effect_descriptors,
+        sync.track,
+        sync.slot_idx,
+        sync.param_idx,
+        sync.display_step,
+        Some(sync.selection),
+    );
+    flush_reactive_display_edit(editor, ui_dirty);
+}
+
+fn flush_reactive_display_edit(editor: &mut Editor, dirty: bool) {
+    if dirty {
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+    }
+}
+
 fn sync_expanded_step_viewports_for_track(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1110,13 +1353,19 @@ fn sync_all_expanded_step_viewports(
     dirty
 }
 
+fn sync_shared_track_collapsed(track_collapsed: &Arc<Mutex<Vec<bool>>>, app: &ui::App) {
+    *track_collapsed.lock().unwrap() = app.track_collapsed.clone();
+}
+
 struct UiInvalidationApplyCtx<'a> {
     app: &'a mut ui::App,
     editor: &'a mut Editor,
     state: &'a Arc<SequencerState>,
+    track_collapsed: &'a Arc<Mutex<Vec<bool>>>,
     bus_state: &'a Arc<Mutex<Vec<ui::BusChannelState>>>,
     current_track_idx: usize,
     selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: &'a BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
     piano_roll_selection: &'a Arc<Mutex<HashSet<u64>>>,
     accumulator_names: &'a Arc<Mutex<Vec<String>>>,
     cached_track_peak_levels: &'a [f64],
@@ -1142,9 +1391,11 @@ fn apply_ui_invalidations(
         app,
         editor,
         state,
+        track_collapsed,
         bus_state,
         current_track_idx,
         selected_steps,
+        selected_neural_neurons,
         piano_roll_selection,
         accumulator_names,
         cached_track_peak_levels,
@@ -1331,7 +1582,39 @@ fn apply_ui_invalidations(
                 );
                 if track == current_track_idx {
                     if fx_visible {
-                        sync_track_params(rt, app, state, track, selected_steps);
+                        rt.set_reactive(
+                            "SEQ",
+                            "effects",
+                            build_effects_value(
+                                state,
+                                track,
+                                &app.graph.effect_descriptors,
+                                selected_steps,
+                            ),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "midi-effects",
+                            build_midi_effects_value(state, track, selected_steps),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "instrument-panel",
+                            build_instrument_panel_value(app, track, selected_steps),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "bus-effects",
+                            build_bus_effects_value_for_selection(app, Some(selected_steps)),
+                        );
+                        sync_track_params_with_neural_selection(
+                            rt,
+                            app,
+                            state,
+                            track,
+                            selected_steps,
+                            Some(selected_neural_neurons),
+                        );
                         needs_reactive_cycle = true;
                     }
                     needs_reactive_cycle |=
@@ -1417,6 +1700,13 @@ fn apply_ui_invalidations(
                         .set_reactive("SEQ", "track-outputs", build_track_outputs(app, state))
                         .effects_dirty;
                 }
+                TrackMixerInvalidation::Collapsed => {
+                    let collapsed = track_collapsed.lock().unwrap().clone();
+                    app.replace_track_collapsed(collapsed);
+                    needs_reactive_cycle |= rt
+                        .set_reactive("SEQ", "track-collapsed", build_track_collapsed(app))
+                        .effects_dirty;
+                }
             },
             UiInvalidation::BusMixer { bus, change } => {
                 if !bus_state_pulled {
@@ -1478,13 +1768,27 @@ fn apply_ui_invalidations(
                         .effects_dirty;
                 }
                 if track == current_track_idx {
-                    sync_track_params(rt, app, state, track, selected_steps);
+                    sync_track_params_with_neural_selection(
+                        rt,
+                        app,
+                        state,
+                        track,
+                        selected_steps,
+                        Some(selected_neural_neurons),
+                    );
                     needs_reactive_cycle = true;
                 }
             }
             UiInvalidation::TrackParamPanel { track } => {
                 if track == current_track_idx {
-                    sync_track_params(rt, app, state, track, selected_steps);
+                    sync_track_params_with_neural_selection(
+                        rt,
+                        app,
+                        state,
+                        track,
+                        selected_steps,
+                        Some(selected_neural_neurons),
+                    );
                     needs_reactive_cycle = true;
                 }
             }
@@ -2983,10 +3287,13 @@ mod tests {
 
         let mut track_names = Vec::<String>::new();
         let track_pan_ids = Arc::new(Mutex::new(Vec::<i32>::new()));
+        let track_collapsed = Arc::new(Mutex::new(app.track_collapsed.clone()));
         let bus_state = Arc::new(Mutex::new(app.buses.clone()));
         let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons =
+            Arc::new(Mutex::new(BTreeSet::new()));
         let piano_roll_selection = Arc::new(Mutex::new(HashSet::<u64>::new()));
         let piano_roll_move_state = Arc::new(Mutex::new(None));
         let ui_epoch = Arc::new(AtomicUsize::new(0));
@@ -3009,6 +3316,7 @@ mod tests {
             state.clone(),
             &track_names,
             track_pan_ids.clone(),
+            track_collapsed.clone(),
             bus_state.clone(),
             bus_node_ids.clone(),
             current_track.clone(),
@@ -3021,6 +3329,7 @@ mod tests {
             fx_epoch.clone(),
             ui_invalidations.clone(),
             expanded_step_projection.clone(),
+            selected_neural_neurons.clone(),
             active_delete_target.clone(),
             active_delete_target_version.clone(),
             auto_follow_override_until.clone(),
@@ -3082,7 +3391,11 @@ mod tests {
             .collect();
         *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
         *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
+        sync_shared_track_collapsed(&track_collapsed, &app);
         push_project_scratch_to_named_buffer(&mut editor, &app);
+        if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
+            editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
+        }
 
         let cached_track_peak_levels = vec![0.0; track_names.len()];
         let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
@@ -3366,6 +3679,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let track_pan_ids: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(
         app.graph.track_node_ids.iter().map(|n| n.pan_id).collect(),
     ));
+    let track_collapsed: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(app.track_collapsed.clone()));
     let bus_state: Arc<Mutex<Vec<ui::BusChannelState>>> = Arc::new(Mutex::new(app.buses.clone()));
     let bus_node_ids: Arc<Mutex<Vec<ui::BusNodeIds>>> =
         Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
@@ -3375,6 +3689,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_track = Arc::new(AtomicUsize::new(0));
     // Selected steps for p-locking
     let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+    let selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons =
+        Arc::new(Mutex::new(BTreeSet::new()));
     let piano_roll_selection: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>> = Arc::new(Mutex::new(None));
     let step_clipboard: Arc<
@@ -3412,6 +3728,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.clone(),
         &track_names,
         track_pan_ids.clone(),
+        track_collapsed.clone(),
         bus_state.clone(),
         bus_node_ids.clone(),
         current_track.clone(),
@@ -3424,6 +3741,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fx_epoch.clone(),
         ui_invalidations.clone(),
         expanded_step_projection.clone(),
+        selected_neural_neurons.clone(),
         active_delete_target.clone(),
         active_delete_target_version.clone(),
         auto_follow_override_until.clone(),
@@ -3475,6 +3793,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
     let mut prev_active_buffer_name = editor.active_buffer().name.clone();
+    let mut prev_selected_neural_neurons = selected_neural_neurons.lock().unwrap().clone();
     let mut prev_agent_generation_watermark = agent_generation_watermark(&app);
     let mut prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)> = None;
     let mut prev_auto_follow = true;
@@ -3487,6 +3806,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut cached_modulator_phases, mut cached_modulator_levels) =
         read_modulator_display_values(app.graph.lg, &app);
     let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
+    let mut last_neural_visualization_poll_at = Instant::now() - NEURAL_VISUALIZATION_POLL_INTERVAL;
     let mut last_cpu_ui_poll_at = Instant::now() - CPU_UI_POLL_INTERVAL;
     let mut last_voice_count_log_at = Instant::now() - VOICE_COUNT_LOG_INTERVAL;
     let log_voice_counts = std::env::var_os("TINYSEQ_LOG_VOICE_COUNTS").is_some();
@@ -3652,6 +3972,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     let key = normalize_command_shortcuts(raw_key);
+                    if key.kind == crossterm::event::KeyEventKind::Press
+                        && key.code == crossterm::event::KeyCode::Esc
+                    {
+                        let cleared_neural_selection = {
+                            let mut selection = selected_neural_neurons.lock().unwrap();
+                            let had_selection = !selection.is_empty();
+                            selection.clear();
+                            had_selection
+                        };
+                        if cleared_neural_selection {
+                            let selection = selected_neural_neurons.lock().unwrap().clone();
+                            sync_selected_neural_neuron_bindings(
+                                editor.runtime_mut(),
+                                &state,
+                                &selection,
+                            );
+                            let track = current_track.load(Ordering::Relaxed);
+                            sync_fx_param_binding_fields_with_neural_selection(
+                                editor.runtime_mut(),
+                                &app,
+                                &state,
+                                track,
+                                &selected_steps,
+                                Some(&selection),
+                            );
+                            sync_track_plocks_for_neural_selection(
+                                editor.runtime_mut(),
+                                &app,
+                                &state,
+                                track,
+                                &selected_steps,
+                                &selection,
+                            );
+                            prev_selected_neural_neurons = selection;
+                            editor.mark_needs_redraw();
+                            ui_loop_stats.note_event(event_started.elapsed());
+                            continue;
+                        }
+                    }
                     if should_toggle_play_on_space(&editor, &key) {
                         let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                         editor.refresh_runtime_side_effects();
@@ -3922,8 +4281,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 build_instrument_panel_value(&app, idx, &selected_steps),
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                            sync_track_params(rt, &app, &state, idx, &selected_steps);
-                            sync_fx_param_binding_fields(rt, &app, &state, idx, &selected_steps);
+                            let selected_neural_snapshot =
+                                selected_neural_neurons.lock().unwrap().clone();
+                            sync_track_params_with_neural_selection(
+                                rt,
+                                &app,
+                                &state,
+                                idx,
+                                &selected_steps,
+                                Some(&selected_neural_snapshot),
+                            );
+                            sync_fx_param_binding_fields_with_neural_selection(
+                                rt,
+                                &app,
+                                &state,
+                                idx,
+                                &selected_steps,
+                                Some(&selected_neural_snapshot),
+                            );
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -4221,13 +4596,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     *accumulator_names.lock().unwrap() =
                                         build_accumulator_names(&app);
-                                    sync_track_params(rt, &app, &state, idx, &selected_steps);
-                                    sync_fx_param_binding_fields(
+                                    let selected_neural_snapshot =
+                                        selected_neural_neurons.lock().unwrap().clone();
+                                    sync_track_params_with_neural_selection(
                                         rt,
                                         &app,
                                         &state,
                                         idx,
                                         &selected_steps,
+                                        Some(&selected_neural_snapshot),
+                                    );
+                                    sync_fx_param_binding_fields_with_neural_selection(
+                                        rt,
+                                        &app,
+                                        &state,
+                                        idx,
+                                        &selected_steps,
+                                        Some(&selected_neural_snapshot),
                                     );
                                     rt.set_reactive(
                                         "SEQ",
@@ -4469,9 +4854,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "new-project" => {
                         app.start_new_project();
                         push_project_scratch_to_named_buffer(&mut editor, &app);
+                        if let Err(error) =
+                            evaluate_project_scratch_on_ui_runtime(&mut editor, &app)
+                        {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Scratch UI eval error: {error}"
+                            )));
+                        }
                         selected_steps.lock().unwrap().clear();
                         piano_roll_selection.lock().unwrap().clear();
                         track_names = app.tracks.clone();
+                        sync_shared_track_collapsed(&track_collapsed, &app);
                         current_track.store(0, Ordering::Relaxed);
                         {
                             let mut pan_ids = track_pan_ids.lock().unwrap();
@@ -4637,29 +5030,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned()
                                 {
                                     let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                                    ui::apply_command(
-                                        &mut app,
-                                        ui::AppCommand::SetInstrumentParam {
+                                    let (neural_selection, wrote_neural_plock) =
+                                        record_selected_neural_instrument_plock(
+                                            &mut editor,
+                                            &state,
+                                            &selected_neural_neurons,
                                             track,
                                             param_idx,
-                                            value: stored,
-                                        },
-                                    );
-                                    sync_instrument_param_value_field(
-                                        editor.runtime_mut(),
-                                        &app,
-                                        track,
-                                        param_idx,
-                                        None,
-                                    );
-                                    if param_idx == 2 || param_idx == 3 {
-                                        sync_sampler_selection_time_fields(
-                                            editor.runtime_mut(),
-                                            &app,
-                                            track,
-                                            selected_steps.lock().unwrap().iter().copied().min(),
+                                            stored,
+                                        );
+                                    if !wrote_neural_plock {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentParam {
+                                                track,
+                                                param_idx,
+                                                value: stored,
+                                            },
                                         );
                                     }
+                                    sync_instrument_param_authoring_display(
+                                        &mut editor,
+                                        InstrumentParamDisplaySync {
+                                            app: &app,
+                                            state: &state,
+                                            selected_steps: &selected_steps,
+                                            selection: &neural_selection,
+                                            track,
+                                            param_idx,
+                                            display_step: None,
+                                            sync_plock_list: wrote_neural_plock,
+                                            sync_sampler_times: true,
+                                        },
+                                    );
                                     if param_change_needs_fx_rebuild(&desc) {
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -4687,6 +5090,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let slot = &app.state.pattern.instrument_slots[track];
                                     let selected: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
+                                    let neural_selection =
+                                        selected_neural_neurons.lock().unwrap().clone();
                                     let default = if param_idx
                                         < slot.num_params.load(Ordering::Relaxed) as usize
                                     {
@@ -4694,14 +5099,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         desc.default
                                     };
-                                    let current = selected
-                                        .iter()
-                                        .copied()
-                                        .min()
-                                        .and_then(|step| slot.plocks.get(step, param_idx))
-                                        .unwrap_or(default);
+                                    let current = sequencer::lisp_effect::selected_neural_instrument_plock_value(
+                                        &state,
+                                        &neural_selection,
+                                        track,
+                                        param_idx,
+                                    )
+                                    .or_else(|| {
+                                        selected
+                                            .iter()
+                                            .copied()
+                                            .min()
+                                            .and_then(|step| slot.plocks.get(step, param_idx))
+                                    })
+                                    .unwrap_or(default);
                                     let next = desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
-                                    if selected.is_empty() {
+                                    let wrote_neural_plock = write_selected_neural_instrument_plock(
+                                        &mut editor,
+                                        &state,
+                                        &neural_selection,
+                                        track,
+                                        param_idx,
+                                        next,
+                                    );
+                                    if wrote_neural_plock {
+                                        sync_instrument_param_authoring_display(
+                                            &mut editor,
+                                            InstrumentParamDisplaySync {
+                                                app: &app,
+                                                state: &state,
+                                                selected_steps: &selected_steps,
+                                                selection: &neural_selection,
+                                                track,
+                                                param_idx,
+                                                display_step: None,
+                                                sync_plock_list: true,
+                                                sync_sampler_times: false,
+                                            },
+                                        );
+                                    } else if selected.is_empty() {
                                         ui::apply_command(
                                             &mut app,
                                             ui::AppCommand::SetInstrumentParam {
@@ -4710,13 +5146,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 value: next,
                                             },
                                         );
-                                        sync_instrument_param_value_field(
+                                        if sync_instrument_param_value_field(
                                             editor.runtime_mut(),
                                             &app,
                                             track,
                                             param_idx,
                                             None,
-                                        );
+                                        ) {
+                                            editor.mark_needs_redraw();
+                                        }
                                     } else {
                                         ui::apply_command(
                                             &mut app,
@@ -4765,23 +5203,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .as_ref()
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
-                                ui::apply_command(
-                                    &mut app,
-                                    ui::AppCommand::SetEffectParam {
+                                let (neural_selection, wrote_neural_plock) =
+                                    record_selected_neural_effect_plock(
+                                        &mut editor,
+                                        &state,
+                                        &selected_neural_neurons,
                                         track,
                                         slot_idx,
                                         param_idx,
-                                        value: clamped,
+                                        clamped,
+                                    );
+                                if !wrote_neural_plock {
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetEffectParam {
+                                            track,
+                                            slot_idx,
+                                            param_idx,
+                                            value: clamped,
+                                        },
+                                    );
+                                }
+                                sync_effect_param_authoring_display(
+                                    &mut editor,
+                                    EffectParamDisplaySync {
+                                        state: &state,
+                                        effect_descriptors: &app.graph.effect_descriptors,
+                                        app: &app,
+                                        selected_steps: &selected_steps,
+                                        selection: &neural_selection,
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        display_step: None,
+                                        sync_plock_list: wrote_neural_plock,
                                     },
-                                );
-                                sync_track_effect_param_value_field(
-                                    editor.runtime_mut(),
-                                    &state,
-                                    &app.graph.effect_descriptors,
-                                    track,
-                                    slot_idx,
-                                    param_idx,
-                                    None,
                                 );
                                 if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -4855,13 +5311,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         app.publish_bus_gate_runtime();
                                                         *bus_state.lock().unwrap() =
                                                             app.buses.clone();
-                                                        sync_bus_effect_param_value_field(
+                                                        if sync_bus_effect_param_value_field(
                                                             editor.runtime_mut(),
                                                             &app,
                                                             bus_idx,
                                                             slot_idx,
                                                             param_idx,
-                                                        );
+                                                        ) {
+                                                            editor.mark_needs_redraw();
+                                                        }
                                                     }
                                                     Err(error) => {
                                                         editor.handle_host_event(
@@ -4919,17 +5377,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                             if selected.is_empty() {
                                                 slot.defaults.set(param_idx, next);
-                                                sync_midi_fx_param_value_field(
+                                                if sync_midi_fx_param_value_field(
                                                     editor.runtime_mut(),
                                                     &state,
                                                     track,
                                                     slot_idx,
                                                     param_idx,
                                                     None,
-                                                );
+                                                ) {
+                                                    editor.mark_needs_redraw();
+                                                }
                                             } else {
                                                 for step in selected {
-                                                    slot.plocks.set(step, param_idx, next);
+                                                    slot.set_plock(step, param_idx, next);
                                                 }
                                             }
                                             state.publish_scheduler_snapshot();
@@ -4948,23 +5408,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .cloned();
                                     if let Some(desc) = desc {
                                         let chain = &state.pattern.effect_chains[track];
+                                        let neural_selection =
+                                            selected_neural_neurons.lock().unwrap().clone();
                                         let current = chain
                                             .get(slot_idx)
                                             .map(|slot| {
                                                 let default = slot.defaults.get(param_idx);
-                                                selected
-                                                    .iter()
-                                                    .copied()
-                                                    .min()
-                                                    .and_then(|step| {
-                                                        slot.plocks.get(step, param_idx)
-                                                    })
-                                                    .unwrap_or(default)
+                                                sequencer::lisp_effect::selected_neural_effect_plock_value(
+                                                    &state,
+                                                    &neural_selection,
+                                                    track,
+                                                    slot_idx,
+                                                    param_idx,
+                                                )
+                                                .or_else(|| {
+                                                    selected
+                                                        .iter()
+                                                        .copied()
+                                                        .min()
+                                                        .and_then(|step| {
+                                                            slot.plocks.get(step, param_idx)
+                                                        })
+                                                })
+                                                .unwrap_or(default)
                                             })
                                             .unwrap_or(desc.default);
                                         let next =
                                             desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
-                                        if selected.is_empty() {
+                                        let wrote_neural_plock = write_selected_neural_effect_plock(
+                                            &mut editor,
+                                            &state,
+                                            &neural_selection,
+                                            track,
+                                            slot_idx,
+                                            param_idx,
+                                            next,
+                                        );
+                                        if wrote_neural_plock {
+                                            sync_effect_param_authoring_display(
+                                                &mut editor,
+                                                EffectParamDisplaySync {
+                                                    state: &state,
+                                                    effect_descriptors: &app
+                                                        .graph
+                                                        .effect_descriptors,
+                                                    app: &app,
+                                                    selected_steps: &selected_steps,
+                                                    selection: &neural_selection,
+                                                    track,
+                                                    slot_idx,
+                                                    param_idx,
+                                                    display_step: None,
+                                                    sync_plock_list: true,
+                                                },
+                                            );
+                                        } else if selected.is_empty() {
                                             ui::apply_command(
                                                 &mut app,
                                                 ui::AppCommand::SetEffectParam {
@@ -4974,7 +5472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     value: next,
                                                 },
                                             );
-                                            sync_track_effect_param_value_field(
+                                            if sync_track_effect_param_value_field(
                                                 editor.runtime_mut(),
                                                 &state,
                                                 &app.graph.effect_descriptors,
@@ -4982,7 +5480,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 slot_idx,
                                                 param_idx,
                                                 None,
-                                            );
+                                            ) {
+                                                editor.mark_needs_redraw();
+                                            }
                                         } else {
                                             ui::apply_command(
                                                 &mut app,
@@ -5025,12 +5525,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(selected_idx) =
                                         labels.iter().position(|item| item == &label)
                                     {
-                                        ui::apply_command(
-                                            &mut app,
-                                            ui::AppCommand::SetInstrumentParam {
+                                        let value = selected_idx as f32;
+                                        let (neural_selection, wrote_neural_plock) =
+                                            record_selected_neural_instrument_plock(
+                                                &mut editor,
+                                                &state,
+                                                &selected_neural_neurons,
                                                 track,
                                                 param_idx,
-                                                value: selected_idx as f32,
+                                                value,
+                                            );
+                                        if !wrote_neural_plock {
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::SetInstrumentParam {
+                                                    track,
+                                                    param_idx,
+                                                    value,
+                                                },
+                                            );
+                                        }
+                                        sync_instrument_param_authoring_display(
+                                            &mut editor,
+                                            InstrumentParamDisplaySync {
+                                                app: &app,
+                                                state: &state,
+                                                selected_steps: &selected_steps,
+                                                selection: &neural_selection,
+                                                track,
+                                                param_idx,
+                                                display_step: None,
+                                                sync_plock_list: wrote_neural_plock,
+                                                sync_sampler_times: false,
                                             },
                                         );
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -5061,25 +5587,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned()
                                 {
                                     let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                                    let steps: Vec<usize> =
-                                        selected_steps.lock().unwrap().iter().copied().collect();
-                                    ui::apply_command(
-                                        &mut app,
-                                        ui::AppCommand::SetInstrumentPlockMulti {
+                                    let (neural_selection, wrote_neural_plock) =
+                                        record_selected_neural_instrument_plock(
+                                            &mut editor,
+                                            &state,
+                                            &selected_neural_neurons,
                                             track,
-                                            steps,
                                             param_idx,
-                                            value: stored,
-                                        },
-                                    );
-                                    if param_idx == 2 || param_idx == 3 {
-                                        sync_sampler_selection_time_fields(
-                                            editor.runtime_mut(),
-                                            &app,
-                                            track,
-                                            selected_steps.lock().unwrap().iter().copied().min(),
+                                            stored,
+                                        );
+                                    if !wrote_neural_plock {
+                                        let steps: Vec<usize> = selected_steps
+                                            .lock()
+                                            .unwrap()
+                                            .iter()
+                                            .copied()
+                                            .collect();
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentPlockMulti {
+                                                track,
+                                                steps,
+                                                param_idx,
+                                                value: stored,
+                                            },
                                         );
                                     }
+                                    let display_step = displayed_plock_step(
+                                        &state,
+                                        track,
+                                        selected_plock_step(&selected_steps),
+                                    );
+                                    sync_instrument_param_authoring_display(
+                                        &mut editor,
+                                        InstrumentParamDisplaySync {
+                                            app: &app,
+                                            state: &state,
+                                            selected_steps: &selected_steps,
+                                            selection: &neural_selection,
+                                            track,
+                                            param_idx,
+                                            display_step,
+                                            sync_plock_list: wrote_neural_plock,
+                                            sync_sampler_times: true,
+                                        },
+                                    );
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -5109,19 +5661,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(selected_idx) =
                                         labels.iter().position(|item| item == &label)
                                     {
-                                        let steps: Vec<usize> = selected_steps
-                                            .lock()
-                                            .unwrap()
-                                            .iter()
-                                            .copied()
-                                            .collect();
-                                        ui::apply_command(
-                                            &mut app,
-                                            ui::AppCommand::SetInstrumentPlockMulti {
+                                        let value = selected_idx as f32;
+                                        let (neural_selection, wrote_neural_plock) =
+                                            record_selected_neural_instrument_plock(
+                                                &mut editor,
+                                                &state,
+                                                &selected_neural_neurons,
                                                 track,
-                                                steps,
                                                 param_idx,
-                                                value: selected_idx as f32,
+                                                value,
+                                            );
+                                        if !wrote_neural_plock {
+                                            let steps: Vec<usize> = selected_steps
+                                                .lock()
+                                                .unwrap()
+                                                .iter()
+                                                .copied()
+                                                .collect();
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::SetInstrumentPlockMulti {
+                                                    track,
+                                                    steps,
+                                                    param_idx,
+                                                    value,
+                                                },
+                                            );
+                                        }
+                                        sync_instrument_param_authoring_display(
+                                            &mut editor,
+                                            InstrumentParamDisplaySync {
+                                                app: &app,
+                                                state: &state,
+                                                selected_steps: &selected_steps,
+                                                selection: &neural_selection,
+                                                track,
+                                                param_idx,
+                                                display_step: None,
+                                                sync_plock_list: wrote_neural_plock,
+                                                sync_sampler_times: false,
                                             },
                                         );
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -5206,13 +5784,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         app.state.publish_scheduler_snapshot();
                                     } else {
-                                        ui::apply_command(
-                                            &mut app,
-                                            ui::AppCommand::SetEffectParam {
+                                        let value = selected_idx as f32;
+                                        let (neural_selection, wrote_neural_plock) =
+                                            record_selected_neural_effect_plock(
+                                                &mut editor,
+                                                &state,
+                                                &selected_neural_neurons,
                                                 track,
                                                 slot_idx,
                                                 param_idx,
-                                                value: selected_idx as f32,
+                                                value,
+                                            );
+                                        if !wrote_neural_plock {
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::SetEffectParam {
+                                                    track,
+                                                    slot_idx,
+                                                    param_idx,
+                                                    value,
+                                                },
+                                            );
+                                        }
+                                        sync_effect_param_authoring_display(
+                                            &mut editor,
+                                            EffectParamDisplaySync {
+                                                state: &state,
+                                                effect_descriptors: &app.graph.effect_descriptors,
+                                                app: &app,
+                                                selected_steps: &selected_steps,
+                                                selection: &neural_selection,
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                display_step: None,
+                                                sync_plock_list: wrote_neural_plock,
                                             },
                                         );
                                     }
@@ -5255,13 +5861,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let rt = editor.runtime_mut();
                                     sync_track_mixer_state(rt, &app, &state);
                                     if track == current_track.load(Ordering::Relaxed) {
-                                        sync_track_params(rt, &app, &state, track, &selected_steps);
-                                        sync_fx_param_binding_fields(
+                                        let selected_neural_snapshot =
+                                            selected_neural_neurons.lock().unwrap().clone();
+                                        sync_track_params_with_neural_selection(
                                             rt,
                                             &app,
                                             &state,
                                             track,
                                             &selected_steps,
+                                            Some(&selected_neural_snapshot),
+                                        );
+                                        sync_fx_param_binding_fields_with_neural_selection(
+                                            rt,
+                                            &app,
+                                            &state,
+                                            track,
+                                            &selected_steps,
+                                            Some(&selected_neural_snapshot),
                                         );
                                     }
                                     rt.run_reactive_cycle();
@@ -6324,20 +6940,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         app.state.publish_scheduler_snapshot();
                                     } else {
-                                        let steps: Vec<usize> = selected_steps
-                                            .lock()
-                                            .unwrap()
-                                            .iter()
-                                            .copied()
-                                            .collect();
-                                        ui::apply_command(
-                                            &mut app,
-                                            ui::AppCommand::SetEffectPlockMulti {
+                                        let value = selected_idx as f32;
+                                        let (neural_selection, wrote_neural_plock) =
+                                            record_selected_neural_effect_plock(
+                                                &mut editor,
+                                                &state,
+                                                &selected_neural_neurons,
                                                 track,
                                                 slot_idx,
-                                                steps,
                                                 param_idx,
-                                                value: selected_idx as f32,
+                                                value,
+                                            );
+                                        if !wrote_neural_plock {
+                                            let steps: Vec<usize> = selected_steps
+                                                .lock()
+                                                .unwrap()
+                                                .iter()
+                                                .copied()
+                                                .collect();
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::SetEffectPlockMulti {
+                                                    track,
+                                                    slot_idx,
+                                                    steps,
+                                                    param_idx,
+                                                    value,
+                                                },
+                                            );
+                                        }
+                                        sync_effect_param_authoring_display(
+                                            &mut editor,
+                                            EffectParamDisplaySync {
+                                                state: &state,
+                                                effect_descriptors: &app.graph.effect_descriptors,
+                                                app: &app,
+                                                selected_steps: &selected_steps,
+                                                selection: &neural_selection,
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                display_step: None,
+                                                sync_plock_list: wrote_neural_plock,
                                             },
                                         );
                                     }
@@ -6440,7 +7084,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
                                     for step in steps {
-                                        slot.plocks.set(step, param_idx, clamped);
+                                        slot.set_plock(step, param_idx, clamped);
                                     }
                                     state.publish_scheduler_snapshot();
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -6527,7 +7171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .copied()
                                             .collect();
                                         for step in steps {
-                                            slot.plocks.set(step, param_idx, selected_idx as f32);
+                                            slot.set_plock(step, param_idx, selected_idx as f32);
                                         }
                                         state.publish_scheduler_snapshot();
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -6621,8 +7265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let stored =
                                                     desc.clamp(desc.user_input_to_stored(value));
                                                 state.pattern.instrument_slots[track]
-                                                    .plocks
-                                                    .set(step, param_idx, stored);
+                                                    .set_plock(step, param_idx, stored);
                                                 state.publish_scheduler_snapshot();
                                             }
                                         }
@@ -6645,7 +7288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .and_then(|d| d.params.get(param_idx))
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                slot.plocks.set(step, param_idx, clamped);
+                                                slot.set_plock(step, param_idx, clamped);
                                                 state.publish_scheduler_snapshot();
                                             }
                                         }
@@ -6672,7 +7315,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     })
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                slot.plocks.set(step, param_idx, clamped);
+                                                slot.set_plock(step, param_idx, clamped);
                                                 state.publish_scheduler_snapshot();
                                             }
                                         }
@@ -6759,7 +7402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     _ => None,
                                                 })
                                             {
-                                                state.pattern.instrument_slots[track].plocks.set(
+                                                state.pattern.instrument_slots[track].set_plock(
                                                     step,
                                                     param_idx,
                                                     selected_idx as f32,
@@ -6800,7 +7443,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .get(track)
                                                     .and_then(|chain| chain.get(slot_idx))
                                                 {
-                                                    slot.plocks.set(
+                                                    slot.set_plock(
                                                         step,
                                                         param_idx,
                                                         selected_idx as f32,
@@ -6849,7 +7492,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .get(track)
                                                     .and_then(|slots| slots.get(slot_idx))
                                                 {
-                                                    slot.plocks.set(
+                                                    slot.set_plock(
                                                         step,
                                                         param_idx,
                                                         selected_idx as f32,
@@ -6886,24 +7529,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            if let (Some(target), Some(step)) = (target, step) {
+                            let target_track =
+                                map.get("target-track")
+                                    .and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) => Some(*n as usize),
+                                        _ => None,
+                                    });
+                            let network_id =
+                                map.get("network-id")
+                                    .and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) => Some(*n as u64),
+                                        _ => None,
+                                    });
+                            let neuron_idx =
+                                map.get("neuron-idx")
+                                    .and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) => Some(*n as usize),
+                                        _ => None,
+                                    });
+                            if let Some(target) = target {
                                 let track = current_track.load(Ordering::Relaxed);
+                                let mut changed = false;
                                 match target.as_str() {
-                                    "timebase" => state.pattern.timebase_plocks[track].clear(step),
-                                    "swing" => state.pattern.swing_plocks[track].clear(step),
+                                    "timebase" => {
+                                        if let Some(step) = step {
+                                            state.pattern.timebase_plocks[track].clear(step);
+                                        }
+                                    }
+                                    "swing" => {
+                                        if let Some(step) = step {
+                                            state.pattern.swing_plocks[track].clear(step);
+                                        }
+                                    }
                                     "swing-resolution" => {
-                                        state.pattern.swing_resolution_plocks[track].clear(step)
+                                        if let Some(step) = step {
+                                            state.pattern.swing_resolution_plocks[track].clear(step)
+                                        }
                                     }
                                     "instrument" => {
-                                        if let Some(param_idx) = param_idx {
+                                        if let (Some(step), Some(param_idx)) = (step, param_idx) {
                                             state.pattern.instrument_slots[track]
                                                 .plocks
                                                 .clear_param(step, param_idx);
                                         }
                                     }
                                     "effect" => {
-                                        if let (Some(slot_idx), Some(param_idx)) =
-                                            (slot_idx, param_idx)
+                                        if let (Some(step), Some(slot_idx), Some(param_idx)) =
+                                            (step, slot_idx, param_idx)
                                         {
                                             if let Some(slot) = state
                                                 .pattern
@@ -6916,8 +7588,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     "midi-fx" => {
-                                        if let (Some(slot_idx), Some(param_idx)) =
-                                            (slot_idx, param_idx)
+                                        if let (Some(step), Some(slot_idx), Some(param_idx)) =
+                                            (step, slot_idx, param_idx)
                                         {
                                             if let Some(slot) = state
                                                 .pattern
@@ -6929,11 +7601,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    "neural-instrument" => {
+                                        if let (
+                                            Some(network_id),
+                                            Some(neuron_idx),
+                                            Some(target_track),
+                                            Some(param_idx),
+                                        ) = (network_id, neuron_idx, target_track, param_idx)
+                                        {
+                                            match sequencer::lisp_effect::clear_neural_instrument_plock_by_network_id(
+                                                &state,
+                                                network_id,
+                                                neuron_idx,
+                                                target_track,
+                                                param_idx,
+                                            ) {
+                                                Ok(removed) => changed |= removed,
+                                                Err(error) => editor.handle_host_event(
+                                                    HostEvent::Status(format!(
+                                                        "Error clearing neuron instrument p-lock: {error}"
+                                                    )),
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    "neural-effect" => {
+                                        if let (
+                                            Some(network_id),
+                                            Some(neuron_idx),
+                                            Some(target_track),
+                                            Some(slot_idx),
+                                            Some(param_idx),
+                                        ) = (
+                                            network_id,
+                                            neuron_idx,
+                                            target_track,
+                                            slot_idx,
+                                            param_idx,
+                                        ) {
+                                            match sequencer::lisp_effect::clear_neural_effect_plock_by_network_id(
+                                                &state,
+                                                network_id,
+                                                neuron_idx,
+                                                target_track,
+                                                slot_idx,
+                                                param_idx,
+                                            ) {
+                                                Ok(removed) => changed |= removed,
+                                                Err(error) => editor.handle_host_event(
+                                                    HostEvent::Status(format!(
+                                                        "Error clearing neuron effect p-lock: {error}"
+                                                    )),
+                                                ),
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
-                                state.publish_scheduler_snapshot();
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                if changed {
+                                    let selection = selected_neural_neurons.lock().unwrap().clone();
+                                    sync_track_plocks_for_neural_selection(
+                                        editor.runtime_mut(),
+                                        &app,
+                                        &state,
+                                        track,
+                                        &selected_steps,
+                                        &selection,
+                                    );
+                                    editor.runtime_mut().run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    editor.mark_needs_redraw();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                } else if step.is_some() {
+                                    state.publish_scheduler_snapshot();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
                     }
@@ -7853,6 +8597,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
                                     let rt = editor.runtime_mut();
                                     let started = Instant::now();
+                                    sync_shared_track_collapsed(&track_collapsed, &app);
                                     sync_track_name_state(rt, &mut track_names, &app);
                                     sync_pattern_state(rt, &state);
                                     sync_names_pattern_elapsed = started.elapsed();
@@ -7917,15 +8662,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     sync_fx_lists_elapsed = started.elapsed();
                                     let started = Instant::now();
-                                    sync_track_params(rt, &app, &state, ct, &selected_steps);
-                                    sync_track_params_elapsed = started.elapsed();
-                                    let started = Instant::now();
-                                    sync_fx_param_binding_fields(
+                                    let selected_neural_snapshot =
+                                        selected_neural_neurons.lock().unwrap().clone();
+                                    sync_track_params_with_neural_selection(
                                         rt,
                                         &app,
                                         &state,
                                         ct,
                                         &selected_steps,
+                                        Some(&selected_neural_snapshot),
+                                    );
+                                    sync_track_params_elapsed = started.elapsed();
+                                    let started = Instant::now();
+                                    sync_fx_param_binding_fields_with_neural_selection(
+                                        rt,
+                                        &app,
+                                        &state,
+                                        ct,
+                                        &selected_steps,
+                                        Some(&selected_neural_snapshot),
                                     );
                                     sync_fx_bindings_elapsed = started.elapsed();
                                     let started = Instant::now();
@@ -8065,6 +8820,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.delete_bus_pattern_at(deleted_pattern, new_pattern);
                             let ct = current_track.load(Ordering::Relaxed);
                             let rt = editor.runtime_mut();
+                            sync_shared_track_collapsed(&track_collapsed, &app);
                             sync_track_name_state(rt, &mut track_names, &app);
                             sync_pattern_state(rt, &state);
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
@@ -8094,8 +8850,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 build_instrument_panel_value(&app, ct, &selected_steps),
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                            sync_track_params(rt, &app, &state, ct, &selected_steps);
-                            sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                            let selected_neural_snapshot =
+                                selected_neural_neurons.lock().unwrap().clone();
+                            sync_track_params_with_neural_selection(
+                                rt,
+                                &app,
+                                &state,
+                                ct,
+                                &selected_steps,
+                                Some(&selected_neural_snapshot),
+                            );
+                            sync_fx_param_binding_fields_with_neural_selection(
+                                rt,
+                                &app,
+                                &state,
+                                ct,
+                                &selected_steps,
+                                Some(&selected_neural_snapshot),
+                            );
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -8855,6 +9627,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     current_track.store(draft_track, Ordering::Relaxed);
                                     app.ui.cursor_track = draft_track;
                                     track_names = app.tracks.clone();
+                                    sync_shared_track_collapsed(&track_collapsed, &app);
 
                                     let rt = editor.runtime_mut();
                                     rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
@@ -10504,6 +11277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         track_names = app.tracks.clone();
+                        sync_shared_track_collapsed(&track_collapsed, &app);
                         let restored_track = if app.tracks.is_empty() {
                             0
                         } else {
@@ -10647,8 +11421,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 build_instrument_panel_value(&app, ct, &selected_steps),
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                            sync_track_params(rt, &app, &state, ct, &selected_steps);
-                            sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                            let selected_neural_snapshot =
+                                selected_neural_neurons.lock().unwrap().clone();
+                            sync_track_params_with_neural_selection(
+                                rt,
+                                &app,
+                                &state,
+                                ct,
+                                &selected_steps,
+                                Some(&selected_neural_snapshot),
+                            );
+                            sync_fx_param_binding_fields_with_neural_selection(
+                                rt,
+                                &app,
+                                &state,
+                                ct,
+                                &selected_steps,
+                                Some(&selected_neural_snapshot),
+                            );
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -10661,6 +11451,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                        if let Err(error) =
+                            evaluate_project_scratch_on_ui_runtime(&mut editor, &app)
+                        {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Scratch UI eval error: {error}"
+                            )));
+                        }
                         ui_invalidations.clear();
                         expanded_step_projection.clear();
 
@@ -11289,6 +12086,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_meter_poll_at = Instant::now();
             }
             let mut needs_reactive_cycle = false;
+            let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
+            if selected_neural_snapshot != prev_selected_neural_neurons {
+                needs_reactive_cycle |= sync_selected_neural_neuron_bindings(
+                    editor.runtime_mut(),
+                    &state,
+                    &selected_neural_snapshot,
+                );
+                needs_reactive_cycle |= sync_fx_param_binding_fields_with_neural_selection(
+                    editor.runtime_mut(),
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    Some(&selected_neural_snapshot),
+                );
+                needs_reactive_cycle |= sync_track_plocks_for_neural_selection(
+                    editor.runtime_mut(),
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    &selected_neural_snapshot,
+                );
+                prev_selected_neural_neurons = selected_neural_snapshot.clone();
+            }
             // Track switch — rebuild everything
             if ct != prev_current_track && !app.tracks.is_empty() {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
@@ -11311,6 +12133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
                 reset_sampler_waveform_view(&mut editor);
                 let rt = editor.runtime_mut();
+                sync_shared_track_collapsed(&track_collapsed, &app);
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
                 set_current_track_reactive(rt, app.tracks.len(), ct);
@@ -11353,8 +12176,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     build_instrument_panel_value(&app, ct, &selected_steps),
                 );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                sync_track_params(rt, &app, &state, ct, &selected_steps);
-                sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                sync_track_params_with_neural_selection(
+                    rt,
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    Some(&selected_neural_snapshot),
+                );
+                sync_fx_param_binding_fields_with_neural_selection(
+                    rt,
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    Some(&selected_neural_snapshot),
+                );
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
@@ -11382,8 +12219,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 needs_reactive_cycle = true;
                 if fx_visible && !app.tracks.is_empty() {
                     let rt = editor.runtime_mut();
-                    sync_track_params(rt, &app, &state, ct, &selected_steps);
-                    sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                    sync_track_params_with_neural_selection(
+                        rt,
+                        &app,
+                        &state,
+                        ct,
+                        &selected_steps,
+                        Some(&selected_neural_snapshot),
+                    );
+                    sync_fx_param_binding_fields_with_neural_selection(
+                        rt,
+                        &app,
+                        &state,
+                        ct,
+                        &selected_steps,
+                        Some(&selected_neural_snapshot),
+                    );
                 }
             }
             if bpm != prev_bpm {
@@ -11447,6 +12298,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 prev_bus_peak_levels = cached_bus_peak_levels.clone();
+            }
+            if last_neural_visualization_poll_at.elapsed() >= NEURAL_VISUALIZATION_POLL_INTERVAL {
+                last_neural_visualization_poll_at = Instant::now();
+                needs_reactive_cycle |=
+                    sync_neural_visualization_fields(editor.runtime_mut(), &state);
             }
             if cached_modulator_phases != prev_modulator_phases {
                 if fx_visible {
@@ -11543,8 +12399,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if fx_visible && current_track_playhead_changed && !app.tracks.is_empty() {
                 let rt = editor.runtime_mut();
-                sync_track_params(rt, &app, &state, ct, &selected_steps);
-                sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                sync_track_params_with_neural_selection(
+                    rt,
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    Some(&selected_neural_snapshot),
+                );
+                sync_fx_param_binding_fields_with_neural_selection(
+                    rt,
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    Some(&selected_neural_snapshot),
+                );
                 needs_reactive_cycle = true;
             }
             prev_current_track_playhead_visible = current_track_playhead_visible;
@@ -11558,9 +12428,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app: &mut app,
                     editor: &mut editor,
                     state: &state,
+                    track_collapsed: &track_collapsed,
                     bus_state: &bus_state,
                     current_track_idx: ct,
                     selected_steps: &selected_steps,
+                    selected_neural_neurons: &selected_neural_snapshot,
                     piano_roll_selection: &piano_roll_selection,
                     accumulator_names: &accumulator_names,
                     cached_track_peak_levels: &cached_track_peak_levels,
@@ -11592,8 +12464,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let old_pattern_epoch = prev_pattern_epoch;
                 let rt = editor.runtime_mut();
                 let started = Instant::now();
+                sync_shared_track_collapsed(&track_collapsed, &app);
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
+                let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
+                sync_selected_neural_neuron_bindings(rt, &state, &selected_neural_snapshot);
                 sync_names_pattern_elapsed = started.elapsed();
                 if current_track_playhead_visible {
                     let started = Instant::now();
@@ -11626,11 +12501,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_mixer_elapsed = started.elapsed();
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 let started = Instant::now();
-                sync_track_params(rt, &app, &state, ct, &selected_steps);
+                sync_track_params_with_neural_selection(
+                    rt,
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    Some(&selected_neural_snapshot),
+                );
                 sync_track_params_elapsed = started.elapsed();
                 let started = Instant::now();
-                sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                sync_fx_param_binding_fields_with_neural_selection(
+                    rt,
+                    &app,
+                    &state,
+                    ct,
+                    &selected_steps,
+                    Some(&selected_neural_snapshot),
+                );
                 sync_fx_bindings_elapsed = started.elapsed();
+                prev_selected_neural_neurons = selected_neural_snapshot;
                 let started = Instant::now();
                 rt.set_reactive(
                     "SEQ",
@@ -11704,6 +12594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                 } else {
+                    sync_shared_track_collapsed(&track_collapsed, &app);
                     sync_track_name_state(rt, &mut track_names, &app);
                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                     sync_step_param_lists(rt, &state, ct);
@@ -11725,8 +12616,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                    sync_track_params(rt, &app, &state, ct, &selected_steps);
-                    sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
+                    sync_track_params_with_neural_selection(
+                        rt,
+                        &app,
+                        &state,
+                        ct,
+                        &selected_steps,
+                        Some(&selected_neural_snapshot),
+                    );
+                    sync_fx_param_binding_fields_with_neural_selection(
+                        rt,
+                        &app,
+                        &state,
+                        ct,
+                        &selected_steps,
+                        Some(&selected_neural_snapshot),
+                    );
                     rt.set_reactive(
                         "SEQ",
                         "selected-steps",

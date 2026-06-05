@@ -1235,6 +1235,65 @@ fn hot_reload_preserves_existing_defstate_values() {
 }
 
 #[test]
+fn eval_current_buffer_native_uses_transactional_reload() {
+    let dir = hot_reload_temp_dir("eseqlisp-eval-current-buffer");
+    let root = dir.join("root.lisp");
+    std::fs::write(
+        &root,
+        r#"(defstate hot-state "initial")
+(effect-buffer "*hot-state*" (label hot-state))"#,
+    )
+    .unwrap();
+
+    let init = r#"
+        (bind-key "C-x C-b" "eval-current-buffer")
+    "#;
+    let mut editor = Editor::new(
+        Runtime::new(),
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_or_create_file_buffer(&root).unwrap();
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+
+    editor
+        .runtime
+        .eval_str(r#"(set! hot-state "changed")"#)
+        .unwrap();
+    editor.runtime.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let root_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.path.as_ref() == Some(&root))
+        .unwrap();
+    editor.buffers[root_idx].set_text(
+        r#"(defstate hot-state "new-initial")
+(effect-buffer "*hot-state*" (label hot-state))"#,
+    );
+    editor.buffers[root_idx].dirty = true;
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+
+    let hot = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*hot-state*")
+        .expect("hot-state buffer");
+    assert_eq!(
+        hot.widget_tree
+            .as_ref()
+            .and_then(widget_label_text)
+            .as_deref(),
+        Some("changed")
+    );
+}
+
+#[test]
 fn dragging_vertical_tile_border_updates_split_ratio() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -3174,6 +3233,142 @@ fn mouse_drag_updates_slider_via_bind_shorthand() {
         Value::Number(n) => assert!(n > 90.0),
         _ => panic!("expected numeric slider state"),
     }
+}
+
+#[test]
+fn mouse_drag_updates_matrix_via_bind_shorthand() {
+    fn find_widget<'a>(
+        node: &'a crate::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(12, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def weights (state (list (list 0 0.25) (list 0.5 0.75))))
+                (effect
+                  (matrix
+                    :rows 2
+                    :cols 2
+                    :min 0
+                    :max 1
+                    :width 4
+                    :height 4
+                    :bind weights))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(12, 8);
+
+    let layout = editor.runtime.current_layout.as_ref().expect("layout");
+    let matrix = find_widget(layout, "matrix").expect("matrix layout node");
+    assert!(matrix.rect.width > 0.0 && matrix.rect.height > 0.0);
+    assert!(matrix.rect.width.is_finite() && matrix.rect.height.is_finite());
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 2),
+        1,
+        1,
+        12,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 1),
+        1,
+        1,
+        12,
+        8,
+    );
+
+    let value = editor.runtime.eval_str("weights").unwrap().unwrap();
+    let Value::List(rows) = value else {
+        panic!("expected matrix rows");
+    };
+    let Value::List(first_row) = &*rows[0].borrow() else {
+        panic!("expected first matrix row");
+    };
+    assert_eq!(*first_row[0].borrow(), Value::Number(0.0));
+    assert_eq!(*first_row[1].borrow(), Value::Number(0.75));
+}
+
+#[test]
+fn mouse_drag_updates_matrix_via_on_change() {
+    fn find_widget<'a>(
+        node: &'a crate::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(12, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def weights (state (list (list 0 0.25) (list 0.5 0.75))))
+                (effect
+                  (matrix
+                    :rows 2
+                    :cols 2
+                    :min 0
+                    :max 1
+                    :width 4
+                    :height 4
+                    :value weights
+                    :on-change (lambda (next-weights)
+                      (set! weights next-weights))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(12, 8);
+
+    let layout = editor.runtime.current_layout.as_ref().expect("layout");
+    let matrix = find_widget(layout, "matrix").expect("matrix layout node");
+    assert!(matrix.rect.width > 0.0 && matrix.rect.height > 0.0);
+    assert!(matrix.rect.width.is_finite() && matrix.rect.height.is_finite());
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 2),
+        1,
+        1,
+        12,
+        8,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 1),
+        1,
+        1,
+        12,
+        8,
+    );
+
+    let value = editor.runtime.eval_str("weights").unwrap().unwrap();
+    let Value::List(rows) = value else {
+        panic!("expected matrix rows");
+    };
+    let Value::List(first_row) = &*rows[0].borrow() else {
+        panic!("expected first matrix row");
+    };
+    assert_eq!(*first_row[0].borrow(), Value::Number(0.0));
+    assert_eq!(*first_row[1].borrow(), Value::Number(0.75));
 }
 
 #[test]
@@ -5586,6 +5781,282 @@ fn ui_only_buffer_can_still_hide_status_bar() {
 
     assert!(!frame.tiles[0].show_status);
     assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
+}
+
+#[test]
+fn hidden_ui_only_status_bar_reappears_for_chord_and_minibuffer_input() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.active_leaf_mut().show_status = false;
+    let tile_id = editor.active_tile;
+
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    assert!(!frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    let status: String = frame.tiles[0]
+        .frame
+        .status_cells
+        .iter()
+        .map(|cell| cell.ch)
+        .collect();
+    assert!(frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 7);
+    assert!(status.contains("C-x -"));
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    let status: String = frame.tiles[0]
+        .frame
+        .status_cells
+        .iter()
+        .map(|cell| cell.ch)
+        .collect();
+    assert!(frame.tiles[0].show_status);
+    assert!(status.contains("Find file: "));
+
+    editor.minibuffer_input = Some(super::MinibufferMode::FindFile {
+        input: "demo".to_string(),
+        selected: 0,
+    });
+    assert_eq!(
+        editor.minibuffer_prompt().as_deref(),
+        Some("Find file: demo  [font-demo.lisp]")
+    );
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    let status: String = frame.tiles[0]
+        .frame
+        .status_cells
+        .iter()
+        .map(|cell| cell.ch)
+        .collect();
+    assert!(frame.tiles[0].show_status);
+    assert!(status.contains("Find file: demo"), "{status}");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    assert!(!frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
+}
+
+fn eval_tabbed_test_layout(editor: &mut Editor) {
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (set-layout
+              (list :buf "*sequencer*"
+                :tabs (list
+                  (list "Sequencer" "*sequencer*")
+                  (list "Matrix" "*matrix*"))
+                :hide-status true
+                :border-radius 12
+                :border-width 4))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+}
+
+fn editor_with_tabbed_buffers() -> Editor {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def tab-clicked (state false))
+            (effect-buffer "*sequencer*"
+              (button "under-tab"
+                :width 10
+                :height 1
+                :on-click (lambda (evt) (set! tab-clicked true))))
+            (effect-buffer "*matrix*" (label "matrix"))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    eval_tabbed_test_layout(&mut editor);
+    editor.update_tile_rects(60, 12);
+    editor
+}
+
+#[test]
+fn tabbed_layout_selects_primary_buffer_by_default() {
+    let editor = editor_with_tabbed_buffers();
+    let leaf = editor.active_leaf();
+
+    assert_eq!(editor.active_buffer().name, "*sequencer*");
+    assert_eq!(leaf.tabs.len(), 2);
+    assert_eq!(leaf.selected_tab, Some(0));
+}
+
+#[test]
+fn tabbed_layout_rejects_malformed_tabs_before_applying_layout() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*sequencer*", "");
+    editor.open_scratch_buffer("*matrix*", "");
+
+    let result = editor.runtime_mut().eval_str(
+        r#"(set-layout
+            (list :buf "*sequencer*"
+              :tabs (list (list "Matrix" "*matrix*"))))"#,
+    );
+    if result.is_ok() {
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.active_leaf().tabs.is_empty(),
+            "malformed tab specs must not apply a tabbed tile"
+        );
+    } else {
+        let error = result.unwrap_err();
+        assert!(
+            format!("{error:?}").contains("must include the primary"),
+            "unexpected error: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
+    let mut editor = editor_with_tabbed_buffers();
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*transport*"
+              (button "under-tab"
+                :width 80
+                :height 4
+                :on-click (lambda (evt) (set! tab-clicked true))))
+            (set-layout
+              (list :rows :gap 0
+                0.25 (list :buf "*transport*" :hide-status true)
+                0.75 (list :buf "*sequencer*"
+                  :tabs (list
+                    (list "Sequencer" "*sequencer*")
+                    (list "Matrix" "*matrix*"))
+                  :hide-status true
+                  :border-radius 12
+                  :border-width 4)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+
+    let sequencer_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*sequencer*")
+        .unwrap();
+    let tile_id = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(sequencer_idx)
+        .unwrap()
+        .id;
+    let leaf = editor.tile_root.find_leaf(tile_id).unwrap();
+    let tab_rect = crate::tile::tile_tab_layouts(
+        editor.tile_rect(tile_id).unwrap(),
+        &leaf.tabs,
+        leaf.selected_tab,
+    )
+    .into_iter()
+    .find(|tab| tab.index == 1)
+    .expect("matrix tab layout");
+
+    let precise_col = tab_rect.rect.col + tab_rect.rect.width * 0.5;
+    let precise_row = tab_rect.rect.row + tab_rect.rect.height * 0.5;
+    let tile_rect = editor.tile_rect(tile_id).unwrap();
+    assert!(
+        tab_rect.rect.row >= tile_rect.row
+            && tab_rect.rect.row + tab_rect.rect.height <= editor.tile_body_rect(tile_id).unwrap().row + f32::EPSILON,
+        "tabs should live in the tile header row above the content body"
+    );
+    assert_eq!(
+        editor.tile_at_screen(precise_col, precise_row),
+        Some(tile_id),
+        "tab click point should be inside the tabbed tile"
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(editor.active_tile, tile_id);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(
+        editor.active_tile, tile_id,
+        "releasing on the internal tab header must keep the tabbed tile selected"
+    );
+    assert_eq!(editor.active_leaf().selected_tab, Some(1));
+    assert_eq!(
+        editor.runtime.eval_str("tab-clicked").unwrap().unwrap(),
+        Value::Bool(false),
+        "tab clicks must not dispatch to buffer widgets underneath"
+    );
+}
+
+#[test]
+fn tab_selection_survives_reapplying_same_layout() {
+    let mut editor = editor_with_tabbed_buffers();
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-window-buffer-for "*sequencer*" "*matrix*")"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(editor.active_leaf().selected_tab, Some(1));
+
+    eval_tabbed_test_layout(&mut editor);
+
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(editor.active_leaf().selected_tab, Some(1));
+}
+
+#[test]
+fn tabbed_tile_frame_reserves_internal_header_row_for_tabs() {
+    let mut editor = editor_with_tabbed_buffers();
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);
+    let tile = &frame.tiles[0];
+
+    assert!(!tile.tabs.is_empty());
+    assert!(tile.body_rect.row > tile.rect.row);
+    assert_eq!(tile.body_rect.col, tile.rect.col);
+    assert_eq!(tile.body_rect.width, tile.rect.width);
+    assert!(tile.body_rect.height < tile.rect.height);
+    let first_tab_height = tile.tabs[0].rect.height;
+    for tab in &tile.tabs {
+        assert!(tab.rect.width > 0.0);
+        assert_eq!(tab.rect.height, first_tab_height);
+        assert!(tab.rect.col + tab.rect.width <= tile.rect.col + tile.rect.width);
+        assert!(tab.rect.row >= tile.rect.row);
+        assert!(tab.rect.row + tab.rect.height <= tile.body_rect.row + f32::EPSILON);
+    }
+    assert!(tile.frame.widget_layout.as_ref().unwrap().rect.height > 0.0);
+    assert_eq!(editor.tile_body_rect(editor.active_tile).unwrap(), tile.body_rect);
 }
 
 #[test]

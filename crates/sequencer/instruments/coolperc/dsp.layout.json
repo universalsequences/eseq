@@ -66,10 +66,6 @@
         "x": 143.91,
         "y": 4.0
       },
-      "mod#0": {
-        "x": 128.93997,
-        "y": 61.55352
-      },
       "modulated1": {
         "x": 29.191128,
         "y": 20.026146
@@ -240,17 +236,9 @@
         "segmented": true,
         "y": 63.196953
       },
-      "gain:0->mod#0:0": {
-        "segmented": true,
-        "y": 60.76993
-      },
       "gate:0->env:0": {
         "segmented": true,
         "y": 10.94
-      },
-      "mod#0:0->*#0:3": {
-        "segmented": true,
-        "y": 64.15678
       },
       "release:0->env:5": {
         "segmented": true,

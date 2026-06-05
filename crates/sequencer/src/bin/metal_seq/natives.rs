@@ -213,6 +213,7 @@ pub(crate) fn init_runtime(
     state: Arc<SequencerState>,
     track_names: &[String],
     track_pan_ids: Arc<Mutex<Vec<i32>>>,
+    track_collapsed: Arc<Mutex<Vec<bool>>>,
     buses: Arc<Mutex<Vec<ui::BusChannelState>>>,
     bus_node_ids: Arc<Mutex<Vec<ui::BusNodeIds>>>,
     current_track: Arc<AtomicUsize>,
@@ -225,12 +226,19 @@ pub(crate) fn init_runtime(
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
     expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
+    selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons,
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
     auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) -> RuntimeInit {
     let mut runtime = Runtime::new();
+    sequencer::lisp_effect::register_neural_authoring_natives_with_selection(
+        &mut runtime,
+        Arc::clone(&state),
+        Arc::clone(&selected_neural_neurons),
+    );
+    sequencer::lisp_effect::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -257,6 +265,29 @@ pub(crate) fn init_runtime(
                     "num-patterns",
                     Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
                 ),
+                ("neural-networks", build_neural_networks_value(&state)),
+                (
+                    "selected-neural-neurons",
+                    sequencer::lisp_effect::selected_neural_neurons_to_value(
+                        &selected_neural_neurons.lock().unwrap(),
+                    ),
+                ),
+                (
+                    "neural-energy-matrix",
+                    build_neural_energy_matrix_value(&state),
+                ),
+                (
+                    "neural-trigger-matrix",
+                    build_neural_trigger_matrix_value(&state),
+                ),
+                (
+                    "neural-dampening-matrix",
+                    build_neural_dampening_matrix_value(&state),
+                ),
+                (
+                    "graph-visualizations",
+                    build_graph_visualizations_value(&state),
+                ),
                 ("auto-follow", Value::Bool(true)),
                 ("playhead", Value::Number(0.0)),
                 ("transport-playhead", Value::Number(0.0)),
@@ -272,6 +303,7 @@ pub(crate) fn init_runtime(
                     build_track_instrument_run_modes(&app),
                 ),
                 ("track-names", build_track_names(&track_names)),
+                ("track-collapsed", build_track_collapsed(app)),
                 (
                     "track-num-steps",
                     build_all_track_num_steps_value(&state, app),
@@ -1348,6 +1380,33 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(muted))
     });
 
+    // seq-toggle-track-collapsed — (seq-toggle-track-collapsed track-idx)
+    let st = state.clone();
+    let collapsed_tracks = track_collapsed.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-toggle-track-collapsed", move |args, _ctx| {
+        let Some(Value::Number(track)) = args.first() else {
+            return Err("seq-toggle-track-collapsed: expected track".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-toggle-track-collapsed: track {track} out of range").into());
+        }
+        let collapsed = {
+            let mut tracks = collapsed_tracks.lock().unwrap();
+            if tracks.len() < st.active_track_count() {
+                tracks.resize(st.active_track_count(), false);
+            }
+            tracks[track] = !tracks[track];
+            tracks[track]
+        };
+        ui_inv.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Collapsed,
+        });
+        Ok(Value::Bool(collapsed))
+    });
+
     // seq-toggle-track-solo — (seq-toggle-track-solo track-idx)
     let st = state.clone();
     let pan_ids = track_pan_ids.clone();
@@ -2022,7 +2081,7 @@ pub(crate) fn init_runtime(
         };
         let steps = sel.lock().unwrap();
         for &step in steps.iter() {
-            slot_state.plocks.set(step, param_idx, val);
+            slot_state.set_plock(step, param_idx, val);
             ui_inv.push(UiInvalidation::Step {
                 track,
                 step,
@@ -2079,7 +2138,7 @@ pub(crate) fn init_runtime(
         let steps = sel.lock().unwrap();
         for &step in steps.iter() {
             for (param_idx, val) in updates {
-                slot_state.plocks.set(step, param_idx, val);
+                slot_state.set_plock(step, param_idx, val);
                 ui_inv.push(UiInvalidation::TrackFx {
                     track,
                     change: TrackFxInvalidation::Plock {
@@ -2327,6 +2386,21 @@ pub(crate) fn init_runtime(
           `(__register-midi-fx-preview ,name))
         "#,
     );
+
+    // `def-sequencer` in the editor/UI runtime publishes its definition to the
+    // scheduler VM (where the generator actually runs). The compiler auto-quotes
+    // :tick / :init, so the body arrives here as list data — never evaluated in the
+    // UI — which we serialize and ship via SequencerState. Re-evaluating the
+    // authoring file republishes (upsert by id) for live hot-reload.
+    let st_def_sequencer = state.clone();
+    let ui_ep_def_sequencer = ui_epoch.clone();
+    runtime.register_native("def-sequencer", move |args, _ctx| {
+        let published = sequencer::lisp_effect::published_sequencer_from_def_args(&args)?;
+        let name = published.name.clone();
+        st_def_sequencer.publish_sequencer(published);
+        ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::String(name))
+    });
 
     let st = state.clone();
     let ct = current_track.clone();
@@ -3728,6 +3802,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-record",
             "(seq-toggle-record)",
             "Toggle recording when at least one track is armed.",
+        ),
+        (
+            "seq-toggle-track-collapsed",
+            "(seq-toggle-track-collapsed track)",
+            "Toggle whether a track is collapsed in track overview UIs.",
         ),
         (
             "seq-toggle-record-arm",

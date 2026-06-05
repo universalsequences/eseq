@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::EffectSlotSnapshot;
+use crate::graph::ProjectGraphOverrides;
+use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
     PatternSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
@@ -166,15 +168,21 @@ pub enum ProjectTrack {
         sample_path: String,
         #[serde(default)]
         color: Option<TrackColor>,
+        #[serde(default)]
+        collapsed: bool,
     },
     Custom {
         instrument_name: String,
         #[serde(default)]
         color: Option<TrackColor>,
+        #[serde(default)]
+        collapsed: bool,
     },
     Modulator {
         #[serde(default)]
         color: Option<TrackColor>,
+        #[serde(default)]
+        collapsed: bool,
     },
 }
 
@@ -183,7 +191,15 @@ impl ProjectTrack {
         match self {
             Self::Sampler { color, .. }
             | Self::Custom { color, .. }
-            | Self::Modulator { color } => color.map(TrackColor::clamped),
+            | Self::Modulator { color, .. } => color.map(TrackColor::clamped),
+        }
+    }
+
+    pub fn collapsed(&self) -> bool {
+        match self {
+            Self::Sampler { collapsed, .. }
+            | Self::Custom { collapsed, .. }
+            | Self::Modulator { collapsed, .. } => *collapsed,
         }
     }
 }
@@ -191,6 +207,8 @@ impl ProjectTrack {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectPattern {
     pub track_bits: Vec<[u64; TRACK_PATTERN_WORDS]>,
+    #[serde(default)]
+    pub neural_reset_bits: Vec<[u64; TRACK_PATTERN_WORDS]>,
     #[serde(
         serialize_with = "serialize_step_data",
         deserialize_with = "deserialize_step_data"
@@ -241,6 +259,10 @@ pub struct ProjectPattern {
     pub bus_patterns: Vec<ProjectBusPatternSnapshot>,
     #[serde(default)]
     pub mod_connections: Vec<ProjectModConnection>,
+    #[serde(default)]
+    pub neural_networks: Vec<ProjectNeuralNetwork>,
+    #[serde(default)]
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
     pub instrument_types: Vec<ProjectInstrumentType>,
     #[serde(default)]
     pub instrument_run_modes: Vec<ProjectCustomInstrumentRunMode>,
@@ -323,6 +345,7 @@ pub struct ProjectEffectSlot {
     pub num_params: u32,
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
+    pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
     /// Effect-specific instance data that isn't a numeric param. Currently just
@@ -380,6 +403,7 @@ impl ProjectPattern {
     ) -> Self {
         Self {
             track_bits: snapshot.track_bits.clone(),
+            neural_reset_bits: snapshot.neural_reset_bits.clone(),
             step_data: snapshot.step_data.clone(),
             track_params: snapshot
                 .track_params
@@ -446,6 +470,8 @@ impl ProjectPattern {
                 .copied()
                 .map(ProjectModConnection::from)
                 .collect(),
+            neural_networks: snapshot.neural_networks.clone(),
+            graph_overrides: snapshot.graph_overrides.clone(),
             instrument_types: snapshot
                 .instrument_types
                 .iter()
@@ -594,6 +620,7 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             num_params: value.num_params,
             defaults: value.defaults.clone(),
             plocks: value.plocks.clone(),
+            plock_param_ids: value.plock_param_ids.clone(),
             param_node_indices: value.param_node_indices.clone(),
             param_node_spans: value.param_node_spans.clone(),
             ir: value.ir.clone(),
@@ -603,12 +630,21 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
 
 impl ProjectEffectSlot {
     pub fn into_snapshot_with_node_id(self, node_id: u32) -> EffectSlotSnapshot {
+        self.into_snapshot_with_node_ids(node_id, 0)
+    }
+
+    pub fn into_snapshot_with_node_ids(
+        self,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) -> EffectSlotSnapshot {
         EffectSlotSnapshot {
             node_id,
-            modulator_node_id: 0,
+            modulator_node_id,
             num_params: self.num_params,
             defaults: self.defaults,
             plocks: self.plocks,
+            plock_param_ids: self.plock_param_ids,
             param_node_indices: self.param_node_indices,
             param_node_spans: self.param_node_spans,
             ir: self.ir,
@@ -1042,6 +1078,8 @@ struct SparseEffectSlotPlock {
     step: usize,
     param: usize,
     value: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    param_id: Option<ParamNodeId>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1063,6 +1101,8 @@ struct DenseProjectEffectSlot {
     num_params: u32,
     defaults: Vec<f32>,
     plocks: Vec<Vec<Option<f32>>>,
+    #[serde(default)]
+    plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
     param_node_indices: Vec<u32>,
     #[serde(default)]
     param_node_spans: Vec<u32>,
@@ -1089,7 +1129,17 @@ impl Serialize for ProjectEffectSlot {
             .enumerate()
             .flat_map(|(step, row)| {
                 row.iter().enumerate().filter_map(move |(param, value)| {
-                    value.map(|value| SparseEffectSlotPlock { step, param, value })
+                    value.map(|value| SparseEffectSlotPlock {
+                        step,
+                        param,
+                        value,
+                        param_id: self
+                            .plock_param_ids
+                            .get(step)
+                            .and_then(|ids| ids.get(param))
+                            .copied()
+                            .flatten(),
+                    })
                 })
             })
             .collect::<Vec<_>>();
@@ -1124,15 +1174,18 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
         Ok(match repr {
             ProjectEffectSlotRepr::Sparse(slot) => {
                 let mut plocks = vec![vec![None; slot.defaults.len()]; MAX_STEPS];
+                let mut plock_param_ids = vec![vec![None; slot.defaults.len()]; MAX_STEPS];
                 for entry in slot.plocks_sparse {
                     if entry.step < plocks.len() && entry.param < slot.defaults.len() {
                         plocks[entry.step][entry.param] = Some(entry.value);
+                        plock_param_ids[entry.step][entry.param] = entry.param_id;
                     }
                 }
                 Self {
                     num_params: slot.num_params,
                     defaults: slot.defaults,
                     plocks,
+                    plock_param_ids,
                     param_node_indices: slot.param_node_indices,
                     param_node_spans: slot.param_node_spans,
                     ir: slot.ir,
@@ -1142,6 +1195,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 num_params: slot.num_params,
                 defaults: slot.defaults,
                 plocks: slot.plocks,
+                plock_param_ids: slot.plock_param_ids,
                 param_node_indices: slot.param_node_indices,
                 param_node_spans: slot.param_node_spans,
                 ir: slot.ir,
@@ -1150,6 +1204,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 num_params: 0,
                 defaults: Vec::new(),
                 plocks: vec![Vec::new(); MAX_STEPS],
+                plock_param_ids: vec![Vec::new(); MAX_STEPS],
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
                 ir: None,
@@ -1222,10 +1277,12 @@ mod tests {
                 ProjectTrack::Custom {
                     instrument_name: "prophet-5".to_string(),
                     color: Some(TrackColor::new(0.96, 0.28, 0.52)),
+                    collapsed: true,
                 },
                 ProjectTrack::Sampler {
                     sample_path: "samples/drums/kick.wav".to_string(),
                     color: Some(TrackColor::new(0.98, 0.56, 0.20)),
+                    collapsed: false,
                 },
             ],
             custom_effects: vec![vec![Some("widener".to_string()), None], vec![None, None]],
@@ -1236,6 +1293,7 @@ mod tests {
             },
             patterns: vec![ProjectPattern {
                 track_bits: vec![[0b1011, 0, 0, 0], [0b0101, 1, 0, 0]],
+                neural_reset_bits: vec![[0b0010, 0, 0, 0], [0, 0, 0, 0]],
                 step_data: vec![vec![default_step_values(); 256]; 2],
                 track_params: vec![
                     ProjectTrackParams {
@@ -1301,6 +1359,7 @@ mod tests {
                         num_params: 2,
                         defaults: vec![0.1, 0.2],
                         plocks: vec![vec![None, Some(0.8)]; 256],
+                        plock_param_ids: vec![vec![None, None]; 256],
                         param_node_indices: vec![0, 1],
                         param_node_spans: vec![1, 1],
                         ir: None,
@@ -1309,6 +1368,7 @@ mod tests {
                         num_params: 0,
                         defaults: vec![],
                         plocks: vec![vec![]; 256],
+                        plock_param_ids: vec![vec![]; 256],
                         param_node_indices: vec![],
                         param_node_spans: vec![],
                         ir: None,
@@ -1357,6 +1417,64 @@ mod tests {
                     dest_track: 1,
                     dest_input: 2,
                 }],
+                neural_networks: {
+                    let mut network = ProjectNeuralNetwork::default();
+                    network.id = 42;
+                    network.name = "drum-net".to_string();
+                    network.enabled = true;
+                    network.num_neurons = 6;
+                    network.neurons[0].route = Some(1);
+                    network.neurons[0].output_overrides.instrument =
+                        vec![crate::neural::ProjectParamOverride {
+                            target_track: 1,
+                            param_id: crate::neural::ParamNodeId {
+                                logical_id: 7,
+                                node_param_idx: 3,
+                            },
+                            param_index: 2,
+                            value: 0.75,
+                        }];
+                    network.neurons[0].output_overrides.effects =
+                        vec![crate::neural::ProjectEffectParamOverride {
+                            target_track: 1,
+                            slot_index: 0,
+                            param_id: crate::neural::ParamNodeId {
+                                logical_id: 11,
+                                node_param_idx: 5,
+                            },
+                            param_index: 4,
+                            value: 0.33,
+                        }];
+                    vec![network]
+                },
+                graph_overrides: vec![ProjectGraphOverrides {
+                    sequencer_id: 99,
+                    sequencer_name: "neural".to_string(),
+                    node_intrinsics: vec![crate::graph::ProjectGraphNodeIntrinsicOverride {
+                        group: "nrn".to_string(),
+                        instance: 1,
+                        resolution: Some(Timebase::Eighth as u8),
+                        delay_steps: Some(3),
+                        quantize: Some(crate::graph::ProjectGraphQuantizeOverride::Off),
+                        route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),
+                        seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
+                    }],
+                    node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
+                        group: "nrn".to_string(),
+                        instance: 1,
+                        param: "threshold".to_string(),
+                        value: 0.75,
+                    }],
+                    edge_params: vec![crate::graph::ProjectGraphEdgeParamOverride {
+                        group: "nrn->nrn".to_string(),
+                        from: 0,
+                        to: 1,
+                        param: "weight".to_string(),
+                        value: 0.5,
+                    }],
+                    reset_every_beats: None,
+                    max_poly: None,
+                }],
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
             }],
@@ -1384,9 +1502,12 @@ mod tests {
             restored.tracks[1].color(),
             Some(TrackColor::new(0.98, 0.56, 0.20))
         );
+        assert!(restored.tracks[0].collapsed());
+        assert!(!restored.tracks[1].collapsed());
         assert_eq!(restored.patterns.len(), 1);
         assert_eq!(restored.patterns[0].track_bits[0], [0b1011, 0, 0, 0]);
         assert_eq!(restored.patterns[0].track_bits[1], [0b0101, 1, 0, 0]);
+        assert_eq!(restored.patterns[0].neural_reset_bits[0], [0b0010, 0, 0, 0]);
         assert_eq!(restored.patterns[0].step_data[0].len(), 256);
         assert_eq!(
             restored.patterns[0].chord_snapshots[1][3],
@@ -1419,6 +1540,42 @@ mod tests {
                 ProjectCustomInstrumentRunMode::Instrument,
             ]
         );
+        assert_eq!(restored.patterns[0].neural_networks.len(), 1);
+        let network = &restored.patterns[0].neural_networks[0];
+        assert_eq!(network.id, 42);
+        assert_eq!(network.name, "drum-net");
+        assert_eq!(network.num_neurons, 6);
+        assert_eq!(network.neurons[0].route, Some(1));
+        assert_eq!(
+            network.neurons[0].output_overrides.instrument[0].target_track,
+            1
+        );
+        assert_eq!(
+            network.neurons[0].output_overrides.instrument[0].param_id,
+            crate::neural::ParamNodeId {
+                logical_id: 7,
+                node_param_idx: 3,
+            }
+        );
+        assert_eq!(
+            network.neurons[0].output_overrides.effects[0].target_track,
+            1
+        );
+        assert_eq!(
+            network.neurons[0].output_overrides.effects[0].param_id,
+            crate::neural::ParamNodeId {
+                logical_id: 11,
+                node_param_idx: 5,
+            }
+        );
+        assert_eq!(restored.patterns[0].graph_overrides.len(), 1);
+        let graph = &restored.patterns[0].graph_overrides[0];
+        assert_eq!(graph.sequencer_name, "neural");
+        assert_eq!(graph.node_intrinsics[0].delay_steps, Some(3));
+        assert_eq!(graph.node_params[0].param, "threshold");
+        assert_eq!(graph.node_params[0].value, 0.75);
+        assert_eq!(graph.edge_params[0].group, "nrn->nrn");
+        assert_eq!(graph.edge_params[0].value, 0.5);
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);
         assert_eq!(restored.buses.len(), 3);
@@ -1511,6 +1668,7 @@ mod tests {
         assert_eq!(step[crate::sequencer::StepParam::Pan.index()], 0.0);
         assert_eq!(step[crate::sequencer::StepParam::Chop.index()], 1.0);
         assert_eq!(step[crate::sequencer::StepParam::Delay.index()], 0.0);
+        assert!(project.patterns[0].graph_overrides.is_empty());
     }
 
     #[test]
@@ -1600,6 +1758,7 @@ mod tests {
             num_params: 2,
             defaults: vec![0.35, 1.0],
             plocks: vec![Vec::new(); MAX_STEPS],
+            plock_param_ids: vec![Vec::new(); MAX_STEPS],
             param_node_indices: vec![10, 11],
             param_node_spans: vec![1, 1],
             ir: Some("lexicon-300-rich-plate".to_string()),

@@ -294,6 +294,8 @@ mod engine_registry_tests {
     fn manifest() -> DGenManifest {
         DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            version: 2,
+            process_abi: "dgen-c-v2-host-sample-rate".to_string(),
             total_memory_slots: 0,
             params: Vec::new(),
             groups: Vec::new(),
@@ -816,6 +818,7 @@ pub struct App {
     pub state: Arc<SequencerState>,
     pub tracks: Vec<String>,
     pub track_colors: Vec<TrackColor>,
+    pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
     pub sampler_paths: Vec<Option<PathBuf>>,
@@ -844,6 +847,10 @@ impl App {
         self.track_colors.push(color);
     }
 
+    pub fn push_default_track_collapsed(&mut self) {
+        self.track_collapsed.push(false);
+    }
+
     pub fn set_track_color(&mut self, track: usize, color: TrackColor) {
         self.normalize_track_colors();
         if let Some(slot) = self.track_colors.get_mut(track) {
@@ -856,6 +863,25 @@ impl App {
         while self.track_colors.len() < self.tracks.len() {
             self.push_next_track_color();
         }
+    }
+
+    pub fn normalize_track_collapsed(&mut self) {
+        self.track_collapsed.truncate(self.tracks.len());
+        while self.track_collapsed.len() < self.tracks.len() {
+            self.push_default_track_collapsed();
+        }
+    }
+
+    pub fn set_track_collapsed(&mut self, track: usize, collapsed: bool) {
+        self.normalize_track_collapsed();
+        if let Some(slot) = self.track_collapsed.get_mut(track) {
+            *slot = collapsed;
+        }
+    }
+
+    pub fn replace_track_collapsed(&mut self, collapsed: Vec<bool>) {
+        self.track_collapsed = collapsed;
+        self.normalize_track_collapsed();
     }
 
     pub fn submit_sample_analysis(&self, loaded: &crate::sampler::LoadedSample) {
@@ -1090,6 +1116,7 @@ impl App {
             state,
             tracks: Vec::new(),
             track_colors: Vec::new(),
+            track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             bus_pattern_bank: Vec::new(),
             sampler_paths: Vec::new(),

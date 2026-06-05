@@ -4,6 +4,11 @@ use std::sync::{Arc, Mutex};
 use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
 };
+use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
+use crate::neural::{
+    remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
+    ProjectNeuralNetwork,
+};
 use crate::voice::MAX_VOICES;
 
 use super::data::{
@@ -22,6 +27,7 @@ pub struct StepSlotPlocks {
 #[derive(Clone)]
 pub struct StepSnapshot {
     pub active: bool,
+    pub neural_reset: bool,
     pub params: [f32; NUM_PARAMS],
     pub chord: Vec<f32>,
     pub chord_durations: Vec<f32>,
@@ -51,6 +57,7 @@ impl StepSnapshot {
 #[derive(Clone)]
 pub struct PatternSnapshot {
     pub track_bits: Vec<[u64; TRACK_PATTERN_WORDS]>,
+    pub neural_reset_bits: Vec<[u64; TRACK_PATTERN_WORDS]>,
     pub step_data: Vec<Vec<[f32; NUM_PARAMS]>>,
     pub track_params: Vec<TrackParamsSnapshot>,
     pub effect_slots: Vec<Vec<EffectSlotSnapshot>>,
@@ -66,6 +73,8 @@ pub struct PatternSnapshot {
     pub instrument_types: Vec<InstrumentType>,
     pub instrument_run_modes: Vec<CustomInstrumentRunMode>,
     pub mod_connections: Vec<ModConnection>,
+    pub neural_networks: Vec<ProjectNeuralNetwork>,
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
 }
 
 impl PatternSnapshot {
@@ -81,6 +90,7 @@ impl PatternSnapshot {
         }
 
         self.track_bits.remove(track_idx);
+        remove_track_lane_if_present(&mut self.neural_reset_bits, track_idx);
         remove_track_lane_if_present(&mut self.step_data, track_idx);
         remove_track_lane_if_present(&mut self.track_params, track_idx);
         remove_track_lane_if_present(&mut self.effect_slots, track_idx);
@@ -102,6 +112,8 @@ impl PatternSnapshot {
                 remap_mod_connection_after_track_delete(*connection, track_idx)
             })
             .collect();
+        remap_neural_network_routes_after_track_delete(&mut self.neural_networks, track_idx);
+        remap_graph_overrides_after_track_delete(&mut self.graph_overrides, track_idx);
     }
 
     pub fn remove_effect_slot(&mut self, track: usize, slot_idx: usize) {
@@ -238,6 +250,7 @@ impl PatternSnapshot {
         while self.track_bits.len() < track_count {
             let track = self.track_bits.len();
             self.track_bits.push([0u64; TRACK_PATTERN_WORDS]);
+            self.neural_reset_bits.push([0u64; TRACK_PATTERN_WORDS]);
             self.step_data.push(Self::default_step_data());
             self.track_params.push(TrackParamsSnapshot::default());
             self.effect_slots
@@ -255,6 +268,9 @@ impl PatternSnapshot {
             self.instrument_types.push(InstrumentType::Sampler);
             self.instrument_run_modes
                 .push(CustomInstrumentRunMode::Instrument);
+        }
+        while self.neural_reset_bits.len() < track_count {
+            self.neural_reset_bits.push([0u64; TRACK_PATTERN_WORDS]);
         }
         self.mod_connections.retain(|connection| {
             connection.source_track < track_count
@@ -276,6 +292,7 @@ impl PatternSnapshot {
 
     fn truncate_tracks(&mut self, track_count: usize) {
         self.track_bits.truncate(track_count);
+        self.neural_reset_bits.truncate(track_count);
         self.step_data.truncate(track_count);
         self.track_params.truncate(track_count);
         self.effect_slots.truncate(track_count);
@@ -306,6 +323,7 @@ impl PatternSnapshot {
         instrument_types: &[InstrumentType],
     ) -> Self {
         let mut track_bits = Vec::with_capacity(num_tracks);
+        let mut neural_reset_bits = Vec::with_capacity(num_tracks);
         let mut step_data = Vec::with_capacity(num_tracks);
         let mut track_params = Vec::with_capacity(num_tracks);
         let mut effect_slots = Vec::with_capacity(num_tracks);
@@ -324,6 +342,7 @@ impl PatternSnapshot {
 
         for t in 0..num_tracks {
             track_bits.push(state.pattern.patterns[t].load_bits());
+            neural_reset_bits.push(state.pattern.neural_reset_patterns[t].load_bits());
 
             let mut steps = Vec::with_capacity(MAX_STEPS);
             for s in 0..MAX_STEPS {
@@ -421,6 +440,7 @@ impl PatternSnapshot {
 
         Self {
             track_bits,
+            neural_reset_bits,
             step_data,
             track_params,
             effect_slots,
@@ -436,6 +456,8 @@ impl PatternSnapshot {
             instrument_types: inst_types,
             instrument_run_modes,
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         }
     }
 
@@ -447,6 +469,8 @@ impl PatternSnapshot {
         track_names: &[String],
         instrument_types: &[InstrumentType],
         mod_connections: Vec<ModConnection>,
+        neural_networks: Vec<ProjectNeuralNetwork>,
+        graph_overrides: Vec<ProjectGraphOverrides>,
     ) -> Self {
         let mut snapshot = Self::capture(
             state,
@@ -457,6 +481,8 @@ impl PatternSnapshot {
             instrument_types,
         );
         snapshot.mod_connections = mod_connections;
+        snapshot.neural_networks = neural_networks;
+        snapshot.graph_overrides = graph_overrides;
         snapshot
     }
 
@@ -465,6 +491,12 @@ impl PatternSnapshot {
         let mut track_sound_state = state.pattern.track_sound_state.lock().unwrap();
         for t in 0..num_tracks {
             state.pattern.patterns[t].store_bits(self.track_bits[t]);
+            state.pattern.neural_reset_patterns[t].store_bits(
+                self.neural_reset_bits
+                    .get(t)
+                    .copied()
+                    .unwrap_or([0u64; TRACK_PATTERN_WORDS]),
+            );
 
             for s in 0..MAX_STEPS {
                 for p in StepParam::ALL {
@@ -555,6 +587,11 @@ impl PatternSnapshot {
             self.push_default_track(track, &[]);
         }
         self.track_bits[track] = source.track_bits[track];
+        self.neural_reset_bits[track] = source
+            .neural_reset_bits
+            .get(track)
+            .copied()
+            .unwrap_or([0u64; TRACK_PATTERN_WORDS]);
         self.step_data[track] = source.step_data[track].clone();
         self.track_params[track] = source.track_params[track].clone();
         self.effect_slots[track] = source.effect_slots[track].clone();
@@ -590,6 +627,7 @@ impl PatternSnapshot {
             return;
         }
         self.track_bits[track] = [0u64; TRACK_PATTERN_WORDS];
+        self.neural_reset_bits[track] = [0u64; TRACK_PATTERN_WORDS];
         self.step_data[track] = Self::default_step_data();
         self.track_params[track] = TrackParamsSnapshot::default();
         self.effect_slots[track] = Self::default_effect_slots(track, slot_descriptors);
@@ -644,6 +682,7 @@ impl PatternSnapshot {
 
     fn push_default_track(&mut self, t: usize, slot_descriptors: &[Vec<EffectDescriptor>]) {
         self.track_bits.push([0u64; TRACK_PATTERN_WORDS]);
+        self.neural_reset_bits.push([0u64; TRACK_PATTERN_WORDS]);
         self.step_data.push(Self::default_step_data());
         self.track_params.push(TrackParamsSnapshot::default());
         self.effect_slots
@@ -666,6 +705,7 @@ impl PatternSnapshot {
     pub fn new_default(num_tracks: usize, slot_descriptors: &[Vec<EffectDescriptor>]) -> Self {
         let mut snap = Self {
             track_bits: Vec::with_capacity(num_tracks),
+            neural_reset_bits: Vec::with_capacity(num_tracks),
             step_data: Vec::with_capacity(num_tracks),
             track_params: Vec::with_capacity(num_tracks),
             effect_slots: Vec::with_capacity(num_tracks),
@@ -681,6 +721,8 @@ impl PatternSnapshot {
             instrument_types: Vec::with_capacity(num_tracks),
             instrument_run_modes: Vec::with_capacity(num_tracks),
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         };
         for t in 0..num_tracks {
             snap.push_default_track(t, slot_descriptors);
@@ -706,6 +748,7 @@ impl PatternSnapshot {
     fn track_lane_count_is_consistent(&self) -> bool {
         let n = self.track_bits.len();
         self.step_data.len() == n
+            && self.neural_reset_bits.len() == n
             && self.track_params.len() == n
             && self.effect_slots.len() == n
             && self.midi_fx_slots.len() == n
@@ -783,6 +826,54 @@ impl PatternSnapshot {
 fn remove_track_lane_if_present<T>(lanes: &mut Vec<T>, track_idx: usize) {
     if track_idx < lanes.len() {
         lanes.remove(track_idx);
+    }
+}
+
+fn remap_optional_track_after_delete(track: usize, deleted_track: usize) -> Option<usize> {
+    if track == deleted_track {
+        None
+    } else if track > deleted_track {
+        Some(track - 1)
+    } else {
+        Some(track)
+    }
+}
+
+fn remap_graph_overrides_after_track_delete(
+    overrides: &mut [ProjectGraphOverrides],
+    deleted_track: usize,
+) {
+    for graph in overrides {
+        for intrinsic in &mut graph.node_intrinsics {
+            if let Some(route) = intrinsic.route.take() {
+                intrinsic.route = match route {
+                    crate::graph::ProjectGraphRouteOverride::None => {
+                        Some(crate::graph::ProjectGraphRouteOverride::None)
+                    }
+                    crate::graph::ProjectGraphRouteOverride::Track(track) => {
+                        remap_optional_track_after_delete(track, deleted_track)
+                            .map(crate::graph::ProjectGraphRouteOverride::Track)
+                    }
+                };
+            }
+            if let Some(seed_from) = intrinsic.seed_from.take() {
+                intrinsic.seed_from = Some(match seed_from {
+                    crate::graph::ProjectGraphSeedFrom::Route => {
+                        crate::graph::ProjectGraphSeedFrom::Route
+                    }
+                    crate::graph::ProjectGraphSeedFrom::Tracks(tracks) => {
+                        crate::graph::ProjectGraphSeedFrom::Tracks(
+                            tracks
+                                .into_iter()
+                                .filter_map(|track| {
+                                    remap_optional_track_after_delete(track, deleted_track)
+                                })
+                                .collect(),
+                        )
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -940,6 +1031,7 @@ pub fn default_empty_effect_chain() -> Vec<EffectSlotState> {
 
 pub struct PatternState {
     pub patterns: Vec<TrackPattern>,
+    pub neural_reset_patterns: Vec<TrackPattern>,
     pub step_data: Vec<StepData>,
     pub chord_data: Vec<ChordData>,
     pub track_params: Vec<TrackParams>,
@@ -1012,14 +1104,40 @@ pub struct RuntimeBindingState {
     pub sampler_analysis_status: Vec<AtomicU32>,
 }
 
+/// A sequencer definition published from the UI/editor runtime to the scheduler VM.
+///
+/// Two shapes share this channel:
+/// - **tick mode** (`graph == None`): `tick_source` is the auto-quoted `:tick` body
+///   serialized to re-evaluable lisp (see `lisp_effect::sequencer_tick_source`) and
+///   `resolution` is a `Timebase` index; the scheduler registers it into its generator
+///   runtime.
+/// - **graph mode** (`graph == Some(_)`): the whole-body manifest is carried in-process
+///   as a [`crate::graph::GraphManifest`]; the scheduler materializes it into a
+///   `GraphRuntime`. `tick_source`/`resolution` are unused.
+///
+/// The scheduler polls [`SequencerState::published_sequencers_version`] and reconciles.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublishedSequencer {
+    pub id: u64,
+    pub name: String,
+    pub resolution: u8,
+    pub tick_source: String,
+    /// Present iff this is a graph-mode sequencer.
+    pub graph: Option<crate::graph::GraphManifest>,
+}
+
 pub struct SequencerState {
     pub pattern: PatternState,
     pub transport: TransportState,
     pub runtime: RuntimeBindingState,
     scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     scheduler_snapshot_version: AtomicU64,
+    neural_visualization: Mutex<NeuralVisualizationSnapshot>,
+    graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     scratch_source: Mutex<String>,
     scratch_source_version: AtomicU64,
+    published_sequencers: Mutex<Vec<PublishedSequencer>>,
+    published_sequencers_version: AtomicU64,
     scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pending_accumulator_reset_all: AtomicBool,
@@ -1039,13 +1157,19 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
     ) -> PatternSnapshot {
         let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mod_connections = self
+        let (mod_connections, neural_networks, graph_overrides) = self
             .pattern
             .pattern_bank
             .lock()
             .unwrap()
             .get(current_pattern)
-            .map(|snapshot| snapshot.mod_connections.clone())
+            .map(|snapshot| {
+                (
+                    snapshot.mod_connections.clone(),
+                    snapshot.neural_networks.clone(),
+                    snapshot.graph_overrides.clone(),
+                )
+            })
             .unwrap_or_default();
         PatternSnapshot::capture_with_mod_connections(
             self,
@@ -1055,11 +1179,15 @@ impl SequencerState {
             names,
             instrument_types,
             mod_connections,
+            neural_networks,
+            graph_overrides,
         )
     }
 
     pub fn new(num_tracks: usize, initial_chains: Vec<Vec<EffectSlotState>>) -> Self {
         let patterns: Vec<TrackPattern> = (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
+        let neural_reset_patterns: Vec<TrackPattern> =
+            (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
         let step_data: Vec<StepData> = (0..MAX_TRACKS).map(|_| StepData::new()).collect();
         let track_params: Vec<TrackParams> = (0..MAX_TRACKS).map(|_| TrackParams::new()).collect();
         let trigger_flash: Vec<AtomicU32> = (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect();
@@ -1085,6 +1213,7 @@ impl SequencerState {
         let state = Self {
             pattern: PatternState {
                 patterns,
+                neural_reset_patterns,
                 step_data,
                 chord_data,
                 track_params,
@@ -1200,8 +1329,12 @@ impl SequencerState {
             },
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
+            neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
+            graph_visualizations: Mutex::new(Vec::new()),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
+            published_sequencers: Mutex::new(Vec::new()),
+            published_sequencers_version: AtomicU64::new(0),
             scratch_effect_descriptors: Mutex::new(Vec::new()),
             scratch_instrument_descriptors: Mutex::new(Vec::new()),
             pending_accumulator_reset_all: AtomicBool::new(false),
@@ -1217,9 +1350,29 @@ impl SequencerState {
     pub fn scheduler_snapshot_version(&self) -> u64 {
         self.scheduler_snapshot_version.load(Ordering::Acquire)
     }
+    pub fn current_pattern_index(&self) -> usize {
+        self.pattern.current_pattern.load(Ordering::Relaxed) as usize
+    }
     pub fn latest_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         self.scheduler_snapshot.lock().unwrap().clone()
     }
+
+    pub fn set_neural_visualization(&self, snapshot: NeuralVisualizationSnapshot) {
+        *self.neural_visualization.lock().unwrap() = snapshot;
+    }
+
+    pub fn neural_visualization(&self) -> NeuralVisualizationSnapshot {
+        self.neural_visualization.lock().unwrap().clone()
+    }
+
+    pub fn set_graph_visualizations(&self, snapshots: Vec<GraphVisualizationSnapshot>) {
+        *self.graph_visualizations.lock().unwrap() = snapshots;
+    }
+
+    pub fn graph_visualizations(&self) -> Vec<GraphVisualizationSnapshot> {
+        self.graph_visualizations.lock().unwrap().clone()
+    }
+
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         let snapshot = Arc::new(SequencerSnapshot::capture(self));
         {
@@ -1229,6 +1382,86 @@ impl SequencerState {
         self.scheduler_snapshot_version
             .fetch_add(1, Ordering::AcqRel);
         snapshot
+    }
+
+    pub fn current_neural_networks(&self) -> Vec<ProjectNeuralNetwork> {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        self.pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|snapshot| snapshot.neural_networks.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn edit_current_neural_networks<F, R>(&self, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ProjectNeuralNetwork>) -> Result<R, String>,
+    {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let result = {
+            let mut bank = self
+                .pattern
+                .pattern_bank
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let snapshot = bank
+                .get_mut(current_pattern)
+                .ok_or_else(|| "current pattern out of range".to_string())?;
+            edit(&mut snapshot.neural_networks)?
+        };
+        self.publish_scheduler_snapshot();
+        Ok(result)
+    }
+
+    pub fn current_graph_overrides(&self) -> Vec<ProjectGraphOverrides> {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        self.pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|snapshot| snapshot.graph_overrides.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn edit_current_graph_overrides<F, R>(&self, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ProjectGraphOverrides>) -> Result<R, String>,
+    {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let result = {
+            let mut bank = self
+                .pattern
+                .pattern_bank
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let snapshot = bank
+                .get_mut(current_pattern)
+                .ok_or_else(|| "current pattern out of range".to_string())?;
+            edit(&mut snapshot.graph_overrides)?
+        };
+        self.publish_scheduler_snapshot();
+        Ok(result)
+    }
+
+    pub fn set_neural_reset_step(
+        &self,
+        track: usize,
+        step: usize,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        if track >= self.active_track_count() {
+            return Err("track out of range".to_string());
+        }
+        if step >= MAX_STEPS {
+            return Err("step out of range".to_string());
+        }
+        self.pattern.neural_reset_patterns[track].set_step_active(step, enabled);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        Ok(enabled)
     }
 
     pub fn request_track_delete_boundary(&self, track_idx: usize) -> u64 {
@@ -1311,6 +1544,7 @@ impl SequencerState {
 
     fn clear_live_track_lane(&self, track: usize) {
         self.pattern.patterns[track].store_bits([0u64; TRACK_PATTERN_WORDS]);
+        self.pattern.neural_reset_patterns[track].store_bits([0u64; TRACK_PATTERN_WORDS]);
         for step in 0..MAX_STEPS {
             for param in StepParam::ALL {
                 self.pattern.step_data[track].set(step, param, param.default_value());
@@ -1638,6 +1872,25 @@ impl SequencerState {
         *self.scratch_source.lock().unwrap() = source.into();
         self.scratch_source_version.fetch_add(1, Ordering::AcqRel);
     }
+    /// Publish (upsert by id) a UI-authored generator definition for the scheduler.
+    pub fn publish_sequencer(&self, sequencer: PublishedSequencer) {
+        {
+            let mut list = self.published_sequencers.lock().unwrap();
+            if let Some(existing) = list.iter_mut().find(|s| s.id == sequencer.id) {
+                *existing = sequencer;
+            } else {
+                list.push(sequencer);
+            }
+        }
+        self.published_sequencers_version
+            .fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn published_sequencers(&self) -> Vec<PublishedSequencer> {
+        self.published_sequencers.lock().unwrap().clone()
+    }
+    pub fn published_sequencers_version(&self) -> u64 {
+        self.published_sequencers_version.load(Ordering::Acquire)
+    }
     pub fn scratch_runtime_descriptors(
         &self,
     ) -> (Vec<Vec<EffectDescriptor>>, Vec<EffectDescriptor>) {
@@ -1760,6 +2013,8 @@ impl SequencerState {
                 names,
                 instrument_types,
                 bank[cur].mod_connections.clone(),
+                bank[cur].neural_networks.clone(),
+                bank[cur].graph_overrides.clone(),
             );
             bank[cur] = current_snapshot;
             bank[new_idx].restore(self);
@@ -1793,6 +2048,8 @@ impl SequencerState {
                 names,
                 instrument_types,
                 bank[cur].mod_connections.clone(),
+                bank[cur].neural_networks.clone(),
+                bank[cur].graph_overrides.clone(),
             );
             let cloned = bank[cur].clone();
             bank.push(cloned);
@@ -1832,6 +2089,8 @@ impl SequencerState {
                 names,
                 instrument_types,
                 bank[cur].mod_connections.clone(),
+                bank[cur].neural_networks.clone(),
+                bank[cur].graph_overrides.clone(),
             );
             bank.remove(cur);
             let new_idx = cur.min(bank.len() - 1);
@@ -1872,6 +2131,8 @@ impl SequencerState {
             names,
             instrument_types,
             bank[cur].mod_connections.clone(),
+            bank[cur].neural_networks.clone(),
+            bank[cur].graph_overrides.clone(),
         );
         let source = bank[cur].clone();
         for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
@@ -1892,6 +2153,7 @@ impl SequencerState {
             self.pattern.timebase_plocks[track].clear(step);
             self.pattern.swing_plocks[track].clear(step);
             self.pattern.swing_resolution_plocks[track].clear(step);
+            self.pattern.neural_reset_patterns[track].clear_step(step);
             for param_idx in 0..MAX_SLOT_PARAMS {
                 self.pattern.instrument_slots[track]
                     .plocks
@@ -1937,6 +2199,7 @@ impl SequencerState {
 
         StepSnapshot {
             active: self.pattern.patterns[track].is_active(step),
+            neural_reset: self.pattern.neural_reset_patterns[track].is_active(step),
             params,
             chord,
             chord_durations,
@@ -1957,6 +2220,7 @@ impl SequencerState {
         }
 
         self.pattern.patterns[track].clear_step(step);
+        self.pattern.neural_reset_patterns[track].clear_step(step);
 
         self.pattern.chord_data[track].clear_step(step);
         self.pattern.timebase_plocks[track].clear(step);
@@ -2028,6 +2292,7 @@ impl SequencerState {
         }
 
         self.pattern.patterns[track].set_step_active(step, snapshot.active);
+        self.pattern.neural_reset_patterns[track].set_step_active(step, snapshot.neural_reset);
 
         self.pattern.chord_data[track].clear_step(step);
         for (idx, &transpose) in snapshot.chord.iter().enumerate() {
@@ -2061,7 +2326,7 @@ impl SequencerState {
                     .copied()
                     .flatten();
                 match val {
-                    Some(val) => slot.plocks.set(step, param_idx, val),
+                    Some(val) => slot.set_plock(step, param_idx, val),
                     None => slot.plocks.clear_param(step, param_idx),
                 }
             }
@@ -2077,7 +2342,7 @@ impl SequencerState {
                 .copied()
                 .flatten()
             {
-                Some(val) => instrument_slot.plocks.set(step, param_idx, val),
+                Some(val) => instrument_slot.set_plock(step, param_idx, val),
                 None => instrument_slot.plocks.clear_param(step, param_idx),
             }
         }
@@ -2153,6 +2418,8 @@ impl SequencerState {
             let src = step - num_steps;
             let active = self.pattern.patterns[track].is_active(src);
             self.pattern.patterns[track].set_step_active(step, active);
+            let neural_reset = self.pattern.neural_reset_patterns[track].is_active(src);
+            self.pattern.neural_reset_patterns[track].set_step_active(step, neural_reset);
         }
 
         for step in num_steps..new_len {
@@ -2169,7 +2436,7 @@ impl SequencerState {
                 let src = step - num_steps;
                 for p in 0..np {
                     match slot.plocks.get(src, p) {
-                        Some(val) => slot.plocks.set(step, p, val),
+                        Some(val) => slot.set_plock(step, p, val),
                         None => slot.plocks.clear_param(step, p),
                     }
                 }
@@ -2269,6 +2536,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            plock_param_ids: vec![vec![None, None]; MAX_STEPS],
             param_node_indices: vec![id as u32, id as u32 + 10],
             param_node_spans: vec![1, 1],
             ir: None,
@@ -2284,6 +2552,7 @@ mod tests {
                     bits
                 })
                 .collect(),
+            neural_reset_bits: vec![[0u64; TRACK_PATTERN_WORDS]; num_tracks],
             step_data: (0..num_tracks)
                 .map(|track| {
                     let mut steps = vec![[0.0; NUM_PARAMS]; MAX_STEPS];
@@ -2364,6 +2633,8 @@ mod tests {
                 })
                 .collect(),
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         }
     }
 
@@ -2501,6 +2772,23 @@ mod tests {
                 dest_input: 1,
             }]
         );
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_remaps_neural_routes() {
+        let mut snapshot = sample_pattern_snapshot(4);
+        let mut network = crate::neural::ProjectNeuralNetwork::default();
+        network.neurons[0].route = Some(0);
+        network.neurons[1].route = Some(1);
+        network.neurons[2].route = Some(3);
+        snapshot.neural_networks = vec![network];
+
+        snapshot.remove_track(1);
+
+        let neurons = &snapshot.neural_networks[0].neurons;
+        assert_eq!(neurons[0].route, Some(0));
+        assert_eq!(neurons[1].route, None);
+        assert_eq!(neurons[2].route, Some(2));
     }
 
     #[test]
@@ -2656,6 +2944,7 @@ mod tests {
     fn remap_snapshot_sidechain_references_updates_defaults_and_plocks() {
         let mut snapshot = PatternSnapshot {
             track_bits: vec![[0; TRACK_PATTERN_WORDS]; 4],
+            neural_reset_bits: vec![[0; TRACK_PATTERN_WORDS]; 4],
             step_data: vec![vec![[0.0; NUM_PARAMS]; MAX_STEPS]; 4],
             track_params: vec![TrackParamsSnapshot::default(); 4],
             effect_slots: vec![
@@ -2670,6 +2959,7 @@ mod tests {
                         plocks[0][0] = Some(2.0);
                         plocks
                     },
+                    plock_param_ids: vec![vec![None]; MAX_STEPS],
                     param_node_indices: vec![0],
                     param_node_spans: vec![1],
                     ir: None,
@@ -2695,6 +2985,8 @@ mod tests {
             instrument_types: vec![InstrumentType::Sampler; 4],
             instrument_run_modes: vec![CustomInstrumentRunMode::Instrument; 4],
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         };
         let descriptors = vec![
             vec![EffectDescriptor::builtin_filter()],
@@ -2727,15 +3019,15 @@ mod tests {
         state.pattern.chord_data[0].add_note(1, 4.0);
         state.pattern.chord_data[0].add_note(1, 7.0);
         state.pattern.timebase_plocks[0].set(1, Timebase::Eighth);
-        state.pattern.effect_chains[0][0].plocks.set(1, 2, 440.0);
-        state.pattern.instrument_slots[0].plocks.set(1, 0, 0.75);
+        state.pattern.effect_chains[0][0].set_plock(1, 2, 440.0);
+        state.pattern.instrument_slots[0].set_plock(1, 0, 0.75);
 
         state.pattern.patterns[0].toggle_step(2);
         state.pattern.step_data[0].set(2, StepParam::Velocity, 0.3);
         state.pattern.chord_data[0].add_note(2, 12.0);
         state.pattern.timebase_plocks[0].set(2, Timebase::QuarterTriplet);
-        state.pattern.effect_chains[0][0].plocks.set(2, 2, 880.0);
-        state.pattern.instrument_slots[0].plocks.set(2, 0, 0.25);
+        state.pattern.effect_chains[0][0].set_plock(2, 2, 880.0);
+        state.pattern.instrument_slots[0].set_plock(2, 0, 0.25);
 
         state.move_step_range(0, 1, 2, 2);
 
@@ -2907,23 +3199,24 @@ mod tests {
 
     fn populate_step(state: &SequencerState, track: usize, step: usize) {
         state.pattern.patterns[track].set_step_active(step, true);
+        state.pattern.neural_reset_patterns[track].set_step_active(step, true);
         state.pattern.step_data[track].set(step, StepParam::Velocity, 0.75);
         state.pattern.step_data[track].set(step, StepParam::Transpose, 7.0);
         state.pattern.chord_data[track].add_note(step, 0.0);
         state.pattern.chord_data[track].add_note(step, 4.0);
         state.pattern.timebase_plocks[track].set(step, Timebase::Eighth);
-        state.pattern.effect_chains[track][0]
-            .plocks
-            .set(step, 0, 440.0);
-        state.pattern.instrument_slots[track]
-            .plocks
-            .set(step, 0, 0.5);
+        state.pattern.effect_chains[track][0].set_plock(step, 0, 440.0);
+        state.pattern.instrument_slots[track].set_plock(step, 0, 0.5);
     }
 
     fn assert_step_matches_populated(state: &SequencerState, track: usize, step: usize) {
         assert!(
             state.pattern.patterns[track].is_active(step),
             "step {step} should be active"
+        );
+        assert!(
+            state.pattern.neural_reset_patterns[track].is_active(step),
+            "step {step} should carry neural reset"
         );
         assert_eq!(
             state.pattern.step_data[track].get(step, StepParam::Velocity),
@@ -2954,6 +3247,10 @@ mod tests {
         assert!(
             !state.pattern.patterns[track].is_active(step),
             "step {step} should be inactive"
+        );
+        assert!(
+            !state.pattern.neural_reset_patterns[track].is_active(step),
+            "step {step} should not carry neural reset"
         );
         assert_eq!(
             state.pattern.step_data[track].get(step, StepParam::Velocity),
@@ -3010,18 +3307,14 @@ mod tests {
             state.pattern.effect_chains[track][0]
                 .defaults
                 .set(0, track as f32 + 1.0);
-            state.pattern.effect_chains[track][0]
-                .plocks
-                .set(track, 0, 300.0 + track as f32);
+            state.pattern.effect_chains[track][0].set_plock(track, 0, 300.0 + track as f32);
             state.pattern.instrument_slots[track]
                 .node_id
                 .store((200 + track) as u32, Ordering::Relaxed);
             state.pattern.instrument_slots[track]
                 .num_params
                 .store(1, Ordering::Relaxed);
-            state.pattern.instrument_slots[track]
-                .plocks
-                .set(track, 0, 0.25 + track as f32);
+            state.pattern.instrument_slots[track].set_plock(track, 0, 0.25 + track as f32);
             state.pattern.instrument_base_note_offsets[track]
                 .store((track as f32 + 12.0).to_bits(), Ordering::Relaxed);
             let run_mode = if track == 2 {
@@ -3175,14 +3468,14 @@ mod tests {
         state.pattern.effect_chains[2][0]
             .num_params
             .store(1, Ordering::Relaxed);
-        state.pattern.effect_chains[2][0].plocks.set(0, 0, 123.0);
+        state.pattern.effect_chains[2][0].set_plock(0, 0, 123.0);
         state.pattern.instrument_slots[2]
             .node_id
             .store(888, Ordering::Relaxed);
         state.pattern.instrument_slots[2]
             .num_params
             .store(1, Ordering::Relaxed);
-        state.pattern.instrument_slots[2].plocks.set(0, 0, 0.75);
+        state.pattern.instrument_slots[2].set_plock(0, 0, 0.75);
         state.pattern.instrument_run_modes[2].store(
             CustomInstrumentRunMode::FreePatch.runtime_flag(),
             Ordering::Relaxed,

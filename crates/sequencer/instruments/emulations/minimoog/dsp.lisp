@@ -71,7 +71,7 @@
 (def ln2       (log 2))
 
 ; Glide
-(def glide_alpha (- 1.0 (exp (/ -3.0 (max 0.1 (* glide_time 44.1))))))
+(def glide_alpha (- 1.0 (exp (/ -3.0 (max 0.1 (* glide_time samplerate 0.001))))))
 (make-history glide_hist)
 (def glide_pitch (+ (* glide_alpha pitch)
                     (* (- 1.0 glide_alpha) (read-history glide_hist))))

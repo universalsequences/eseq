@@ -109,6 +109,11 @@ const ESEQLISP_BUILTINS: &[(&str, &str, &str)] = &[
         "Evaluate the entire current buffer.",
     ),
     (
+        "eval-current-buffer",
+        "(eval-current-buffer)",
+        "Evaluate the current buffer through the editor reload pipeline.",
+    ),
+    (
         "eval-sexp",
         "(eval-sexp)",
         "Evaluate the s-expression at the cursor.",

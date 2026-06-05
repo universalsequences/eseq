@@ -10,6 +10,7 @@ pub mod image;
 pub mod knob;
 pub mod knob_number;
 pub mod label;
+pub mod matrix;
 pub mod mixer_meter;
 pub mod modulator_curve;
 pub mod number_label;
@@ -812,6 +813,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &vslider::VSLIDER_WIDGET,
     &button::BUTTON_WIDGET,
     &toggle::TOGGLE_WIDGET,
+    &matrix::MATRIX_WIDGET,
     &knob::KNOB_WIDGET,
     &knob_number::KNOB_NUMBER_WIDGET,
     &mixer_meter::MIXER_METER_WIDGET,

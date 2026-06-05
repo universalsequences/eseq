@@ -1,0 +1,393 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "add1": {
+        "x": 117.44085,
+        "y": 44.86894
+      },
+      "add2": {
+        "x": 104.51507,
+        "y": 31.48405
+      },
+      "attack": {
+        "x": 4.0,
+        "y": 8.0
+      },
+      "audio": {
+        "x": 128.0035,
+        "y": 63.303062
+      },
+      "clock": {
+        "x": 204.48,
+        "y": 8.0
+      },
+      "cos1": {
+        "x": 120.295906,
+        "y": 48.247448
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 10.68
+      },
+      "div1": {
+        "x": 96.526924,
+        "y": 8.901782
+      },
+      "env": {
+        "x": 97.525,
+        "y": 20.3
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "gate": {
+        "x": 136.815,
+        "y": 8.0
+      },
+      "history1": {
+        "x": 115.65151,
+        "y": 27.848536
+      },
+      "latch1": {
+        "x": 86.40641,
+        "y": 39.396366
+      },
+      "latch2": {
+        "x": 207.64133,
+        "y": 19.508617
+      },
+      "md": {
+        "x": 153.16283,
+        "y": 33.664997
+      },
+      "mix1": {
+        "x": 136.7634,
+        "y": 61.251953
+      },
+      "modulated1": {
+        "x": 214.3252,
+        "y": 22.534122
+      },
+      "mul1": {
+        "x": 206.16043,
+        "y": 11.092436
+      },
+      "mul2": {
+        "x": 143.6596,
+        "y": 26.50925
+      },
+      "mul3": {
+        "x": 116.322685,
+        "y": 41.73884
+      },
+      "mul4": {
+        "x": 130.0666,
+        "y": 36.474483
+      },
+      "mul5": {
+        "x": 172.50716,
+        "y": 39.69292
+      },
+      "phase": {
+        "x": 84.915,
+        "y": 20.3
+      },
+      "phasor1": {
+        "x": 102.959404,
+        "y": 35.55708
+      },
+      "pitch": {
+        "x": 90.32481,
+        "y": 6.42
+      },
+      "pow#0": {
+        "x": 160.94707,
+        "y": 26.982498
+      },
+      "ramp2trig1": {
+        "x": 72.647736,
+        "y": 33.49841
+      },
+      "ramp2trig2": {
+        "x": 207.76549,
+        "y": 16.650198
+      },
+      "rate": {
+        "x": 225.77666,
+        "y": 9.512436
+      },
+      "release": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "scale1": {
+        "x": 97.525,
+        "y": 28.769768
+      },
+      "scale2": {
+        "x": 147.38475,
+        "y": 46.667446
+      },
+      "schroeder-allpass1": {
+        "x": 134.97865,
+        "y": 53.662796
+      },
+      "schroeder-allpass2": {
+        "x": 135.1035,
+        "y": 57.674446
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 13.360001
+      },
+      "triangle1": {
+        "x": 188.6942,
+        "y": 18.095348
+      },
+      "triangle2": {
+        "x": 102.478935,
+        "y": 41.73884
+      },
+      "trigger": {
+        "x": 159.865,
+        "y": 8.0
+      },
+      "trishape": {
+        "x": 226.70341,
+        "y": 18.388714
+      },
+      "value1": {
+        "x": 157.73045,
+        "y": 53.314114
+      },
+      "value2": {
+        "x": 160.94707,
+        "y": 48.650845
+      },
+      "velocity": {
+        "x": 109.125,
+        "y": 8.0
+      },
+      "wrap1": {
+        "x": 206.16043,
+        "y": 13.984056
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 14.150001
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 15.490001
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 17.150002
+      },
+      "triangle1:0->pow#0:0": {
+        "segmented": true,
+        "y": 24.431248
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.18
+      }
+    },
+    "inputPresentation": {
+      "add1:0": "cable",
+      "add1:1": "cable",
+      "add2:0": "cable",
+      "add2:1": "cable",
+      "audio:0": "cable",
+      "cos1:0": "cable",
+      "div1:0": "cable",
+      "history1:0": "cable",
+      "latch1:0": "cable",
+      "latch1:1": "cable",
+      "latch2:0": "cable",
+      "latch2:1": "cable",
+      "md:0": "cable",
+      "mix1:0": "cable",
+      "mix1:1": "cable",
+      "modulated1:0": "cable",
+      "mul1:0": "cable",
+      "mul1:1": "cable",
+      "mul2:0": "cable",
+      "mul2:1": "cable",
+      "mul3:0": "cable",
+      "mul4:0": "cable",
+      "mul4:1": "cable",
+      "mul5:0": "cable",
+      "phasor1:0": "cable",
+      "ramp2trig1:0": "cable",
+      "ramp2trig2:0": "cable",
+      "scale1:0": "cable",
+      "scale2:0": "cable",
+      "schroeder-allpass1:0": "cable",
+      "schroeder-allpass1:1": "cable",
+      "schroeder-allpass1:2": "cable",
+      "schroeder-allpass2:0": "cable",
+      "schroeder-allpass2:1": "cable",
+      "schroeder-allpass2:2": "cable",
+      "triangle1:0": "cable",
+      "triangle1:1": "cable",
+      "triangle2:0": "cable",
+      "triangle2:1": "cable",
+      "wrap1:0": "cable"
+    }
+  },
+  "macros": {
+    "allpass-filter": {
+      "nodes": {
+        "cutoff": {
+          "x": 54.739998,
+          "y": 4.0
+        },
+        "input": {
+          "x": 30.529997,
+          "y": 4.0
+        },
+        "out": {
+          "x": 33.679195,
+          "y": 17.365
+        },
+        "q": {
+          "x": 80.11,
+          "y": 4.0
+        },
+        "return": {
+          "x": 30.529997,
+          "y": 10.6825
+        }
+      },
+      "cables": {
+        "cutoff:0->return:1": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "input:0->return:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "q:0->return:2": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 14.813749
+        }
+      }
+    },
+    "schroeder-allpass": {
+      "nodes": {
+        "*#0": {
+          "x": 83.44872,
+          "y": 17.365
+        },
+        "*#1": {
+          "x": 83.44872,
+          "y": 30.73
+        },
+        "d": {
+          "x": 52.183723,
+          "y": 10.6825
+        },
+        "delay_samples": {
+          "x": 56.33372,
+          "y": 4.0
+        },
+        "feedback": {
+          "x": 89.82372,
+          "y": 4.0
+        },
+        "input": {
+          "x": 117.51372,
+          "y": 4.0
+        },
+        "out": {
+          "x": 52.858723,
+          "y": 37.4125
+        },
+        "out~1": {
+          "x": 53.01292,
+          "y": 44.094997
+        },
+        "w": {
+          "x": 107.442444,
+          "y": 24.0475
+        },
+        "w_hist": {
+          "x": 40.68216,
+          "y": 24.0475
+        }
+      },
+      "cables": {
+        "*#0:0->w:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "*#1:0->out:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "d:0->*#0:1": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "d:0->out:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "delay_samples:0->d:1": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "feedback:0->*#0:0": {
+          "segmented": true,
+          "y": 11.5575
+        },
+        "feedback:0->*#1:0": {
+          "segmented": true,
+          "y": 11.5575
+        },
+        "input:0->w:0": {
+          "segmented": true,
+          "y": 14.81375
+        },
+        "out:0->out~1:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "w:0->*#1:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "w:0->w_hist:0": {
+          "segmented": true,
+          "y": 27.63225
+        },
+        "w_hist:0->d:0": {
+          "segmented": true,
+          "y": 18.155
+        }
+      }
+    }
+  }
+}

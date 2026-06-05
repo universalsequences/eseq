@@ -193,6 +193,7 @@ macro_rules! theme_slots {
                 "secondary" => Some(theme.red),
                 "gray" | "grey" => Some(theme.bright_black),
                 "dim" => Some(theme.dim),
+                "transparent" | "none" => Some(Color::rgba(0.0, 0.0, 0.0, 0.0)),
                 $(
                     stringify!($field) => Some(theme.$field),
                 )+
@@ -932,6 +933,18 @@ mod tests {
         assert_eq!(
             named_color("patcher back button hover border"),
             Some(PATCHER_BACK_BUTTON_HOVER_BORDER())
+        );
+    }
+
+    #[test]
+    fn transparent_is_a_named_color() {
+        assert_eq!(
+            named_color("transparent"),
+            Some(Color::rgba(0.0, 0.0, 0.0, 0.0))
+        );
+        assert_eq!(
+            parse_color_value(&Value::Keyword("none".to_string())),
+            Some(Color::rgba(0.0, 0.0, 0.0, 0.0))
         );
     }
 }

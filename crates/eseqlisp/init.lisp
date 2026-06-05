@@ -12,9 +12,7 @@
         result))))
 
 (def eval-buffer-command ()
-  (let ((result (eval (current-buffer-text))))
-    (host-command "sync-current-buffer" true)
-    result))
+  (eval-current-buffer))
 
 (def save-current-buffer ()
   (save-buffer))

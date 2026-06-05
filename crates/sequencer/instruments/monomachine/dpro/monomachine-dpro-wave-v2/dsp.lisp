@@ -61,7 +61,7 @@
 (def scan_target (+ base_wave (* (/ wp_steps 127) scan_span)))
 (make-history scan_hist)
 (def scan_prev (read-history scan_hist))
-(def scan_slew_coeff (- 1.0 (exp (/ -1.0 (* 0.012 44100.0)))))
+(def scan_slew_coeff (- 1.0 (exp (/ -1.0 (* 0.012 samplerate)))))
 (def scan_pos
   (gswitch trigger
     scan_target

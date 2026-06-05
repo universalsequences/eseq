@@ -3831,10 +3831,14 @@ fragment float4 waveform_frag(
 
             // ── Per-tile rendering with scissor rect ─────────────────────────
             for tile in &tiled.tiles {
-                let tile_left_px = tile.rect.col * cell_w;
-                let tile_top_px = tile.rect.row * cell_h;
-                let tile_width_px = tile.rect.width * cell_w;
-                let tile_height_px = tile.rect.height * cell_h;
+                let frame_left_px = tile.rect.col * cell_w;
+                let frame_top_px = tile.rect.row * cell_h;
+                let frame_width_px = tile.rect.width * cell_w;
+                let frame_height_px = tile.rect.height * cell_h;
+                let tile_left_px = tile.body_rect.col * cell_w;
+                let tile_top_px = tile.body_rect.row * cell_h;
+                let tile_width_px = tile.body_rect.width * cell_w;
+                let tile_height_px = tile.body_rect.height * cell_h;
                 let border_inset_px = if tile.show_border {
                     tile.border_width_px
                         .max(0.0)
@@ -3855,12 +3859,14 @@ fragment float4 waveform_frag(
                 let content_col = content_left_px / cell_w;
                 let content_row = content_top_px / cell_h;
 
-                let tile_scissor_left = tile_left_px.floor().max(0.0);
-                let tile_scissor_top = tile_top_px.floor().max(0.0);
-                let tile_scissor_right =
-                    (tile_left_px + tile_width_px).ceil().max(tile_scissor_left);
-                let tile_scissor_bottom =
-                    (tile_top_px + tile_height_px).ceil().max(tile_scissor_top);
+                let tile_scissor_left = frame_left_px.floor().max(0.0);
+                let tile_scissor_top = frame_top_px.floor().max(0.0);
+                let tile_scissor_right = (frame_left_px + frame_width_px)
+                    .ceil()
+                    .max(tile_scissor_left);
+                let tile_scissor_bottom = (frame_top_px + frame_height_px)
+                    .ceil()
+                    .max(tile_scissor_top);
                 let tile_scissor = MTLScissorRect {
                     x: tile_scissor_left as usize,
                     y: tile_scissor_top as usize,
@@ -3890,10 +3896,10 @@ fragment float4 waveform_frag(
                 enc.setScissorRect(tile_scissor);
                 push_rounded_rect_fill_px(
                     &mut tile_bg_verts,
-                    tile_left_px,
-                    tile_top_px,
-                    tile_width_px,
-                    tile_height_px,
+                    frame_left_px,
+                    frame_top_px,
+                    frame_width_px,
+                    frame_height_px,
                     tile.border_radius_px,
                     tile_bg,
                     vp_w,
@@ -4267,10 +4273,10 @@ fragment float4 waveform_frag(
                     let mut bverts = Vec::new();
                     push_rounded_rect_border_px(
                         &mut bverts,
-                        tile_left_px,
-                        tile_top_px,
-                        tile_width_px,
-                        tile_height_px,
+                        frame_left_px,
+                        frame_top_px,
+                        frame_width_px,
+                        frame_height_px,
                         tile.border_width_px,
                         tile.border_radius_px,
                         border_color,
@@ -4287,6 +4293,132 @@ fragment float4 waveform_frag(
                         &bverts,
                     );
                 }
+            }
+
+            let mut tab_instances = Vec::new();
+            let mut tab_text_prims = Vec::new();
+            enc.setScissorRect(MTLScissorRect {
+                x: 0,
+                y: 0,
+                width: vp_w.max(0.0).ceil() as usize,
+                height: vp_h.max(0.0).ceil() as usize,
+            });
+            for tile in &tiled.tiles {
+                if tile.tabs.is_empty() {
+                    continue;
+                }
+                let Some(first_tab) = tile.tabs.first() else {
+                    continue;
+                };
+                let Some(last_tab) = tile.tabs.last() else {
+                    continue;
+                };
+                let group_left = first_tab.rect.col;
+                let group_top = first_tab.rect.row;
+                let group_right = last_tab.rect.col + last_tab.rect.width;
+                let group_width = (group_right - group_left).max(0.0);
+                let group_height = first_tab.rect.height;
+                let group_height_px = group_height * cell_h;
+                let group_inset_y = 0.0;
+                let group_visual_top = group_top + group_inset_y / cell_h.max(1.0);
+                let group_visual_height_px = (group_height_px - group_inset_y * 2.0).max(1.0);
+                let group_visual_height = group_visual_height_px / cell_h.max(1.0);
+                let group_bg = theme::STATUS_BG();
+                let selected_tab_bg = Color::from_hex(0x48, 0x48, 0x4d);
+                push_rounded_instance_cells_with_normalized_radius(
+                    &mut tab_instances,
+                    group_left,
+                    group_visual_top,
+                    group_width,
+                    group_visual_height,
+                    group_bg,
+                    0.95,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+                for tab in &tile.tabs {
+                    if tab.selected {
+                        let selected_inset_px = 1.0;
+                        let selected_x = tab.rect.col + selected_inset_px / cell_w.max(1.0);
+                        let selected_y = group_visual_top + selected_inset_px / cell_h.max(1.0);
+                        let selected_w =
+                            (tab.rect.width - selected_inset_px * 2.0 / cell_w.max(1.0)).max(0.1);
+                        let selected_h = (group_visual_height
+                            - selected_inset_px * 2.0 / cell_h.max(1.0))
+                        .max(0.1);
+                        push_rounded_instance_cells_with_normalized_radius(
+                            &mut tab_instances,
+                            selected_x,
+                            selected_y,
+                            selected_w,
+                            selected_h,
+                            selected_tab_bg,
+                            0.95,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
+                    let fg = if tab.selected {
+                        theme::FG()
+                    } else {
+                        theme::STATUS_FG()
+                    };
+                    tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
+                        widget_render::MetalProportionalTextPrimitive {
+                            row: tab.rect.row + (tab.rect.height - 1.0) * 0.5,
+                            col: tab.rect.col,
+                            align_width: tab.rect.width.max(0.0),
+                            h_align: 0.5,
+                            text: tab.label.clone(),
+                            font_size: 10.5,
+                            scale: 1.0,
+                            fg,
+                            bg: if tab.selected {
+                                selected_tab_bg
+                            } else {
+                                group_bg
+                            },
+                        },
+                    ));
+                }
+            }
+            if let Some(box_pipeline) = self.widget_pipelines.get("box") {
+                draw_widget_instances(
+                    &enc,
+                    &self.device,
+                    &mut self.upload_arena,
+                    &mut self.stats,
+                    box_pipeline,
+                    tab_instances.as_slice(),
+                );
+            }
+            if let (Some(prop_atlas), Some(prop_pipe)) =
+                (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+            {
+                let prop_verts = build_proportional_text_quads_cached(
+                    &tab_text_prims,
+                    prop_atlas,
+                    &mut self.prop_text_layout_cache,
+                    &mut self.stats,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+                let prop_tex = prop_atlas.texture.clone();
+                draw_vertices(
+                    &enc,
+                    &self.device,
+                    &mut self.upload_arena,
+                    &mut self.stats,
+                    prop_pipe,
+                    &prop_tex,
+                    &prop_verts,
+                );
             }
 
             // ── Global patch cables (no tile scissor) ───────────────────────
@@ -4455,8 +4587,8 @@ fragment float4 waveform_frag(
                     });
                 }
                 if let Some(tile) = tiled.tiles.iter().find(|t| t.is_active) {
-                    let col_off = tile.rect.col.round() as usize;
-                    let row_off = tile.rect.row.round() as usize;
+                    let col_off = tile.body_rect.col.round() as usize;
+                    let row_off = tile.body_rect.row.round() as usize;
                     let sel_bg = to_rgba(theme::COMP_SELECTED_BG());
                     let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
                     let pop_fg = to_rgba(theme::COMP_FG());
@@ -7544,6 +7676,36 @@ fragment float4 waveform_frag(
         }
     }
 
+    fn push_rounded_instance_cells_with_normalized_radius(
+        instances: &mut Vec<WidgetInstance>,
+        col: f32,
+        row: f32,
+        width: f32,
+        height: f32,
+        color: Color,
+        normalized_radius: f32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        push_rounded_instance_cells_rgba(
+            instances,
+            col,
+            row,
+            width,
+            height,
+            color.to_rgba(),
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+        );
+        if let Some(instance) = instances.last_mut() {
+            instance.corner_radius = normalized_radius.clamp(0.001, 1.0);
+        }
+    }
+
     fn push_rounded_instance_cells_rgba(
         instances: &mut Vec<WidgetInstance>,
         col: f32,
@@ -8040,7 +8202,7 @@ fragment float4 waveform_frag(
                 is_background,
             } => {
                 let local_right_ndc = -1.0 + (layout_width * cell_w / vp_w) * 2.0;
-                if (instance.ndc_max[0] - local_right_ndc).abs() <= 0.002 {
+                if is_background && (instance.ndc_max[0] - local_right_ndc).abs() <= 0.002 {
                     let old_width = instance.ndc_max[0] - instance.ndc_min[0];
                     instance.ndc_max[0] += (extra_cols * cell_w / vp_w) * 2.0;
                     let new_width = instance.ndc_max[0] - instance.ndc_min[0];

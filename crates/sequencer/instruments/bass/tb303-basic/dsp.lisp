@@ -50,7 +50,7 @@
 (def filt_env (adsr gate trigger filt_attack filt_decay filt_sustain filt_release))
 
 ; Portamento / slide smoothing. Larger slide_time gives the classic liquid note smear.
-(def glide_alpha (- 1.0 (exp (/ -3.0 (max 0.1 (* slide_time 44.1))))))
+(def glide_alpha (- 1.0 (exp (/ -3.0 (max 0.1 (* slide_time samplerate 0.001))))))
 (make-history glide_hist)
 (def glide_pitch (+ (* glide_alpha pitch)
                     (* (- 1.0 glide_alpha) (read-history glide_hist))))

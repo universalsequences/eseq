@@ -54,7 +54,7 @@
 (def target_wav1 (clip (- (mod wav1) 1) 0 63))
 (def target_wav2 (clip (- (mod wav2) 1) 0 63))
 (def time_ms (* (/ (clip time 0 127) 127) 650))
-(def wave_slew_coeff (gswitch (gt time 0.5) (- 1.0 (exp (/ -1.0 (* (+ time_ms 1.0) 0.001 44100.0)))) 1.0))
+(def wave_slew_coeff (gswitch (gt time 0.5) (- 1.0 (exp (/ -1.0 (* (+ time_ms 1.0) 0.001 samplerate)))) 1.0))
 
 (make-history wav1_hist)
 (make-history wav2_hist)

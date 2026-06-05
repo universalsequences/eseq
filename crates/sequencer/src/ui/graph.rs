@@ -14,6 +14,17 @@ use super::{App, EngineDescriptor, EngineNodeIds, TrackNodeIds};
 
 const DELETE_WITHOUT_SHIFT_ENV: &str = "TINYSEQ_DELETE_TRACK_WITHOUT_SHIFT";
 
+fn graph_node_id_to_slot_identity(node_id: i32) -> u32 {
+    u32::try_from(node_id).unwrap_or(0)
+}
+
+fn first_graph_node_identity(ids: &[i32]) -> u32 {
+    ids.first()
+        .copied()
+        .map(graph_node_id_to_slot_identity)
+        .unwrap_or(0)
+}
+
 fn instrument_display_name(name: &str) -> String {
     std::path::Path::new(name)
         .file_name()
@@ -1095,6 +1106,7 @@ impl GraphController<'_> {
 
         self.app.tracks.clear();
         self.app.track_colors.clear();
+        self.app.track_collapsed.clear();
         self.app.sampler_paths.clear();
         self.app.graph.track_node_ids.clear();
         self.app.graph.track_buffer_ids.clear();
@@ -1792,6 +1804,9 @@ impl GraphController<'_> {
         self.app.tracks.remove(track_idx);
         if track_idx < self.app.track_colors.len() {
             self.app.track_colors.remove(track_idx);
+        }
+        if track_idx < self.app.track_collapsed.len() {
+            self.app.track_collapsed.remove(track_idx);
         }
         self.app.sampler_paths.remove(track_idx);
         self.app.graph.track_node_ids.remove(track_idx);
@@ -3263,6 +3278,7 @@ impl GraphController<'_> {
 
         self.app.tracks.push(track_name.clone());
         self.app.push_next_track_color();
+        self.app.push_default_track_collapsed();
         self.app
             .graph
             .effect_descriptors
@@ -3280,6 +3296,8 @@ impl GraphController<'_> {
                 gatepitch_ids,
                 modulator_ids,
             } => {
+                let instrument_node_id = first_graph_node_identity(&sampler_ids);
+                let instrument_modulator_node_id = first_graph_node_identity(&modulator_ids);
                 for (v, &sampler_id) in sampler_ids.iter().enumerate() {
                     self.app.state.runtime.synth_node_ids[idx][v]
                         .store(sampler_id as u32, Ordering::Release);
@@ -3325,7 +3343,11 @@ impl GraphController<'_> {
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
                 self.app.graph.track_engine_ids.push(None);
                 let sampler_desc = EffectDescriptor::builtin_sampler();
-                self.app.state.pattern.instrument_slots[idx].apply_descriptor(&sampler_desc, 0);
+                self.app.state.pattern.instrument_slots[idx].apply_descriptor_with_modulator(
+                    &sampler_desc,
+                    instrument_node_id,
+                    instrument_modulator_node_id,
+                );
                 self.app.graph.instrument_descriptors.push(sampler_desc);
             }
             InstrumentRegistration::Custom {
@@ -3427,7 +3449,8 @@ impl GraphController<'_> {
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
                 self.app.graph.track_engine_ids.push(None);
                 let desc = crate::track_modulator::descriptor();
-                self.app.state.pattern.instrument_slots[idx].apply_descriptor(&desc, 0);
+                self.app.state.pattern.instrument_slots[idx]
+                    .apply_descriptor(&desc, shell.mod_env_id as u32);
                 self.app.graph.instrument_descriptors.push(desc);
             }
         }
@@ -3534,27 +3557,20 @@ impl GraphController<'_> {
     ) {
         let inst_desc = lisp_effect::instrument_descriptor_from_manifest(name, manifest);
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
+        let (node_id, modulator_node_id) = self.instrument_slot_identity(track);
         if preserve_runtime_values {
-            let node_id = inst_slot.node_id.load(Ordering::Relaxed);
             if let Some(old_desc) = self.app.graph.instrument_descriptors.get(track) {
-                inst_slot.sync_descriptor_by_param_name(old_desc, &inst_desc, node_id);
+                inst_slot.sync_descriptor_by_param_name_with_modulator(
+                    old_desc,
+                    &inst_desc,
+                    node_id,
+                    modulator_node_id,
+                );
             } else {
-                inst_slot.sync_descriptor(&inst_desc, node_id);
+                inst_slot.sync_descriptor_with_modulator(&inst_desc, node_id, modulator_node_id);
             }
         } else {
-            inst_slot
-                .num_params
-                .store(inst_desc.params.len() as u32, Ordering::Relaxed);
-            for (i, p) in inst_desc.params.iter().enumerate() {
-                inst_slot.defaults.set(i, p.default);
-                if i < inst_slot.param_node_indices.len() {
-                    inst_slot.param_node_indices[i].store(p.node_param_idx, Ordering::Relaxed);
-                }
-                if i < inst_slot.param_node_spans.len() {
-                    inst_slot.param_node_spans[i]
-                        .store(p.node_param_span.max(1), Ordering::Relaxed);
-                }
-            }
+            inst_slot.apply_descriptor_with_modulator(&inst_desc, node_id, modulator_node_id);
         }
 
         if track < self.app.graph.instrument_descriptors.len() {
@@ -3562,6 +3578,23 @@ impl GraphController<'_> {
         } else {
             self.app.graph.instrument_descriptors.push(inst_desc);
         }
+    }
+
+    fn instrument_slot_identity(&self, track: usize) -> (u32, u32) {
+        let Some(Some(engine_id)) = self.app.graph.track_engine_ids.get(track).copied() else {
+            let slot = &self.app.state.pattern.instrument_slots[track];
+            return (
+                slot.node_id.load(Ordering::Relaxed),
+                slot.modulator_node_id.load(Ordering::Relaxed),
+            );
+        };
+        let Some(Some(engine)) = self.app.graph.engine_node_ids.get(engine_id) else {
+            return (0, 0);
+        };
+        (
+            first_graph_node_identity(&engine.synth_ids),
+            first_graph_node_identity(&engine.modulator_ids),
+        )
     }
 }
 

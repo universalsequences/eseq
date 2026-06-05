@@ -20,9 +20,9 @@ use crate::sampler::{
     PARAM_WARP_ONSET_TABLE_PTR_LO, PARAM_WARP_PROJECT_BPM, PARAM_WARP_RATIO, PARAM_WARP_SAMPLE_BPM,
 };
 use crate::scheduled_event::{
-    ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
-    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
-    TimedEvent,
+    resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
+    ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+    ScheduledInstrumentParams, ScheduledSamplerParams, TimedEvent,
 };
 use crate::sequencer::{
     sync_beats, BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState,
@@ -31,7 +31,7 @@ use crate::sequencer::{
 use crate::ui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
 
-pub const HOST_SAMPLE_RATE: u32 = 44_100;
+pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
 
 unsafe fn push_param_span(lg: *mut LiveGraph, logical_id: u64, idx: u64, span: u32, value: f32) {
@@ -110,17 +110,21 @@ fn select_output_config(
 ) -> Option<OutputDeviceConfig> {
     let ranges: Vec<OutputFormatRange> = ranges.into_iter().collect();
     if let Some(channels) =
-        select_output_channels(HOST_SAMPLE_RATE, default_channels, ranges.clone())
+        select_output_channels(default_sample_rate, default_channels, ranges.clone())
     {
         return Some(OutputDeviceConfig {
-            sample_rate: HOST_SAMPLE_RATE,
+            sample_rate: default_sample_rate,
             channels,
         });
     }
 
-    select_output_channels(default_sample_rate, default_channels, ranges).map(|channels| {
+    if default_sample_rate == FALLBACK_SAMPLE_RATE {
+        return None;
+    }
+
+    select_output_channels(FALLBACK_SAMPLE_RATE, default_channels, ranges).map(|channels| {
         OutputDeviceConfig {
-            sample_rate: default_sample_rate,
+            sample_rate: FALLBACK_SAMPLE_RATE,
             channels,
         }
     })
@@ -1277,6 +1281,22 @@ fn custom_pitch_hz(transpose: f32, base_note_offset: f32) -> f32 {
     440.0 * 2f32.powf((transpose + base_note_offset) / 12.0)
 }
 
+fn track_accepts_scheduled_trigger(state: &SequencerState, track_idx: usize) -> bool {
+    let Some(track_params) = state.pattern.track_params.get(track_idx) else {
+        return false;
+    };
+    if track_params.is_muted() {
+        return false;
+    }
+    let has_solo = state
+        .pattern
+        .track_params
+        .iter()
+        .take(state.active_track_count())
+        .any(|params| params.is_solo());
+    !has_solo || track_params.is_solo()
+}
+
 fn resolve_live_keyboard_transpose(
     state: &SequencerState,
     accumulator_state: crate::accumulator::AccumulatorRuntimeState,
@@ -1352,14 +1372,6 @@ fn take_active_keyboard_note(
         }
     }
     None
-}
-
-fn resolved_chord_transpose(
-    chord_transpose: f32,
-    step_transpose: f32,
-    resolved_transpose: f32,
-) -> f32 {
-    chord_transpose + (resolved_transpose - step_transpose)
 }
 
 fn track_engine_id(state: &SequencerState, track_idx: usize) -> Option<usize> {
@@ -1764,6 +1776,34 @@ fn dispatch_scheduled_step(
         chord,
         instrument_params,
         instrument_fingerprint,
+        None,
+    );
+}
+
+fn dispatch_scheduled_network_step(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    samples_per_step: f32,
+    resolved: crate::accumulator::ResolvedStep,
+    chord: crate::scheduled_event::ScheduledChordData,
+    effect_params: Vec<ScheduledEffectParam>,
+    instrument_params: ScheduledInstrumentParams,
+    sampler_params: ScheduledSamplerParams,
+    instrument_fingerprint: u64,
+) {
+    unsafe {
+        dispatch_effect_chain_for_track(data.lg.0, &effect_params);
+    }
+    fire_resolved(
+        data,
+        track_idx,
+        0,
+        samples_per_step as f64,
+        resolved,
+        chord,
+        instrument_params,
+        instrument_fingerprint,
+        Some(sampler_params),
     );
 }
 
@@ -1796,6 +1836,32 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
             instrument_params,
         } => {
             dispatch_instrument_params_to_active_voices(data, track, &instrument_params);
+        }
+        ScheduledEventKind::EffectParams { effect_params, .. } => unsafe {
+            dispatch_effect_chain_for_track(data.lg.0, &effect_params);
+        },
+        ScheduledEventKind::NetworkTrigger {
+            track,
+            samples_per_step,
+            resolved,
+            chord,
+            effect_params,
+            instrument_params,
+            sampler_params,
+            instrument_fingerprint,
+            ..
+        } => {
+            dispatch_scheduled_network_step(
+                data,
+                track,
+                samples_per_step,
+                resolved,
+                chord,
+                effect_params,
+                instrument_params,
+                sampler_params,
+                instrument_fingerprint,
+            );
         }
     }
 }
@@ -2123,7 +2189,11 @@ fn fire_resolved(
     chord: crate::scheduled_event::ScheduledChordData,
     instrument_params: ScheduledInstrumentParams,
     instrument_fingerprint: u64,
+    scheduled_sampler_params: Option<ScheduledSamplerParams>,
 ) {
+    if !track_accepts_scheduled_trigger(&data.state, track_idx) {
+        return;
+    }
     let tp = &data.state.pattern.track_params[track_idx];
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
@@ -2141,69 +2211,85 @@ fn fire_resolved(
     let total_gate = (resolved.duration as f64 * samples_per_step) as f32;
     let chop_gate = total_gate / chop as f32;
 
-    // Envelope and sampler params from instrument slot.
-    let inst_slot = &data.state.pattern.instrument_slots[track_idx];
-    let attack_ms = inst_slot
-        .plocks
-        .get(step, 0)
-        .unwrap_or_else(|| inst_slot.defaults.get(0));
-    let release_ms = inst_slot
-        .plocks
-        .get(step, 1)
-        .unwrap_or_else(|| inst_slot.defaults.get(1));
+    let fallback_sampler_params = || {
+        let inst_slot = &data.state.pattern.instrument_slots[track_idx];
+        ScheduledSamplerParams {
+            attack_ms: inst_slot
+                .plocks
+                .get(step, 0)
+                .unwrap_or_else(|| inst_slot.defaults.get(0)),
+            release_ms: inst_slot
+                .plocks
+                .get(step, 1)
+                .unwrap_or_else(|| inst_slot.defaults.get(1)),
+            start_point: inst_slot
+                .plocks
+                .get(step, 2)
+                .unwrap_or_else(|| inst_slot.defaults.get(2)),
+            end_point: inst_slot
+                .plocks
+                .get(step, 3)
+                .unwrap_or_else(|| inst_slot.defaults.get(3)),
+            instrument_enabled: inst_slot
+                .plocks
+                .get(step, 4)
+                .unwrap_or_else(|| inst_slot.defaults.get(4)),
+            reverse: inst_slot
+                .plocks
+                .get(step, 5)
+                .unwrap_or_else(|| inst_slot.defaults.get(5)),
+            loop_mode: inst_slot
+                .plocks
+                .get(step, 6)
+                .unwrap_or_else(|| inst_slot.defaults.get(6)),
+            loop_xfade_ms: inst_slot
+                .plocks
+                .get(step, 7)
+                .unwrap_or_else(|| inst_slot.defaults.get(7)),
+            sr_hz: inst_slot
+                .plocks
+                .get(step, 8)
+                .unwrap_or_else(|| inst_slot.defaults.get(8)),
+            warp_enabled: inst_slot
+                .plocks
+                .get(step, 9)
+                .unwrap_or_else(|| inst_slot.defaults.get(9)),
+            warp_mode: inst_slot
+                .plocks
+                .get(step, 10)
+                .unwrap_or_else(|| inst_slot.defaults.get(10)),
+            sample_bpm: inst_slot
+                .plocks
+                .get(step, 11)
+                .unwrap_or_else(|| inst_slot.defaults.get(11)),
+            playback_speed: inst_slot
+                .plocks
+                .get(step, 12)
+                .unwrap_or_else(|| inst_slot.defaults.get(12)),
+            scrub: inst_slot
+                .plocks
+                .get(step, 13)
+                .unwrap_or_else(|| inst_slot.defaults.get(13)),
+        }
+    };
+    let sampler_params = scheduled_sampler_params.unwrap_or_else(fallback_sampler_params);
+    let attack_ms = sampler_params.attack_ms;
+    let release_ms = sampler_params.release_ms;
     let attack_samples = attack_ms * data.sample_rate as f32 / 1000.0;
     let release_samples = release_ms * data.sample_rate as f32 / 1000.0;
     let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
-    let start_point = inst_slot
-        .plocks
-        .get(step, 2)
-        .unwrap_or_else(|| inst_slot.defaults.get(2));
-    let end_point = inst_slot
-        .plocks
-        .get(step, 3)
-        .unwrap_or_else(|| inst_slot.defaults.get(3));
-    let instrument_enabled = inst_slot
-        .plocks
-        .get(step, 4)
-        .unwrap_or_else(|| inst_slot.defaults.get(4));
-    let reverse = inst_slot
-        .plocks
-        .get(step, 5)
-        .unwrap_or_else(|| inst_slot.defaults.get(5));
-    let loop_mode = inst_slot
-        .plocks
-        .get(step, 6)
-        .unwrap_or_else(|| inst_slot.defaults.get(6));
-    let loop_xfade_samples = inst_slot
-        .plocks
-        .get(step, 7)
-        .unwrap_or_else(|| inst_slot.defaults.get(7))
-        * data.sample_rate as f32
-        / 1000.0;
-    let sr_hz = inst_slot
-        .plocks
-        .get(step, 8)
-        .unwrap_or_else(|| inst_slot.defaults.get(8));
-    let warp_enabled = inst_slot
-        .plocks
-        .get(step, 9)
-        .unwrap_or_else(|| inst_slot.defaults.get(9));
-    let warp_mode = inst_slot
-        .plocks
-        .get(step, 10)
-        .unwrap_or_else(|| inst_slot.defaults.get(10));
-    let sample_bpm = inst_slot
-        .plocks
-        .get(step, 11)
-        .unwrap_or_else(|| inst_slot.defaults.get(11));
-    let playback_speed = inst_slot
-        .plocks
-        .get(step, 12)
-        .unwrap_or_else(|| inst_slot.defaults.get(12));
-    let scrub = inst_slot
-        .plocks
-        .get(step, 13)
-        .unwrap_or_else(|| inst_slot.defaults.get(13));
+    let start_point = sampler_params.start_point;
+    let end_point = sampler_params.end_point;
+    let instrument_enabled = sampler_params.instrument_enabled;
+    let reverse = sampler_params.reverse;
+    let loop_mode = sampler_params.loop_mode;
+    let loop_xfade_samples = sampler_params.loop_xfade_ms * data.sample_rate as f32 / 1000.0;
+    let sr_hz = sampler_params.sr_hz;
+    let warp_enabled = sampler_params.warp_enabled;
+    let warp_mode = sampler_params.warp_mode;
+    let sample_bpm = sampler_params.sample_bpm;
+    let playback_speed = sampler_params.playback_speed;
+    let scrub = sampler_params.scrub;
     let (
         warp_enabled,
         warp_mode,
@@ -2232,19 +2318,6 @@ fn fire_resolved(
             );
         }
     }
-
-    // Fit to Scale: quantize the final transpose to the nearest scale degree.
-    // Keep the pre-FTS value so chord notes can be individually quantized.
-    let fts = tp.get_fts_scale();
-    let pre_fts_transpose = resolved.transpose;
-    let resolved = if fts > 0 {
-        crate::accumulator::ResolvedStep {
-            transpose: crate::scale::quantize_transpose(resolved.transpose, fts),
-            ..resolved
-        }
-    } else {
-        resolved
-    };
 
     if is_modulator {
         let lid = data.state.runtime.modulator_lids[track_idx].load(Ordering::Acquire);
@@ -2293,13 +2366,8 @@ fn fire_resolved(
                 total_gate
             };
             let note_chop_gate = note_total_gate / chop as f32;
-            // Apply accumulator offset using pre-FTS transpose, then FTS-quantize each note.
-            let raw = resolved_chord_transpose(chord.notes[n], step_transpose, pre_fts_transpose);
-            let transpose = if fts > 0 {
-                crate::scale::quantize_transpose(raw, fts)
-            } else {
-                raw
-            };
+            let transpose =
+                resolved_chord_transpose(chord.notes[n], step_transpose, resolved.transpose);
             if is_custom {
                 let Some(engine_id) = engine_id else {
                     continue;
@@ -3673,7 +3741,7 @@ pub fn build_output_stream(
     Ok(stream)
 }
 
-/// Query the default output device, preferring 44.1 kHz when supported.
+/// Query the default output device, preserving the system sample rate when possible.
 pub fn query_device_config() -> Result<(u32, u16), String> {
     let host = cpal::default_host();
     let device = host
@@ -3703,7 +3771,7 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
             .unwrap_or_else(|_| "default output device".to_string());
         format!(
             "{device_name} does not support f32 output at either {} Hz or its default {} Hz rate",
-            HOST_SAMPLE_RATE,
+            FALLBACK_SAMPLE_RATE,
             default_config.sample_rate().0
         )
     })?;
@@ -3719,15 +3787,16 @@ mod tests {
     use super::{
         bus_gate_target_at, instrument_sound_fingerprint, resolve_live_keyboard_transpose,
         resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
-        select_output_config, swing_delay_samples, CustomEnginePool, GateOffTracker,
-        OutputDeviceConfig, OutputFormatRange, HOST_SAMPLE_RATE,
+        select_output_config, swing_delay_samples, track_accepts_scheduled_trigger,
+        CustomEnginePool, GateOffTracker, OutputDeviceConfig, OutputFormatRange,
+        FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::AccumulatorRuntimeState;
     use crate::analysis::{pack_ptr, OnsetTableShared};
     use crate::sequencer::{SequencerState, SwingResolution};
 
     #[test]
-    fn output_config_keeps_default_channels_at_44100() {
+    fn output_config_prefers_system_default_sample_rate_over_44100() {
         let ranges = [
             OutputFormatRange {
                 channels: 2,
@@ -3749,16 +3818,28 @@ mod tests {
             },
         ];
 
-        assert_eq!(select_output_channels(HOST_SAMPLE_RATE, 4, ranges), Some(4));
+        assert_eq!(
+            select_output_config(48_000, 2, ranges),
+            Some(OutputDeviceConfig {
+                sample_rate: 48_000,
+                channels: 2,
+            })
+        );
     }
 
     #[test]
-    fn output_config_prefers_stereo_when_default_channels_do_not_support_44100() {
+    fn output_config_keeps_default_channels_at_selected_rate() {
         let ranges = [
             OutputFormatRange {
                 channels: 6,
                 min_sample_rate: 48_000,
-                max_sample_rate: 48_000,
+                max_sample_rate: 96_000,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 48_000,
+                max_sample_rate: 96_000,
                 supports_f32: true,
             },
             OutputFormatRange {
@@ -3767,19 +3848,39 @@ mod tests {
                 max_sample_rate: 44_100,
                 supports_f32: true,
             },
+        ];
+
+        assert_eq!(select_output_channels(48_000, 6, ranges), Some(6));
+    }
+
+    #[test]
+    fn output_config_prefers_stereo_when_default_channels_do_not_support_selected_rate() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 6,
+                min_sample_rate: 44_100,
+                max_sample_rate: 44_100,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 1,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: true,
+            },
             OutputFormatRange {
                 channels: 2,
-                min_sample_rate: 44_100,
+                min_sample_rate: 48_000,
                 max_sample_rate: 96_000,
                 supports_f32: true,
             },
         ];
 
-        assert_eq!(select_output_channels(HOST_SAMPLE_RATE, 6, ranges), Some(2));
+        assert_eq!(select_output_channels(48_000, 6, ranges), Some(2));
     }
 
     #[test]
-    fn output_config_falls_back_to_default_sample_rate_without_44100() {
+    fn output_config_uses_default_sample_rate_without_44100() {
         let ranges = [
             OutputFormatRange {
                 channels: 2,
@@ -3805,7 +3906,7 @@ mod tests {
     }
 
     #[test]
-    fn output_config_falls_back_to_default_sample_rate_without_f32_at_44100() {
+    fn output_config_uses_default_sample_rate_when_44100_lacks_f32() {
         let ranges = [
             OutputFormatRange {
                 channels: 2,
@@ -3831,7 +3932,33 @@ mod tests {
     }
 
     #[test]
-    fn output_config_rejects_when_preferred_and_default_rates_lack_f32_support() {
+    fn output_config_falls_back_to_44100_when_default_rate_lacks_f32() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: false,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: FALLBACK_SAMPLE_RATE,
+                max_sample_rate: FALLBACK_SAMPLE_RATE,
+                supports_f32: true,
+            },
+        ];
+
+        assert_eq!(
+            select_output_config(48_000, 2, ranges),
+            Some(OutputDeviceConfig {
+                sample_rate: FALLBACK_SAMPLE_RATE,
+                channels: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn output_config_rejects_when_default_and_fallback_rates_lack_f32_support() {
         let ranges = [
             OutputFormatRange {
                 channels: 2,
@@ -4132,7 +4259,7 @@ mod tests {
         state.pattern.instrument_slots[0].defaults.set(1, 0.4);
 
         let base = instrument_sound_fingerprint(&state, 0, 2, Some(3));
-        state.pattern.instrument_slots[0].plocks.set(3, 1, 0.9);
+        state.pattern.instrument_slots[0].set_plock(3, 1, 0.9);
         let changed = instrument_sound_fingerprint(&state, 0, 2, Some(3));
 
         assert_ne!(base, changed);
@@ -4209,5 +4336,24 @@ mod tests {
         );
 
         assert_eq!(resolved, 4.0);
+    }
+
+    #[test]
+    fn scheduled_triggers_respect_track_mute() {
+        let state = SequencerState::new(2, Vec::new());
+        state.pattern.track_params[1].set_mute(true);
+
+        assert!(track_accepts_scheduled_trigger(&state, 0));
+        assert!(!track_accepts_scheduled_trigger(&state, 1));
+    }
+
+    #[test]
+    fn scheduled_triggers_respect_solo_mutes() {
+        let state = SequencerState::new(3, Vec::new());
+        state.pattern.track_params[0].set_solo(true);
+
+        assert!(track_accepts_scheduled_trigger(&state, 0));
+        assert!(!track_accepts_scheduled_trigger(&state, 1));
+        assert!(!track_accepts_scheduled_trigger(&state, 2));
     }
 }

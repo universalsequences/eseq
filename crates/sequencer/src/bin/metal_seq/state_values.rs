@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 fn sampler_modulation_depth_display_range(
     depth_desc: &sequencer::effects::ParamDescriptor,
@@ -930,6 +931,45 @@ pub(crate) fn sync_instrument_param_value_field(
     false
 }
 
+pub(crate) fn sync_instrument_param_value_field_with_neural_selection(
+    rt: &mut Runtime,
+    app: &ui::App,
+    track: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) -> bool {
+    if let Some((name, value)) = app
+        .graph
+        .instrument_descriptors
+        .get(track)
+        .and_then(|desc| desc.params.get(param_idx))
+        .and_then(|pdesc| {
+            app.state.pattern.instrument_slots.get(track).map(|slot| {
+                let stored = selected_neural_neurons
+                    .and_then(|selection| {
+                        sequencer::lisp_effect::selected_neural_instrument_plock_value(
+                            &app.state, selection, track, param_idx,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        slot_param_stored_value(slot, pdesc, param_idx, display_step)
+                    });
+                (pdesc.name.clone(), pdesc.stored_to_user(stored))
+            })
+        })
+    {
+        return reactive_set_needs_ui(rt.set_reactive(
+            "SEQ",
+            &instrument_param_value_field(track, param_idx, &name),
+            Value::Number(value as f64),
+        ));
+    }
+    false
+}
+
 pub(crate) fn sync_sampler_selection_time_fields(
     rt: &mut Runtime,
     app: &ui::App,
@@ -1021,6 +1061,51 @@ pub(crate) fn sync_track_effect_param_value_field(
     false
 }
 
+pub(crate) fn sync_track_effect_param_value_field_with_neural_selection(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    display_step: Option<usize>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) -> bool {
+    if let Some((name, value)) = descriptors
+        .get(track)
+        .and_then(|slots| slots.get(slot_idx))
+        .and_then(|desc| desc.params.get(param_idx).map(|p| (&desc.name, p)))
+        .and_then(|(_, pdesc)| {
+            state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+                .map(|slot| {
+                    let stored = selected_neural_neurons
+                        .and_then(|selection| {
+                            sequencer::lisp_effect::selected_neural_effect_plock_value(
+                                state, selection, track, slot_idx, param_idx,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            slot_param_stored_value(slot, pdesc, param_idx, display_step)
+                        });
+                    (pdesc.name.clone(), stored)
+                })
+        })
+    {
+        return reactive_set_needs_ui(rt.set_reactive(
+            "SEQ",
+            &track_effect_param_value_field(track, slot_idx, param_idx, &name),
+            Value::Number(value as f64),
+        ));
+    }
+    false
+}
+
 pub(crate) fn sync_midi_fx_param_value_field(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1094,6 +1179,19 @@ pub(crate) fn sync_fx_param_binding_fields(
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> bool {
+    sync_fx_param_binding_fields_with_neural_selection(rt, app, state, track, selected_steps, None)
+}
+
+pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) -> bool {
     let mut needs_ui = false;
     if track < app.tracks.len() {
         let selected_step = selected_plock_step(selected_steps);
@@ -1103,8 +1201,14 @@ pub(crate) fn sync_fx_param_binding_fields(
         if let Some(desc) = app.graph.instrument_descriptors.get(track) {
             for (param_idx, pdesc) in desc.params.iter().enumerate() {
                 if param_supports_value_binding(pdesc) {
-                    needs_ui |=
-                        sync_instrument_param_value_field(rt, app, track, param_idx, display_step);
+                    needs_ui |= sync_instrument_param_value_field_with_neural_selection(
+                        rt,
+                        app,
+                        track,
+                        param_idx,
+                        display_step,
+                        selected_neural_neurons,
+                    );
                 }
             }
         }
@@ -1112,7 +1216,7 @@ pub(crate) fn sync_fx_param_binding_fields(
             for (slot_idx, desc) in slots.iter().enumerate() {
                 for (param_idx, pdesc) in desc.params.iter().enumerate() {
                     if param_supports_value_binding(pdesc) {
-                        needs_ui |= sync_track_effect_param_value_field(
+                        needs_ui |= sync_track_effect_param_value_field_with_neural_selection(
                             rt,
                             state,
                             &app.graph.effect_descriptors,
@@ -1120,6 +1224,7 @@ pub(crate) fn sync_fx_param_binding_fields(
                             slot_idx,
                             param_idx,
                             display_step,
+                            selected_neural_neurons,
                         );
                     }
                 }
@@ -1520,6 +1625,22 @@ pub(crate) fn build_track_colors(app: &ui::App) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn build_track_collapsed_from_slice(collapsed: &[bool], track_count: usize) -> Value {
+    Value::List(
+        (0..track_count)
+            .map(|track| {
+                Rc::new(RefCell::new(Value::Bool(
+                    collapsed.get(track).copied().unwrap_or(false),
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_track_collapsed(app: &ui::App) -> Value {
+    build_track_collapsed_from_slice(&app.track_collapsed, app.tracks.len())
+}
+
 pub(crate) fn build_track_ids(app: &ui::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = app
         .graph
@@ -1602,6 +1723,7 @@ pub(crate) fn sync_track_name_state(
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
+    rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
 }
 
 /// Build a Lisp Value::List of per-track volumes (0.0–1.0).
@@ -1856,6 +1978,7 @@ pub(crate) fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
 
 pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Arc<SequencerState>) {
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
+    rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
     rt.set_reactive(
         "SEQ",
         "track-instrument-types",
@@ -1946,6 +2069,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-mixer-pans", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
@@ -2353,6 +2477,41 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
     effects_dirty
 }
 
+pub(crate) fn sync_neural_visualization_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+) -> bool {
+    let mut effects_dirty = rt
+        .set_reactive(
+            "SEQ",
+            "neural-energy-matrix",
+            build_neural_energy_matrix_value(state),
+        )
+        .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "neural-trigger-matrix",
+            build_neural_trigger_matrix_value(state),
+        )
+        .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "neural-dampening-matrix",
+            build_neural_dampening_matrix_value(state),
+        )
+        .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "graph-visualizations",
+            build_graph_visualizations_value(state),
+        )
+        .effects_dirty;
+    effects_dirty
+}
+
 pub(crate) fn sync_bus_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
     let mut effects_dirty = false;
     for (idx, &level) in levels.iter().enumerate() {
@@ -2590,6 +2749,414 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "num-patterns",
         Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
     );
+    rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
+    rt.set_reactive(
+        "SEQ",
+        "neural-energy-matrix",
+        build_neural_energy_matrix_value(state),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "neural-trigger-matrix",
+        build_neural_trigger_matrix_value(state),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "neural-dampening-matrix",
+        build_neural_dampening_matrix_value(state),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "graph-visualizations",
+        build_graph_visualizations_value(state),
+    );
+}
+
+pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value {
+    Value::List(
+        state
+            .current_neural_networks()
+            .iter()
+            .map(neural_network_value)
+            .map(|network| Rc::new(RefCell::new(network)))
+            .collect(),
+    )
+}
+
+pub(crate) fn build_neural_dampening_matrix_value(state: &Arc<SequencerState>) -> Value {
+    let snapshot = state.neural_visualization();
+    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    Value::List(
+        (0..size)
+            .map(|row| {
+                Rc::new(RefCell::new(Value::List(
+                    (0..size)
+                        .map(|col| {
+                            Rc::new(RefCell::new(Value::Number(neural_dampening_display_value(
+                                snapshot.dampening[row][col],
+                            ))))
+                        })
+                        .collect(),
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_neural_energy_matrix_value(state: &Arc<SequencerState>) -> Value {
+    let snapshot = state.neural_visualization();
+    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    neural_column_matrix_value(
+        (0..size).map(|idx| neural_energy_display_value(snapshot.energy[idx])),
+    )
+}
+
+pub(crate) fn build_neural_trigger_matrix_value(state: &Arc<SequencerState>) -> Value {
+    let snapshot = state.neural_visualization();
+    let size = snapshot.num_neurons.min(sequencer::neural::NUM_NEURONS);
+    neural_column_matrix_value(
+        (0..size).map(|idx| neural_trigger_display_value(snapshot.trigger_activity[idx])),
+    )
+}
+
+pub(crate) fn build_graph_visualizations_value(state: &Arc<SequencerState>) -> Value {
+    Value::List(
+        state
+            .graph_visualizations()
+            .iter()
+            .map(|snapshot| Rc::new(RefCell::new(graph_visualization_value(snapshot))))
+            .collect(),
+    )
+}
+
+fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisualizationSnapshot) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "id".to_string(),
+        value_cell(Value::Number(snapshot.id as f64)),
+    );
+    map.insert(
+        "name".to_string(),
+        value_cell(Value::String(snapshot.name.clone())),
+    );
+    map.insert(
+        "active".to_string(),
+        value_cell(Value::Bool(snapshot.active)),
+    );
+    map.insert(
+        "num-nodes".to_string(),
+        value_cell(Value::Number(snapshot.num_nodes as f64)),
+    );
+    map.insert(
+        "energy-matrix".to_string(),
+        value_cell(neural_column_matrix_value(
+            snapshot
+                .energy
+                .iter()
+                .take(snapshot.num_nodes)
+                .map(|value| graph_energy_display_value(*value)),
+        )),
+    );
+    map.insert(
+        "trigger-matrix".to_string(),
+        value_cell(neural_column_matrix_value(
+            snapshot
+                .trigger_activity
+                .iter()
+                .take(snapshot.num_nodes)
+                .map(|value| neural_trigger_display_value(*value)),
+        )),
+    );
+    map.insert(
+        "weight-matrix".to_string(),
+        value_cell(graph_dense_edge_matrix_value(snapshot, |edge| {
+            graph_weight_display_value(edge.weight)
+        })),
+    );
+    map.insert(
+        "dampening-matrix".to_string(),
+        value_cell(graph_dense_edge_matrix_value(snapshot, |edge| {
+            neural_dampening_display_value(edge.dampening as f32)
+        })),
+    );
+    map.insert(
+        "edges".to_string(),
+        value_cell(Value::List(
+            snapshot
+                .edges
+                .iter()
+                .map(|edge| Rc::new(RefCell::new(graph_edge_value(*edge))))
+                .collect(),
+        )),
+    );
+    map.insert(
+        "node-events".to_string(),
+        value_cell(Value::List(
+            snapshot
+                .node_events
+                .iter()
+                .take(snapshot.num_nodes)
+                .map(|event| Rc::new(RefCell::new(graph_optional_event_value(*event))))
+                .collect(),
+        )),
+    );
+    map.insert(
+        "events".to_string(),
+        value_cell(Value::List(
+            snapshot
+                .node_events
+                .iter()
+                .take(snapshot.num_nodes)
+                .flatten()
+                .copied()
+                .map(|event| Rc::new(RefCell::new(graph_event_value(event))))
+                .collect(),
+        )),
+    );
+    Value::Map(map)
+}
+
+fn value_cell(value: Value) -> Rc<RefCell<Value>> {
+    Rc::new(RefCell::new(value))
+}
+
+fn graph_dense_edge_matrix_value(
+    snapshot: &sequencer::graph::GraphVisualizationSnapshot,
+    value: impl Fn(sequencer::graph::GraphVisualizationEdge) -> f64,
+) -> Value {
+    let mut matrix = vec![vec![0.0; snapshot.num_nodes]; snapshot.num_nodes];
+    for edge in &snapshot.edges {
+        if edge.from < snapshot.num_nodes && edge.to < snapshot.num_nodes {
+            matrix[edge.from][edge.to] = value(*edge);
+        }
+    }
+    Value::List(
+        matrix
+            .into_iter()
+            .map(|row| {
+                Rc::new(RefCell::new(Value::List(
+                    row.into_iter()
+                        .map(|cell| Rc::new(RefCell::new(Value::Number(cell))))
+                        .collect(),
+                )))
+            })
+            .collect(),
+    )
+}
+
+fn graph_edge_value(edge: sequencer::graph::GraphVisualizationEdge) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "from".to_string(),
+        value_cell(Value::Number(edge.from as f64)),
+    );
+    map.insert("to".to_string(), value_cell(Value::Number(edge.to as f64)));
+    map.insert(
+        "weight".to_string(),
+        value_cell(Value::Number(graph_weight_display_value(edge.weight))),
+    );
+    map.insert(
+        "dampening".to_string(),
+        value_cell(Value::Number(neural_dampening_display_value(
+            edge.dampening as f32,
+        ))),
+    );
+    Value::Map(map)
+}
+
+fn graph_optional_event_value(event: Option<sequencer::graph::GraphVisualizationEvent>) -> Value {
+    event.map(graph_event_value).unwrap_or(Value::Nil)
+}
+
+fn graph_event_value(event: sequencer::graph::GraphVisualizationEvent) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "node".to_string(),
+        value_cell(Value::Number(event.node_index as f64)),
+    );
+    map.insert(
+        "track".to_string(),
+        value_cell(
+            event
+                .track
+                .map(|track| Value::Number(track as f64))
+                .unwrap_or(Value::Nil),
+        ),
+    );
+    map.insert(
+        "sample".to_string(),
+        value_cell(Value::Number(event.sample_time as f64)),
+    );
+    map.insert("beat".to_string(), value_cell(Value::Number(event.beat)));
+    map.insert(
+        "transpose".to_string(),
+        value_cell(Value::Number(graph_weight_display_value(
+            event.transpose as f64,
+        ))),
+    );
+    map.insert(
+        "velocity".to_string(),
+        value_cell(Value::Number(neural_trigger_display_value(event.velocity))),
+    );
+    Value::Map(map)
+}
+
+fn neural_column_matrix_value(values: impl Iterator<Item = f64>) -> Value {
+    Value::List(
+        values
+            .map(|value| {
+                Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(
+                    Value::Number(value),
+                ))])))
+            })
+            .collect(),
+    )
+}
+
+fn neural_energy_display_value(value: f32) -> f64 {
+    let value = value.clamp(0.0, 4.0) as f64;
+    (value * 100.0).round() / 100.0
+}
+
+fn graph_energy_display_value(value: f64) -> f64 {
+    let value = value.clamp(0.0, 4.0);
+    (value * 100.0).round() / 100.0
+}
+
+fn graph_weight_display_value(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+fn neural_trigger_display_value(value: f32) -> f64 {
+    value.clamp(0.0, 1.0) as f64
+}
+
+fn neural_dampening_display_value(value: f32) -> f64 {
+    let value = value.clamp(0.0, 1.0) as f64;
+    (value * 100.0).round() / 100.0
+}
+
+fn neural_network_value(network: &sequencer::neural::ProjectNeuralNetwork) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "id".to_string(),
+        Rc::new(RefCell::new(Value::Number(network.id as f64))),
+    );
+    map.insert(
+        "name".to_string(),
+        Rc::new(RefCell::new(Value::String(network.name.clone()))),
+    );
+    map.insert(
+        "enabled".to_string(),
+        Rc::new(RefCell::new(Value::Bool(network.enabled))),
+    );
+    map.insert(
+        "num-neurons".to_string(),
+        Rc::new(RefCell::new(Value::Number(network.num_neurons as f64))),
+    );
+    map.insert(
+        "reset-bars".to_string(),
+        Rc::new(RefCell::new(Value::Number(
+            network.reset_interval_bars as f64,
+        ))),
+    );
+    map.insert(
+        "energy-decay".to_string(),
+        Rc::new(RefCell::new(Value::Number(network.energy_decay as f64))),
+    );
+    map.insert(
+        "max-poly".to_string(),
+        Rc::new(RefCell::new(Value::Number(network.max_poly as f64))),
+    );
+    map.insert(
+        "max-poly-selection".to_string(),
+        Rc::new(RefCell::new(Value::String(
+            network.max_poly_selection.as_str().to_string(),
+        ))),
+    );
+    map.insert(
+        "weights".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            network
+                .weights
+                .iter()
+                .map(|row| {
+                    Rc::new(RefCell::new(Value::List(
+                        row.iter()
+                            .map(|value| Rc::new(RefCell::new(Value::Number(*value as f64))))
+                            .collect(),
+                    )))
+                })
+                .collect(),
+        ))),
+    );
+    map.insert(
+        "neurons".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            network
+                .neurons
+                .iter()
+                .enumerate()
+                .map(|(idx, neuron)| Rc::new(RefCell::new(neural_neuron_value(idx, neuron))))
+                .collect(),
+        ))),
+    );
+    Value::Map(map)
+}
+
+fn neural_neuron_value(idx: usize, neuron: &sequencer::neural::ProjectNeuron) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "index".to_string(),
+        Rc::new(RefCell::new(Value::Number(idx as f64))),
+    );
+    map.insert(
+        "route".to_string(),
+        Rc::new(RefCell::new(
+            neuron
+                .route
+                .map(|route| Value::Number(route as f64))
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    map.insert(
+        "resolution".to_string(),
+        Rc::new(RefCell::new(Value::Keyword(
+            neuron.resolution_timebase().label().to_string(),
+        ))),
+    );
+    map.insert(
+        "delay".to_string(),
+        Rc::new(RefCell::new(Value::Number(neuron.delay_steps as f64))),
+    );
+    map.insert(
+        "threshold".to_string(),
+        Rc::new(RefCell::new(Value::Number(neuron.threshold as f64))),
+    );
+    map.insert(
+        "transpose".to_string(),
+        Rc::new(RefCell::new(Value::Number(neuron.transpose as f64))),
+    );
+    map.insert(
+        "quantize".to_string(),
+        Rc::new(RefCell::new(
+            neuron
+                .quantize_timebase()
+                .map(|timebase| Value::Keyword(timebase.label().to_string()))
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    map.insert(
+        "dampening".to_string(),
+        Rc::new(RefCell::new(Value::Number(neuron.dampening_amount as f64))),
+    );
+    map.insert(
+        "dampening-recovery".to_string(),
+        Rc::new(RefCell::new(Value::Number(
+            neuron.dampening_recovery as f64,
+        ))),
+    );
+    Value::Map(map)
 }
 
 pub(crate) fn build_sync_labels() -> Value {
@@ -2812,28 +3379,22 @@ pub(crate) fn build_effects_value(
                                     })
                                 })
                                 .unwrap_or(source_current),
-                            source_value_field: target.source_param_idx.and_then(
-                                |source_param_idx| {
-                                    plock_step.is_none().then(|| {
-                                        let source_desc = &desc.params[source_param_idx];
-                                        track_effect_param_value_field(
-                                            track,
-                                            slot_idx,
-                                            source_param_idx,
-                                            &source_desc.name,
-                                        )
-                                    })
-                                },
-                            ),
-                            depth_value: depth_desc.stored_to_user(depth_current),
-                            depth_value_field: plock_step.is_none().then(|| {
+                            source_value_field: target.source_param_idx.map(|source_param_idx| {
+                                let source_desc = &desc.params[source_param_idx];
                                 track_effect_param_value_field(
                                     track,
                                     slot_idx,
-                                    target.depth_param_idx,
-                                    &depth_desc.name,
+                                    source_param_idx,
+                                    &source_desc.name,
                                 )
                             }),
+                            depth_value: depth_desc.stored_to_user(depth_current),
+                            depth_value_field: Some(track_effect_param_value_field(
+                                track,
+                                slot_idx,
+                                target.depth_param_idx,
+                                &depth_desc.name,
+                            )),
                             depth_min: target.depth_min,
                             depth_max: target.depth_max,
                             depth_unit: target.depth_unit.clone(),
@@ -2852,7 +3413,11 @@ pub(crate) fn build_effects_value(
                 .iter()
                 .enumerate()
                 .filter_map(|(param_idx, pdesc)| {
-                    if is_source_param(pdesc.node_param_idx)
+                    if (is_source_param(pdesc.node_param_idx)
+                        && !matches!(
+                            pdesc.host_control,
+                            Some(sequencer::effects::HostControl::FxSidechain { .. })
+                        ))
                         || is_mod_param(&pdesc.name)
                         || is_generated_host_mod_param(&pdesc.name)
                         || is_hidden_dgen_mod_param(&pdesc.name)
@@ -2909,7 +3474,7 @@ pub(crate) fn build_effects_value(
                                 "boolean".to_string(),
                                 Rc::new(RefCell::new(Value::Bool(true))),
                             );
-                            if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                            if param_supports_value_binding(pdesc) {
                                 insert_string_prop(
                                     &mut pmap,
                                     "value-field",
@@ -2940,6 +3505,18 @@ pub(crate) fn build_effects_value(
                                 "options".to_string(),
                                 Rc::new(RefCell::new(Value::List(option_values))),
                             );
+                            if param_supports_value_binding(pdesc) {
+                                insert_string_prop(
+                                    &mut pmap,
+                                    "value-field",
+                                    track_effect_param_value_field(
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        &pdesc.name,
+                                    ),
+                                );
+                            }
                         }
                         ParamKind::Continuous { .. } => {
                             if desc.name == "Delay" && param_idx == 2 && delay_synced {
@@ -2973,7 +3550,8 @@ pub(crate) fn build_effects_value(
                                         (SyncDivision::ALL.len() - 1) as f64,
                                     ))),
                                 );
-                            } else if plock_step.is_none() {
+                            }
+                            if param_supports_value_binding(pdesc) {
                                 insert_string_prop(
                                     &mut pmap,
                                     "value-field",
@@ -3082,13 +3660,11 @@ pub(crate) fn build_effects_value(
                         }
                         ParamKind::Continuous { .. } => {}
                     }
-                    if plock_step.is_none() {
-                        insert_string_prop(
-                            &mut pmap,
-                            "value-field",
-                            track_effect_param_value_field(track, slot_idx, param_idx, &pdesc.name),
-                        );
-                    }
+                    insert_string_prop(
+                        &mut pmap,
+                        "value-field",
+                        track_effect_param_value_field(track, slot_idx, param_idx, &pdesc.name),
+                    );
                     let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
                     if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
                         == Some("source")
@@ -3268,7 +3844,7 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                         "boolean".to_string(),
                                         Rc::new(RefCell::new(Value::Bool(true))),
                                     );
-                                    if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                                    if param_supports_value_binding(pdesc) {
                                         insert_string_prop(
                                             &mut pmap,
                                             "value-field",
@@ -3299,9 +3875,21 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                         "options".to_string(),
                                         Rc::new(RefCell::new(Value::List(option_values))),
                                     );
+                                    if param_supports_value_binding(pdesc) {
+                                        insert_string_prop(
+                                            &mut pmap,
+                                            "value-field",
+                                            bus_effect_param_value_field(
+                                                bus_idx,
+                                                slot_idx,
+                                                param_idx,
+                                                &pdesc.name,
+                                            ),
+                                        );
+                                    }
                                 }
                                 ParamKind::Continuous { .. } => {
-                                    if plock_step.is_none() {
+                                    if param_supports_value_binding(pdesc) {
                                         insert_string_prop(
                                             &mut pmap,
                                             "value-field",
@@ -3422,7 +4010,7 @@ pub(crate) fn build_midi_effects_value(
                                 "boolean".to_string(),
                                 Rc::new(RefCell::new(Value::Bool(true))),
                             );
-                            if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                            if param_supports_value_binding(pdesc) {
                                 insert_string_prop(
                                     &mut pmap,
                                     "value-field",
@@ -3453,9 +4041,21 @@ pub(crate) fn build_midi_effects_value(
                                 "options".to_string(),
                                 Rc::new(RefCell::new(Value::List(option_values))),
                             );
+                            if param_supports_value_binding(pdesc) {
+                                insert_string_prop(
+                                    &mut pmap,
+                                    "value-field",
+                                    midi_fx_param_value_field(
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        &pdesc.name,
+                                    ),
+                                );
+                            }
                         }
                         ParamKind::Continuous { .. } => {
-                            if plock_step.is_none() {
+                            if param_supports_value_binding(pdesc) {
                                 insert_string_prop(
                                     &mut pmap,
                                     "value-field",
@@ -3667,20 +4267,16 @@ pub(crate) fn build_sampler_panel_value(
                                 .map(|source_desc| source_desc.stored_to_user(source_current))
                         })
                         .unwrap_or(source_current),
-                    source_value_field: target.source_param_idx.and_then(|source_param_idx| {
-                        plock_step.is_none().then(|| {
-                            let source_desc = &desc.params[source_param_idx];
-                            instrument_param_value_field(track, source_param_idx, &source_desc.name)
-                        })
+                    source_value_field: target.source_param_idx.map(|source_param_idx| {
+                        let source_desc = &desc.params[source_param_idx];
+                        instrument_param_value_field(track, source_param_idx, &source_desc.name)
                     }),
                     depth_value: depth_desc.stored_to_user(depth_current),
-                    depth_value_field: plock_step.is_none().then(|| {
-                        instrument_param_value_field(
-                            track,
-                            target.depth_param_idx,
-                            &depth_desc.name,
-                        )
-                    }),
+                    depth_value_field: Some(instrument_param_value_field(
+                        track,
+                        target.depth_param_idx,
+                        &depth_desc.name,
+                    )),
                     depth_min,
                     depth_max,
                     depth_unit: target.depth_unit.clone(),
@@ -3780,7 +4376,7 @@ pub(crate) fn build_sampler_panel_value(
                     "boolean".to_string(),
                     Rc::new(RefCell::new(Value::Bool(true))),
                 );
-                if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                if param_supports_value_binding(pdesc) {
                     insert_string_prop(
                         &mut pmap,
                         "value-field",
@@ -3806,9 +4402,16 @@ pub(crate) fn build_sampler_panel_value(
                     "options".to_string(),
                     Rc::new(RefCell::new(Value::List(option_values))),
                 );
+                if param_supports_value_binding(pdesc) {
+                    insert_string_prop(
+                        &mut pmap,
+                        "value-field",
+                        instrument_param_value_field(track, param_idx, &pdesc.name),
+                    );
+                }
             }
             sequencer::effects::ParamKind::Continuous { .. } => {
-                if plock_step.is_none() {
+                if param_supports_value_binding(pdesc) {
                     insert_string_prop(
                         &mut pmap,
                         "value-field",
@@ -4273,20 +4876,16 @@ pub(crate) fn build_instrument_panel_value(
                                 .map(|source_desc| source_desc.stored_to_user(source_current))
                         })
                         .unwrap_or(source_current),
-                    source_value_field: target.source_param_idx.and_then(|source_param_idx| {
-                        plock_step.is_none().then(|| {
-                            let source_desc = &desc.params[source_param_idx];
-                            instrument_param_value_field(track, source_param_idx, &source_desc.name)
-                        })
+                    source_value_field: target.source_param_idx.map(|source_param_idx| {
+                        let source_desc = &desc.params[source_param_idx];
+                        instrument_param_value_field(track, source_param_idx, &source_desc.name)
                     }),
                     depth_value: depth_desc.stored_to_user(depth_current),
-                    depth_value_field: plock_step.is_none().then(|| {
-                        instrument_param_value_field(
-                            track,
-                            target.depth_param_idx,
-                            &depth_desc.name,
-                        )
-                    }),
+                    depth_value_field: Some(instrument_param_value_field(
+                        track,
+                        target.depth_param_idx,
+                        &depth_desc.name,
+                    )),
                     depth_min,
                     depth_max,
                     depth_unit: target.depth_unit.clone(),
@@ -4347,9 +4946,7 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                plock_step
-                    .is_none()
-                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
                 None,
             );
@@ -4363,9 +4960,7 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                plock_step
-                    .is_none()
-                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 modulation_targets.get(&param_idx),
                 pdesc.ui_metadata.as_ref(),
             );
@@ -4406,9 +5001,7 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
-                plock_step
-                    .is_none()
-                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                Some(instrument_param_value_field(track, param_idx, &pdesc.name)),
                 None,
                 None,
             );
@@ -4582,16 +5175,19 @@ pub(crate) fn midi_fx_option_index(fx_name: &str, param_idx: usize, label: &str)
         })
 }
 
+const METER_FLOOR_DBFS: f32 = -60.0;
+
 pub(crate) fn master_meter_level(peak: f32) -> f64 {
-    if peak <= 0.0 {
+    if peak <= 0.0 || !peak.is_finite() {
         0.0
     } else {
-        peak.sqrt().min(1.2) as f64
+        let db = 20.0 * peak.log10();
+        ((db - METER_FLOOR_DBFS) / -METER_FLOOR_DBFS).clamp(0.0, 1.0) as f64
     }
 }
 
 pub(crate) fn quantize_meter_level(level: f64) -> f64 {
-    ((level.clamp(0.0, 1.2) * METER_LEVEL_STEPS).round()) / METER_LEVEL_STEPS
+    ((level.clamp(0.0, 1.0) * METER_LEVEL_STEPS).round()) / METER_LEVEL_STEPS
 }
 
 pub(crate) fn meter_display_level(peak: f32) -> f64 {
@@ -4608,11 +5204,24 @@ pub(crate) fn sync_project_state(rt: &mut Runtime, app: &ui::App) {
 
 pub(crate) const PROJECT_SCRATCH_BUFFER_NAME: &str = "*scratch*";
 
+fn project_scratch_source_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(|crates_dir| crates_dir.parent())
+        .unwrap_or(&manifest_dir)
+        .join(".eseqlisp-scratch")
+}
+
 pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ui::App) {
     let scratch_text = app.editor.scratch_buffer.clone();
     let scratch_cursor = app.editor.scratch_cursor;
 
-    editor.upsert_scratch_buffer(PROJECT_SCRATCH_BUFFER_NAME, &scratch_text);
+    let id = editor.upsert_scratch_buffer(PROJECT_SCRATCH_BUFFER_NAME, &scratch_text);
+    let scratch_path = project_scratch_source_path();
+    if let Some(buffer) = editor.buffers.iter_mut().find(|buffer| buffer.id == id) {
+        buffer.path = Some(scratch_path);
+    }
 
     if editor.active_buffer().name == PROJECT_SCRATCH_BUFFER_NAME {
         let buffer = editor.active_buffer_mut();
@@ -4620,6 +5229,33 @@ pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ui
         let col = scratch_cursor.1.min(buffer.lines[row].len());
         buffer.cursor = (row, col);
     }
+}
+
+pub(crate) fn evaluate_project_scratch_on_ui_runtime(
+    editor: &mut Editor,
+    app: &ui::App,
+) -> Result<(), String> {
+    let scratch_text = app.editor.scratch_buffer.clone();
+    if scratch_text.trim().is_empty() {
+        return Ok(());
+    }
+
+    let overlays = editor.snapshot_file_backed_sources();
+    let report = editor.runtime_mut().eval_source_transactional(
+        Some(project_scratch_source_path()),
+        &scratch_text,
+        overlays,
+    );
+    let result = if report.success {
+        Ok(())
+    } else {
+        Err(report.failure_message())
+    };
+    editor.process_lisp_reload_report(report);
+    if let Some(status) = editor.runtime_mut().take_status_message() {
+        editor.show_transient_message(status);
+    }
+    result
 }
 
 pub(crate) fn pull_named_scratch_buffer_into_project(editor: &Editor, app: &mut ui::App) {
@@ -4909,6 +5545,30 @@ pub(crate) fn sync_track_params(
     );
 }
 
+pub(crate) fn sync_track_params_with_neural_selection(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) {
+    sync_track_params(rt, app, state, track, selected);
+    rt.set_reactive(
+        "SEQ",
+        "track-plocks",
+        build_track_plocks_value_with_neural_selection(
+            app,
+            state,
+            track,
+            selected,
+            selected_neural_neurons,
+        ),
+    );
+}
+
 fn plock_entry(
     step: usize,
     target: &str,
@@ -4921,9 +5581,47 @@ fn plock_entry(
     param_idx: Option<usize>,
     options: Option<Vec<String>>,
 ) -> Rc<RefCell<Value>> {
+    plock_entry_with_label(
+        &format!("S{}", step + 1),
+        step,
+        target,
+        group,
+        name,
+        value,
+        min,
+        max,
+        slot_idx,
+        param_idx,
+        options,
+        None,
+        None,
+        None,
+    )
+}
+
+fn plock_entry_with_label(
+    label: &str,
+    step: usize,
+    target: &str,
+    group: &str,
+    name: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    slot_idx: Option<usize>,
+    param_idx: Option<usize>,
+    options: Option<Vec<String>>,
+    source: Option<&str>,
+    target_track: Option<usize>,
+    network_id: Option<u64>,
+) -> Rc<RefCell<Value>> {
     use std::collections::HashMap;
 
     let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    map.insert(
+        "label".to_string(),
+        Rc::new(RefCell::new(Value::String(label.to_string()))),
+    );
     map.insert(
         "step".to_string(),
         Rc::new(RefCell::new(Value::Number((step + 1) as f64))),
@@ -4968,6 +5666,30 @@ fn plock_entry(
             Rc::new(RefCell::new(Value::Number(param_idx as f64))),
         );
     }
+    if let Some(source) = source {
+        map.insert(
+            "source".to_string(),
+            Rc::new(RefCell::new(Value::String(source.to_string()))),
+        );
+        if source == "neuron" {
+            map.insert(
+                "neuron-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(step as f64))),
+            );
+        }
+    }
+    if let Some(target_track) = target_track {
+        map.insert(
+            "target-track".to_string(),
+            Rc::new(RefCell::new(Value::Number(target_track as f64))),
+        );
+    }
+    if let Some(network_id) = network_id {
+        map.insert(
+            "network-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(network_id as f64))),
+        );
+    }
     if let Some(options) = options {
         let selected = options
             .get(value.round().max(0.0) as usize)
@@ -4988,6 +5710,142 @@ fn plock_entry(
         );
     }
     Rc::new(RefCell::new(Value::Map(map)))
+}
+
+pub(crate) fn build_track_plocks_value_with_neural_selection(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: Option<
+        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    >,
+) -> Value {
+    let Some(selection) = selected_neural_neurons else {
+        return build_track_plocks_value(app, state, track, selected);
+    };
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    if !selection
+        .iter()
+        .any(|selected| selected.pattern_idx == current_pattern)
+    {
+        return build_track_plocks_value(app, state, track, selected);
+    }
+    build_selected_neural_plocks_value(app, state, selection)
+}
+
+fn build_selected_neural_plocks_value(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    selection: &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+) -> Value {
+    use sequencer::effects::ParamKind;
+
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let networks = state.current_neural_networks();
+    let mut items = Vec::new();
+
+    for selected in selection
+        .iter()
+        .filter(|selected| selected.pattern_idx == current_pattern)
+    {
+        let Some(network) = networks
+            .iter()
+            .find(|network| network.id == selected.network_id)
+        else {
+            continue;
+        };
+        let Some(neuron) = network.neurons.get(selected.neuron_idx) else {
+            continue;
+        };
+        let label = format!("N{}", selected.neuron_idx + 1);
+
+        for override_param in &neuron.output_overrides.instrument {
+            let target_track = override_param.target_track;
+            let Some(desc) = app.graph.instrument_descriptors.get(target_track) else {
+                continue;
+            };
+            let Some(param) = desc.params.get(override_param.param_index) else {
+                continue;
+            };
+            let Some(slot) = state.pattern.instrument_slots.get(target_track) else {
+                continue;
+            };
+            if slot.param_node_id(override_param.param_index) != Some(override_param.param_id) {
+                continue;
+            }
+            let options = match &param.kind {
+                ParamKind::Enum { labels } => Some(labels.clone()),
+                ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                ParamKind::Continuous { .. } => None,
+            };
+            items.push(plock_entry_with_label(
+                &label,
+                selected.neuron_idx,
+                "neural-instrument",
+                &format!("T{} inst", target_track + 1),
+                &param.name,
+                param.stored_to_user(override_param.value),
+                param.stored_to_user(param.min),
+                param.stored_to_user(param.max),
+                None,
+                Some(override_param.param_index),
+                options,
+                Some("neuron"),
+                Some(target_track),
+                Some(network.id),
+            ));
+        }
+
+        for override_param in &neuron.output_overrides.effects {
+            let target_track = override_param.target_track;
+            let Some(desc) = app
+                .graph
+                .effect_descriptors
+                .get(target_track)
+                .and_then(|descs| descs.get(override_param.slot_index))
+            else {
+                continue;
+            };
+            let Some(param) = desc.params.get(override_param.param_index) else {
+                continue;
+            };
+            let Some(slot) = state
+                .pattern
+                .effect_chains
+                .get(target_track)
+                .and_then(|chain| chain.get(override_param.slot_index))
+            else {
+                continue;
+            };
+            if slot.param_node_id(override_param.param_index) != Some(override_param.param_id) {
+                continue;
+            }
+            let options = match &param.kind {
+                ParamKind::Enum { labels } => Some(labels.clone()),
+                ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                ParamKind::Continuous { .. } => None,
+            };
+            items.push(plock_entry_with_label(
+                &label,
+                selected.neuron_idx,
+                "neural-effect",
+                &format!("T{} {}", target_track + 1, desc.name),
+                &param.name,
+                override_param.value,
+                param.min,
+                param.max,
+                Some(override_param.slot_index),
+                Some(override_param.param_index),
+                options,
+                Some("neuron"),
+                Some(target_track),
+                Some(network.id),
+            ));
+        }
+    }
+
+    Value::List(items)
 }
 
 pub(crate) fn build_track_plocks_value(
@@ -5319,6 +6177,7 @@ pub(crate) fn track_step_has_plock(
 mod tests {
     use super::*;
     use eseqlisp::parser::{ASTParser, Parser, ParserError, Token};
+    use sequencer::sequencer::default_empty_effect_chain;
     use std::collections::HashMap;
 
     fn agent_test_string_list(values: &[&str]) -> Value {
@@ -5356,6 +6215,280 @@ mod tests {
             );
             Ok(Value::Map(map))
         });
+    }
+
+    #[test]
+    fn meter_level_maps_linear_audio_peak_to_dbfs_display_scale() {
+        let epsilon = 0.0001;
+        assert!((master_meter_level(1.0) - 1.0).abs() < epsilon);
+        assert!((master_meter_level(10.0_f32.powf(-6.0 / 20.0)) - 0.9).abs() < epsilon);
+        assert!((master_meter_level(10.0_f32.powf(-12.0 / 20.0)) - 0.8).abs() < epsilon);
+        assert!((master_meter_level(0.01) - (20.0 / 60.0)).abs() < epsilon);
+        assert_eq!(master_meter_level(0.001), 0.0);
+        assert_eq!(master_meter_level(0.0), 0.0);
+        assert_eq!(master_meter_level(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn quantized_meter_display_keeps_audible_low_levels_visible() {
+        let minus_forty_db = meter_display_level(0.01);
+        assert!(
+            minus_forty_db >= 0.31,
+            "-40 dBFS should light several meter segments"
+        );
+        assert!(
+            minus_forty_db <= 0.35,
+            "-40 dBFS should remain near one third scale"
+        );
+        assert_eq!(meter_display_level(0.0005), 0.0);
+    }
+
+    #[test]
+    fn neural_networks_reactive_value_reflects_current_pattern_model() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state
+            .edit_current_neural_networks(|networks| {
+                let mut network = sequencer::neural::ProjectNeuralNetwork {
+                    id: 11,
+                    name: "router".to_string(),
+                    num_neurons: 2,
+                    weights: vec![vec![0.0, 0.75], vec![0.0, 0.0]],
+                    ..sequencer::neural::ProjectNeuralNetwork::default()
+                };
+                network.reset_interval_bars = 3.0;
+                network.energy_decay = 0.5;
+                network.max_poly = 5;
+                network.max_poly_selection = sequencer::neural::NeuralMaxPolySelection::Random;
+                network.neurons[1].route = Some(1);
+                network.neurons[1].delay_steps = 4;
+                network.neurons[1].quantize = Some(Timebase::Eighth as u8);
+                networks.push(network);
+                Ok(())
+            })
+            .unwrap();
+
+        let Value::List(networks) = build_neural_networks_value(&state) else {
+            panic!("expected neural network list");
+        };
+        assert_eq!(networks.len(), 1);
+        let Value::Map(network) = &*networks[0].borrow() else {
+            panic!("expected neural network map");
+        };
+        assert_eq!(
+            network.get("name").map(|value| value.borrow().clone()),
+            Some(Value::String("router".to_string()))
+        );
+        assert_eq!(
+            network
+                .get("reset-bars")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+        assert_eq!(
+            network
+                .get("energy-decay")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(0.5))
+        );
+        assert_eq!(
+            network.get("max-poly").map(|value| value.borrow().clone()),
+            Some(Value::Number(5.0))
+        );
+        assert_eq!(
+            network
+                .get("max-poly-selection")
+                .map(|value| value.borrow().clone()),
+            Some(Value::String("random".to_string()))
+        );
+        let Some(neurons) = network.get("neurons") else {
+            panic!("expected neurons");
+        };
+        let Value::List(neurons) = &*neurons.borrow() else {
+            panic!("expected neuron list");
+        };
+        let Value::Map(neuron) = &*neurons[1].borrow() else {
+            panic!("expected neuron map");
+        };
+        assert_eq!(
+            neuron.get("route").map(|value| value.borrow().clone()),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            neuron.get("delay").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+        assert_eq!(
+            neuron.get("quantize").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("8".to_string()))
+        );
+    }
+
+    #[test]
+    fn neural_dampening_matrix_value_reflects_runtime_snapshot() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut snapshot = sequencer::neural::NeuralVisualizationSnapshot::default();
+        snapshot.active = true;
+        snapshot.network_id = 7;
+        snapshot.num_neurons = 2;
+        snapshot.dampening[0][1] = 0.625;
+        state.set_neural_visualization(snapshot);
+
+        let Value::List(rows) = build_neural_dampening_matrix_value(&state) else {
+            panic!("expected dampening matrix rows");
+        };
+        assert_eq!(rows.len(), 2);
+        let Value::List(first_row) = &*rows[0].borrow() else {
+            panic!("expected first dampening row");
+        };
+        assert_eq!(first_row.len(), 2);
+        assert_eq!(*first_row[1].borrow(), Value::Number(0.63));
+    }
+
+    #[test]
+    fn neural_energy_and_trigger_matrix_values_reflect_runtime_snapshot() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut snapshot = sequencer::neural::NeuralVisualizationSnapshot::default();
+        snapshot.active = true;
+        snapshot.network_id = 7;
+        snapshot.num_neurons = 2;
+        snapshot.energy[0] = 0.625;
+        snapshot.energy[1] = 8.0;
+        snapshot.trigger_activity[1] = 1.0;
+        state.set_neural_visualization(snapshot);
+
+        let Value::List(energy_rows) = build_neural_energy_matrix_value(&state) else {
+            panic!("expected energy matrix rows");
+        };
+        assert_eq!(energy_rows.len(), 2);
+        let Value::List(first_energy_row) = &*energy_rows[0].borrow() else {
+            panic!("expected first energy row");
+        };
+        assert_eq!(first_energy_row.len(), 1);
+        assert_eq!(*first_energy_row[0].borrow(), Value::Number(0.63));
+        let Value::List(second_energy_row) = &*energy_rows[1].borrow() else {
+            panic!("expected second energy row");
+        };
+        assert_eq!(*second_energy_row[0].borrow(), Value::Number(4.0));
+
+        let Value::List(trigger_rows) = build_neural_trigger_matrix_value(&state) else {
+            panic!("expected trigger matrix rows");
+        };
+        assert_eq!(trigger_rows.len(), 2);
+        let Value::List(first_trigger_row) = &*trigger_rows[0].borrow() else {
+            panic!("expected first trigger row");
+        };
+        let Value::List(second_trigger_row) = &*trigger_rows[1].borrow() else {
+            panic!("expected second trigger row");
+        };
+        assert_eq!(*first_trigger_row[0].borrow(), Value::Number(0.0));
+        assert_eq!(*second_trigger_row[0].borrow(), Value::Number(1.0));
+    }
+
+    #[test]
+    fn graph_visualizations_value_reflects_runtime_snapshot() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.set_graph_visualizations(vec![sequencer::graph::GraphVisualizationSnapshot {
+            id: 9,
+            name: "graph".to_string(),
+            active: true,
+            num_nodes: 2,
+            energy: vec![0.125, 8.0],
+            trigger_activity: vec![0.0, 1.0],
+            node_events: vec![
+                None,
+                Some(sequencer::graph::GraphVisualizationEvent {
+                    node_index: 1,
+                    track: Some(3),
+                    sample_time: 12_345,
+                    beat: 1.5,
+                    transpose: -7.25,
+                    velocity: 0.625,
+                }),
+            ],
+            edges: vec![sequencer::graph::GraphVisualizationEdge {
+                from: 0,
+                to: 1,
+                weight: 0.333,
+                dampening: 0.625,
+            }],
+        }]);
+
+        let Value::List(graphs) = build_graph_visualizations_value(&state) else {
+            panic!("expected graph visualization list");
+        };
+        assert_eq!(graphs.len(), 1);
+        let Value::Map(graph) = &*graphs[0].borrow() else {
+            panic!("expected graph map");
+        };
+        assert_eq!(
+            graph.get("name").map(|value| value.borrow().clone()),
+            Some(Value::String("graph".to_string()))
+        );
+
+        let Value::List(weight_rows) = &*graph.get("weight-matrix").unwrap().borrow() else {
+            panic!("expected weight matrix");
+        };
+        let Value::List(weight_row_0) = &*weight_rows[0].borrow() else {
+            panic!("expected weight matrix row");
+        };
+        assert_eq!(*weight_row_0[0].borrow(), Value::Number(0.0));
+        assert_eq!(*weight_row_0[1].borrow(), Value::Number(0.33));
+
+        let Value::List(dampening_rows) = &*graph.get("dampening-matrix").unwrap().borrow() else {
+            panic!("expected dampening matrix");
+        };
+        let Value::List(dampening_row_0) = &*dampening_rows[0].borrow() else {
+            panic!("expected dampening matrix row");
+        };
+        assert_eq!(*dampening_row_0[1].borrow(), Value::Number(0.63));
+
+        let Value::List(energy_rows) = &*graph.get("energy-matrix").unwrap().borrow() else {
+            panic!("expected energy matrix");
+        };
+        let Value::List(energy_row_1) = &*energy_rows[1].borrow() else {
+            panic!("expected energy matrix row");
+        };
+        assert_eq!(*energy_row_1[0].borrow(), Value::Number(4.0));
+
+        let Value::List(trigger_rows) = &*graph.get("trigger-matrix").unwrap().borrow() else {
+            panic!("expected trigger matrix");
+        };
+        let Value::List(trigger_row_1) = &*trigger_rows[1].borrow() else {
+            panic!("expected trigger matrix row");
+        };
+        assert_eq!(*trigger_row_1[0].borrow(), Value::Number(1.0));
+
+        let Value::List(node_events) = &*graph.get("node-events").unwrap().borrow() else {
+            panic!("expected node events");
+        };
+        assert_eq!(*node_events[0].borrow(), Value::Nil);
+        let Value::Map(event) = &*node_events[1].borrow() else {
+            panic!("expected event map");
+        };
+        assert_eq!(
+            event.get("track").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+        assert_eq!(
+            event.get("transpose").map(|value| value.borrow().clone()),
+            Some(Value::Number(-7.25))
+        );
+        assert_eq!(
+            event.get("velocity").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.625))
+        );
     }
 
     #[test]
@@ -8425,6 +9558,27 @@ mod tests {
         names
     }
 
+    fn tile_tabs_for_buffer(editor: &eseqlisp::Editor, buffer_name: &str) -> Vec<(String, String)> {
+        let buffer_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == buffer_name)
+            .unwrap_or_else(|| panic!("missing buffer {buffer_name}"));
+        let leaf = editor
+            .tile_root
+            .find_leaf_by_buffer_idx(buffer_idx)
+            .unwrap_or_else(|| panic!("missing tile for buffer {buffer_name}"));
+        leaf.tabs
+            .iter()
+            .map(|tab| {
+                (
+                    tab.label.clone(),
+                    editor.buffers[tab.buffer_idx].name.clone(),
+                )
+            })
+            .collect()
+    }
+
     fn layout_bottom(node: &eseqlisp::layout::LayoutNode) -> f32 {
         node.children
             .iter()
@@ -9542,7 +10696,7 @@ mod tests {
             .expect("filter descriptor should include cutoff");
         let slot = sequencer::effects::EffectSlotState::new(&desc, 0);
         slot.defaults.set(cutoff_idx, 5000.0);
-        slot.plocks.set(4, cutoff_idx, 200.0);
+        slot.set_plock(4, cutoff_idx, 200.0);
 
         assert_eq!(
             slot_param_stored_value(&slot, &desc.params[cutoff_idx], cutoff_idx, None),
@@ -9573,9 +10727,7 @@ mod tests {
         state.pattern.effect_chains[0][0]
             .defaults
             .set(cutoff_idx, 5000.0);
-        state.pattern.effect_chains[0][0]
-            .plocks
-            .set(3, cutoff_idx, 1200.0);
+        state.pattern.effect_chains[0][0].set_plock(3, cutoff_idx, 1200.0);
         let descriptors = vec![vec![desc.clone()]];
         let field = track_effect_param_value_field(0, 0, cutoff_idx, &desc.params[cutoff_idx].name);
         let mut runtime = Runtime::new();
@@ -9605,12 +10757,434 @@ mod tests {
         assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(5000.0));
     }
 
+    #[test]
+    fn sync_instrument_param_value_field_uses_selected_neuron_plock_value() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let resonance_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "resonance")
+            .expect("filter descriptor should include resonance");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(resonance_idx, 0.2);
+        app.state
+            .edit_current_neural_networks(|networks| {
+                let mut network = sequencer::neural::ProjectNeuralNetwork {
+                    id: 11,
+                    name: "router".to_string(),
+                    num_neurons: 1,
+                    ..sequencer::neural::ProjectNeuralNetwork::default()
+                };
+                network.neurons[0].output_overrides.instrument =
+                    vec![sequencer::neural::ProjectParamOverride {
+                        target_track: 0,
+                        param_id: sequencer::neural::ParamNodeId {
+                            logical_id: 17,
+                            node_param_idx: desc.params[resonance_idx].node_param_idx,
+                        },
+                        param_index: resonance_idx,
+                        value: 0.75,
+                    }];
+                networks.push(network);
+                Ok(())
+            })
+            .unwrap();
+        let selection =
+            std::collections::BTreeSet::from([sequencer::lisp_effect::SelectedNeuralNeuron {
+                pattern_idx: 0,
+                network_id: 11,
+                neuron_idx: 0,
+            }]);
+        let field =
+            instrument_param_value_field(0, resonance_idx, &desc.params[resonance_idx].name);
+        let mut runtime = Runtime::new();
+
+        sync_instrument_param_value_field_with_neural_selection(
+            &mut runtime,
+            &app,
+            0,
+            resonance_idx,
+            None,
+            Some(&selection),
+        );
+
+        assert_eq!(reactive_number(&runtime, "SEQ", &field), Some(0.75));
+    }
+
+    #[test]
+    fn track_plocks_value_shows_selected_neuron_plocks() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let resonance_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "resonance")
+            .expect("filter descriptor should include resonance");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
+        app.state.pattern.instrument_slots[0].set_plock(2, resonance_idx, 0.25);
+        app.state
+            .edit_current_neural_networks(|networks| {
+                let mut network = sequencer::neural::ProjectNeuralNetwork {
+                    id: 11,
+                    name: "router".to_string(),
+                    num_neurons: 1,
+                    ..sequencer::neural::ProjectNeuralNetwork::default()
+                };
+                network.neurons[0].output_overrides.instrument =
+                    vec![sequencer::neural::ProjectParamOverride {
+                        target_track: 0,
+                        param_id: sequencer::neural::ParamNodeId {
+                            logical_id: 17,
+                            node_param_idx: desc.params[resonance_idx].node_param_idx,
+                        },
+                        param_index: resonance_idx,
+                        value: 0.75,
+                    }];
+                networks.push(network);
+                Ok(())
+            })
+            .unwrap();
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([2])));
+        let selection =
+            std::collections::BTreeSet::from([sequencer::lisp_effect::SelectedNeuralNeuron {
+                pattern_idx: 0,
+                network_id: 11,
+                neuron_idx: 0,
+            }]);
+
+        let Value::List(items) = build_track_plocks_value_with_neural_selection(
+            &app,
+            &app.state,
+            0,
+            &selected_steps,
+            Some(&selection),
+        ) else {
+            panic!("track p-locks should be a list");
+        };
+
+        assert_eq!(
+            items.len(),
+            1,
+            "selected neuron p-locks should replace selected-step p-lock display"
+        );
+        let item = items[0].borrow();
+        let Value::Map(map) = &*item else {
+            panic!("track p-lock item should be a map");
+        };
+        assert_eq!(value_map_string(map, "label").as_deref(), Some("N1"));
+        assert_eq!(value_map_string(map, "source").as_deref(), Some("neuron"));
+        assert_eq!(
+            value_map_string(map, "target").as_deref(),
+            Some("neural-instrument")
+        );
+        assert_eq!(value_map_string(map, "group").as_deref(), Some("T1 inst"));
+        assert_eq!(value_map_string(map, "name").as_deref(), Some("resonance"));
+        assert_eq!(value_map_number(map, "network-id"), Some(11.0));
+        assert_eq!(value_map_number(map, "neuron-idx"), Some(0.0));
+        assert_eq!(value_map_number(map, "target-track"), Some(0.0));
+        assert_eq!(
+            value_map_number(map, "param-idx"),
+            Some(resonance_idx as f64)
+        );
+        let value = map.get("value").and_then(|value| match &*value.borrow() {
+            Value::Number(value) => Some(*value),
+            _ => None,
+        });
+        assert_eq!(value, Some(0.75));
+    }
+
+    #[test]
+    fn instrument_panel_restores_value_field_after_selection_clears() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(cutoff_idx, 5000.0);
+        app.state.pattern.instrument_slots[0].set_plock(3, cutoff_idx, 1200.0);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let value_field =
+            instrument_param_value_field(0, cutoff_idx, &desc.params[cutoff_idx].name);
+
+        let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number(&default_panel, "cutoff"),
+            Some(5000.0),
+            "unselected instrument panel should show the default value"
+        );
+        assert!(
+            value_param_has_value_field(&default_panel, "cutoff", &value_field),
+            "unselected instrument panel should bind cutoff to its default value field"
+        );
+
+        selected_steps.lock().unwrap().insert(3);
+        let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number(&selected_panel, "cutoff"),
+            Some(1200.0),
+            "selected instrument panel should show the selected step p-lock"
+        );
+        assert!(
+            value_param_has_value_field(&selected_panel, "cutoff", &value_field),
+            "selected p-lock panel should keep a reactive display value field"
+        );
+
+        selected_steps.lock().unwrap().clear();
+        let cleared_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number(&cleared_panel, "cutoff"),
+            Some(5000.0),
+            "cleared selection should return the panel to default values"
+        );
+        assert!(
+            value_param_has_value_field(&cleared_panel, "cutoff", &value_field),
+            "cleared selection should restore default value binding"
+        );
+    }
+
+    #[test]
+    fn sampler_panel_restores_value_field_after_selection_clears() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let attack_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "attack")
+            .expect("sampler descriptor should include attack");
+        let app = test_app_with_sampler_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0]
+            .defaults
+            .set(attack_idx, 40.0);
+        app.state.pattern.instrument_slots[0].set_plock(3, attack_idx, 120.0);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let value_field =
+            instrument_param_value_field(0, attack_idx, &desc.params[attack_idx].name);
+
+        let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number_by_idx(&default_panel, "attack", attack_idx),
+            Some(40.0),
+            "unselected sampler panel should show the default attack value"
+        );
+        assert!(
+            value_param_has_value_field_by_idx(&default_panel, "attack", attack_idx, &value_field),
+            "unselected sampler panel should bind attack to its default value field"
+        );
+
+        selected_steps.lock().unwrap().insert(3);
+        let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number_by_idx(&selected_panel, "attack", attack_idx),
+            Some(120.0),
+            "selected sampler panel should show the selected step p-lock"
+        );
+        assert!(
+            value_param_has_value_field_by_idx(&selected_panel, "attack", attack_idx, &value_field),
+            "selected sampler p-lock panel should keep a reactive display value field"
+        );
+
+        selected_steps.lock().unwrap().clear();
+        let cleared_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        assert_eq!(
+            value_param_number_by_idx(&cleared_panel, "attack", attack_idx),
+            Some(40.0),
+            "cleared selection should return sampler attack to its default value"
+        );
+        assert!(
+            value_param_has_value_field_by_idx(&cleared_panel, "attack", attack_idx, &value_field),
+            "cleared selection should restore sampler attack default value binding"
+        );
+    }
+
+    fn test_app_with_instrument_descriptor(desc: sequencer::effects::EffectDescriptor) -> ui::App {
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 0);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = ui::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            ui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.graph.instrument_descriptors = vec![desc];
+        app
+    }
+
+    fn test_app_with_sampler_descriptor(desc: sequencer::effects::EffectDescriptor) -> ui::App {
+        let mut app = test_app_with_instrument_descriptor(desc);
+        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Sampler];
+        app
+    }
+
     fn reactive_number(runtime: &Runtime, namespace: &str, field: &str) -> Option<f64> {
         let namespace = runtime.global_value(namespace)?;
         let Value::Map(map) = namespace else {
             return None;
         };
         map.get(field).and_then(|value| match &*value.borrow() {
+            Value::Number(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    fn value_param_number(value: &Value, name: &str) -> Option<f64> {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .find_map(|item| value_param_number(&item.borrow(), name));
+            }
+            return None;
+        };
+        if value_map_string(map, "name").as_deref() == Some(name) {
+            return map.get("value").and_then(|value| match &*value.borrow() {
+                Value::Number(value) => Some(*value),
+                _ => None,
+            });
+        }
+        map.values()
+            .find_map(|value| value_param_number(&value.borrow(), name))
+    }
+
+    fn value_param_has_value_field(value: &Value, name: &str, expected_field: &str) -> bool {
+        value_param_string(value, name, "value-field").as_deref() == Some(expected_field)
+    }
+
+    fn value_param_number_by_idx(value: &Value, name: &str, idx: usize) -> Option<f64> {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .find_map(|item| value_param_number_by_idx(&item.borrow(), name, idx));
+            }
+            return None;
+        };
+        if value_map_matches_name_idx(map, name, idx) {
+            return map.get("value").and_then(|value| match &*value.borrow() {
+                Value::Number(value) => Some(*value),
+                _ => None,
+            });
+        }
+        map.values()
+            .find_map(|value| value_param_number_by_idx(&value.borrow(), name, idx))
+    }
+
+    fn value_param_has_value_field_by_idx(
+        value: &Value,
+        name: &str,
+        idx: usize,
+        expected_field: &str,
+    ) -> bool {
+        value_param_string_by_idx(value, name, idx, "value-field").as_deref()
+            == Some(expected_field)
+    }
+
+    fn value_param_has_key(value: &Value, name: &str, key: &str) -> bool {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .any(|item| value_param_has_key(&item.borrow(), name, key));
+            }
+            return false;
+        };
+        if value_map_string(map, "name").as_deref() == Some(name) {
+            return map.contains_key(key);
+        }
+        map.values()
+            .any(|value| value_param_has_key(&value.borrow(), name, key))
+    }
+
+    fn value_param_has_key_by_idx(value: &Value, name: &str, idx: usize, key: &str) -> bool {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .any(|item| value_param_has_key_by_idx(&item.borrow(), name, idx, key));
+            }
+            return false;
+        };
+        if value_map_matches_name_idx(map, name, idx) {
+            return map.contains_key(key);
+        }
+        map.values()
+            .any(|value| value_param_has_key_by_idx(&value.borrow(), name, idx, key))
+    }
+
+    fn value_param_string(value: &Value, name: &str, key: &str) -> Option<String> {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .find_map(|item| value_param_string(&item.borrow(), name, key));
+            }
+            return None;
+        };
+        if value_map_string(map, "name").as_deref() == Some(name) {
+            return value_map_string(map, key);
+        }
+        map.values()
+            .find_map(|value| value_param_string(&value.borrow(), name, key))
+    }
+
+    fn value_param_string_by_idx(
+        value: &Value,
+        name: &str,
+        idx: usize,
+        key: &str,
+    ) -> Option<String> {
+        let Value::Map(map) = value else {
+            if let Value::List(items) = value {
+                return items
+                    .iter()
+                    .find_map(|item| value_param_string_by_idx(&item.borrow(), name, idx, key));
+            }
+            return None;
+        };
+        if value_map_matches_name_idx(map, name, idx) {
+            return value_map_string(map, key);
+        }
+        map.values()
+            .find_map(|value| value_param_string_by_idx(&value.borrow(), name, idx, key))
+    }
+
+    fn value_map_matches_name_idx(
+        map: &HashMap<String, Rc<RefCell<Value>>>,
+        name: &str,
+        idx: usize,
+    ) -> bool {
+        value_map_string(map, "name").as_deref() == Some(name)
+            && map.get("idx").is_some_and(
+                |value| matches!(&*value.borrow(), Value::Number(value) if *value as usize == idx),
+            )
+    }
+
+    fn value_map_string(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<String> {
+        map.get(key).and_then(|value| match &*value.borrow() {
+            Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+    }
+
+    fn value_map_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<f64> {
+        map.get(key).and_then(|value| match &*value.borrow() {
             Value::Number(value) => Some(*value),
             _ => None,
         })
@@ -9772,6 +11346,11 @@ mod tests {
             .register_native("seq-halve-track-pattern", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
+        editor
+            .runtime_mut()
+            .register_native("seq-toggle-track-collapsed", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
@@ -9816,6 +11395,7 @@ mod tests {
                 ("track-ids", test_number_list(&[0.0])),
                 ("track-names", test_string_list(&["bd02"])),
                 ("track-colors", test_track_colors()),
+                ("track-collapsed", test_bool_list(&[false])),
                 ("current-track", Value::Number(0.0)),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
@@ -9858,6 +11438,7 @@ mod tests {
                 ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
+                ("selected-neural-neurons", test_list(vec![])),
                 ("steps", steps.clone()),
                 ("velocities", step_numbers.clone()),
                 ("durations", test_number_list(&[1.0; 16])),
@@ -10044,6 +11625,11 @@ mod tests {
         rt.set_reactive("SEQ", "track-ids", test_list(ids));
         rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
         rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
+        rt.set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_repeated_bool_list(false, track_count),
+        );
         rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
         rt.set_reactive(
             "SEQ",
@@ -10337,6 +11923,11 @@ mod tests {
         rt.set_reactive("SEQ", "track-ids", test_list(ids));
         rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
         rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
+        rt.set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_repeated_bool_list(false, track_count),
+        );
         rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
         rt.set_reactive(
             "SEQ",
@@ -10611,6 +12202,159 @@ mod tests {
             Some(Value::Number(2.0))
         );
         assert_eq!(editor.active_buffer().cursor, (0, 0));
+    }
+
+    #[test]
+    fn metal_seq_default_step_panel_has_no_matrix_tab_or_buffer() {
+        let editor = full_grid_editor_for_scroll_tests();
+
+        assert!(
+            !editor
+                .buffers
+                .iter()
+                .any(|buffer| buffer.name == "*matrix*"),
+            "default grid load must not create the legacy matrix buffer"
+        );
+        assert!(
+            collect_tile_buffer_names(&editor)
+                .iter()
+                .all(|name| name != "*matrix*"),
+            "default layout must not reference the legacy matrix buffer"
+        );
+        assert!(
+            tile_tabs_for_buffer(&editor, "*sequencer*").is_empty(),
+            "default sequencer tile should not render a one-item tab bar"
+        );
+    }
+
+    #[test]
+    fn metal_seq_register_step_sequencer_tab_adds_tab_without_selecting_custom_buffer() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*fake-seq*" (label "fake sequencer"))
+                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                "#,
+            )
+            .expect("register fake sequencer tab");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("remembered-step-panel-buffer")
+                .unwrap(),
+            Some(Value::String("*sequencer*".to_string()))
+        );
+        assert!(
+            collect_tile_buffer_names(&editor).contains(&"*sequencer*".to_string()),
+            "registration should preserve the visible sequencer panel"
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Fake".to_string(), "*fake-seq*".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn metal_seq_register_step_sequencer_tab_upserts_by_buffer_and_preserves_selection() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*fake-seq*" (label "fake sequencer"))
+                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                (seq-register-step-sequencer-tab "Renamed" "*fake-seq*")
+                "#,
+            )
+            .expect("register and rename fake sequencer tab");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Renamed".to_string(), "*fake-seq*".to_string())
+            ],
+            "re-registering the same buffer should update the label without duplicating the tab"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-apply-fx-layout)")
+            .expect("reapply main layout");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string()))
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Renamed".to_string(), "*fake-seq*".to_string())
+            ],
+            "reapplying the layout should keep the registered tabs without selecting the custom tab"
+        );
+    }
+
+    #[test]
+    fn metal_seq_register_step_sequencer_tab_does_not_restore_main_layout_when_step_tile_absent() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.create_scratch_buffer("*code*", "", eseqlisp::BufferMode::ESeqLisp);
+        editor.create_scratch_buffer("*fake-seq*", "", eseqlisp::BufferMode::ESeqLisp);
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (set-layout
+                  (list :cols :gap 1
+                    0.5 (list :buf "*code*" :hide-status true)
+                    0.5 (list :buf "*fake-seq*" :hide-status true)))
+                "#,
+            )
+            .expect("install custom code/ui layout");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*fake-seq*" (label "fake sequencer"))
+                (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                "#,
+            )
+            .expect("register fake sequencer tab");
+        editor.refresh_runtime_side_effects();
+
+        let tile_buffers = collect_tile_buffer_names(&editor);
+        assert_eq!(
+            tile_buffers,
+            vec!["*code*".to_string(), "*fake-seq*".to_string()],
+            "registration should not rebuild the main sequencer layout when no step tile is present"
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*fake-seq*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Fake".to_string(), "*fake-seq*".to_string())
+            ],
+            "registration should still add tabs to an already visible custom sequencer tile"
+        );
     }
 
     #[test]
@@ -11237,6 +12981,117 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_track_panel_renders_selected_neuron_plock_rows() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut plock = HashMap::new();
+        plock.insert(
+            "label".to_string(),
+            Rc::new(RefCell::new(Value::String("N1".to_string()))),
+        );
+        plock.insert(
+            "step-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        plock.insert(
+            "neuron-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        plock.insert(
+            "target".to_string(),
+            Rc::new(RefCell::new(Value::String("neural-instrument".to_string()))),
+        );
+        plock.insert(
+            "network-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(11.0))),
+        );
+        plock.insert(
+            "target-track".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        plock.insert(
+            "param-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(3.0))),
+        );
+        plock.insert(
+            "group".to_string(),
+            Rc::new(RefCell::new(Value::String("T1 inst".to_string()))),
+        );
+        plock.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("resonance".to_string()))),
+        );
+        plock.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.75))),
+        );
+        plock.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
+        plock.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(1.0))));
+        plock.insert(
+            "source".to_string(),
+            Rc::new(RefCell::new(Value::String("neuron".to_string()))),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-plocks",
+            Value::List(vec![Rc::new(RefCell::new(Value::Map(plock)))]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
+        editor.set_layout_viewport(80, 20);
+        let layout = editor.widget_layout().expect("track panel layout");
+        let label = find_layout_node_by_text(&layout, "N1")
+            .expect("selected neuron p-lock label should render");
+
+        assert_finite_nonzero_rect(label, "selected neuron p-lock label");
+
+        let clear = find_layout_node_by_text(&layout, "x")
+            .expect("selected neuron p-lock clear button should render");
+        assert_eq!(clear.widget_type, "button");
+        assert_finite_nonzero_rect(clear, "selected neuron p-lock clear button");
+
+        let _ = editor.drain_host_commands();
+        let callback = clear
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("selected neuron p-lock clear button on-click");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke selected neuron p-lock clear button");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "clear-track-plock-entry");
+                let Value::Map(payload) = payload else {
+                    panic!("expected clear-track-plock-entry map payload, got {payload:?}");
+                };
+                assert_eq!(
+                    value_map_string(payload, "target").as_deref(),
+                    Some("neural-instrument")
+                );
+                assert_eq!(value_map_number(payload, "network-id"), Some(11.0));
+                assert_eq!(value_map_number(payload, "neuron-idx"), Some(0.0));
+                assert_eq!(value_map_number(payload, "target-track"), Some(0.0));
+                assert_eq!(value_map_number(payload, "param-idx"), Some(3.0));
+            }
+            other => panic!("expected clear-track-plock-entry host command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn metal_seq_transport_playhead_is_render_bound() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
@@ -11334,6 +13189,208 @@ mod tests {
             expand.props.get("background"),
             Some(&Value::String("seqv-ellipsis-button".to_string())),
             "sequencer row expand control should use the SDF ellipsis widget instead of text"
+        );
+    }
+
+    #[test]
+    fn metal_seq_collapsed_tracks_render_compact_mixer_strip_and_hide_sequencer_row() {
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        editor
+            .runtime_mut()
+            .register_native("seq-toggle-track-collapsed", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(3.0)),
+                ("track-ids", test_number_list(&[0.0, 1.0, 2.0])),
+                ("track-names", test_string_list(&["kick", "snare", "hat"])),
+                ("track-colors", test_multi_track_colors(3)),
+                ("track-collapsed", test_bool_list(&[false, true, false])),
+                ("current-track", Value::Number(0.0)),
+                ("delete-target-version", Value::Number(0.0)),
+                ("record-armed", test_repeated_bool_list(false, 3)),
+                ("track-mutes", test_repeated_bool_list(false, 3)),
+                ("track-solos", test_repeated_bool_list(false, 3)),
+                ("track-muted-by-solo", test_repeated_bool_list(false, 3)),
+                (
+                    "track-instrument-types",
+                    test_string_list(&["sampler", "sampler", "sampler"]),
+                ),
+                (
+                    "track-mod-output-available",
+                    test_repeated_bool_list(false, 3),
+                ),
+                ("mod-routes", test_list(vec![])),
+                ("track-volumes", test_number_list(&[1.0, 1.0, 1.0])),
+                ("track-mixer-pans", test_number_list(&[0.0, 0.0, 0.0])),
+                ("track-outputs", test_string_list(&["main", "main", "main"])),
+                (
+                    "track-output-options",
+                    test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
+                ),
+                (
+                    "track-bus-sends",
+                    test_list(
+                        (0..3)
+                            .map(|_| {
+                                test_list(vec![
+                                    test_track_bus_send(1, "Bus A", 0.0),
+                                    test_track_bus_send(2, "Bus B", 0.0),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+                ("track-num-steps", test_number_list(&[16.0, 16.0, 16.0])),
+                ("track-timebases", test_string_list(&["16", "16", "16"])),
+                ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
+                ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
+                ("bus-mutes", test_repeated_bool_list(false, 3)),
+                ("bus-solos", test_repeated_bool_list(false, 3)),
+                ("master-peak-l", Value::Number(0.0)),
+                ("master-peak-r", Value::Number(0.0)),
+                ("bus-peak-0", Value::Number(0.0)),
+                ("bus-peak-1", Value::Number(0.0)),
+                ("bus-peak-2", Value::Number(0.0)),
+            ],
+            true,
+        );
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        {
+            let rt = editor.runtime_mut();
+            for track in 0..3 {
+                rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
+                rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
+                rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
+                rt.set_reactive(
+                    "SEQ",
+                    &format!("mixer-track-delete-target-{track}"),
+                    Value::Bool(false),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &format!("track-selected-{track}"),
+                    Value::Bool(track == 0),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_row_field(track, 0),
+                    Value::Number(if track == 0 { 0.0 } else { -1.0 }),
+                );
+                for bus in 1..=2 {
+                    rt.set_reactive(
+                        "SEQ",
+                        &format!("track-{track}-bus-{bus}-send"),
+                        Value::Number(0.0),
+                    );
+                }
+                for step in 0..16 {
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_active_field(track, step),
+                        Value::Bool(step.is_multiple_of(2)),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_plocked_field(track, step),
+                        Value::Bool(false),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_selected_field(track, step),
+                        Value::Bool(false),
+                    );
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_duration_field(track, step),
+                        Value::Bool(false),
+                    );
+                }
+            }
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (load "metal-seq-themes.lisp")
+                  (seq-theme-mac-osx-dark)
+                  (load "metal-seq-materials.lisp")
+                  (defstate selected-bus -1)
+                  (load "metal-seq-mixer-v2.lisp")
+                  (load "metal-seq-sequencer.lisp")
+                "#,
+            )
+            .expect("load mixer and sequencer lisp");
+        editor.refresh_runtime_side_effects();
+
+        let mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer buffer should exist")
+            .id;
+        editor.set_active_buffer(mixer_id);
+        editor.set_layout_viewport(120, 16);
+        let mixer_layout = editor
+            .widget_layout()
+            .expect("collapsed mixer layout should build");
+
+        let compact_badge =
+            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-collapsed-label-1")
+                .expect("collapsed track badge should render");
+        assert_finite_nonzero_rect(compact_badge, "collapsed mixer track badge");
+        assert!(
+            compact_badge.props.contains_key("on-double-click"),
+            "collapsed mixer badge should keep double-click collapse toggling"
+        );
+        let compact_mute =
+            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-collapsed-mute-1")
+                .expect("collapsed track mute should render");
+        assert_finite_nonzero_rect(compact_mute, "collapsed mixer mute");
+        let compact_meter = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-meter-1")
+            .expect("collapsed track meter should render");
+        assert_finite_nonzero_rect(compact_meter, "collapsed mixer meter");
+        assert!(
+            find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-track-label-1").is_none(),
+            "collapsed mixer track should not render the full-width label"
+        );
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 30);
+        let sequencer_layout = editor
+            .widget_layout()
+            .expect("collapsed sequencer layout should build");
+
+        assert!(
+            find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-1").is_none(),
+            "collapsed track should be omitted from the sequencer row list"
+        );
+        assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-0").is_some());
+        assert!(find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-2").is_some());
+        assert_eq!(
+            count_stable_key_prefix(&sequencer_layout, "seqv-step-cell-"),
+            32,
+            "sequencer should render step cells only for visible tracks"
         );
     }
 
@@ -12498,7 +14555,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            sequencer_updates, 0,
+            sequencer_updates,
+            0,
             "page-boundary projection should update bound slot props without rebuilding sequencer rows; got {} pending updates",
             pending.len()
         );
@@ -12925,6 +14983,7 @@ mod tests {
                     test_list(vec![Value::String("kick".to_string())]),
                 ),
                 ("track-colors", test_track_colors()),
+                ("track-collapsed", test_bool_list(&[false])),
                 ("num-tracks", Value::Number(1.0)),
                 ("current-track", Value::Number(0.0)),
                 ("delete-target-version", Value::Number(0.0)),
@@ -13605,7 +15664,8 @@ mod tests {
                     && node.rect.col + eps >= parent.rect.col
                     && node.rect.row + eps >= parent.rect.row
                     && node.rect.col + node.rect.width <= parent.rect.col + parent.rect.width + eps
-                    && node.rect.row + node.rect.height <= parent.rect.row + parent.rect.height + eps,
+                    && node.rect.row + node.rect.height
+                        <= parent.rect.row + parent.rect.height + eps,
                 "{label} should have a finite nonzero rect inside its parent; node={:?}; parent={:?}",
                 node.rect,
                 parent.rect
@@ -17955,6 +20015,95 @@ mod tests {
     }
 
     #[test]
+    fn effect_sidechain_host_control_survives_effects_value_param_filter() {
+        fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow())
+        }
+
+        let desc = sequencer::effects::EffectDescriptor {
+            name: "sidechain".to_string(),
+            input_channels: 7,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                sequencer::effects::ParamDescriptor {
+                    name: "threshold".to_string(),
+                    min: -80.0,
+                    max: -2.0,
+                    default: -20.0,
+                    kind: sequencer::effects::ParamKind::Continuous { unit: None },
+                    scaling: sequencer::effects::ParamScaling::Linear,
+                    node_param_idx: 0,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                sequencer::effects::ParamDescriptor {
+                    name: "sidechain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: sequencer::effects::ParamKind::Enum {
+                        labels: vec!["off".to_string(), "Track 2".to_string()],
+                    },
+                    scaling: sequencer::effects::ParamScaling::Linear,
+                    node_param_idx: u32::MAX,
+                    node_param_span: 1,
+                    host_control: Some(sequencer::effects::HostControl::FxSidechain {
+                        input_channel: 6,
+                    }),
+                    ui_metadata: None,
+                },
+            ],
+        };
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+
+        let effects = build_effects_value(&state, 0, &[vec![desc]], &selected);
+
+        let Value::List(slots) = effects else {
+            panic!("effects value should be a list");
+        };
+        let first_slot = slots
+            .first()
+            .expect("descriptor should produce an effect slot")
+            .borrow();
+        let params = map_get(&first_slot, "params").expect("effect should expose params");
+        let Value::List(params) = &*params else {
+            panic!("params should be a list: {params:?}");
+        };
+        let sidechain = params
+            .iter()
+            .find(|param| {
+                map_get(&param.borrow(), "name")
+                    .map(|name| matches!(&*name, Value::String(name) if name == "sidechain"))
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("sidechain param should survive filter: {params:?}"))
+            .borrow();
+        let options = map_get(&sidechain, "options").expect("sidechain should expose options");
+        let Value::List(options) = &*options else {
+            panic!("sidechain options should be a list: {options:?}");
+        };
+        let labels = options
+            .iter()
+            .map(|value| match &*value.borrow() {
+                Value::String(label) => label.clone(),
+                other => panic!("sidechain option should be a string, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["off".to_string(), "Track 2".to_string()]);
+    }
+
+    #[test]
     fn effect_source_dropdown_keeps_options_without_slot_state() {
         fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
             let Value::Map(map) = value else {
@@ -19465,6 +21614,10 @@ mod tests {
                     ]),
                 ),
                 ("track-colors", test_track_colors()),
+                (
+                    "track-collapsed",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
                 ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
                 ("track-selected-0", Value::Bool(true)),

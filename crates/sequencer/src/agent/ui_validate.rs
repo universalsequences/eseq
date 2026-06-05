@@ -565,6 +565,8 @@ mod tests {
     fn manifest_with_params(names: &[&str]) -> DGenManifest {
         DGenManifest {
             dylib_path: std::path::PathBuf::new(),
+            version: 2,
+            process_abi: "dgen-c-v2-host-sample-rate".to_string(),
             total_memory_slots: 0,
             params: names
                 .iter()

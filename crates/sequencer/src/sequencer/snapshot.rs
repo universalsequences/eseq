@@ -1,6 +1,8 @@
 use std::sync::atomic::Ordering;
 
 use crate::effects::EffectSlotSnapshot;
+use crate::graph::ProjectGraphOverrides;
+use crate::neural::ProjectNeuralNetwork;
 
 use super::data::{
     CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
@@ -21,6 +23,7 @@ pub struct SequencerTransportSnapshot {
 #[derive(Clone, Debug)]
 pub struct SequencerStepSnapshot {
     pub active: bool,
+    pub neural_reset: bool,
     pub params: [f32; NUM_PARAMS],
     pub chord: Vec<f32>,
     pub chord_durations: Vec<f32>,
@@ -48,6 +51,8 @@ pub struct SequencerSnapshot {
     pub transport: SequencerTransportSnapshot,
     pub tracks: Vec<SequencerTrackSnapshot>,
     pub mod_connections: Vec<ModConnection>,
+    pub neural_networks: Vec<ProjectNeuralNetwork>,
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
 }
 
 impl SequencerSnapshot {
@@ -63,6 +68,8 @@ impl SequencerSnapshot {
             },
             tracks: Vec::new(),
             mod_connections: Vec::new(),
+            neural_networks: Vec::new(),
+            graph_overrides: Vec::new(),
         }
     }
 
@@ -153,6 +160,8 @@ impl SequencerSnapshot {
 
                 steps.push(SequencerStepSnapshot {
                     active: state.pattern.patterns[track_idx].is_active(step_idx),
+                    neural_reset: state.pattern.neural_reset_patterns[track_idx]
+                        .is_active(step_idx),
                     params: step_params,
                     chord,
                     chord_durations,
@@ -177,17 +186,27 @@ impl SequencerSnapshot {
             });
         }
 
+        let (mod_connections, neural_networks, graph_overrides) = state
+            .pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|pattern| {
+                (
+                    pattern.mod_connections.clone(),
+                    pattern.neural_networks.clone(),
+                    pattern.graph_overrides.clone(),
+                )
+            })
+            .unwrap_or_default();
+
         Self {
             transport,
             tracks,
-            mod_connections: state
-                .pattern
-                .pattern_bank
-                .lock()
-                .unwrap()
-                .get(current_pattern)
-                .map(|pattern| pattern.mod_connections.clone())
-                .unwrap_or_default(),
+            mod_connections,
+            neural_networks,
+            graph_overrides,
         }
     }
 }

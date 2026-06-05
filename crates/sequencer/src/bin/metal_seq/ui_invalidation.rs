@@ -170,6 +170,7 @@ pub(crate) enum TrackMixerInvalidation {
     MutedBySolo,
     RecordArm,
     Output,
+    Collapsed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]

@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "Left": {
+        "x": 39.885,
+        "y": 17.365
+      },
+      "Right": {
+        "x": 108.605,
+        "y": 17.365
+      },
+      "add1": {
+        "x": 58.72489,
+        "y": 9.1025
+      },
+      "ceil1": {
+        "x": 71.40276,
+        "y": 21.007656
+      },
+      "div1": {
+        "x": 72.92489,
+        "y": 17.9053
+      },
+      "generated1": {
+        "x": 56.658764,
+        "y": 18.945
+      },
+      "generated2": {
+        "x": 63.758766,
+        "y": 24.314732
+      },
+      "history1": {
+        "x": 53.793247,
+        "y": 13.216836
+      },
+      "input_l": {
+        "x": 31.765001,
+        "y": 4.0
+      },
+      "input_r": {
+        "x": 102.225006,
+        "y": 4.0
+      },
+      "latch1": {
+        "x": 53.858765,
+        "y": 24.85874
+      },
+      "latch2": {
+        "x": 82.50279,
+        "y": 24.736609
+      },
+      "mix#0": {
+        "x": 29.297499,
+        "y": 11.636836
+      },
+      "mix#1": {
+        "x": 106.285,
+        "y": 10.6825
+      },
+      "mix-amt": {
+        "x": 54.815002,
+        "y": 4.0
+      },
+      "sr": {
+        "x": 100.64035,
+        "y": 23.156609
+      },
+      "value1": {
+        "x": 141.69995,
+        "y": 16.425066
+      },
+      "value2": {
+        "x": 73.34682,
+        "y": 12.305805
+      }
+    },
+    "cables": {
+      "input_l:0->mix#0:0": {
+        "segmented": true,
+        "y": 8.13125
+      },
+      "input_r:0->mix#1:0": {
+        "segmented": true,
+        "y": 6.8912506
+      },
+      "mix#0:0->Left:0": {
+        "segmented": true,
+        "y": 14.813749
+      },
+      "mix#1:0->Right:0": {
+        "segmented": true,
+        "y": 13.57375
+      },
+      "mix-amt:0->mix#0:2": {
+        "segmented": true,
+        "y": 5.93
+      },
+      "mix-amt:0->mix#1:2": {
+        "segmented": true,
+        "y": 5.93
+      }
+    },
+    "inputPresentation": {
+      "add1:0": "cable",
+      "ceil1:0": "cable",
+      "div1:0": "cable",
+      "div1:1": "cable",
+      "generated1:0": "cable",
+      "generated1:1": "cable",
+      "generated2:0": "cable",
+      "history1:0": "cable",
+      "latch1:0": "cable",
+      "latch1:1": "cable",
+      "latch2:0": "cable",
+      "latch2:1": "cable",
+      "mix#0:1": "cable",
+      "mix#0:2": "inline-raw-param",
+      "mix#1:1": "cable"
+    }
+  },
+  "macros": {}
+}

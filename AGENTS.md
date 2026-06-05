@@ -15,6 +15,28 @@ cargo run --bin instrument_probe -- emulations/monomachine-dpro-wave-v2 \
 
 For saved instrument names, the probe resolves local assets from the saved instrument directory. For direct file paths, it resolves assets from the source file's parent directory. Use `--param name=value` for parameter overrides and `--json` for machine-readable output.
 
+## Sequencer scheduler routing testing
+
+When changing scheduler trigger routing, MIDI FX routing, graph-mode `def-sequencer` playback, or pattern-parameter application for neural/graph generated events, use the deterministic scheduler lookahead harness instead of loading a whole project or relying only on UI/audio behavior. The harness drives the extracted production scheduler lookahead pass directly, without instruments, DSP, project load, or UI:
+
+```sh
+cargo test -p sequencer scheduler::tests::scheduler_lookahead_routes_lisp_graph_seed_and_propagation_through_midi_fx -- --nocapture
+```
+
+This test covers the important route:
+
+```text
+step seed -> Lisp graph sequencer -> target track MIDI FX -> routed target event with target track params
+```
+
+If scheduler-side Lisp/project scratch runtime loading changes, also run:
+
+```sh
+cargo test -p sequencer scheduler::tests::scheduler_runtime_keeps_builtin_midi_fx_when_project_scratch_fails -- --nocapture
+```
+
+That regression protects the case where project scratch source, such as a graph sequencer demo, fails in the scheduler VM but builtin MIDI FX like `arp` and `trigger-to-track` must remain registered.
+
 ## UI/layout testing
 
 When changing Lisp UI structure or widget wrapper argument order, do not stop at parse/render-tree tests. Add or run a layout test that proves expected text/debug nodes have finite, nonzero measured rects inside the visible panel; regressions often look like "the panel exists, but its children measured to zero or disappeared."

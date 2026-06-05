@@ -22,9 +22,30 @@ pub enum TileNode {
     Split(TileSplit),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileBufferTab {
+    pub label: String,
+    pub buffer_idx: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileTabLayout {
+    pub index: usize,
+    pub label: String,
+    pub rect: Rect,
+    pub selected: bool,
+}
+
+pub const TILE_TAB_STRIP_HEIGHT: f32 = 1.28;
+pub const TILE_TAB_TOP_INSET: f32 = 0.18;
+const TILE_TAB_LABEL_PAD: f32 = 2.0;
+const TILE_TAB_HORIZONTAL_INSET: f32 = 0.55;
+
 pub struct TileLeaf {
     pub id: TileId,
     pub buffer_idx: usize,
+    pub tabs: Vec<TileBufferTab>,
+    pub selected_tab: Option<usize>,
     pub show_status: bool,
     pub show_border: bool,
     /// Pixel width for Metal tile borders. TUI rendering ignores this.
@@ -136,6 +157,8 @@ impl TileLeaf {
         Self {
             id,
             buffer_idx,
+            tabs: Vec::new(),
+            selected_tab: None,
             show_status: true,
             show_border: true,
             border_width_px: 2.0,
@@ -160,6 +183,146 @@ impl TileLeaf {
             layout_revision: 0,
             cached_inactive_frame: None,
         }
+    }
+}
+
+pub fn tile_body_rect(rect: Rect, has_tabs: bool) -> Rect {
+    if !has_tabs {
+        return rect;
+    }
+    let strip_height = (TILE_TAB_TOP_INSET + TILE_TAB_STRIP_HEIGHT).min(rect.height.max(0.0));
+    Rect {
+        row: rect.row + strip_height,
+        col: rect.col,
+        width: rect.width,
+        height: (rect.height - strip_height).max(0.0),
+    }
+}
+
+pub fn tile_tab_layouts(
+    rect: Rect,
+    tabs: &[TileBufferTab],
+    selected_tab: Option<usize>,
+) -> Vec<TileTabLayout> {
+    if tabs.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+        return Vec::new();
+    }
+    let tab_container_width = (rect.width - TILE_TAB_HORIZONTAL_INSET * 2.0).max(0.0);
+    let tab_width = (tab_container_width / tabs.len() as f32).max(0.0);
+    if tab_width <= 0.0 {
+        return Vec::new();
+    }
+
+    let selected = selected_tab.unwrap_or(usize::MAX);
+    tabs.iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let is_selected = index == selected;
+            let col = rect.col + TILE_TAB_HORIZONTAL_INSET + tab_width * index as f32;
+            let layout = TileTabLayout {
+                index,
+                label: truncate_tab_label(&tab.label, tab_width),
+                rect: Rect {
+                    row: rect.row + TILE_TAB_TOP_INSET,
+                    col,
+                    width: tab_width,
+                    height: TILE_TAB_STRIP_HEIGHT,
+                },
+                selected: is_selected,
+            };
+            layout
+        })
+        .collect()
+}
+
+fn truncate_tab_label(label: &str, width: f32) -> String {
+    let budget = (width - TILE_TAB_LABEL_PAD).max(0.0);
+    let mut used = 0.0;
+    let mut out = String::new();
+    for ch in label.chars() {
+        let char_width = estimated_tab_char_width_cells(ch);
+        if used + char_width > budget + 0.01 && !out.is_empty() {
+            break;
+        }
+        used += char_width;
+        out.push(ch);
+    }
+    out
+}
+
+fn estimated_tab_char_width_cells(ch: char) -> f32 {
+    match ch {
+        ' ' => 0.38,
+        'i' | 'l' | 'I' | '!' | '|' | '.' | ',' | ':' | ';' | '\'' | '`' => 0.36,
+        'j' | 'f' | 'r' | 't' | '(' | ')' | '[' | ']' | '{' | '}' => 0.5,
+        'm' | 'w' | 'M' | 'W' => 0.95,
+        'A'..='Z' => 0.78,
+        '0'..='9' => 0.64,
+        '-' | '_' | '/' | '\\' => 0.55,
+        _ => 0.64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_widths_are_equal_and_fit_widest_label() {
+        let rect = Rect {
+            row: 10.0,
+            col: 0.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        let layouts = tile_tab_layouts(
+            rect,
+            &[
+                TileBufferTab {
+                    label: "iii".to_string(),
+                    buffer_idx: 0,
+                },
+                TileBufferTab {
+                    label: "WWW".to_string(),
+                    buffer_idx: 1,
+                },
+            ],
+            Some(0),
+        );
+
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts[0].rect.width, layouts[1].rect.width);
+        assert!(layouts[0].rect.col > rect.col);
+        assert_eq!(layouts[1].rect.col, rect.col + rect.width * 0.5);
+        assert!(layouts[1].rect.col + layouts[1].rect.width < rect.col + rect.width);
+        assert_eq!(layouts[1].label, "WWW");
+    }
+
+    #[test]
+    fn tab_width_estimate_keeps_matrix_label_untruncated() {
+        let rect = Rect {
+            row: 10.0,
+            col: 0.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        let layouts = tile_tab_layouts(
+            rect,
+            &[
+                TileBufferTab {
+                    label: "Seq".to_string(),
+                    buffer_idx: 0,
+                },
+                TileBufferTab {
+                    label: "Matrix".to_string(),
+                    buffer_idx: 1,
+                },
+            ],
+            Some(0),
+        );
+
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts[1].label, "Matrix");
     }
 }
 

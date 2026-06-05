@@ -2,7 +2,7 @@
   (make-history h)
   (def target (log (clip pitch_hz 1.0 22000.0)))
   (def t_ms (clip glide_ms 0.05 10000.0))
-  (def coef (exp (/ -1.0 (* t_ms 44.1))))
+  (def coef (exp (/ -1.0 (* t_ms samplerate 0.001))))
   (def prev (read-history h))
   (def smoothed (+ (* target (- 1.0 coef)) (* prev coef)))
   (write-history h smoothed)

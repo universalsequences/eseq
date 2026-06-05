@@ -63,11 +63,14 @@ pub mod effects;
 mod filter;
 #[allow(dead_code)]
 mod gatepitch;
+pub mod generator;
+pub mod graph;
 #[allow(dead_code)]
 mod limiter;
 #[allow(dead_code)]
 pub mod lisp_effect;
 pub mod mixer_volume;
+pub mod neural;
 pub mod paths;
 pub mod project;
 pub mod recorder;

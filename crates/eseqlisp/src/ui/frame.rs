@@ -8,6 +8,7 @@ use crate::layout::{Rect, layout_contains_widget_id};
 use crate::mode::{TokenClass, TokenSpan, highlight_lines};
 use crate::text::matching_paren;
 use crate::theme;
+use crate::tile::{tile_body_rect, tile_tab_layouts};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -518,6 +519,8 @@ fn build_active_status_row(
         build_message_status_row(&format!(" {prompt}"), viewport_width)
     } else if let Some(prompt) = editor.prompt_text() {
         build_message_status_row(&prompt, viewport_width)
+    } else if let Some(prompt) = editor.pending_key_prompt() {
+        build_message_status_row(&format!(" {prompt}"), viewport_width)
     } else if let Some(msg) = &editor.minibuffer {
         build_message_status_row(&format!(" {msg}"), viewport_width)
     } else {
@@ -799,12 +802,16 @@ fn build_tiled_render_frame_impl(
         .map(|(tile_id, rect)| {
             let leaf = editor.tile_root.find_leaf(*tile_id).unwrap();
             let buf = &editor.buffers[leaf.buffer_idx];
+            let body_rect = tile_body_rect(*rect, !leaf.tabs.is_empty());
+            let tabs = tile_tab_layouts(*rect, &leaf.tabs, leaf.selected_tab);
             let show_status = editor
                 .tile_effective_show_status(*tile_id)
                 .unwrap_or(leaf.show_status);
             (
                 *tile_id,
                 *rect,
+                body_rect,
+                tabs,
                 leaf.buffer_idx,
                 show_status,
                 leaf.show_border,
@@ -835,6 +842,8 @@ fn build_tiled_render_frame_impl(
     for (
         tile_id,
         rect,
+        body_rect,
+        tabs,
         buffer_idx,
         show_status,
         show_border,
@@ -865,11 +874,11 @@ fn build_tiled_render_frame_impl(
         let inner_height_exact;
         if cell_borders {
             // TUI: subtract 1-cell borders on each side
-            inner_width = (rect.width.round() as usize).saturating_sub(2);
+            inner_width = (body_rect.width.round() as usize).saturating_sub(2);
             inner_height = if show_status {
-                (rect.height.round() as usize).saturating_sub(3) // border top/bottom + status
+                (body_rect.height.round() as usize).saturating_sub(3) // border top/bottom + status
             } else {
-                (rect.height.round() as usize).saturating_sub(2) // border top/bottom
+                (body_rect.height.round() as usize).saturating_sub(2) // border top/bottom
             };
             inner_width_exact = inner_width as f32;
             inner_height_exact = inner_height as f32;
@@ -879,7 +888,7 @@ fn build_tiled_render_frame_impl(
             // inside pixel borders. Lay widgets out to the same inset content
             // rect so :width :fill children do not clip their right edge.
             let (cols_exact, rows_exact) = metal_tile_inner_extents(
-                rect,
+                body_rect,
                 show_status,
                 show_border,
                 border_width_px,
@@ -887,7 +896,7 @@ fn build_tiled_render_frame_impl(
                 cell_h,
             );
             let (cols, rows) = metal_tile_inner_cells(
-                rect,
+                body_rect,
                 show_status,
                 show_border,
                 border_width_px,
@@ -950,6 +959,8 @@ fn build_tiled_render_frame_impl(
             tiles.push(TileFrame {
                 tile_id,
                 rect,
+                body_rect,
+                tabs,
                 is_active: true,
                 show_status,
                 show_border,
@@ -1001,6 +1012,8 @@ fn build_tiled_render_frame_impl(
             tiles.push(TileFrame {
                 tile_id,
                 rect,
+                body_rect,
+                tabs,
                 is_active: false,
                 show_status,
                 show_border,
