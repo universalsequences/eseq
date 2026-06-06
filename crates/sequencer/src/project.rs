@@ -1458,6 +1458,8 @@ mod tests {
                         quantize: Some(crate::graph::ProjectGraphQuantizeOverride::Off),
                         route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),
                         seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
+                        duration: None,
+                        swing: None,
                     }],
                     node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
                         group: "nrn".to_string(),

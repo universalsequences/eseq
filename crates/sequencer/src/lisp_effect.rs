@@ -3162,6 +3162,8 @@ pub(crate) struct GraphNodeContext {
     energy: f64,
     tick_index: u64,
     beat: f64,
+    resolution: Timebase,
+    delay_steps: u32,
     /// Behavioral params (`node-param`), prototype defaults + per-instance plocks.
     params: HashMap<String, f64>,
     /// Author-defined state cells (`node-state`/`node-set!`) beyond engine `energy`.
@@ -3829,6 +3831,8 @@ impl ScratchControlRuntime {
                 energy: eval.energy,
                 tick_index: eval.tick_index,
                 beat: eval.beat,
+                resolution: eval.resolution,
+                delay_steps: eval.delay_steps,
                 params,
                 state: HashMap::new(),
                 input_event: eval.input_event,
@@ -3900,6 +3904,16 @@ fn parse_emit_spec(value: &EValue) -> Option<crate::graph::EmitSpec> {
     Some(crate::graph::EmitSpec {
         note: field("note"),
         velocity: field("vel"),
+        duration: map.get("dur").and_then(|cell| match &*cell.borrow() {
+            EValue::Number(n) => Some(crate::graph::GraphDurationSpec::Beats { value: *n }),
+            value if graph_keyword(value).as_deref() == Some("seed") => {
+                Some(crate::graph::GraphDurationSpec::Seed)
+            }
+            _ => None,
+        }),
+        swing: map
+            .get("swing")
+            .and_then(|cell| graph_parse_swing_spec(&cell.borrow()).ok()),
     })
 }
 
@@ -4020,6 +4034,12 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
         "(event-vel ev)",
         "Read the velocity field off a relayed event (Ext 1).",
         move |args, _ctx| Ok(event_field(&args, "vel")),
+    );
+    runtime.register_native_with_docs(
+        "event-dur",
+        "(event-dur ev)",
+        "Read the duration-in-beats field off a relayed event.",
+        move |args, _ctx| Ok(event_field(&args, "dur")),
     );
 
     let gn = Arc::clone(&graph_node);
@@ -4232,9 +4252,91 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
         },
     );
 
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "in-dur",
+        "(in-dur)",
+        "The duration in beats of the event arriving this boundary (one node step if nothing arrived).",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("in-dur called outside :update")?;
+            let fallback = ctx
+                .resolution
+                .step_beats(crate::graph::GRAPH_RESOLUTION_REF_STEPS);
+            Ok(EValue::Number(
+                ctx.input_event
+                    .map(|p| p.duration_beats as f64)
+                    .unwrap_or(fallback),
+            ))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "steps",
+        "(steps n)",
+        "Duration in beats for n steps of the current graph node's resolved resolution.",
+        move |args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("steps called outside :update")?;
+            let Some(EValue::Number(n)) = args.first() else {
+                return Err("steps expects a numeric step count".to_string());
+            };
+            Ok(EValue::Number(
+                n.max(0.0)
+                    * ctx
+                        .resolution
+                        .step_beats(crate::graph::GRAPH_RESOLUTION_REF_STEPS),
+            ))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "delay",
+        "(delay)",
+        "Duration in beats for this graph node's resolved delay.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("delay called outside :update")?;
+            Ok(EValue::Number(
+                ctx.delay_steps as f64
+                    * ctx
+                        .resolution
+                        .step_beats(crate::graph::GRAPH_RESOLUTION_REF_STEPS),
+            ))
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "seed",
+        "(seed)",
+        "Duration in beats carried by the incoming seed/payload.",
+        move |_args, _ctx| {
+            let guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard.as_ref().ok_or("seed called outside :update")?;
+            Ok(EValue::Number(
+                ctx.input_event
+                    .map(|p| p.duration_beats as f64)
+                    .unwrap_or_else(|| {
+                        ctx.resolution
+                            .step_beats(crate::graph::GRAPH_RESOLUTION_REF_STEPS)
+                    }),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "swing",
+        "(swing pct [:16|:8|:4|:2])",
+        "Graph swing timing policy: 50 is straight, 75 is maximum delayed swing.",
+        move |args, _ctx| graph_swing_value_from_args(&args),
+    );
+
     runtime.register_native_with_docs(
         "emit",
-        "(emit :note n :vel v)",
+        "(emit :note n :vel v :dur d :swing s)",
         "Fire this node with a shaped event. Each named field overrides the emitted and \
          propagated payload; unnamed fields relay the incoming event verbatim. Returning \
          it from `:update` is the fire decision (truthy).",
@@ -4248,19 +4350,49 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
             while i < args.len() {
                 let key = ctx_key(args.get(i))
                     .ok_or("emit expects keyword/value pairs, e.g. (emit :note 60 :vel 0.8)")?;
-                let value = match args.get(i + 1) {
-                    Some(EValue::Number(n)) => *n,
-                    _ => return Err(format!("emit field :{key} expects a number")),
-                };
                 let field = match key.as_str() {
                     "note" => "note",
                     "vel" | "velocity" => "vel",
+                    "dur" | "duration" => "dur",
+                    "swing" => "swing",
                     other => return Err(format!("emit: unknown field :{other}")),
                 };
-                map.insert(
-                    field.to_string(),
-                    std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(value))),
-                );
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("emit field :{key} expects a value"))?;
+                match field {
+                    "note" | "vel" => {
+                        let EValue::Number(value) = value else {
+                            return Err(format!("emit field :{key} expects a number"));
+                        };
+                        map.insert(
+                            field.to_string(),
+                            std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(*value))),
+                        );
+                    }
+                    "dur" => {
+                        match value {
+                            EValue::Number(_) => {}
+                            value if graph_keyword(value).as_deref() == Some("seed") => {}
+                            _ => {
+                                return Err("emit field :dur expects a number or :seed".to_string());
+                            }
+                        }
+                        map.insert(
+                            field.to_string(),
+                            std::rc::Rc::new(std::cell::RefCell::new(value.clone())),
+                        );
+                    }
+                    "swing" => {
+                        graph_parse_swing_spec(value)
+                            .map_err(|error| format!("emit field :swing {error}"))?;
+                        map.insert(
+                            field.to_string(),
+                            std::rc::Rc::new(std::cell::RefCell::new(value.clone())),
+                        );
+                    }
+                    _ => unreachable!(),
+                }
                 i += 2;
             }
             Ok(EValue::Map(map))
@@ -4281,6 +4413,12 @@ fn payload_to_event(payload: Option<crate::graph::GraphPayload>) -> EValue {
                 "vel".to_string(),
                 std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(
                     payload.velocity as f64,
+                ))),
+            );
+            map.insert(
+                "dur".to_string(),
+                std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(
+                    payload.duration_beats as f64,
                 ))),
             );
             EValue::Map(map)
@@ -4337,6 +4475,69 @@ pub fn register_graph_authoring_natives(
     // Writable mirror of resolved graph values; `bind-graph` reads it, `reactive-set`
     // dirties it. Dynamic-field namespace (no declared fields), like SEQV.
     runtime.register_reactive(GRAPH_REACTIVE_NS, vec![], true);
+
+    runtime.register_native_with_docs(
+        "steps",
+        "(steps n)",
+        "Graph duration form for n steps of the edited node's resolution.",
+        move |args, _ctx| {
+            if args.len() != 1 {
+                return Err("steps expects exactly one numeric step count".to_string());
+            }
+            let Some(EValue::Number(n)) = args.first() else {
+                return Err("steps expects a numeric step count".to_string());
+            };
+            Ok(lisp_list(vec![
+                EValue::Symbol("steps".to_string()),
+                EValue::Number(n.max(0.0)),
+            ]))
+        },
+    );
+    runtime.register_native_with_docs(
+        "delay",
+        "(delay)",
+        "Graph duration form for the edited node's propagation delay.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("delay expects no arguments".to_string());
+            }
+            Ok(lisp_list(vec![EValue::Symbol("delay".to_string())]))
+        },
+    );
+    runtime.register_native_with_docs(
+        "seed",
+        "(seed)",
+        "Graph duration form that inherits the incoming seed/payload duration.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("seed expects no arguments".to_string());
+            }
+            Ok(EValue::Keyword("seed".to_string()))
+        },
+    );
+    runtime.register_native_with_docs(
+        "beats",
+        "(beats :16) | (beats 0.25)",
+        "Graph duration helper for a fixed beat duration.",
+        move |args, _ctx| {
+            if args.len() != 1 {
+                return Err("beats expects exactly one number or timebase".to_string());
+            }
+            if let Some(EValue::Number(n)) = args.first() {
+                return Ok(EValue::Number(n.max(0.0)));
+            }
+            let timebase = parse_timebase_arg(&args, 0)?;
+            Ok(EValue::Number(
+                timebase.step_beats(crate::graph::GRAPH_RESOLUTION_REF_STEPS),
+            ))
+        },
+    );
+    runtime.register_native_with_docs(
+        "swing",
+        "(swing pct [:16|:8|:4|:2])",
+        "Graph swing timing policy: 50 is straight, 75 is maximum delayed swing.",
+        move |args, _ctx| graph_swing_value_from_args(&args),
+    );
 
     let state_for_graph_list = Arc::clone(&state);
     runtime.register_native_with_docs(
@@ -5407,9 +5608,12 @@ fn register_sequencer_natives_with_accumulators(
 
     runtime.register_native_with_docs(
         "beats",
-        "(beats :8)",
-        "Beats in one step of a timebase, for seq-emit :dur.",
+        "(beats :8) | (beats 0.25)",
+        "Beats in one step of a timebase, or a numeric beat duration.",
         move |args, _ctx| {
+            if let Some(EValue::Number(n)) = args.first() {
+                return Ok(EValue::Number(n.max(0.0)));
+            }
             let timebase = parse_timebase_arg(&args, 0)?;
             Ok(EValue::Number(timebase.step_beats(
                 crate::generator::GENERATOR_RESOLUTION_REF_STEPS,
@@ -8623,8 +8827,8 @@ fn gen_splitmix64(mut value: u64) -> u64 {
 // `def-node` sub-form (its absence keeps the existing tick-mode path).
 
 use crate::graph::{
-    EdgeSetSpec, EventSelect, GraphManifest, LeakSpec, NodeProto, ParamSpec, Reduce as GraphReduce,
-    SeedFrom, ShapeSpec, StateSpec, Topology,
+    EdgeSetSpec, EventSelect, GraphDurationSpec, GraphManifest, GraphSwingSpec, LeakSpec,
+    NodeProto, ParamSpec, Reduce as GraphReduce, SeedFrom, ShapeSpec, StateSpec, Topology,
 };
 
 /// Clone a list value's items out of their cells, or `None` if not a list.
@@ -8740,6 +8944,181 @@ fn graph_bars_or_beats(value: &EValue) -> f64 {
         }
     }
     graph_number(value).unwrap_or(0.0)
+}
+
+fn graph_parse_duration_spec(value: &EValue) -> Result<GraphDurationSpec, String> {
+    if let Some(n) = graph_number(value) {
+        return Ok(GraphDurationSpec::Beats { value: n.max(0.0) });
+    }
+    if graph_keyword(value).as_deref() == Some("seed") {
+        return Ok(GraphDurationSpec::Seed);
+    }
+    let items = graph_list_items(value)
+        .ok_or_else(|| "duration expects a number, :seed, or duration form".to_string())?;
+    let head = graph_head_symbol(&items)
+        .ok_or_else(|| "duration form expects a symbol head".to_string())?;
+    match head.as_str() {
+        "steps" | "step" => {
+            if items.len() != 2 {
+                return Err("(steps n) expects exactly one numeric step count".to_string());
+            }
+            let value = items
+                .get(1)
+                .and_then(graph_number)
+                .ok_or_else(|| "(steps n) expects a numeric step count".to_string())?;
+            Ok(GraphDurationSpec::Steps {
+                value: value.max(0.0),
+            })
+        }
+        "beats" | "beat" => {
+            if items.len() != 2 {
+                return Err("(beats x) expects exactly one number or timebase".to_string());
+            }
+            let value = items
+                .get(1)
+                .ok_or_else(|| "(beats x) expects a number or timebase".to_string())?;
+            if let Some(n) = graph_number(value) {
+                Ok(GraphDurationSpec::Beats { value: n.max(0.0) })
+            } else {
+                Ok(GraphDurationSpec::Timebase {
+                    index: graph_timebase(value)? as u8,
+                })
+            }
+        }
+        "delay" => {
+            if items.len() != 1 {
+                return Err("(delay) expects no arguments".to_string());
+            }
+            Ok(GraphDurationSpec::Delay)
+        }
+        "seed" => {
+            if items.len() != 1 {
+                return Err("(seed) expects no arguments".to_string());
+            }
+            Ok(GraphDurationSpec::Seed)
+        }
+        "+" => {
+            if items.len() < 2 {
+                return Err("(+ duration ...) expects at least one duration".to_string());
+            }
+            Ok(GraphDurationSpec::Add {
+                items: items[1..]
+                    .iter()
+                    .map(graph_parse_duration_spec)
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        }
+        "*" => {
+            if items.len() != 3 {
+                return Err("(* scalar duration) expects exactly two arguments".to_string());
+            }
+            let a = items
+                .get(1)
+                .ok_or_else(|| "(* scalar duration) expects a scalar".to_string())?;
+            let b = items
+                .get(2)
+                .ok_or_else(|| "(* scalar duration) expects a duration".to_string())?;
+            match (graph_number(a), graph_number(b)) {
+                (Some(factor), None) => Ok(GraphDurationSpec::Mul {
+                    factor,
+                    item: Box::new(graph_parse_duration_spec(b)?),
+                }),
+                (None, Some(factor)) => Ok(GraphDurationSpec::Mul {
+                    factor,
+                    item: Box::new(graph_parse_duration_spec(a)?),
+                }),
+                _ => Err("duration * expects one numeric scalar and one duration".to_string()),
+            }
+        }
+        "min" => {
+            if items.len() < 2 {
+                return Err("(min duration ...) expects at least one duration".to_string());
+            }
+            Ok(GraphDurationSpec::Min {
+                items: items[1..]
+                    .iter()
+                    .map(graph_parse_duration_spec)
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        }
+        "max" => {
+            if items.len() < 2 {
+                return Err("(max duration ...) expects at least one duration".to_string());
+            }
+            Ok(GraphDurationSpec::Max {
+                items: items[1..]
+                    .iter()
+                    .map(graph_parse_duration_spec)
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        }
+        other => Err(format!("unknown duration form `{other}`")),
+    }
+}
+
+fn graph_swing_resolution(value: &EValue) -> Result<u8, String> {
+    let label = match value {
+        EValue::Keyword(s) | EValue::Symbol(s) | EValue::String(s) => {
+            s.trim_start_matches(':').to_ascii_lowercase()
+        }
+        EValue::Number(n) => {
+            let index = (*n).round().max(0.0) as u8;
+            return Ok(index.min(3));
+        }
+        _ => String::new(),
+    };
+    match label.as_str() {
+        "16" | "1/16" | "sixteenth" => Ok(0),
+        "8" | "1/8" | "eighth" => Ok(1),
+        "4" | "1/4" | "quarter" => Ok(2),
+        "2" | "1/2" | "half" => Ok(3),
+        _ => Err("expects swing resolution :16, :8, :4, or :2".to_string()),
+    }
+}
+
+fn graph_swing_value(amount: f64, resolution: u8) -> EValue {
+    lisp_list(vec![
+        EValue::Symbol("swing".to_string()),
+        EValue::Number(amount.clamp(50.0, 75.0)),
+        EValue::Number(resolution as f64),
+    ])
+}
+
+fn graph_swing_value_from_args(args: &[EValue]) -> Result<EValue, String> {
+    if !(1..=2).contains(&args.len()) {
+        return Err("swing expects (swing pct [:16|:8|:4|:2])".to_string());
+    }
+    let amount = graph_number(&args[0]).ok_or_else(|| "swing expects a numeric pct".to_string())?;
+    let resolution = match args.get(1) {
+        Some(value) => graph_swing_resolution(value)?,
+        None => 0,
+    };
+    Ok(graph_swing_value(amount, resolution))
+}
+
+fn graph_parse_swing_spec(value: &EValue) -> Result<GraphSwingSpec, String> {
+    if let Some(n) = graph_number(value) {
+        return Ok(GraphSwingSpec::new(n as f32, 0));
+    }
+    let items = graph_list_items(value)
+        .ok_or_else(|| "swing expects a number or (swing pct [:16|:8|:4|:2])".to_string())?;
+    let head = graph_head_symbol(&items)
+        .ok_or_else(|| "swing form expects a symbol head".to_string())?;
+    if head != "swing" {
+        return Err(format!("unknown swing form `{head}`"));
+    }
+    if !(2..=3).contains(&items.len()) {
+        return Err("(swing pct [:16|:8|:4|:2]) expects one or two arguments".to_string());
+    }
+    let amount = items
+        .get(1)
+        .and_then(graph_number)
+        .ok_or_else(|| "(swing pct ...) expects a numeric pct".to_string())?;
+    let resolution = match items.get(2) {
+        Some(value) => graph_swing_resolution(value)?,
+        None => 0,
+    };
+    Ok(GraphSwingSpec::new(amount as f32, resolution))
 }
 
 /// `(name :float min max :default d)` / `(name :int min max :default d)`.
@@ -8890,6 +9269,8 @@ fn graph_parse_node_proto(items: &[EValue]) -> Result<NodeProto, String> {
             "quantize" | "q" => proto.quantize = graph_quantize(value)?,
             "route" => proto.route = graph_route(value),
             "seed-from" => proto.seed_from = graph_seed_from(value),
+            "duration" | "dur" => proto.duration = Some(graph_parse_duration_spec(value)?),
+            "swing" => proto.swing = Some(graph_parse_swing_spec(value)?),
             "reduce" => proto.reduce = graph_reduce(value),
             "event" | "event-select" => proto.event_select = graph_event_select(value),
             "params" => proto.params = graph_parse_param_list(value),
@@ -8957,6 +9338,8 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
     let mut seed_on_reset = 0.0;
     let mut max_poly = 0u32;
     let mut max_poly_selection = NeuralMaxPolySelection::Deterministic;
+    let mut duration = GraphDurationSpec::default();
+    let mut swing = GraphSwingSpec::default();
     let mut node: Option<NodeProto> = None;
     let mut edge_sets: Vec<EdgeSetSpec> = Vec::new();
 
@@ -9000,6 +9383,8 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
             "seed-on-reset" => seed_on_reset = graph_number(value).unwrap_or(0.0),
             "max-poly" => max_poly = graph_number(value).unwrap_or(0.0).max(0.0) as u32,
             "max-poly-selection" => max_poly_selection = parse_neural_max_poly_selection(value)?,
+            "duration" | "dur" => duration = graph_parse_duration_spec(value)?,
+            "swing" => swing = graph_parse_swing_spec(value)?,
             // Resolution is per-node, not sequencer-level.
             "resolution" | "res" => {}
             _ => return Err(format!("graph-mode def-sequencer unknown key :{key}")),
@@ -9018,6 +9403,8 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
         seed_on_reset,
         max_poly,
         max_poly_selection,
+        duration,
+        swing,
         node,
         edge_sets,
     })
@@ -10392,6 +10779,8 @@ struct GraphNodeEdit {
     quantize: Option<crate::graph::ProjectGraphQuantizeOverride>,
     route: Option<crate::graph::ProjectGraphRouteOverride>,
     seed_from: Option<crate::graph::ProjectGraphSeedFrom>,
+    duration: Option<crate::graph::GraphDurationSpec>,
+    swing: Option<crate::graph::GraphSwingSpec>,
 }
 
 struct GraphEdgeEdit {
@@ -10884,6 +11273,8 @@ fn ensure_graph_node_intrinsic<'a>(
             quantize: None,
             route: None,
             seed_from: None,
+            duration: None,
+            swing: None,
         });
     graph
         .node_intrinsics
@@ -10952,6 +11343,8 @@ fn parse_graph_node_edit(args: &[EValue]) -> Result<GraphNodeEdit, String> {
             "quantize" | "q" => edit.quantize = Some(parse_graph_quantize_override(value)?),
             "route" => edit.route = Some(parse_graph_route_override(value)?),
             "seed-from" => edit.seed_from = Some(parse_graph_seed_from(value)?),
+            "duration" | "dur" => edit.duration = Some(graph_parse_duration_spec(value)?),
+            "swing" => edit.swing = Some(graph_parse_swing_spec(value)?),
             other => return Err(format!("graph-node unknown argument :{other}")),
         }
         idx += 1;
@@ -10977,6 +11370,12 @@ fn apply_graph_node_edit(
     }
     if edit.seed_from.is_some() {
         node.seed_from = edit.seed_from;
+    }
+    if edit.duration.is_some() {
+        node.duration = edit.duration;
+    }
+    if edit.swing.is_some() {
+        node.swing = edit.swing;
     }
 }
 
@@ -12326,6 +12725,10 @@ mod tests {
             gv_num(4.0),
             gv_kw("max-poly-selection"),
             gv_kw("propagation"),
+            gv_kw("duration"),
+            gv_list(vec![gv_sym("steps"), gv_num(1.0)]),
+            gv_kw("swing"),
+            gv_list(vec![gv_sym("swing"), gv_num(57.0), gv_kw("16")]),
             gv_kw("reset-every"),
             gv_list(vec![gv_sym("bars"), gv_num(4.0)]),
             gv_list(vec![
@@ -12335,6 +12738,10 @@ mod tests {
                 gv_kw("16"),
                 gv_kw("delay"),
                 gv_num(1.0),
+                gv_kw("duration"),
+                gv_list(vec![gv_sym("delay")]),
+                gv_kw("swing"),
+                gv_list(vec![gv_sym("swing"), gv_num(62.0), gv_kw("8")]),
                 gv_kw("seed-from"),
                 gv_num(0.0),
                 gv_kw("quantize"),
@@ -12410,7 +12817,9 @@ mod tests {
 
     #[test]
     fn parse_graph_manifest_extracts_full_shape() {
-        use crate::graph::{LeakSpec, Reduce, SeedFrom, ShapeSpec, Topology};
+        use crate::graph::{
+            GraphDurationSpec, GraphSwingSpec, LeakSpec, Reduce, SeedFrom, ShapeSpec, Topology,
+        };
         use crate::sequencer::Timebase;
 
         let manifest = super::parse_graph_manifest(&sample_graph_args()).expect("parse");
@@ -12422,6 +12831,8 @@ mod tests {
             manifest.max_poly_selection,
             NeuralMaxPolySelection::Propagation
         );
+        assert_eq!(manifest.duration, GraphDurationSpec::Steps { value: 1.0 });
+        assert_eq!(manifest.swing, GraphSwingSpec::new(57.0, 0));
         assert_eq!(manifest.reset_every_beats, 16.0); // (bars 4) @ 4/4
 
         let node = &manifest.node;
@@ -12429,6 +12840,8 @@ mod tests {
         assert_eq!(node.resolution, Timebase::Sixteenth);
         assert_eq!(node.delay_steps, 1);
         assert_eq!(node.quantize, None);
+        assert_eq!(node.duration, Some(GraphDurationSpec::Delay));
+        assert_eq!(node.swing, Some(GraphSwingSpec::new(62.0, 1)));
         assert_eq!(node.reduce, Reduce::Sum);
         assert_eq!(node.seed_from, SeedFrom::Tracks(vec![0]));
         assert_eq!(node.param_default("threshold"), Some(1.0));
@@ -12470,6 +12883,8 @@ mod tests {
             seed_on_reset: 2.0,
             max_poly: 0,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -12557,6 +12972,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 0,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -12594,6 +13011,7 @@ mod tests {
             GraphPayload {
                 note: 4.0,
                 velocity: 1.0,
+                duration_beats: 0.25,
             },
         );
         let mut out = Vec::new();
@@ -12638,6 +13056,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 0,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -12675,6 +13095,7 @@ mod tests {
             GraphPayload {
                 note: 10.0,
                 velocity: 1.0,
+                duration_beats: 0.25,
             },
         );
         let mut out = Vec::new();
@@ -12702,6 +13123,236 @@ mod tests {
     }
 
     #[test]
+    fn graph_update_can_reset_transpose_cascade_through_vm() {
+        use crate::graph::{
+            GraphDurationSpec, GraphManifest, GraphPayload, NodeEval, NodeProto, ShapeSpec,
+        };
+        use crate::sequencer::Timebase;
+
+        let update_source =
+            "(emit :note (if (>= (param :transpose-reset) 1) (param :transpose) (+ (in-note) (param :transpose))) :vel (in-vel))";
+        let manifest = GraphManifest {
+            id: 33,
+            name: "g".into(),
+            shape: ShapeSpec::Line(1),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: GraphDurationSpec::Steps { value: 1.0 },
+            swing: crate::graph::GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Quarter,
+                update_source: Some(update_source.into()),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![],
+        };
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        let eval_with_reset = |transpose_reset| {
+            let mut params = HashMap::new();
+            params.insert("transpose".to_string(), 7.0);
+            params.insert("transpose-reset".to_string(), transpose_reset);
+            NodeEval {
+                node_index: 0,
+                input: 1.0,
+                energy: 1.0,
+                tick_index: 0,
+                beat: 0.0,
+                resolution: Timebase::Quarter,
+                delay_steps: 1,
+                input_event: Some(GraphPayload {
+                    note: 12.0,
+                    velocity: 0.5,
+                    duration_beats: 0.25,
+                }),
+                params,
+            }
+        };
+
+        let carried = scratch
+            .invoke_graph_update(&manifest, &eval_with_reset(0.0))
+            .expect("invoke transpose carry update");
+        assert_eq!(carried.emit.and_then(|emit| emit.note), Some(19.0));
+
+        let reset = scratch
+            .invoke_graph_update(&manifest, &eval_with_reset(1.0))
+            .expect("invoke transpose reset update");
+        assert_eq!(reset.emit.and_then(|emit| emit.note), Some(7.0));
+    }
+
+    #[test]
+    fn graph_update_emit_shapes_duration_through_vm() {
+        use crate::graph::{
+            EdgeSetSpec, GraphManifest, GraphPayload, NodeProto, ParamSpec, SeedFrom, ShapeSpec,
+            Topology,
+        };
+        use crate::sequencer::Timebase;
+
+        let manifest = GraphManifest {
+            id: 33,
+            name: "g".into(),
+            shape: ShapeSpec::Line(1),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Sixteenth,
+                seed_from: SeedFrom::Tracks(vec![0]),
+                update_source: Some(
+                    "(emit :note (in-note) :vel (in-vel) :dur (+ (steps 0.5) (* 0.25 (in-dur)) (* 0.25 (event-dur (in-event)))))"
+                        .into(),
+                ),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "n".into(),
+                to: "n".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+            }],
+        };
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut runtime = manifest.materialize();
+        runtime.seed(
+            0,
+            0.0,
+            GraphPayload {
+                note: 10.0,
+                velocity: 1.0,
+                duration_beats: 0.75,
+            },
+        );
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or_default()
+            },
+            &mut out,
+        );
+
+        assert!(!out.is_empty());
+        assert_eq!(out[0].event.resolved.duration, 0.5);
+    }
+
+    #[test]
+    fn graph_update_emit_shapes_swing_through_vm() {
+        use crate::graph::{
+            EdgeSetSpec, GraphManifest, GraphPayload, NodeProto, ParamSpec, SeedFrom, ShapeSpec,
+            Topology,
+        };
+        use crate::sequencer::Timebase;
+
+        let manifest = GraphManifest {
+            id: 34,
+            name: "g".into(),
+            shape: ShapeSpec::Line(1),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Sixteenth,
+                seed_from: SeedFrom::Tracks(vec![0]),
+                update_source: Some(
+                    "(emit :note (in-note) :vel (in-vel) :swing (swing 75 :16))".into(),
+                ),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "n".into(),
+                to: "n".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+            }],
+        };
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut runtime = manifest.materialize();
+        runtime.seed(
+            0,
+            0.0,
+            GraphPayload {
+                note: 10.0,
+                velocity: 1.0,
+                duration_beats: 0.25,
+            },
+        );
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or_default()
+            },
+            &mut out,
+        );
+
+        assert!(!out.is_empty());
+        assert_eq!(out[0].sample_time, 18_000);
+    }
+
+    #[test]
     fn graph_update_can_request_graph_state_reset_through_vm() {
         use crate::graph::{
             EdgeSetSpec, GraphManifest, GraphPayload, NodeProto, ParamSpec, SeedFrom, ShapeSpec,
@@ -12718,6 +13369,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 0,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -12758,6 +13411,7 @@ mod tests {
             GraphPayload {
                 note: 9.0,
                 velocity: 0.25,
+                duration_beats: 0.25,
             },
         );
         let mut out = Vec::new();
@@ -12806,6 +13460,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 0,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -12887,6 +13543,8 @@ mod tests {
             0.0,
             0,
             NeuralMaxPolySelection::Deterministic,
+            crate::graph::GraphDurationSpec::default(),
+            crate::graph::GraphSwingSpec::default(),
             vec![param_defaults.clone(), param_defaults],
         );
         runtime.seed(0, 0.0, GraphPayload::default());
@@ -13028,6 +13686,7 @@ mod tests {
             GraphPayload {
                 note: 0.0,
                 velocity: 1.0,
+                duration_beats: 0.25,
             },
         );
 
@@ -13345,6 +14004,8 @@ mod tests {
                     quantize: None,
                     route: None,
                     seed_from: None,
+                    duration: None,
+                    swing: None,
                 });
             graph
                 .node_intrinsics
@@ -13356,6 +14017,8 @@ mod tests {
                     quantize: None,
                     route: Some(crate::graph::ProjectGraphRouteOverride::Track(0)),
                     seed_from: None,
+                    duration: None,
+                    swing: None,
                 });
             graph
                 .edge_params
@@ -13412,6 +14075,7 @@ mod tests {
             crate::graph::GraphPayload {
                 note: 0.0,
                 velocity: 1.0,
+                duration_beats: 0.25,
             },
         );
         assert_eq!(seeded, 1, "track 0 should seed node 0 exactly once");
@@ -13500,6 +14164,7 @@ mod tests {
             crate::graph::GraphPayload {
                 note: 0.0,
                 velocity: 1.0,
+                duration_beats: 0.25,
             },
         );
         let mut scratch = ScratchControlRuntime::new(
@@ -13683,8 +14348,8 @@ mod tests {
         collect_widgets(&layout, "number-picker", &mut pickers);
         assert_eq!(
             pickers.len(),
-            16 * 7 + 2,
-            "expected delay/transpose/vel/reset/dampening/recovery per node + reset-bars + max-poly"
+            16 * 8 + 2,
+            "expected delay/transpose/reset/vel/dampening/recovery per node + reset-bars + max-poly"
         );
         let mut dropdowns = Vec::new();
         collect_widgets(&layout, "dropdown", &mut dropdowns);
@@ -13698,6 +14363,7 @@ mod tests {
                 format!("graph-16-route-{idx}"),
                 format!("graph-16-delay-{idx}"),
                 format!("graph-16-transpose-{idx}"),
+                format!("graph-16-transpose-reset-{idx}"),
                 format!("graph-16-vel-decay-{idx}"),
                 format!("graph-16-vel-reset-{idx}"),
                 format!("graph-16-state-reset-{idx}"),
@@ -13712,6 +14378,13 @@ mod tests {
             }
         }
 
+        let transpose_reset_change = find_by_stable_key(&layout, "graph-16-transpose-reset-5")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("transpose-reset callback");
+        runtime
+            .invoke(transpose_reset_change, vec![Value::Number(1.0)])
+            .expect("invoke transpose-reset callback");
         let vel_reset_change = find_by_stable_key(&layout, "graph-16-vel-reset-6")
             .and_then(|node| node.props.get("on-change"))
             .cloned()
@@ -13732,6 +14405,12 @@ mod tests {
             .iter()
             .find(|graph| graph.sequencer_name == "neural-16-demo")
             .expect("graph overrides after reset control edits");
+        assert!(
+            graph.node_params.iter().any(|param| {
+                param.instance == 5 && param.param == "transpose-reset" && param.value == 1.0
+            }),
+            "transpose-reset knob should write a node param override"
+        );
         assert!(
             graph.node_params.iter().any(|param| {
                 param.instance == 6 && param.param == "vel-reset" && param.value == 1.0
@@ -13797,6 +14476,8 @@ mod tests {
                     quantize: None,
                     route: None,
                     seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
+                    duration: None,
+                    swing: None,
                 },
                 crate::graph::ProjectGraphNodeIntrinsicOverride {
                     group: "nrn".to_string(),
@@ -13806,6 +14487,8 @@ mod tests {
                     quantize: None,
                     route: None,
                     seed_from: None,
+                    duration: None,
+                    swing: None,
                 },
                 crate::graph::ProjectGraphNodeIntrinsicOverride {
                     group: "nrn".to_string(),
@@ -13815,6 +14498,8 @@ mod tests {
                     quantize: None,
                     route: Some(crate::graph::ProjectGraphRouteOverride::Track(0)),
                     seed_from: None,
+                    duration: None,
+                    swing: None,
                 },
             ],
             node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
@@ -13932,6 +14617,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 2,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "nrn".into(),
                 params: vec![ParamSpec {
@@ -13968,7 +14655,9 @@ mod tests {
         let mut runtime = Runtime::new();
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         runtime
-            .eval_str("(graph-node \"neural\" 1 :delay 3 :route 0 :seed-from 0)")
+            .eval_str(
+                "(graph-node \"neural\" 1 :delay 3 :route 0 :seed-from 0 :duration (beats :16) :swing (swing 60 :16))",
+            )
             .expect("graph-node");
         runtime
             .eval_str("(graph-param \"neural\" 1 :threshold 0.75)")
@@ -13980,6 +14669,14 @@ mod tests {
         let overrides = state.current_graph_overrides();
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].node_intrinsics[0].delay_steps, Some(3));
+        assert_eq!(
+            overrides[0].node_intrinsics[0].duration,
+            Some(crate::graph::GraphDurationSpec::Beats { value: 0.25 })
+        );
+        assert_eq!(
+            overrides[0].node_intrinsics[0].swing,
+            Some(crate::graph::GraphSwingSpec::new(60.0, 0))
+        );
         assert_eq!(overrides[0].node_params[0].value, 0.75);
         assert_eq!(overrides[0].edge_params[0].value, 0.5);
         assert_eq!(
@@ -14029,6 +14726,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 2,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "nrn".into(),
                 params: vec![ParamSpec {
@@ -14145,6 +14844,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 4,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "nrn".into(),
                 params: vec![ParamSpec {

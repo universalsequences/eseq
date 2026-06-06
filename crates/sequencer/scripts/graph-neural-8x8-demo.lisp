@@ -36,6 +36,7 @@
   ;; :deterministic :propagation :random :loudest :lowest-transpose :highest-transpose
   ;; :seed-first (seed-originated fires win their slots before neural-only ones).
   :max-poly-selection :propagation
+  :duration (steps 1)
 
   (def-node nrn
     :resolution :16

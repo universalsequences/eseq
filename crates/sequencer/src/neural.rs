@@ -1253,6 +1253,7 @@ mod tests {
             crate::graph::GraphPayload {
                 note: seed.resolved.transpose,
                 velocity: seed.resolved.velocity,
+                duration_beats: seed.resolved.duration,
             },
         );
         let mut graph_out = Vec::new();

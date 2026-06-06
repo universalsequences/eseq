@@ -10,6 +10,7 @@
   :seed-on-reset 0
   :max-poly 2
   :max-poly-selection :deterministic
+  :duration (steps 1)
 
   (def-node nrn
     :resolution :16

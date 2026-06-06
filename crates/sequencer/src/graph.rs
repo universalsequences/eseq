@@ -195,6 +195,149 @@ impl GraphEdge {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum GraphDurationSpec {
+    Steps {
+        value: f64,
+    },
+    Beats {
+        value: f64,
+    },
+    Timebase {
+        index: u8,
+    },
+    Delay,
+    Seed,
+    Add {
+        items: Vec<GraphDurationSpec>,
+    },
+    Mul {
+        factor: f64,
+        item: Box<GraphDurationSpec>,
+    },
+    Min {
+        items: Vec<GraphDurationSpec>,
+    },
+    Max {
+        items: Vec<GraphDurationSpec>,
+    },
+}
+
+impl Default for GraphDurationSpec {
+    fn default() -> Self {
+        Self::Steps { value: 1.0 }
+    }
+}
+
+impl GraphDurationSpec {
+    fn resolve_beats(
+        &self,
+        node_resolution: Timebase,
+        node_delay_steps: u32,
+        incoming: GraphPayload,
+    ) -> f32 {
+        fn finite_nonnegative(value: f64) -> f32 {
+            if value.is_finite() {
+                value.max(0.0) as f32
+            } else {
+                0.0
+            }
+        }
+
+        let node_step_beats = node_resolution
+            .step_beats(GRAPH_RESOLUTION_REF_STEPS)
+            .max(0.0);
+        let value = match self {
+            Self::Steps { value } => value.max(0.0) * node_step_beats,
+            Self::Beats { value } => value.max(0.0),
+            Self::Timebase { index } => Timebase::from_index(*index as u32)
+                .step_beats(GRAPH_RESOLUTION_REF_STEPS)
+                .max(0.0),
+            Self::Delay => node_delay_steps as f64 * node_step_beats,
+            Self::Seed => incoming.duration_beats as f64,
+            Self::Add { items } => items
+                .iter()
+                .map(|item| item.resolve_beats(node_resolution, node_delay_steps, incoming) as f64)
+                .sum(),
+            Self::Mul { factor, item } => {
+                factor
+                    * item
+                        .resolve_beats(node_resolution, node_delay_steps, incoming)
+                        .max(0.0) as f64
+            }
+            Self::Min { items } => items
+                .iter()
+                .map(|item| item.resolve_beats(node_resolution, node_delay_steps, incoming) as f64)
+                .reduce(f64::min)
+                .unwrap_or(0.0),
+            Self::Max { items } => items
+                .iter()
+                .map(|item| item.resolve_beats(node_resolution, node_delay_steps, incoming) as f64)
+                .reduce(f64::max)
+                .unwrap_or(0.0),
+        };
+        finite_nonnegative(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphSwingSpec {
+    /// Existing sequencer swing convention: 50 is straight, 75 is maximum delayed swing.
+    pub amount: f32,
+    /// Swing resolution index: 0=1/16, 1=1/8, 2=1/4, 3=1/2.
+    pub resolution: u8,
+}
+
+impl Default for GraphSwingSpec {
+    fn default() -> Self {
+        Self {
+            amount: 50.0,
+            resolution: 0,
+        }
+    }
+}
+
+impl GraphSwingSpec {
+    pub fn new(amount: f32, resolution: u8) -> Self {
+        Self {
+            amount: amount.clamp(50.0, 75.0),
+            resolution: resolution.min(3),
+        }
+    }
+
+    fn resolution_beats(self) -> f64 {
+        match self.resolution {
+            1 => 0.5,
+            2 => 1.0,
+            3 => 2.0,
+            _ => 0.25,
+        }
+    }
+
+    fn apply_to_timing(
+        self,
+        sample_time: u64,
+        beats: f64,
+        samples_per_quarter: f64,
+    ) -> (u64, f64) {
+        if self.amount <= 50.0 || !samples_per_quarter.is_finite() || samples_per_quarter <= 0.0 {
+            return (sample_time, beats);
+        }
+        let resolution_beats = self.resolution_beats().max(1e-9);
+        let bucket = ((beats + 1e-9) / resolution_beats).floor() as u64;
+        if bucket % 2 == 0 {
+            return (sample_time, beats);
+        }
+        let delay_beats = ((self.amount as f64 / 100.0) - 0.5) * 2.0 * resolution_beats;
+        let delay_samples = (delay_beats * samples_per_quarter).round().max(0.0) as u64;
+        (
+            sample_time.saturating_add(delay_samples),
+            beats + delay_beats.max(0.0),
+        )
+    }
+}
+
 /// Per-instance node configuration. These are the **intrinsic** fields the engine
 /// reads to schedule/route (spec §2.2); they are prototype defaults but per-instance
 /// editable. `seed_track_mask` is the resolved `seed-from` track set (Ext 1/§4).
@@ -269,6 +412,10 @@ pub struct ProjectGraphNodeIntrinsicOverride {
     pub route: Option<ProjectGraphRouteOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_from: Option<ProjectGraphSeedFrom>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<GraphDurationSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swing: Option<GraphSwingSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -323,6 +470,10 @@ pub struct GraphNode {
     pub transpose: f32,
     /// Threshold cached from params for native max-poly propagation scoring.
     pub threshold: f64,
+    /// Musical gate duration policy for emitted graph triggers.
+    pub duration: GraphDurationSpec,
+    /// Timing swing policy for graph triggers.
+    pub swing: GraphSwingSpec,
 }
 
 impl Default for GraphNode {
@@ -338,6 +489,8 @@ impl Default for GraphNode {
             seed_on_reset: 0.0,
             transpose: 0.0,
             threshold: 1.0,
+            duration: GraphDurationSpec::default(),
+            swing: GraphSwingSpec::default(),
         }
     }
 }
@@ -352,6 +505,8 @@ pub struct GraphPayload {
     /// Accumulated transpose (semitone offset) carried by the signal.
     pub note: f32,
     pub velocity: f32,
+    /// Resolved musical gate duration in quarter-note beats.
+    pub duration_beats: f32,
 }
 
 impl Default for GraphPayload {
@@ -359,6 +514,7 @@ impl Default for GraphPayload {
         Self {
             note: 0.0,
             velocity: 1.0,
+            duration_beats: 0.25,
         }
     }
 }
@@ -369,12 +525,16 @@ impl Default for GraphPayload {
 /// When a firing carries no `EmitSpec` at all (the `:update` returned a bare truthy
 /// value), `commit_firing` falls back to the legacy relay + `transpose` so the native
 /// neuron drop-in keeps working unchanged.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EmitSpec {
     /// Absolute emitted/propagated note (semitone offset). `None` relays `in-note`.
     pub note: Option<f32>,
     /// Absolute emitted/propagated velocity. `None` relays `in-vel`.
     pub velocity: Option<f32>,
+    /// Emitted/propagated duration policy. `None` falls back to the node duration policy.
+    pub duration: Option<GraphDurationSpec>,
+    /// Emitted timing swing policy. `None` falls back to the node swing policy.
+    pub swing: Option<GraphSwingSpec>,
 }
 
 /// Context passed to the per-node `:update` predicate at one evaluation boundary.
@@ -391,6 +551,10 @@ pub struct NodeEval {
     pub tick_index: u64,
     /// Musical position of this boundary in quarter-note beats.
     pub beat: f64,
+    /// Resolved node resolution for this instance.
+    pub resolution: Timebase,
+    /// Resolved node propagation delay for this instance.
+    pub delay_steps: u32,
     /// The payload that arrived this boundary (`node-input-event`), if any.
     pub input_event: Option<GraphPayload>,
     /// Behavioral params for this node instance: prototype defaults plus sparse
@@ -401,7 +565,7 @@ pub struct NodeEval {
 /// The decision returned by a node's `:update`. v1a: just whether it fired and the
 /// energy to retain if it does *not* fire (so the engine can keep accumulation/decay
 /// bookkeeping out of the closure while still letting the rule own the threshold).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NodeFire {
     pub fired: bool,
     /// The shaped event from `(emit …)`, if the rule emitted one (Ext B). `None` means
@@ -473,6 +637,8 @@ pub struct GraphRuntimeConfig {
     pub reset_interval_beats: f64,
     pub max_poly: u32,
     pub max_poly_selection: NeuralMaxPolySelection,
+    pub default_duration: GraphDurationSpec,
+    pub default_swing: GraphSwingSpec,
     pub node_params: Vec<HashMap<String, f64>>,
 }
 
@@ -486,6 +652,8 @@ impl GraphRuntimeConfig {
         reset_interval_beats: f64,
         max_poly: u32,
         max_poly_selection: NeuralMaxPolySelection,
+        default_duration: GraphDurationSpec,
+        default_swing: GraphSwingSpec,
         node_params: Vec<HashMap<String, f64>>,
     ) -> Self {
         let num_nodes = nodes.len();
@@ -512,6 +680,8 @@ impl GraphRuntimeConfig {
             reset_interval_beats: reset_interval_beats.max(0.0),
             max_poly,
             max_poly_selection,
+            default_duration,
+            default_swing,
             node_params: normalized_node_params(num_nodes, node_params),
         }
     }
@@ -545,6 +715,8 @@ pub struct GraphRuntime {
     reset_interval_beats: f64,
     max_poly: u32,
     max_poly_selection: NeuralMaxPolySelection,
+    default_duration: GraphDurationSpec,
+    default_swing: GraphSwingSpec,
     random_state: u64,
 
     // ── per-node runtime state ──
@@ -603,6 +775,8 @@ impl GraphRuntime {
             reset_interval_beats,
             0,
             NeuralMaxPolySelection::Deterministic,
+            GraphDurationSpec::default(),
+            GraphSwingSpec::default(),
             node_params,
         )
     }
@@ -616,6 +790,8 @@ impl GraphRuntime {
         reset_interval_beats: f64,
         max_poly: u32,
         max_poly_selection: NeuralMaxPolySelection,
+        default_duration: GraphDurationSpec,
+        default_swing: GraphSwingSpec,
         node_params: Vec<HashMap<String, f64>>,
     ) -> Self {
         Self::new_from_config(GraphRuntimeConfig::new(
@@ -627,6 +803,8 @@ impl GraphRuntime {
             reset_interval_beats,
             max_poly,
             max_poly_selection,
+            default_duration,
+            default_swing,
             node_params,
         ))
     }
@@ -647,6 +825,8 @@ impl GraphRuntime {
             reset_interval_beats: config.reset_interval_beats,
             max_poly: config.max_poly,
             max_poly_selection: config.max_poly_selection,
+            default_duration: config.default_duration,
+            default_swing: config.default_swing,
             random_state: config.id,
             node_params: config.node_params,
             energy: vec![0.0; num_nodes],
@@ -734,6 +914,8 @@ impl GraphRuntime {
         self.reset_interval_beats = config.reset_interval_beats;
         self.max_poly = config.max_poly;
         self.max_poly_selection = config.max_poly_selection;
+        self.default_duration = config.default_duration;
+        self.default_swing = config.default_swing;
         self.node_params = config.node_params;
 
         for (idx, next_edge) in config.edges.into_iter().enumerate() {
@@ -952,12 +1134,14 @@ impl GraphRuntime {
                     energy: self.energy[idx],
                     tick_index: self.tick_count[idx],
                     beat: boundary_beats,
+                    resolution: self.nodes[idx].resolution,
+                    delay_steps: self.nodes[idx].delay_steps,
                     input_event: self.source_event[idx],
                     params: self.node_params[idx].clone(),
                 };
                 self.tick_count[idx] = self.tick_count[idx].saturating_add(1);
                 let decision = update_fn(&eval);
-                decisions[idx] = decision;
+                decisions[idx] = decision.clone();
                 if decision.fired {
                     let (fire_sample, fire_beats) = self.quantized_fire_timing(
                         idx,
@@ -965,6 +1149,13 @@ impl GraphRuntime {
                         sample_time,
                         samples_per_quarter,
                     );
+                    let swing = decision
+                        .emit
+                        .as_ref()
+                        .and_then(|emit| emit.swing)
+                        .unwrap_or(self.nodes[idx].swing);
+                    let (fire_sample, fire_beats) =
+                        swing.apply_to_timing(fire_sample, fire_beats, samples_per_quarter);
                     // Mirror commit_firing's payload resolution so max_poly selection
                     // ranks on the velocity/note this firing will actually emit.
                     let incoming = self.source_event[idx].unwrap_or_default();
@@ -1223,10 +1414,24 @@ impl GraphRuntime {
             Some(spec) => GraphPayload {
                 note: spec.note.unwrap_or(incoming.note),
                 velocity: spec.velocity.unwrap_or(incoming.velocity),
+                duration_beats: spec
+                    .duration
+                    .as_ref()
+                    .unwrap_or(&self.nodes[node_index].duration)
+                    .resolve_beats(
+                        self.nodes[node_index].resolution,
+                        self.nodes[node_index].delay_steps,
+                        incoming,
+                    ),
             },
             None => GraphPayload {
                 note: incoming.note + self.nodes[node_index].transpose,
                 velocity: incoming.velocity,
+                duration_beats: self.nodes[node_index].duration.resolve_beats(
+                    self.nodes[node_index].resolution,
+                    self.nodes[node_index].delay_steps,
+                    incoming,
+                ),
             },
         };
         let mut event = EmittedAccumulatorEvent {
@@ -1241,6 +1446,7 @@ impl GraphRuntime {
         };
         event.resolved.transpose = payload.note;
         event.resolved.velocity = payload.velocity;
+        event.resolved.duration = payload.duration_beats;
         self.node_events[node_index] = Some(GraphVisualizationEvent {
             node_index,
             track: event.track,
@@ -1582,6 +1788,8 @@ pub struct NodeProto {
     pub quantize: Option<Timebase>,
     pub route: Option<usize>,
     pub seed_from: SeedFrom,
+    pub duration: Option<GraphDurationSpec>,
+    pub swing: Option<GraphSwingSpec>,
     pub reduce: Reduce,
     pub event_select: EventSelect,
     pub params: Vec<ParamSpec>,
@@ -1598,6 +1806,8 @@ impl Default for NodeProto {
             quantize: None,
             route: None,
             seed_from: SeedFrom::Route,
+            duration: None,
+            swing: None,
             reduce: Reduce::Sum,
             event_select: EventSelect::Newest,
             params: Vec::new(),
@@ -1656,6 +1866,8 @@ pub struct GraphManifest {
     pub seed_on_reset: f64,
     pub max_poly: u32,
     pub max_poly_selection: NeuralMaxPolySelection,
+    pub duration: GraphDurationSpec,
+    pub swing: GraphSwingSpec,
     pub node: NodeProto,
     pub edge_sets: Vec<EdgeSetSpec>,
 }
@@ -1705,6 +1917,12 @@ impl GraphManifest {
             let mut resolution = self.node.resolution;
             let mut delay_steps = self.node.delay_steps;
             let mut quantize = self.node.quantize;
+            let mut duration = self
+                .node
+                .duration
+                .clone()
+                .unwrap_or_else(|| self.duration.clone());
+            let mut swing = self.node.swing.unwrap_or(self.swing);
             if let Some(overrides) = overrides {
                 for intrinsic in overrides.node_intrinsics.iter().filter(|intrinsic| {
                     intrinsic.group == self.node.name && intrinsic.instance == idx
@@ -1723,6 +1941,12 @@ impl GraphManifest {
                     }
                     if let Some(value) = &intrinsic.seed_from {
                         seed_from = SeedFrom::from(value);
+                    }
+                    if let Some(value) = &intrinsic.duration {
+                        duration = value.clone();
+                    }
+                    if let Some(value) = intrinsic.swing {
+                        swing = value;
                     }
                 }
                 for param in overrides
@@ -1748,6 +1972,8 @@ impl GraphManifest {
                 seed_on_reset: self.seed_on_reset,
                 transpose: node_params[idx].get("transpose").copied().unwrap_or(0.0) as f32,
                 threshold: node_params[idx].get("threshold").copied().unwrap_or(1.0),
+                duration,
+                swing,
             });
         }
 
@@ -1801,6 +2027,8 @@ impl GraphManifest {
             reset_every_beats,
             max_poly,
             self.max_poly_selection,
+            self.duration.clone(),
+            self.swing,
             node_params,
         )
     }
@@ -1848,6 +2076,23 @@ mod tests {
         out
     }
 
+    fn run_on_input(runtime: &mut GraphRuntime, end_beats: f64) -> Vec<GraphEmission> {
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            end_beats,
+            0,
+            48_000.0,
+            0,
+            |eval| NodeFire {
+                fired: eval.input > 0.0,
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+        out
+    }
+
     fn runtime_config(id: u64, nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> GraphRuntimeConfig {
         GraphRuntimeConfig::new(
             id,
@@ -1858,8 +2103,193 @@ mod tests {
             0.0,
             0,
             NeuralMaxPolySelection::Deterministic,
+            GraphDurationSpec::default(),
+            GraphSwingSpec::default(),
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn graph_duration_default_is_one_node_step() {
+        let mut source = node(Timebase::Sixteenth);
+        source.seed_track_mask = seed_track_mask(&[0]);
+        let target = node(Timebase::Sixteenth);
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![source, target],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.seed(0, 0.0, GraphPayload::default());
+
+        let out = run_on_input(&mut runtime, 1.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].event.resolved.duration, 0.25);
+    }
+
+    #[test]
+    fn graph_duration_delay_uses_node_delay_steps() {
+        let mut source = node(Timebase::Sixteenth);
+        source.seed_track_mask = seed_track_mask(&[0]);
+        let mut target = node(Timebase::Sixteenth);
+        target.delay_steps = 2;
+        target.duration = GraphDurationSpec::Delay;
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![source, target],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.seed(0, 0.0, GraphPayload::default());
+
+        let out = run_on_input(&mut runtime, 1.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].event.resolved.duration, 0.5);
+    }
+
+    #[test]
+    fn graph_duration_seed_inherits_incoming_payload_duration() {
+        let mut source = node(Timebase::Sixteenth);
+        source.seed_track_mask = seed_track_mask(&[0]);
+        let mut target = node(Timebase::Sixteenth);
+        target.duration = GraphDurationSpec::Seed;
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![source, target],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.seed(
+            0,
+            0.0,
+            GraphPayload {
+                note: 0.0,
+                velocity: 1.0,
+                duration_beats: 0.75,
+            },
+        );
+
+        let out = run_on_input(&mut runtime, 1.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].event.resolved.duration, 0.75);
+    }
+
+    #[test]
+    fn emit_duration_overrides_node_default_and_propagates_downstream() {
+        let mut seed = node(Timebase::Quarter);
+        seed.seed_track_mask = seed_track_mask(&[0]);
+        let n0 = node(Timebase::Quarter);
+        let mut n1 = node(Timebase::Quarter);
+        n1.duration = GraphDurationSpec::Seed;
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![seed, n0, n1],
+            vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(1, 2, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.seed(0, 0.0, GraphPayload::default());
+
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            3.0,
+            0,
+            48_000.0,
+            0,
+            |eval| NodeFire {
+                fired: eval.input > 0.0,
+                emit: (eval.node_index == 1).then(|| EmitSpec {
+                    duration: Some(GraphDurationSpec::Beats { value: 0.5 }),
+                    swing: None,
+                    ..EmitSpec::default()
+                }),
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+
+        let node0 = out
+            .iter()
+            .find(|emission| emission.node_index == 1)
+            .expect("node 0 emission");
+        let node1 = out
+            .iter()
+            .find(|emission| emission.node_index == 2)
+            .expect("node 1 emission");
+        assert_eq!(node0.event.resolved.duration, 0.5);
+        assert_eq!(node1.event.resolved.duration, 0.5);
+    }
+
+    #[test]
+    fn graph_swing_delays_odd_resolution_bucket() {
+        let mut source = node(Timebase::Sixteenth);
+        source.seed_track_mask = seed_track_mask(&[0]);
+        let mut target = node(Timebase::Sixteenth);
+        target.swing = GraphSwingSpec::new(75.0, 0);
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![source, target],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.seed(0, 0.0, GraphPayload::default());
+
+        let out = run_on_input(&mut runtime, 1.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].sample_time, 18_000);
+        assert_eq!(out[0].event.offset_beats, 0.0);
+    }
+
+    #[test]
+    fn emit_swing_overrides_node_straight_timing() {
+        let mut source = node(Timebase::Sixteenth);
+        source.seed_track_mask = seed_track_mask(&[0]);
+        let target = node(Timebase::Sixteenth);
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![source, target],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.seed(0, 0.0, GraphPayload::default());
+
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            0,
+            |eval| NodeFire {
+                fired: eval.input > 0.0,
+                emit: Some(EmitSpec {
+                    swing: Some(GraphSwingSpec::new(75.0, 0)),
+                    ..EmitSpec::default()
+                }),
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].sample_time, 18_000);
     }
 
     fn always_fire_with_dampen(amount: f64) -> impl FnMut(&NodeEval) -> NodeFire {
@@ -2075,6 +2505,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 0,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: GraphDurationSpec::default(),
+            swing: GraphSwingSpec::default(),
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -2118,6 +2550,7 @@ mod tests {
             GraphPayload {
                 note: 10.0,
                 velocity: 1.0,
+                duration_beats: 0.25,
             },
         );
 
@@ -2149,6 +2582,7 @@ mod tests {
             GraphPayload {
                 note: 3.0,
                 velocity: 0.5,
+                duration_beats: 0.25,
             },
         );
 
@@ -2180,6 +2614,7 @@ mod tests {
             GraphPayload {
                 note: 5.0,
                 velocity: 0.5,
+                duration_beats: 0.25,
             },
         );
 
@@ -2246,6 +2681,7 @@ mod tests {
             GraphPayload {
                 note: 5.0,
                 velocity: 0.7,
+                duration_beats: 0.25,
             },
         );
 
@@ -2261,6 +2697,8 @@ mod tests {
                 emit: Some(EmitSpec {
                     note: Some(12.0),
                     velocity: Some(0.42),
+                    duration: None,
+                    swing: None,
                 }),
                 ..NodeFire::default()
             },
@@ -2464,6 +2902,8 @@ mod tests {
             0.0,
             0,
             NeuralMaxPolySelection::Propagation,
+            GraphDurationSpec::default(),
+            GraphSwingSpec::default(),
             Vec::new(),
         );
         let out = run(&mut runtime, 1.0, 1, vec![1.0, 1.0, 99.0]);
@@ -2494,6 +2934,7 @@ mod tests {
             GraphPayload {
                 note: 0.0,
                 velocity: 1.0,
+                duration_beats: 0.25,
             },
         );
         runtime.push_propagation(
@@ -2502,6 +2943,7 @@ mod tests {
             GraphPayload {
                 note: 0.0,
                 velocity: 0.2,
+                duration_beats: 0.25,
             },
         );
         runtime
@@ -2547,6 +2989,7 @@ mod tests {
             GraphPayload {
                 note: 7.0,
                 velocity: 0.5,
+                duration_beats: 0.25,
             },
         );
         runtime.push_propagation(
@@ -2555,6 +2998,7 @@ mod tests {
             GraphPayload {
                 note: 0.0,
                 velocity: 1.0,
+                duration_beats: 0.25,
             },
         );
         let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0, 1.0]);
@@ -2580,6 +3024,8 @@ mod tests {
             0.0,
             1,
             NeuralMaxPolySelection::Loudest,
+            GraphDurationSpec::default(),
+            GraphSwingSpec::default(),
             Vec::new(),
         );
         runtime.seed(
@@ -2588,6 +3034,7 @@ mod tests {
             GraphPayload {
                 note: 0.0,
                 velocity: 0.3,
+                duration_beats: 0.25,
             },
         );
         runtime.seed(
@@ -2596,6 +3043,7 @@ mod tests {
             GraphPayload {
                 note: 0.0,
                 velocity: 0.9,
+                duration_beats: 0.25,
             },
         );
         let out = run(&mut runtime, 1.0, 1, vec![1.0, 1.0]);
@@ -2621,6 +3069,8 @@ mod tests {
             0.0,
             0,
             NeuralMaxPolySelection::Random,
+            GraphDurationSpec::default(),
+            GraphSwingSpec::default(),
             Vec::new(),
         );
         let out = run(&mut runtime, 1.0, 1, vec![1.0; 4]);
@@ -2664,6 +3114,8 @@ mod tests {
             8.0,
             0,
             NeuralMaxPolySelection::Deterministic,
+            GraphDurationSpec::default(),
+            GraphSwingSpec::default(),
             Vec::new(),
         );
         runtime.energy[1] = 0.75;
@@ -2672,6 +3124,7 @@ mod tests {
         runtime.source_event[1] = Some(GraphPayload {
             note: 7.0,
             velocity: 0.8,
+            duration_beats: 0.25,
         });
         runtime.tick_count[1] = 9;
         runtime.pending[0].push(GraphPropagation {
@@ -2702,6 +3155,8 @@ mod tests {
             4.0,
             0,
             NeuralMaxPolySelection::Propagation,
+            GraphDurationSpec::default(),
+            GraphSwingSpec::default(),
             params,
         );
 
@@ -2714,7 +3169,8 @@ mod tests {
             runtime.source_event[1],
             Some(GraphPayload {
                 note: 7.0,
-                velocity: 0.8
+                velocity: 0.8,
+                duration_beats: 0.25,
             })
         );
         assert_eq!(runtime.tick_count[1], 9);
@@ -2785,6 +3241,7 @@ mod tests {
         runtime.source_event[0] = Some(GraphPayload {
             note: 12.0,
             velocity: 0.6,
+            duration_beats: 0.25,
         });
 
         n0.threshold = 0.25;
@@ -2801,6 +3258,8 @@ mod tests {
             0.0,
             0,
             NeuralMaxPolySelection::Deterministic,
+            GraphDurationSpec::default(),
+            GraphSwingSpec::default(),
             vec![params],
         );
         assert!(runtime.apply_config_preserving_state(config, 0.0));
@@ -2810,7 +3269,8 @@ mod tests {
             runtime.source_event[0],
             Some(GraphPayload {
                 note: 12.0,
-                velocity: 0.6
+                velocity: 0.6,
+                duration_beats: 0.25,
             })
         );
         assert_eq!(runtime.nodes[0].threshold, 0.25);

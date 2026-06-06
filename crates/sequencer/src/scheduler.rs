@@ -915,13 +915,26 @@ fn seed_graph_runtimes(
     graphs: &mut [crate::graph::GraphRuntime],
     event: &StepEvent,
     seed_beats: f64,
+    samples_per_quarter: f64,
 ) {
     if graphs.is_empty() {
         return;
     }
+    let duration_beats = if samples_per_quarter.is_finite() && samples_per_quarter > 0.0 {
+        let value =
+            event.resolved.duration as f64 * event.samples_per_step as f64 / samples_per_quarter;
+        if value.is_finite() {
+            value.max(0.0) as f32
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
     let payload = crate::graph::GraphPayload {
         note: event.resolved.transpose,
         velocity: event.resolved.velocity,
+        duration_beats,
     };
     let debug_graph = std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some();
     for (graph_idx, graph) in graphs.iter_mut().enumerate() {
@@ -3821,7 +3834,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             trigger.step,
                             trigger.samples_per_step,
                             trigger.samples_per_step / samples_per_quarter,
-                            samples_per_quarter,
+                            samples_per_quarter.into(),
                             trigger.absolute_beats as f32,
                             resolved,
                             effect_params,
@@ -3840,7 +3853,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             snapshot,
                             pattern_epoch,
                             sample_time,
-                            samples_per_quarter,
+                            samples_per_quarter.into(),
                             events,
                         ) {
                             chunk_enqueued = false;
@@ -3848,7 +3861,12 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         }
                         let seed_beats = trigger.absolute_beats;
                         neural_runtime.process_seed_at(&seed_event, seed_beats);
-                        seed_graph_runtimes(graph_runtimes, &seed_event, seed_beats);
+                        seed_graph_runtimes(
+                            graph_runtimes,
+                            &seed_event,
+                            seed_beats,
+                            samples_per_quarter.into(),
+                        );
                     } else {
                         let chord = step_chord_data(snapshot, target_track, trigger.step);
                         let step_event = step_event_from_resolved(
@@ -3870,7 +3888,12 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         );
                         let seed_beats = trigger.absolute_beats;
                         neural_runtime.process_seed_at(&step_event, seed_beats);
-                        seed_graph_runtimes(graph_runtimes, &step_event, seed_beats);
+                        seed_graph_runtimes(
+                            graph_runtimes,
+                            &step_event,
+                            seed_beats,
+                            samples_per_quarter.into(),
+                        );
                         if !ok {
                             chunk_enqueued = false;
                             break;
@@ -3897,7 +3920,12 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     );
                     let seed_beats = trigger.absolute_beats;
                     neural_runtime.process_seed_at(&step_event, seed_beats);
-                    seed_graph_runtimes(graph_runtimes, &step_event, seed_beats);
+                    seed_graph_runtimes(
+                        graph_runtimes,
+                        &step_event,
+                        seed_beats,
+                        samples_per_quarter.into(),
+                    );
                     if !ok {
                         chunk_enqueued = false;
                         break;
@@ -4618,10 +4646,10 @@ mod tests {
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
     use crate::graph::{
-        EdgeSetSpec, GraphEdge, GraphEmission, GraphManifest, GraphNode, GraphPayload,
-        GraphRuntime, NodeEval, NodeFire, NodeProto, ParamSpec, ProjectGraphEdgeParamOverride,
-        ProjectGraphNodeIntrinsicOverride, ProjectGraphOverrides, ProjectGraphRouteOverride,
-        ProjectGraphSeedFrom, SeedFrom, ShapeSpec, Topology,
+        EdgeSetSpec, GraphDurationSpec, GraphEdge, GraphEmission, GraphManifest, GraphNode,
+        GraphPayload, GraphRuntime, NodeEval, NodeFire, NodeProto, ParamSpec,
+        ProjectGraphEdgeParamOverride, ProjectGraphNodeIntrinsicOverride, ProjectGraphOverrides,
+        ProjectGraphRouteOverride, ProjectGraphSeedFrom, SeedFrom, ShapeSpec, Topology,
     };
     use crate::lisp_effect;
     use crate::neural::{
@@ -4665,6 +4693,8 @@ mod tests {
             seed_on_reset: 0.0,
             max_poly: 0,
             max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
             node: NodeProto {
                 name: "n".into(),
                 resolution: Timebase::Quarter,
@@ -4705,12 +4735,72 @@ mod tests {
                 quantize: None,
                 route: Some(ProjectGraphRouteOverride::Track(route)),
                 seed_from: None,
+                duration: None,
+                swing: None,
             }],
             node_params: Vec::new(),
             edge_params: Vec::new(),
             reset_every_beats: None,
             max_poly: None,
         }
+    }
+
+    #[test]
+    fn graph_seed_duration_uses_source_step_duration_and_step_size() {
+        let mut source = GraphNode::default();
+        source.seed_track_mask = crate::graph::seed_track_mask(&[0]);
+        let target = GraphNode {
+            duration: GraphDurationSpec::Seed,
+            ..GraphNode::default()
+        };
+        let graph = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![source, target],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        let mut graphs = vec![graph];
+        let event = StepEvent {
+            track: 0,
+            samples_per_step: 24_000.0,
+            resolved: test_resolved_step(),
+            chord: ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            source: EventSource::Step {
+                track: 0,
+                step: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+
+        super::seed_graph_runtimes(&mut graphs, &event, 0.0, 48_000.0);
+        let mut out = Vec::new();
+        graphs[0].process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            0,
+            |eval| NodeFire {
+                fired: eval.input > 0.0,
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].event.resolved.duration, 0.5);
     }
 
     fn process_graph(
@@ -5275,6 +5365,7 @@ mod tests {
             GraphPayload {
                 note: 7.0,
                 velocity: 0.9,
+                duration_beats: 0.25,
             },
         );
         let mut graph_emissions = Vec::new();
@@ -5457,6 +5548,7 @@ mod tests {
         track: usize,
         sample_time: u64,
         transpose: f32,
+        duration: f32,
         sampler_speed: Option<f32>,
         has_speed_param: bool,
     }
@@ -5477,6 +5569,7 @@ mod tests {
                     track,
                     sample_time: event.sample_time,
                     transpose: resolved.transpose,
+                    duration: resolved.duration,
                     sampler_speed: None,
                     has_speed_param: instrument_params.iter().any(|param| {
                         param.target == ScheduledInstrumentParamTarget::Synth
@@ -5495,6 +5588,7 @@ mod tests {
                     track,
                     sample_time: event.sample_time,
                     transpose: resolved.transpose,
+                    duration: resolved.duration,
                     sampler_speed: Some(sampler_params.playback_speed),
                     has_speed_param: instrument_params.iter().any(|param| {
                         param.target == ScheduledInstrumentParamTarget::Synth
@@ -5559,6 +5653,7 @@ mod tests {
               :seed-on-reset 0
               :max-poly 8
               :max-poly-selection :deterministic
+              :duration (steps 1)
 
               (def-node nrn
                 :resolution :16
@@ -5602,6 +5697,8 @@ mod tests {
                         quantize: None,
                         route: None,
                         seed_from: Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                        duration: None,
+                        swing: None,
                     }],
                     node_params: Vec::new(),
                     edge_params: vec![ProjectGraphEdgeParamOverride {
@@ -5698,6 +5795,7 @@ mod tests {
         assert!(
             target_networks.iter().all(|event| {
                 event.transpose == 7.0
+                    && event.duration == 0.25
                     && event.sampler_speed == Some(2.5)
                     && event.has_speed_param
             }),
