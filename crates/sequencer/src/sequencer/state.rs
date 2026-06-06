@@ -496,6 +496,10 @@ impl TrackPatternPool {
     pub fn get_mut(&mut self, id: PatternId) -> Option<&mut TrackPatternData> {
         self.patterns.get_mut(&id)
     }
+
+    pub fn remove(&mut self, id: PatternId) -> Option<TrackPatternData> {
+        self.patterns.remove(&id)
+    }
 }
 
 #[derive(Clone)]
@@ -831,6 +835,36 @@ impl ProjectScenes {
         let id = self.track_pools.get_mut(track)?.insert(source);
         *self.track_overrides.get_mut(track)? = Some(id);
         Some(id)
+    }
+
+    pub fn clone_track_pattern_into_current_scene(&mut self, track: usize) -> Option<PatternId> {
+        if track >= self.scenes.get(self.current_scene)?.cells.len() {
+            return None;
+        }
+        let source = self.effective_track_pattern(track)?.clone();
+        let id = self.track_pools.get_mut(track)?.insert(source);
+        let scene = self.scenes.get_mut(self.current_scene)?;
+        scene.cells[track] = Some(id);
+        *self.track_overrides.get_mut(track)? = None;
+        Some(id)
+    }
+
+    pub fn delete_track_pattern(&mut self, track: usize, id: PatternId) -> bool {
+        let Some(pool) = self.track_pools.get_mut(track) else {
+            return false;
+        };
+        if pool.remove(id).is_none() {
+            return false;
+        }
+        for scene in &mut self.scenes {
+            if scene.cells.get(track).copied().flatten() == Some(id) {
+                scene.cells[track] = None;
+            }
+        }
+        if self.track_overrides.get(track).copied().flatten() == Some(id) {
+            self.track_overrides[track] = None;
+        }
+        true
     }
 
     pub fn new_scene(&mut self) -> usize {
@@ -3546,6 +3580,89 @@ impl SequencerState {
         Some(id)
     }
 
+    pub fn clone_current_scene_track_pattern(
+        &self,
+        track: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> Option<PatternId> {
+        if track >= num_tracks {
+            return None;
+        }
+        let current_snapshot = self.capture_current_pattern_snapshot(
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
+        let (id, data) = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let current_scene = self.current_scene_index();
+            scenes.save_scene_snapshot(current_scene, current_snapshot);
+            let id = scenes.clone_track_pattern_into_current_scene(track)?;
+            let data = scenes.effective_track_pattern(track)?.clone();
+            (id, data)
+        };
+        data.restore_to(self, track);
+        self.set_scene_silenced(track, false);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        Some(id)
+    }
+
+    pub fn delete_track_pattern(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> bool {
+        if track >= num_tracks {
+            return false;
+        }
+        let current_snapshot = self.capture_current_pattern_snapshot(
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
+        let (was_effective, replacement) = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let current_scene = self.current_scene_index();
+            scenes.save_scene_snapshot(current_scene, current_snapshot);
+            let was_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+            if !scenes.delete_track_pattern(track, pattern_id) {
+                return false;
+            }
+            let replacement = if was_effective {
+                scenes.effective_track_pattern(track).cloned()
+            } else {
+                None
+            };
+            (was_effective, replacement)
+        };
+
+        if was_effective {
+            if let Some(data) = replacement {
+                data.restore_to(self, track);
+                self.set_scene_silenced(track, false);
+            } else {
+                self.set_scene_silenced(track, true);
+            }
+        }
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        true
+    }
+
     pub fn set_scene_cell(
         &self,
         scene: usize,
@@ -5599,6 +5716,80 @@ mod tests {
                 && cell.active_effective
                 && !cell.overridden
         }));
+    }
+
+    #[test]
+    fn clone_current_scene_track_pattern_commits_new_pattern_id() {
+        let state = make_state_with_tracks(1);
+        let first = snapshot_with_active_step(1, 0, 2);
+        state.replace_pattern_repository(vec![first], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let original = state.scene_track_pattern_id(0, 0).unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        let cloned = state
+            .clone_current_scene_track_pattern(
+                0,
+                1,
+                &buffer_ids,
+                &sample_rates,
+                &names,
+                &instrument_types,
+            )
+            .unwrap();
+
+        assert_ne!(cloned, original);
+        assert_eq!(state.scene_track_pattern_id(0, 0), Some(cloned));
+        assert!(state.pattern.patterns[0].is_active(2));
+        let cells = state.track_pattern_cells(0);
+        assert!(cells.iter().any(|cell| cell.pattern_id == original
+            && !cell.assigned_to_current_scene
+            && !cell.active_effective));
+        assert!(cells.iter().any(|cell| cell.pattern_id == cloned
+            && cell.assigned_to_current_scene
+            && cell.active_effective
+            && !cell.overridden));
+    }
+
+    #[test]
+    fn delete_track_pattern_clears_scene_cells_and_silences_if_effective() {
+        let state = make_state_with_tracks(1);
+        let first = snapshot_with_active_step(1, 0, 2);
+        let second = snapshot_with_active_step(1, 0, 5);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let first_id = state.scene_track_pattern_id(0, 0).unwrap();
+        let second_id = state.scene_track_pattern_id(1, 0).unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        assert!(state.delete_track_pattern(
+            0,
+            second_id,
+            1,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+        assert_eq!(state.scene_track_pattern_id(1, 0), None);
+        assert!(!state.is_scene_silenced(0));
+        assert!(state
+            .track_pattern_cells(0)
+            .iter()
+            .all(|cell| cell.pattern_id != second_id));
+
+        assert!(state.delete_track_pattern(
+            0,
+            first_id,
+            1,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+        assert_eq!(state.scene_track_pattern_id(0, 0), None);
+        assert!(state.is_scene_silenced(0));
+        assert!(state.track_pattern_cells(0).is_empty());
     }
 
     #[test]

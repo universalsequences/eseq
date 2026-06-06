@@ -3170,6 +3170,7 @@ pub(crate) struct GraphNodeContext {
     input_event: Option<crate::graph::GraphPayload>,
     dampen_incoming: Option<f64>,
     recover_incoming: Option<f64>,
+    reset_graph_state: bool,
 }
 
 /// A lisp `def-sequencer` definition as held by the scheduler-side VM: its id
@@ -3833,6 +3834,7 @@ impl ScratchControlRuntime {
                 input_event: eval.input_event,
                 dampen_incoming: None,
                 recover_incoming: None,
+                reset_graph_state: false,
             });
         }
         let result = self
@@ -3847,10 +3849,12 @@ impl ScratchControlRuntime {
         }
         let mut dampen_incoming = None;
         let mut recover_incoming = None;
+        let mut reset_graph_state = false;
         if let Ok(mut ctx) = self.graph_node.lock() {
             if let Some(ctx) = ctx.take() {
                 dampen_incoming = ctx.dampen_incoming;
                 recover_incoming = ctx.recover_incoming;
+                reset_graph_state = ctx.reset_graph_state;
             }
         }
         let fired = matches!(&result, Ok(Some(v)) if evalue_is_truthy(v));
@@ -3862,6 +3866,7 @@ impl ScratchControlRuntime {
         Ok(crate::graph::NodeFire {
             fired,
             emit,
+            reset_graph_state,
             dampen_incoming,
             recover_incoming,
         })
@@ -4080,6 +4085,23 @@ fn register_graph_node_natives(runtime: &mut Runtime, graph_node: SharedGraphNod
             ctx.recover_incoming = Some(factor);
             // Returns nil so the common `(if fire? (emit …) (recover-incoming …))`
             // shape skips when the else-branch runs (the chosen no-fire form).
+            Ok(EValue::Nil)
+        },
+    );
+
+    let gn = Arc::clone(&graph_node);
+    runtime.register_native_with_docs(
+        "reset-graph-state",
+        "(reset-graph-state)",
+        "Request a full graph runtime-state reset if this node's firing is accepted.",
+        move |_args, _ctx| {
+            let mut guard = gn.lock().map_err(|_| "graph node context".to_string())?;
+            let ctx = guard
+                .as_mut()
+                .ok_or("reset-graph-state called outside :update")?;
+            ctx.reset_graph_state = true;
+            // Returns nil so callers can place it before the final `(emit …)` in a
+            // `do` without changing the fire decision.
             Ok(EValue::Nil)
         },
     );
@@ -12680,6 +12702,94 @@ mod tests {
     }
 
     #[test]
+    fn graph_update_can_request_graph_state_reset_through_vm() {
+        use crate::graph::{
+            EdgeSetSpec, GraphManifest, GraphPayload, NodeProto, ParamSpec, SeedFrom, ShapeSpec,
+            Topology,
+        };
+        use crate::sequencer::Timebase;
+
+        let manifest = GraphManifest {
+            id: 32,
+            name: "g".into(),
+            shape: ShapeSpec::Line(1),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            node: NodeProto {
+                name: "n".into(),
+                resolution: Timebase::Quarter,
+                seed_from: SeedFrom::Tracks(vec![0]),
+                update_source: Some(
+                    "(if (> (input) 0) (do (reset-graph-state) (emit :note (in-note) :vel 1)) nil)"
+                        .into(),
+                ),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "n".into(),
+                to: "n".into(),
+                topology: Topology::AllToAll,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+            }],
+        };
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut runtime = manifest.materialize();
+        runtime.seed(
+            0,
+            0.0,
+            GraphPayload {
+                note: 9.0,
+                velocity: 0.25,
+            },
+        );
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            4.0,
+            0,
+            48_000.0,
+            manifest.max_poly,
+            |eval| {
+                scratch
+                    .invoke_graph_update(&manifest, eval)
+                    .unwrap_or_default()
+            },
+            &mut out,
+        );
+
+        assert!(
+            out.len() >= 3,
+            "reset should preserve the firing's own self-loop scatter; got {out:?}"
+        );
+        assert!(out
+            .iter()
+            .all(|emission| emission.event.resolved.transpose == 9.0));
+        assert!(out
+            .iter()
+            .all(|emission| emission.event.resolved.velocity == 1.0));
+        assert_eq!(runtime.pending_count_for_node(0), Some(1));
+        assert_eq!(runtime.energy(0), 0.0);
+    }
+
+    #[test]
     fn graph_update_dampen_and_recover_incoming_through_vm() {
         use crate::graph::{
             EdgeSetSpec, GraphEdge, GraphManifest, GraphPayload, NodeProto, ParamSpec, ShapeSpec,
@@ -13573,8 +13683,8 @@ mod tests {
         collect_widgets(&layout, "number-picker", &mut pickers);
         assert_eq!(
             pickers.len(),
-            16 * 5 + 2,
-            "expected delay/transpose/vel/dampening/recovery per node + reset-bars + max-poly"
+            16 * 7 + 2,
+            "expected delay/transpose/vel/reset/dampening/recovery per node + reset-bars + max-poly"
         );
         let mut dropdowns = Vec::new();
         collect_widgets(&layout, "dropdown", &mut dropdowns);
@@ -13589,6 +13699,8 @@ mod tests {
                 format!("graph-16-delay-{idx}"),
                 format!("graph-16-transpose-{idx}"),
                 format!("graph-16-vel-decay-{idx}"),
+                format!("graph-16-vel-reset-{idx}"),
+                format!("graph-16-state-reset-{idx}"),
                 format!("graph-16-dampening-{idx}"),
                 format!("graph-16-recovery-{idx}"),
                 format!("graph-16-resolution-{idx}"),
@@ -13599,6 +13711,39 @@ mod tests {
                 assert_measured(widget);
             }
         }
+
+        let vel_reset_change = find_by_stable_key(&layout, "graph-16-vel-reset-6")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("vel-reset callback");
+        runtime
+            .invoke(vel_reset_change, vec![Value::Number(1.0)])
+            .expect("invoke vel-reset callback");
+        let state_reset_change = find_by_stable_key(&layout, "graph-16-state-reset-7")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("state-reset callback");
+        runtime
+            .invoke(state_reset_change, vec![Value::Number(1.0)])
+            .expect("invoke state-reset callback");
+
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-16-demo")
+            .expect("graph overrides after reset control edits");
+        assert!(
+            graph.node_params.iter().any(|param| {
+                param.instance == 6 && param.param == "vel-reset" && param.value == 1.0
+            }),
+            "vel-reset knob should write a node param override"
+        );
+        assert!(
+            graph.node_params.iter().any(|param| {
+                param.instance == 7 && param.param == "state-reset" && param.value == 1.0
+            }),
+            "state-reset knob should write a node param override"
+        );
 
         runtime
             .eval_str("(g16-init-ring-defaults)")

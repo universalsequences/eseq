@@ -407,6 +407,9 @@ pub struct NodeFire {
     /// The shaped event from `(emit …)`, if the rule emitted one (Ext B). `None` means
     /// the legacy default (relay incoming payload + this node's `transpose`).
     pub emit: Option<EmitSpec>,
+    /// If true on an accepted firing, clear the whole graph's runtime state after all
+    /// accepted firings at this boundary have emitted.
+    pub reset_graph_state: bool,
     /// If set, commit-time edge-state mutation for incoming edges that actually
     /// triggered this node this eval.
     pub dampen_incoming: Option<f64>,
@@ -441,6 +444,7 @@ struct GraphFiringCandidate {
     fire_sample: u64,
     fire_beats: f64,
     emit: Option<EmitSpec>,
+    reset_graph_state: bool,
     dampen_incoming: Option<f64>,
     /// The velocity this firing would emit, for velocity-aware `max_poly` selection.
     velocity: f32,
@@ -791,16 +795,33 @@ impl GraphRuntime {
         self.pending.get(node_index).map(Vec::len)
     }
 
-    /// Reset all runtime state: clocks realigned to `total_beats`, energy zeroed then
-    /// seeded from `seed_on_reset`, pending queues cleared, decay/reset indices
-    /// recomputed (mirrors `neural::reset_state`).
+    /// Reset runtime state for transport/periodic resets: clocks realigned to
+    /// `total_beats`, energy zeroed then seeded from `seed_on_reset`, edge dampening
+    /// restored, decay/reset indices recomputed. Future external seed propagations are
+    /// preserved so a clock trigger at the reset boundary can still drive the graph.
     pub fn reset(&mut self, total_beats: f64) {
+        self.reset_internal(total_beats, true);
+    }
+
+    /// Reset caused by an accepted graph firing. This clears pending propagations too:
+    /// a node-authored reset means "clear the graph's state", not "resync transport".
+    fn reset_clearing_pending(&mut self, total_beats: f64) {
+        self.reset_internal(total_beats, false);
+    }
+
+    fn reset_internal(&mut self, total_beats: f64, preserve_external_seeds: bool) {
         for idx in 0..self.num_nodes {
-            let preserved_external_seeds = self.pending[idx]
-                .iter()
-                .copied()
-                .filter(|prop| prop.external_seed && prop.ready_after_beats + 1e-9 >= total_beats)
-                .collect::<Vec<_>>();
+            let preserved_external_seeds = if preserve_external_seeds {
+                self.pending[idx]
+                    .iter()
+                    .copied()
+                    .filter(|prop| {
+                        prop.external_seed && prop.ready_after_beats + 1e-9 >= total_beats
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             self.energy[idx] = self.nodes[idx].seed_on_reset;
             self.trigger_activity[idx] = 0.0;
             self.trigger_visual_until_beats[idx] = 0.0;
@@ -959,6 +980,7 @@ impl GraphRuntime {
                         fire_sample,
                         fire_beats,
                         emit: decision.emit,
+                        reset_graph_state: decision.reset_graph_state,
                         dampen_incoming: decision.dampen_incoming,
                         velocity,
                         note,
@@ -970,6 +992,15 @@ impl GraphRuntime {
             // ── max_poly selection (deterministic: earliest sample, then index). ──
             candidates.sort_by_key(|c| (c.fire_sample, c.node_index));
             let accepted = self.max_poly_accept(&candidates, max_poly);
+            let reset_graph_state = candidates
+                .iter()
+                .enumerate()
+                .any(|(cand_idx, candidate)| accepted[cand_idx] && candidate.reset_graph_state);
+            let pending_lengths_before_commit = if reset_graph_state {
+                self.pending.iter().map(Vec::len).collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let mut rejected = vec![false; self.num_nodes];
             let mut accepted_node = vec![false; self.num_nodes];
             for (cand_idx, candidate) in candidates.iter().enumerate() {
@@ -980,20 +1011,54 @@ impl GraphRuntime {
                     rejected[candidate.node_index] = true;
                 }
             }
-            for idx in 0..self.num_nodes {
-                if !due[idx] {
-                    continue;
-                }
-                if accepted_node[idx] {
-                    continue;
-                }
-                if rejected[idx] {
-                    self.drop_firing(idx);
-                } else {
-                    if let Some(factor) = decisions[idx].recover_incoming {
-                        self.recover_incoming(idx, factor);
+            if reset_graph_state {
+                let mut preserved_reset_firings = Vec::new();
+                for (cand_idx, candidate) in candidates.iter().enumerate() {
+                    if !accepted[cand_idx] || !candidate.reset_graph_state {
+                        continue;
                     }
-                    self.clear_incoming_triggers(idx);
+                    let node_index = candidate.node_index;
+                    let pending_start = pending_lengths_before_commit[node_index];
+                    let pending = self.pending[node_index][pending_start..].to_vec();
+                    preserved_reset_firings.push((
+                        node_index,
+                        pending,
+                        self.trigger_activity[node_index],
+                        self.trigger_visual_until_beats[node_index],
+                        self.node_events[node_index].clone(),
+                    ));
+                }
+                self.reset_clearing_pending(boundary_beats);
+                for (
+                    node_index,
+                    pending,
+                    trigger_activity,
+                    trigger_visual_until_beats,
+                    node_event,
+                ) in preserved_reset_firings
+                {
+                    self.pending[node_index].extend(pending);
+                    self.trigger_activity[node_index] = trigger_activity;
+                    self.trigger_visual_until_beats[node_index] = trigger_visual_until_beats;
+                    self.node_events[node_index] = node_event;
+                }
+            }
+            if !reset_graph_state {
+                for idx in 0..self.num_nodes {
+                    if !due[idx] {
+                        continue;
+                    }
+                    if accepted_node[idx] {
+                        continue;
+                    }
+                    if rejected[idx] {
+                        self.drop_firing(idx);
+                    } else {
+                        if let Some(factor) = decisions[idx].recover_incoming {
+                            self.recover_incoming(idx, factor);
+                        }
+                        self.clear_incoming_triggers(idx);
+                    }
                 }
             }
 
@@ -2092,6 +2157,82 @@ mod tests {
         assert_eq!(out[0].node_index, 1);
         assert_eq!(out[0].event.resolved.transpose, 10.0);
         assert_eq!(out[0].event.resolved.velocity, 0.5);
+    }
+
+    #[test]
+    fn accepted_reset_state_firing_clears_graph_state_after_boundary_emission() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let mut runtime = GraphRuntime::new(
+            1,
+            "g".into(),
+            nodes,
+            vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(1, 0, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.energy[0] = 3.0;
+        runtime.edges[0].dampening = 0.75;
+        runtime.nodes[0].seed_track_mask = seed_track_mask(&[9]);
+        assert_eq!(runtime.seed(9, 2.0, GraphPayload::default()), 1);
+        runtime.push_propagation(
+            0,
+            0.0,
+            GraphPayload {
+                note: 5.0,
+                velocity: 0.5,
+            },
+        );
+
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            1.0,
+            0,
+            48_000.0,
+            0,
+            |eval| NodeFire {
+                fired: eval.node_index == 1 && eval.input > 0.0,
+                reset_graph_state: eval.node_index == 1,
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].event.resolved.transpose, 5.0);
+        assert_eq!(out[0].event.resolved.velocity, 0.5);
+        assert_eq!(runtime.energy, vec![0.0, 0.0]);
+        assert_eq!(
+            runtime.pending_count_for_node(0),
+            Some(0),
+            "unrelated pending state should be cleared"
+        );
+        assert_eq!(
+            runtime.pending_count_for_node(1),
+            Some(1),
+            "the reset firing's outgoing propagation should survive the reset"
+        );
+        assert_eq!(runtime.edge_dampening(0), Some(0.0));
+        assert_eq!(runtime.trigger_activity, vec![0.0, 1.0]);
+
+        let mut propagated_after_reset = Vec::new();
+        runtime.process_block(
+            1.0,
+            2.0,
+            48_000,
+            48_000.0,
+            0,
+            |eval| NodeFire {
+                fired: eval.node_index == 0 && eval.input > 0.0,
+                ..NodeFire::default()
+            },
+            &mut propagated_after_reset,
+        );
+        assert_eq!(propagated_after_reset.len(), 1);
+        assert_eq!(propagated_after_reset[0].node_index, 0);
+        assert_eq!(propagated_after_reset[0].event.resolved.transpose, 5.0);
+        assert_eq!(propagated_after_reset[0].event.resolved.velocity, 0.5);
     }
 
     #[test]

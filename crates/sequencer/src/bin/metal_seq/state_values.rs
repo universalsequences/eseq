@@ -9326,6 +9326,11 @@ mod tests {
                 "mixer-track:{}",
                 test_delete_target_number(payload, "track")?
             )),
+            "track-pattern" => Some(format!(
+                "track-pattern:{}:{}",
+                test_delete_target_number(payload, "track")?,
+                test_delete_target_number(payload, "pattern-id")?
+            )),
             "mod-route" => Some(format!(
                 "mod-route:{}:{}:{}",
                 test_delete_target_number(payload, "source")?,
@@ -9456,6 +9461,7 @@ mod tests {
                         "delete-track"
                     }
                     ("*mixer*", "mod-route") => "delete-mod-route",
+                    ("*mixer*", "track-pattern") => "delete-track-pattern",
                     ("*fx*", "fx-effect") => {
                         let chain = match &payload {
                             Value::Map(map) => {
@@ -11666,7 +11672,7 @@ mod tests {
 
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
         editor.runtime_mut().eval_str(&src).expect("load grid lisp");
-        editor.refresh_runtime_side_effects();
+        apply_startup_grid_layout(&mut editor).expect("apply startup grid layout");
         if let Some(status) = editor.runtime_mut().take_status_message() {
             if status.to_ascii_lowercase().contains("error") {
                 panic!("full grid lisp status after refresh: {status}");
@@ -12454,6 +12460,46 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_grid_reload_does_not_reapply_startup_layout() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.create_scratch_buffer("*code*", "", eseqlisp::BufferMode::ESeqLisp);
+        editor.create_scratch_buffer("*fake-seq*", "", eseqlisp::BufferMode::ESeqLisp);
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (set-layout
+                  (list :cols :gap 1
+                    0.5 (list :buf "*code*" :hide-status true)
+                    0.5 (list :buf "*fake-seq*" :hide-status true)))
+                "#,
+            )
+            .expect("install custom code/ui layout");
+        editor.refresh_runtime_side_effects();
+
+        let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(PathBuf::from("metal-seq-grid.lisp")),
+            &src,
+            overlays,
+        );
+        assert!(
+            report.success,
+            "failed to reload grid UI: {}",
+            report.failure_message()
+        );
+        editor.process_lisp_reload_report(report);
+
+        assert_eq!(
+            collect_tile_buffer_names(&editor),
+            vec!["*code*".to_string(), "*fake-seq*".to_string()],
+            "reloading metal-seq-grid.lisp should refresh definitions without replacing the active layout"
+        );
+    }
+
+    #[test]
     fn metal_seq_piano_roll_placement_preference_controls_next_tab() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
@@ -12556,6 +12602,59 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_samples_sidebar_toggle_hides_and_restores_samples_tile() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        assert!(
+            collect_tile_buffer_names(&editor).contains(&"*samples*".to_string()),
+            "default layout should show the samples sidebar"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-samples-sidebar)")
+            .expect("hide samples sidebar");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("samples-sidebar-visible")
+                .unwrap(),
+            Some(Value::Bool(false))
+        );
+        let hidden_buffers = collect_tile_buffer_names(&editor);
+        assert!(
+            !hidden_buffers.contains(&"*samples*".to_string()),
+            "hidden samples sidebar should be removed from the tile layout: {hidden_buffers:?}"
+        );
+        for expected in ["*transport*", "*sequencer*", "*track*", "*mixer*", "*fx*"] {
+            assert!(
+                hidden_buffers.contains(&expected.to_string()),
+                "hiding samples should preserve {expected}: {hidden_buffers:?}"
+            );
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-samples-sidebar)")
+            .expect("show samples sidebar");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("samples-sidebar-visible")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
+        assert!(
+            collect_tile_buffer_names(&editor).contains(&"*samples*".to_string()),
+            "second toggle should restore the samples sidebar"
+        );
+    }
+
+    #[test]
     fn metal_seq_instrument_patcher_layout_uses_transport_patcher_and_three_part_bottom_bar() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.create_scratch_buffer(
@@ -12605,6 +12704,51 @@ mod tests {
                 && (samples.row - mixer.row).abs() <= 0.1
                 && (mixer.row - fx.row).abs() <= 0.1,
             "samples/mixer/fx should divide the bottom bar into three horizontal parts; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_samples_sidebar_toggle_hides_patcher_samples_tile() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.create_scratch_buffer(
+            "*instrument-patcher:test*",
+            "",
+            eseqlisp::BufferMode::ESeqLisp,
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seq-apply-instrument-patcher-layout "*instrument-patcher:test*")"#)
+            .expect("apply instrument patcher layout");
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-samples-sidebar)")
+            .expect("hide samples sidebar");
+        editor.refresh_runtime_side_effects();
+
+        let hidden_buffers = collect_tile_buffer_names(&editor);
+        assert!(
+            !hidden_buffers.contains(&"*samples*".to_string()),
+            "hidden samples sidebar should be removed from patcher layout: {hidden_buffers:?}"
+        );
+
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let tile = |name: &str| {
+            frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == name)
+                .unwrap_or_else(|| panic!("expected tile for {name}"))
+        };
+
+        let mixer = tile("*mixer*").rect;
+        let fx = tile("*fx*").rect;
+        assert!(
+            (mixer.row - fx.row).abs() <= 0.1
+                && (mixer.height - fx.height).abs() <= 0.75
+                && mixer.width > 0.0
+                && fx.width > 0.0,
+            "with samples hidden, mixer/fx should remain visible in the patcher bottom bar; mixer={mixer:?} fx={fx:?}"
         );
     }
 
@@ -13227,6 +13371,20 @@ mod tests {
             "master recording button should be inside the transport panel: button={:?} panel={:?}",
             button.rect,
             layout.rect
+        );
+
+        let samples_button =
+            find_layout_node_by_stable_key(&layout, "transport-samples-sidebar-button")
+                .expect("samples sidebar button");
+        let save_button =
+            find_layout_node_by_stable_key(&layout, "transport-save-button").expect("save button");
+        assert_finite_nonzero_rect(samples_button, "samples sidebar button");
+        assert_finite_nonzero_rect(save_button, "save button");
+        assert!(
+            samples_button.rect.col + samples_button.rect.width <= save_button.rect.col,
+            "samples sidebar button should be to the left of save; samples={:?} save={:?}",
+            samples_button.rect,
+            save_button.rect
         );
     }
 
@@ -22306,6 +22464,57 @@ mod tests {
                 );
             }
             other => panic!("expected set-scene-cell host command, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-handle-key \"BS\" nil)")
+            .expect("delete selected track pattern from mixer grid");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "delete-track-pattern");
+                let Value::Map(payload) = payload else {
+                    panic!("delete-track-pattern payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("pattern-id")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(4.0))
+                );
+            }
+            other => panic!("expected delete-track-pattern host command, got {other:?}"),
+        }
+        let clone_cell = find_node_by_stable_key(&layout, "mixer-v2-track-pattern-clone-1")
+            .expect("track 2 clone pattern cell");
+        assert!(
+            clone_cell.rect.width > 0.0 && clone_cell.rect.height > 0.0,
+            "track pattern clone cell should have a finite visible rect: {:?}",
+            clone_cell.rect
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-clone-track-pattern 1)")
+            .expect("clone track pattern from mixer grid");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "clone-track-pattern");
+                let Value::Map(payload) = payload else {
+                    panic!("clone-track-pattern payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+            }
+            other => panic!("expected clone-track-pattern host command, got {other:?}"),
         }
         editor
             .runtime_mut()

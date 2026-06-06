@@ -25,6 +25,9 @@
 (def mixer-v2-track-delete-target-binding (i)
   (bind-seq (str "mixer-track-delete-target-" i)))
 
+(def mixer-v2-track-pattern-delete-target? (track pattern-id)
+  (seq-delete-target? :track-pattern (dict :track track :pattern-id pattern-id)))
+
 (def mixer-v2-track-color (i)
   (if (< i (len SEQ.track-colors))
     (nth SEQ.track-colors i)
@@ -254,20 +257,26 @@
 (defwidget track-pattern-cell-bg
   :width 0.88 :height 0.38
   :paint-margin 0.04
-  :state (active assigned override)
+  :state (active assigned override selected clone)
   :shader
-  (let ((outer (if (= active 1)
+  (let ((outer (if (= selected 1)
+          (rgba 1.0 0.62 0.22 1.0)
+          (if (= clone 1)
+            (rgba 0.78 0.82 0.86 1.0)
+            (if (= active 1)
           (rgba 0.82 0.96 1.0 1.0)
           (if (= 1 (* assigned override))
             (rgba 0.95 0.48 0.18 1.0)
             (if (= assigned 1)
               (rgba 0.52 0.58 0.68 1.0)
-              (rgba 0.18 0.19 0.21 1.0)))))
-        (inner (if (= 1 active)
+              (rgba 0.18 0.19 0.21 1.0)))))))
+        (inner (if (= clone 1)
+          (rgba 0.34 0.37 0.40 1.0)
+          (if (= 1 active)
           (rgba 0.82 0.88 1.0 1.0)
           (if (= 1 assigned)
             (rgba 0.16 0.18 0.21 1.0)
-            (rgba 0.09 0.10 0.11 1.0)))))
+            (rgba 0.09 0.10 0.11 1.0))))))
     (sdf/layer
       (sdf/fill (sdf/rounded-rect width height 0.03)
         (material :color outer))
@@ -287,7 +296,14 @@
       (dict
         :scene (or SEQ.current-pattern 0)
         :track track
-        :pattern-id (get cell :id)))))
+        :pattern-id (get cell :id)))
+    (seq-set-delete-target :track-pattern (dict :track track :pattern-id (get cell :id)))))
+
+(def mixer-v2-clone-track-pattern (track)
+  (do
+    (mixer-v2-activate-track-control track)
+    (seq-set-track track)
+    (host-command "clone-track-pattern" (dict :track track))))
 
 (def mixer-v2-track-pattern-grid (track)
   (let ((cells (mixer-v2-track-pattern-cells track)))
@@ -303,7 +319,21 @@
             :active (get cell :active)
             :assigned (get cell :assigned)
             :override (get cell :override)
-            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell))))))))
+            :selected (mixer-v2-track-pattern-delete-target? track (get cell :id))
+            :clone 0
+            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell))))
+        (box
+          :key (str "mixer-v2-track-pattern-clone-" track)
+          :width 1.50 :height 0.75
+          :padding 0
+          :bg :transparent
+          :background "track-pattern-cell-bg"
+          :active 0
+          :assigned 0
+          :override 0
+          :selected 0
+          :clone 1
+          :on-click (lambda (event) (mixer-v2-clone-track-pattern track)))))))
 
 (def mixer-v2-mod-output-style
   (ui/style
@@ -506,11 +536,9 @@
               (mixer-v2-clear-delete-target)
               (host-command "set-track-output" (dict :track i :label v))))
           :width :fill :height 1.2 :font-size 10)
-        (mixer-v2-mod-port-row i)
         (mixer-v2-track-pattern-grid i)
         
         	       
-        (box :width :fill :height 0.2)
         (h-stack :gap 1.6 :align :center
           (v-stack
             
@@ -531,6 +559,8 @@
                   (seq-set-track-pan i v)))))
           
           (mixer-v2-track-meter-control i))
+        
+        (box :width :fill :height 0.25)
         (h-stack :gap 0.35
           (button (str (+ i 1))
             :width 2.1 :height 1.0 :padding 0 :font-size 10
@@ -547,6 +577,7 @@
             :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
             :color (if (nth SEQ.record-armed i) :black :dim)
             :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))
+        (mixer-v2-mod-port-row i)
         (box
           :key (str "mixer-v2-track-label-" i)
           :width :fill :height 1.0
@@ -697,7 +728,7 @@
 
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
-    (box :width 10.3 :height 12.0
+    (box :width 10.3 :height 13.0
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
       :corner-radius 10
@@ -705,7 +736,7 @@
       :padding 0.45
       :on-click (lambda (event) (mixer-v2-select-bus i))
       (v-stack :gap 0.25
-        (box :height 4.8)
+        (box :height 5.8)
         (h-stack :gap 0.45 :align :center
           (box :width 3.0 :height 3.6)
           (mixer-v2-bus-meter-control i))
@@ -722,14 +753,14 @@
             :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-solo i))))
           (box :width 2.1 :height 1.0))
         (button (mixer-v2-bus-label i)
-          :width 8.2 :height 1.0 :padding 0 :font-size 10
+          :width :fill :height 1.0 :padding 0 :font-size 10
           :background-color :mixer-label-bg
           :color :white
           :on-click (lambda (event) (mixer-v2-select-bus i)))))))
 
 (def mixer-v2-sample-drop-zone ()
   (box :key "mixer-v2-sample-drop-zone"
-    :width 11.8 :height 12.0
+    :width 11.8 :height 13.0
     :background-color :buffer-bg
     :drop-hover-background-color :mixer-control-bg
     :border-width 2
@@ -747,12 +778,13 @@
       :bg :transparent)))
 
 (effect-buffer "*mixer*"
-  (h-stack :padding 0.2 :gap 0.0
+  (h-stack :padding 0.2 :gap 0.3
     (each (range 0 SEQ.num-tracks) |i|
       (subtree :key (str "mixer-v2-track-" i)
-        (if (seq-track-collapsed? i)
-          (mixer-v2-track-collapsed-strip i)
-          (mixer-v2-track-strip i))))
+          (if (seq-track-collapsed? i)
+            (mixer-v2-track-collapsed-strip i)
+            (mixer-v2-track-strip i))
+          ))
     (box :width 1.0 :height 11.0)
     (mixer-v2-sample-drop-zone)
     (box :width 1.0 :height 11.0)

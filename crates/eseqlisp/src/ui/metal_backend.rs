@@ -9,7 +9,7 @@ mod inner {
     use std::path::PathBuf;
     use std::ptr::NonNull;
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -691,6 +691,12 @@ vertex WidgetVaryings widget_vert(
                 compile_widget_shader_source_with_metal(vertex_src, fragment_src)
                     .unwrap_or_else(|err| panic!("{widget_type} widget shader failed: {err}"));
             }
+        }
+
+        #[test]
+        fn editable_button_surface_shader_compiles_in_metal() {
+            compile_widget_shader_with_metal(include_str!("../../shaders/button_surface.metal"))
+                .unwrap();
         }
 
         #[test]
@@ -1728,6 +1734,7 @@ fragment float4 waveform_frag(
         prop_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         // Per-widget-type GPU pipelines (hslider, vslider, toggle)
         widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        button_surface_override_modified: Option<SystemTime>,
         sdf_widget_pipeline_sources: HashMap<String, String>,
         sdf_widget_pipeline_registry_generation: u64,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
@@ -1848,6 +1855,7 @@ fragment float4 waveform_frag(
                 pipeline: None,
                 prop_pipeline: None,
                 widget_pipelines: HashMap::new(),
+                button_surface_override_modified: None,
                 sdf_widget_pipeline_sources: HashMap::new(),
                 sdf_widget_pipeline_registry_generation: 0,
                 waveform_pipeline: None,
@@ -3044,6 +3052,7 @@ fragment float4 waveform_frag(
             }
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.compile_pending_sdf_pipelines();
+            self.compile_pending_button_surface_override();
             self.drain_decoded_images(usize::MAX);
 
             let desc = MTLTextureDescriptor::new();
@@ -3612,6 +3621,133 @@ fragment float4 waveform_frag(
             self.sdf_widget_pipeline_registry_generation = generation;
         }
 
+        fn compile_widget_pipeline_source(
+            &self,
+            widget_type: &str,
+            vertex_src: Option<&str>,
+            fragment_src: &str,
+        ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, BackendError> {
+            let full_src = format!(
+                "{}{}{}",
+                WIDGET_SHADER_PREAMBLE,
+                vertex_src.unwrap_or(DEFAULT_WIDGET_VERTEX_SHADER),
+                fragment_src
+            );
+            let src_ns = NSString::from_str(&full_src);
+            let wlib = self
+                .device
+                .newLibraryWithSource_options_error(&src_ns, None)
+                .map_err(|err| {
+                    eprintln!("Metal widget shader compile failed for {widget_type}: {err:?}");
+                    BackendError::MetalError
+                })?;
+
+            let wvert = wlib
+                .newFunctionWithName(&NSString::from_str("widget_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let wfrag = wlib
+                .newFunctionWithName(&NSString::from_str("widget_frag"))
+                .ok_or(BackendError::MetalError)?;
+
+            let wdesc = MTLRenderPipelineDescriptor::new();
+            wdesc.setVertexFunction(Some(&wvert));
+            wdesc.setFragmentFunction(Some(&wfrag));
+            let wattach = unsafe { wdesc.colorAttachments().objectAtIndexedSubscript(0) };
+            wattach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            wattach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                wattach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                wattach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wattach.setRgbBlendOperation(MTLBlendOperation::Add);
+                wattach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                wattach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wattach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+
+            self.device
+                .newRenderPipelineStateWithDescriptor_error(&wdesc)
+                .map_err(|err| {
+                    eprintln!("Metal widget pipeline creation failed for {widget_type}: {err:?}");
+                    BackendError::MetalError
+                })
+        }
+
+        pub fn poll_editable_shader_overrides(&mut self) -> bool {
+            self.compile_pending_sdf_pipelines();
+            self.compile_pending_button_surface_override()
+        }
+
+        fn compile_pending_button_surface_override(&mut self) -> bool {
+            let path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders/button_surface.metal");
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if self.button_surface_override_modified.is_none() {
+                        eprintln!(
+                            "[button-shader-watch] override file not available path={} error={error}",
+                            path.display()
+                        );
+                    }
+                    return false;
+                }
+            };
+            let modified = match metadata.modified() {
+                Ok(modified) => modified,
+                Err(error) => {
+                    eprintln!(
+                        "[button-shader-watch] could not read mtime path={} error={error}",
+                        path.display()
+                    );
+                    return false;
+                }
+            };
+            if self.button_surface_override_modified == Some(modified) {
+                return false;
+            }
+            eprintln!(
+                "[button-shader-watch] edit detected path={} previous={:?} next={:?}",
+                path.display(),
+                self.button_surface_override_modified,
+                modified
+            );
+            let fragment_src = match fs::read_to_string(&path) {
+                Ok(fragment_src) => fragment_src,
+                Err(error) => {
+                    eprintln!(
+                        "[button-shader-watch] failed to read shader path={} error={error}",
+                        path.display()
+                    );
+                    return false;
+                }
+            };
+            eprintln!(
+                "[button-shader-watch] compiling button shader bytes={}",
+                fragment_src.len()
+            );
+            match self.compile_widget_pipeline_source("button", None, &fragment_src) {
+                Ok(pipeline) => {
+                    self.widget_pipelines.insert("button".to_string(), pipeline);
+                    self.button_surface_override_modified = Some(modified);
+                    self.compiled_widget_runs.clear();
+                    self.stats.note_widget_run_cache_clear();
+                    eprintln!(
+                        "[button-shader-watch] reload ok; swapped button pipeline and cleared compiled widget runs"
+                    );
+                    true
+                }
+                Err(_) => {
+                    self.button_surface_override_modified = Some(modified);
+                    eprintln!(
+                        "[button-shader-watch] reload failed; keeping previous button pipeline path={}",
+                        path.display()
+                    );
+                    false
+                }
+            }
+        }
+
         fn draw_waveform_primitives(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -3772,6 +3908,8 @@ fragment float4 waveform_frag(
         /// Render a tiled frame with per-tile scissor clipping.
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
+            self.compile_pending_sdf_pipelines();
+            self.compile_pending_button_surface_override();
             self.agent_instrument_stub_animation_visible = false;
             let render_time_seconds = self.elapsed_time_seconds();
             self.sync_window_theme();
@@ -4096,7 +4234,6 @@ fragment float4 waveform_frag(
                         split_prim_segment_ranges(&offset_prims, content_scissor, cell_w, cell_h);
                     self.stats.note_widget_segments(segments.len());
 
-                    self.compile_pending_sdf_pipelines();
                     for (seg_scissor, seg_range) in &segments {
                         enc.setScissorRect(*seg_scissor);
                         metal_prep_time += if use_widget_run_cache {
@@ -5066,56 +5203,12 @@ fragment float4 waveform_frag(
             // Each widget gets its own fragment shader but shares the vertex
             // shader and SDF utilities from the preamble.
             for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources() {
-                let full_src = format!(
-                    "{}{}{}",
-                    WIDGET_SHADER_PREAMBLE,
-                    vertex_src.unwrap_or(DEFAULT_WIDGET_VERTEX_SHADER),
-                    fragment_src
-                );
-                let src_ns = NSString::from_str(&full_src);
-                let wlib = self
-                    .device
-                    .newLibraryWithSource_options_error(&src_ns, None)
-                    .map_err(|err| {
-                        eprintln!("Metal widget shader compile failed for {widget_type}: {err:?}");
-                        BackendError::MetalError
-                    })?;
-
-                let wvert = wlib
-                    .newFunctionWithName(&NSString::from_str("widget_vert"))
-                    .ok_or(BackendError::MetalError)?;
-                let wfrag = wlib
-                    .newFunctionWithName(&NSString::from_str("widget_frag"))
-                    .ok_or(BackendError::MetalError)?;
-
-                let wdesc = MTLRenderPipelineDescriptor::new();
-                wdesc.setVertexFunction(Some(&wvert));
-                wdesc.setFragmentFunction(Some(&wfrag));
-                let wattach = unsafe { wdesc.colorAttachments().objectAtIndexedSubscript(0) };
-                wattach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                wattach.setBlendingEnabled(true);
-                {
-                    use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
-                    wattach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                    wattach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                    wattach.setRgbBlendOperation(MTLBlendOperation::Add);
-                    wattach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                    wattach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                    wattach.setAlphaBlendOperation(MTLBlendOperation::Add);
-                }
-
-                let pipeline_state = self
-                    .device
-                    .newRenderPipelineStateWithDescriptor_error(&wdesc)
-                    .map_err(|err| {
-                        eprintln!(
-                            "Metal widget pipeline creation failed for {widget_type}: {err:?}"
-                        );
-                        BackendError::MetalError
-                    })?;
+                let pipeline_state =
+                    self.compile_widget_pipeline_source(widget_type, vertex_src, fragment_src)?;
                 self.widget_pipelines
                     .insert(widget_type.to_string(), pipeline_state);
             }
+            self.compile_pending_button_surface_override();
 
             let waveform_src = NSString::from_str(WAVEFORM_SHADER_SRC);
             let waveform_lib = self
@@ -5380,6 +5473,7 @@ fragment float4 waveform_frag(
             self.drain_decoded_images(2);
 
             self.compile_pending_sdf_pipelines();
+            self.compile_pending_button_surface_override();
 
             let Some(pipeline) = self.pipeline.clone() else {
                 return Ok(());

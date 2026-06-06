@@ -3,12 +3,13 @@
 ;; Sixteen all-to-all nodes. Seed it by putting a trigger on track 0 (node 0
 ;; subscribes to track 0). The :update rule shapes the emitted/propagated event in
 ;; lisp: note accumulates the per-node transpose around feedback loops, and velocity
-;; is scaled by a per-node vel-decay each hop.
+;; is either scaled by a per-node vel-decay each hop or reset to 1.0.
 ;;
 ;; All nodes route to track 0 by default so every firing is audible on one
 ;; instrument. Change a node's route in your own copy if you want it to drive other
 ;; tracks. The control panel exposes per-node route / delay / transpose / vel-decay /
-;; resolution / quantize plus the 16x16 connection-weight matrix.
+;; vel-reset / state-reset / resolution / quantize plus the 16x16 connection-weight
+;; matrix.
 ;;
 ;; Project scratch entrypoint:
 ;;   (load "crates/sequencer/scripts/graph-neural-16-demo.lisp")
@@ -43,6 +44,8 @@
     :params ((threshold :float 0 4 :default 0.55)
              (transpose :int -48 48 :default 0)
              (vel-decay :float 0 2 :default 0.9)
+             (vel-reset :int 0 1 :default 0)
+             (state-reset :int 0 1 :default 0)
              (dampening :float 0 1 :default 0.14)
              (recovery :float 0 1 :default 0.94))
     :state ((energy :leak (per-step :energy-decay)))
@@ -50,8 +53,11 @@
     :update (if (>= (energy) (param :threshold))
               (do
                 (dampen-incoming (param :dampening))
+                (if (>= (param :state-reset) 1) (reset-graph-state) nil)
                 (emit :note (+ (in-note) (param :transpose))
-                      :vel  (* (in-vel) (param :vel-decay))))
+                      :vel  (if (>= (param :vel-reset) 1)
+                              1
+                              (* (in-vel) (param :vel-decay)))))
               (recover-incoming (param :recovery))))
 
   (edges
@@ -167,7 +173,8 @@
 
 (def g16-row-height 1.3)
 (def g16-node-width 1.4)
-(def g16-control-width 6.8)
+(def g16-control-width 4.8)
+(def g16-dropdown-width 6.8)
 
 (def g16-num (key value lo hi stp dec on-change)
   (number-picker
@@ -180,7 +187,7 @@
   (dropdown
     :key key
     :value-index value-index :options options
-    :width g16-control-width :height g16-row-height :font-size 9
+    :width g16-dropdown-width :height g16-row-height :font-size 9
     :on-change on-change))
 
 (def g16-row (n)
@@ -198,6 +205,12 @@
     (g16-num (str "graph-16-vel-decay-" n)
       (bind-graph g16-name n :vel-decay) 0 2 0.01 2
       (lambda (v) (g16-edit-param n :vel-decay v)))
+    (g16-num (str "graph-16-vel-reset-" n)
+      (bind-graph g16-name n :vel-reset) 0 1 1 0
+      (lambda (v) (g16-edit-param n :vel-reset v)))
+    (g16-num (str "graph-16-state-reset-" n)
+      (bind-graph g16-name n :state-reset) 0 1 1 0
+      (lambda (v) (g16-edit-param n :state-reset v)))
     (g16-num (str "graph-16-dampening-" n)
       (bind-graph g16-name n :dampening) 0 1 0.01 2
       (lambda (v) (g16-edit-param n :dampening v)))
@@ -214,14 +227,16 @@
 (def g16-header ()
   (h-stack :gap 0.4 :align :center
     (label "node" :width g16-node-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "route" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
+    (label "route" :width g16-dropdown-width :height 1.0 :font-size 8 :h-align :center :color :dim)
     (label "delay" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
     (label "transp" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
     (label "vel x" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
+    (label "vel rst" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
+    (label "state rst" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
     (label "dampen" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
     (label "recover" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "res" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "quant" :width g16-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)))
+    (label "res" :width g16-dropdown-width :height 1.0 :font-size 8 :h-align :center :color :dim)
+    (label "quant" :width g16-dropdown-width :height 1.0 :font-size 8 :h-align :center :color :dim)))
 
 (def g16-panel (current-pattern graph-visualizations)
   (do
@@ -254,7 +269,7 @@
                 (g16-header)
                 (each (range 0 g16-node-count) |n| (g16-row n))))
             (v-stack :gap 0.35
-              (label "trig" :width 2 :height 2.5 :font-size 8 :color :dim)
+              (box :height 2.5)
               (matrix
                 :key "graph-16-trigger-matrix"
                 :rows 16
@@ -265,7 +280,7 @@
                 :max 1
                 :value (g16-viz-matrix viz :trigger-matrix (g16-zero-column-matrix))))
             (v-stack :gap 0.35
-              (label "energy" :width 3 :height 2.5 :font-size 8 :color :dim)
+              (box :height 2.5)
               (matrix
                 :key "graph-16-energy-matrix"
                 :rows 16
@@ -276,7 +291,7 @@
                 :max 4
                 :value (g16-viz-matrix viz :energy-matrix (g16-zero-column-matrix))))
             (v-stack :gap 0.35
-              (label "weights (from row -> to col)" :width 18 :height 2.5 :font-size 8 :color :dim)
+              (box :height 2.5)
               (matrix
                 :key "graph-16-weight-matrix"
                 :rows 16

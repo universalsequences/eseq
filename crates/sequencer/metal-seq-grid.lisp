@@ -15,6 +15,8 @@
 (def seq-has-selected-bus? ()
   (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names))))
 
+(defstate samples-sidebar-visible true)
+
 (load "metal-seq-browser.lisp")
 (load "metal-seq-fx.lisp")
 (load "metal-seq-piano-roll.lisp")
@@ -33,6 +35,9 @@
 (defstate step-panel-buffer "*sequencer*")
 (defstate remembered-step-panel-buffer "*sequencer*")
 (defstate lower-panel-buffer "*fx*")
+(defstate seq-layout-mode :lower-panel)
+(defstate seq-patcher-buffer "")
+(defstate seq-patcher-source-buffer "")
 (defstate seq-registered-step-tabs '())
 
 (def lower-fx-layout-height 10.5)
@@ -91,21 +96,33 @@
       0.78 (seq-main-step-tile-layout-spec)
       0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))))
 
+(def seq-samples-sidebar-layout-spec ()
+  (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42))
+
+(def seq-main-and-mixer-layout-spec (lower-buffer)
+  (list :rows :gap 1
+    0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
+    0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 14 :max-height 14)))
+
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (list :rows :gap 1
     0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-    0.95 (list :cols :gap 1
-      0.2 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42)
-      0.8 (list :rows :gap 1
-        0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
-        0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 14 :max-height 14)))
+    0.95 (if samples-sidebar-visible
+      (list :cols :gap 1
+        0.2 (seq-samples-sidebar-layout-spec)
+        0.8 (seq-main-and-mixer-layout-spec lower-buffer))
+      (seq-main-and-mixer-layout-spec lower-buffer))
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
 (def seq-patcher-bottom-bar-layout-spec ()
-  (list :cols :gap 1
-    0.333 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
-    0.334 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
-    0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13)))
+  (if samples-sidebar-visible
+    (list :cols :gap 1
+      0.333 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
+      0.334 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
+      0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
+    (list :cols :gap 1
+      0.5 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
+      0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))))
 
 (def seq-instrument-patcher-layout-spec (patcher-buffer)
   (list :rows :gap 1
@@ -123,6 +140,7 @@
 
 (def seq-apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
   (do
+    (set! seq-layout-mode :lower-panel)
     (set-layout (seq-lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
     (host-command "refresh-mixer-ui" (dict))))
 
@@ -139,14 +157,34 @@
 (def seq-apply-instrument-patcher-layout (patcher-buffer)
   (do
     (set! remembered-step-panel-buffer (seq-current-step-buffer))
+    (set! seq-layout-mode :instrument-patcher)
+    (set! seq-patcher-buffer patcher-buffer)
+    (set! seq-patcher-source-buffer "")
     (set-layout (seq-instrument-patcher-layout-spec patcher-buffer))
     (host-command "refresh-mixer-ui" (dict))))
 
 (def seq-apply-instrument-patcher-source-layout (patcher-buffer source-buffer)
   (do
     (set! remembered-step-panel-buffer (seq-current-step-buffer))
+    (set! seq-layout-mode :instrument-patcher-source)
+    (set! seq-patcher-buffer patcher-buffer)
+    (set! seq-patcher-source-buffer source-buffer)
     (set-layout (seq-instrument-patcher-source-layout-spec patcher-buffer source-buffer))
     (host-command "refresh-mixer-ui" (dict))))
+
+(def seq-refresh-current-layout ()
+  (if (and (= seq-layout-mode :instrument-patcher-source) (not (= seq-patcher-buffer "")) (not (= seq-patcher-source-buffer "")))
+    (seq-apply-instrument-patcher-source-layout seq-patcher-buffer seq-patcher-source-buffer)
+    (if (and (= seq-layout-mode :instrument-patcher) (not (= seq-patcher-buffer "")))
+      (seq-apply-instrument-patcher-layout seq-patcher-buffer)
+      (if (= lower-panel-buffer "*piano-roll*")
+        (seq-apply-piano-roll-layout)
+        (seq-apply-fx-layout)))))
+
+(def seq-toggle-samples-sidebar ()
+  (do
+    (set! samples-sidebar-visible (not samples-sidebar-visible))
+    (seq-refresh-current-layout)))
 
 (def seq-restore-instrument-patcher-layout ()
   (do
@@ -874,5 +912,6 @@
 (load "metal-seq-metal.lisp")
 (load "metal-seq-sequencer.lisp")
 
-; Layout: samples on the left; metal + mixer on the right; fx spans the bottom.
-(seq-apply-fx-layout)
+; Startup layout is applied by Rust after this file loads. Keep this file free of
+; top-level layout side effects so hot reload and buffer re-evaluation do not
+; replace the active editor layout.

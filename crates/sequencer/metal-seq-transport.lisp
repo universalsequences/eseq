@@ -176,6 +176,42 @@
           (sdf/rounded-rect 0.48 0.33 0.12))
         (material :color fg-col)))))
 
+(defwidget samples-sidebar-icon
+  :width 2.8 :height 1.4
+  :paint-margin 0.5
+  :state (active)
+  :shader
+  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+        (muted-col (rgba 0.45 0.45 0.50 1.0))
+        (bg-col (if (= active 1)
+          (rgba 0.00 0.35 0.82 1.0)
+          (rgba 0.18 0.18 0.20 1.0)))
+        (panel-col (if (= active 1) fg-col muted-col)))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rounded-rect width height 0.4)
+        (material :color bg-col))
+      (sdf/fill
+        (sdf/translate -0.36 0.0
+          (sdf/rounded-rect 0.28 0.92 0.08))
+        (material :color panel-col))
+      (sdf/fill
+        (sdf/translate 0.18 0.0
+          (sdf/rounded-rect 0.56 0.92 0.08))
+        (material :color (rgba 0.11 0.11 0.13 1.0)))
+      (sdf/fill
+        (sdf/translate 0.18 0.24
+          (sdf/rounded-rect 0.34 0.08 0.03))
+        (material :color panel-col))
+      (sdf/fill
+        (sdf/translate 0.18 0.0
+          (sdf/rounded-rect 0.34 0.08 0.03))
+        (material :color panel-col))
+      (sdf/fill
+        (sdf/translate 0.18 -0.24
+          (sdf/rounded-rect 0.34 0.08 0.03))
+        (material :color panel-col)))))
+
 (defwidget transport-tool-chip-bg
   :width 1 :height 1
   :state (active)
@@ -302,11 +338,18 @@
 
 (effect-buffer "*transport*"
   (h-stack :gap 0.5 :padding 0.5 :align :center
+
+    (subtree :key "transport-samples-sidebar-button"
+      (samples-sidebar-icon
+        :on-click |x y r| (seq-toggle-samples-sidebar)
+        :style transport-icon-style
+        :active (if samples-sidebar-visible 1 0)))
     
-    (save-icon 
-      :on-click |x y r| (sbrowser-open-project-save)
-      :style transport-icon-style
-      :active (if (sbrowser-project-save-mode?) 1 0))
+    (subtree :key "transport-save-button"
+      (save-icon
+        :on-click |x y r| (sbrowser-open-project-save)
+        :style transport-icon-style
+        :active (if (sbrowser-project-save-mode?) 1 0)))
     
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4

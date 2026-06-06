@@ -106,6 +106,20 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
                 .ok_or_else(|| "mixer-track delete target expects :track".to_string())?;
             Ok(ActiveDeleteTarget::MixerTrack { track })
         }
+        Some("track-pattern") | Some("pattern") => {
+            let track = value_number_field(payload, "track")
+                .ok_or_else(|| "track-pattern delete target expects :track".to_string())?;
+            let pattern_id = value_number_field(payload, "pattern-id")
+                .or_else(|| value_number_field(payload, "pattern_id"))
+                .ok_or_else(|| "track-pattern delete target expects :pattern-id".to_string())?;
+            if pattern_id == 0 {
+                return Err("track-pattern delete target pattern id must be positive".to_string());
+            }
+            Ok(ActiveDeleteTarget::TrackPattern {
+                track,
+                pattern_id: PatternId(pattern_id as u64),
+            })
+        }
         Some("mod-route") | Some("route") | Some("cable") => {
             let source = value_number_field(payload, "source")
                 .ok_or_else(|| "mod-route delete target expects :source".to_string())?;
@@ -158,6 +172,7 @@ fn effect_param_target(
 fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
     match target {
         Some(ActiveDeleteTarget::MixerTrack { .. }) => Value::String("mixer-track".to_string()),
+        Some(ActiveDeleteTarget::TrackPattern { .. }) => Value::String("track-pattern".to_string()),
         Some(ActiveDeleteTarget::ModRoute { .. }) => Value::String("mod-route".to_string()),
         Some(ActiveDeleteTarget::FxEffect { .. }) => Value::String("fx-effect".to_string()),
         None => Value::Bool(false),
@@ -210,6 +225,21 @@ mod delete_target_tests {
                 source: 0,
                 dest: 3,
                 input: 1,
+            }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("track-pattern".to_string()),
+                &map_value([
+                    ("track", Value::Number(1.0)),
+                    ("pattern-id", Value::Number(4.0)),
+                ]),
+            )
+            .expect("track pattern target"),
+            ActiveDeleteTarget::TrackPattern {
+                track: 1,
+                pattern_id: PatternId(4),
             }
         );
 
@@ -959,6 +989,37 @@ pub(crate) fn init_runtime(
                 );
                 ctx.enqueue_command(HostCommand::Custom {
                     name: "delete-track".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
+            ActiveDeleteTarget::TrackPattern { track, pattern_id } => {
+                if current_buffer != "*mixer*" {
+                    return Ok(Value::Bool(false));
+                }
+                let valid = track < st.active_track_count()
+                    && st
+                        .track_pattern_cells(track)
+                        .iter()
+                        .any(|cell| cell.pattern_id == pattern_id);
+                if !valid {
+                    ctx.set_status("Cannot delete missing track pattern");
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(track as f64))),
+                );
+                map.insert(
+                    "pattern-id".to_string(),
+                    Rc::new(RefCell::new(Value::Number(pattern_id.0 as f64))),
+                );
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-track-pattern".to_string(),
                     payload: Value::Map(map),
                 });
             }

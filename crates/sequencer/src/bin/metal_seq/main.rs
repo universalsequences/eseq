@@ -79,6 +79,10 @@ pub(crate) enum ActiveDeleteTarget {
     MixerTrack {
         track: usize,
     },
+    TrackPattern {
+        track: usize,
+        pattern_id: PatternId,
+    },
     ModRoute {
         source: usize,
         dest: usize,
@@ -436,9 +440,9 @@ fn refresh_sample_browser_buffer(editor: &mut Editor) -> Result<(), String> {
 impl ActiveDeleteTarget {
     fn buffer_name(&self) -> &'static str {
         match self {
-            ActiveDeleteTarget::MixerTrack { .. } | ActiveDeleteTarget::ModRoute { .. } => {
-                "*mixer*"
-            }
+            ActiveDeleteTarget::MixerTrack { .. }
+            | ActiveDeleteTarget::TrackPattern { .. }
+            | ActiveDeleteTarget::ModRoute { .. } => "*mixer*",
             ActiveDeleteTarget::FxEffect { .. } => "*fx*",
         }
     }
@@ -3856,6 +3860,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 ui_epoch.fetch_add(1, Ordering::Relaxed);
             }
+        }
+        if backend.poll_editable_shader_overrides() {
+            editor.mark_needs_redraw();
         }
         pull_shared_bus_state(&mut app, &bus_state);
         pull_named_scratch_buffer_into_project(&editor, &mut app);
@@ -8573,6 +8580,124 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Forked track {} pattern {}",
                             track + 1,
                             pattern_id.0
+                        )));
+                    }
+                    "clone-track-pattern" => {
+                        let track = match payload {
+                            Value::Map(ref map) => map
+                                .get("track")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| current_track.load(Ordering::Relaxed)),
+                            Value::Number(n) => n as usize,
+                            _ => current_track.load(Ordering::Relaxed),
+                        };
+                        let num_tracks = app.tracks.len();
+                        if track >= num_tracks {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Track pattern clone failed: track {} is out of range",
+                                track + 1
+                            )));
+                            continue;
+                        }
+                        let Some(pattern_id) = app.state.clone_current_scene_track_pattern(
+                            track,
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        ) else {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Track pattern clone failed for track {}",
+                                track + 1
+                            )));
+                            continue;
+                        };
+                        let sample_ids = app.state.effective_pattern_sample_ids(num_tracks);
+                        app.graph_controller().apply_sample_ids(&sample_ids);
+                        if let Err(error) = app
+                            .graph_controller()
+                            .sync_track_instrument_run_modes_from_live_state()
+                        {
+                            app.editor.status_message = Some((
+                                format!("Track pattern clone failed: {error}"),
+                                Instant::now(),
+                            ));
+                        }
+                        app.push_all_restored_defaults();
+                        {
+                            let mut guard = active_delete_target.lock().unwrap();
+                            *guard = Some(ActiveDeleteTarget::TrackPattern { track, pattern_id });
+                        }
+                        active_delete_target_version.fetch_add(1, Ordering::Relaxed);
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Cloned track {} pattern {}",
+                            track + 1,
+                            pattern_id.0
+                        )));
+                    }
+                    "delete-track-pattern" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Track pattern delete failed: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let track = map.get("track").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        });
+                        let pattern_id = map
+                            .get("pattern-id")
+                            .or_else(|| map.get("pattern_id"))
+                            .and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) if *n >= 1.0 => Some(*n as u64),
+                                _ => None,
+                            });
+                        let (Some(track), Some(pattern_id)) = (track, pattern_id) else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Track pattern delete failed: missing track or pattern id"
+                                    .to_string(),
+                            ));
+                            continue;
+                        };
+                        let num_tracks = app.tracks.len();
+                        if !app.state.delete_track_pattern(
+                            track,
+                            PatternId(pattern_id),
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        ) {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Track pattern delete failed: track {}, pattern {}",
+                                track + 1,
+                                pattern_id
+                            )));
+                            continue;
+                        }
+                        let sample_ids = app.state.effective_pattern_sample_ids(num_tracks);
+                        app.graph_controller().apply_sample_ids(&sample_ids);
+                        if let Err(error) = app
+                            .graph_controller()
+                            .sync_track_instrument_run_modes_from_live_state()
+                        {
+                            app.editor.status_message = Some((
+                                format!("Track pattern delete failed: {error}"),
+                                Instant::now(),
+                            ));
+                        }
+                        app.push_all_restored_defaults();
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Deleted track {} pattern {}",
+                            track + 1,
+                            pattern_id
                         )));
                     }
                     "set-scene-cell" => {
