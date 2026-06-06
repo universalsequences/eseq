@@ -1034,6 +1034,7 @@ fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
 #[cfg(target_os = "macos")]
 pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
     let mut shaders = Vec::new();
+    shaders.push(("tile-tab", None, TILE_TAB_SHADER));
     shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
     shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
     shaders.push(("patcher-back-chevron", None, PATCHER_BACK_CHEVRON_SHADER));
@@ -1046,6 +1047,45 @@ pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'sta
     }
     shaders
 }
+
+#[cfg(target_os = "macos")]
+pub const TILE_TAB_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * in.aspect, (in.uv.y - 0.5) * 2.0);
+
+    float r = in.corner_radius > 0.0 ? in.corner_radius : 0.75;
+    r = min(r, min(in.aspect, 1.0));
+    float2 half_size = float2(in.aspect - r, 1.0 - r);
+    float2 q = abs(p) - half_size;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+
+    float edge = fwidth(d) * 1.2;
+    float mask = smoothstep(edge, -edge, d);
+    if (mask < 0.002) { discard_fragment(); }
+
+    float border_px = in.value_t > 0.5 ? 1.25 : 0.0;
+    float inner_d = d + border_px * max(edge, 0.001);
+    float inner_mask = smoothstep(edge, -edge, inner_d);
+    float border_mask = clamp(mask - inner_mask, 0.0, 1.0);
+
+    float top_light = smoothstep(1.0, 0.10, in.uv.y);
+    float bottom_shadow = smoothstep(0.35, 1.0, in.uv.y);
+    float3 fill_lit = in.color_a.rgb;
+    fill_lit = mix(fill_lit, in.color_c.rgb, in.color_c.a * top_light * 0.05);
+    fill_lit = mix(fill_lit, in.color_d.rgb, in.color_d.a * bottom_shadow * 0.05);
+    float3 border_lit = in.color_b.rgb;
+    border_lit = mix(border_lit, in.color_c.rgb, in.color_c.a * top_light);
+    border_lit = mix(border_lit, in.color_d.rgb, in.color_d.a * bottom_shadow);
+
+    float4 fill = float4(fill_lit, in.color_a.a * inner_mask);
+    float4 border = float4(border_lit, in.color_b.a * border_mask);
+    float out_alpha = fill.a + border.a * (1.0 - fill.a);
+    if (out_alpha <= 0.002) { discard_fragment(); }
+    float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
+    return float4(out_rgb, out_alpha);
+}
+"#;
 
 #[cfg(target_os = "macos")]
 pub fn widget_primitives_for_node(

@@ -36,6 +36,13 @@
       :fg-match-paren '(1.00 1.00 1.00)
 
       :buffer-bg        '(0.105 0.112 0.122)
+      :buffer-tab-bar-bg '(0.125 0.132 0.142)
+      :buffer-tab-selected-bg '(0.205 0.215 0.235)
+      :buffer-tab-selected-border '(0.34 0.36 0.38)
+      :buffer-tab-fg '(0.58 0.60 0.62)
+      :buffer-tab-selected-fg '(0.93 0.94 0.95)
+      :buffer-tab-selected-highlight '(1.00 1.00 1.00 0.15)
+      :buffer-tab-selected-shadow '(0.00 0.00 0.00 0.22)
 
       :status-fg         '(0.58 0.60 0.62)
       :status-bg         '(0.125 0.132 0.142)
@@ -82,6 +89,9 @@
       :button-ghost-fg   '(0.93 0.94 0.95)
       :button-danger-bg  '(0.92 0.26 0.22)
       :button-danger-fg  '(0.96 0.96 0.98)
+      :button-border     '(0.34 0.36 0.38 0.82)
+      :button-highlight  '(1.00 1.00 1.00 0.15)
+      :button-shadow     '(0.00 0.00 0.00 0.22)
       :dropdown-bg       '(0.20 0.215 0.235)
       :dropdown-fg       '(0.93 0.94 0.95)
       :dropdown-ring     '(0.24 0.50 0.78)

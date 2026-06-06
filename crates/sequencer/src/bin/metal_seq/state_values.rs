@@ -6688,6 +6688,7 @@ mod tests {
             "mac-osx-graphite.lisp",
             "mac-osx-haze.lisp",
             "mac-osx-midnight.lisp",
+            "black-ir-theme.lisp",
             "mac-osx-ember.lisp",
             "mac-osx-violet.lisp",
             "metal-seq-themes.lisp",
@@ -11417,6 +11418,11 @@ mod tests {
             .register_native("seq-toggle-track-collapsed", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
+        editor
+            .runtime_mut()
+            .register_native("seq-toggle-master-recording", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
@@ -11630,6 +11636,7 @@ mod tests {
                     Value::String("instrument".to_string()),
                 ),
                 ("recording", Value::Bool(false)),
+                ("master-recording", Value::Bool(false)),
                 ("transport-playhead", Value::Number(0.0)),
                 ("bpm", Value::Number(120.0)),
                 ("sampler-playhead", Value::Number(0.0)),
@@ -13196,6 +13203,30 @@ mod tests {
                 .take_pending_buffer_widget_trees()
                 .is_empty(),
             "bound transport playhead updates must not enqueue transport widget tree rebuilds"
+        );
+    }
+
+    #[test]
+    fn metal_seq_transport_master_record_button_has_visible_rect() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        let button = find_layout_node_by_stable_key(&layout, "transport-master-record-button")
+            .expect("master recording button");
+        assert_finite_nonzero_rect(button, "master recording button");
+        assert!(
+            button.rect.col >= layout.rect.col
+                && button.rect.row >= layout.rect.row
+                && button.rect.col + button.rect.width <= layout.rect.col + layout.rect.width
+                && button.rect.row + button.rect.height <= layout.rect.row + layout.rect.height,
+            "master recording button should be inside the transport panel: button={:?} panel={:?}",
+            button.rect,
+            layout.rect
         );
     }
 
@@ -22255,10 +22286,14 @@ mod tests {
         assert_eq!(commands.len(), 1);
         match &commands[0] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "launch-track-pattern");
+                assert_eq!(name, "set-scene-cell");
                 let Value::Map(payload) = payload else {
-                    panic!("launch-track-pattern payload should be a dict: {payload:?}");
+                    panic!("set-scene-cell payload should be a dict: {payload:?}");
                 };
+                assert_eq!(
+                    payload.get("scene").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
                 assert_eq!(
                     payload.get("track").map(|value| value.borrow().clone()),
                     Some(Value::Number(1.0))
@@ -22270,7 +22305,7 @@ mod tests {
                     Some(Value::Number(4.0))
                 );
             }
-            other => panic!("expected launch-track-pattern host command, got {other:?}"),
+            other => panic!("expected set-scene-cell host command, got {other:?}"),
         }
         editor
             .runtime_mut()

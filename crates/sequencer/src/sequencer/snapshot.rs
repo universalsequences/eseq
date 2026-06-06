@@ -36,6 +36,7 @@ pub struct SequencerStepSnapshot {
 #[derive(Clone, Debug)]
 pub struct SequencerTrackSnapshot {
     pub params: TrackParamsSnapshot,
+    pub scene_silenced: bool,
     pub instrument_type: InstrumentType,
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub instrument_base_note_offset: f32,
@@ -175,6 +176,7 @@ impl SequencerSnapshot {
 
             tracks.push(SequencerTrackSnapshot {
                 params,
+                scene_silenced: state.is_scene_silenced(track_idx),
                 instrument_type,
                 instrument_run_mode,
                 instrument_base_note_offset,

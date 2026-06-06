@@ -13420,6 +13420,221 @@ mod tests {
     }
 
     #[test]
+    fn graph_16_demo_ui_exposes_all_node_controls_and_ring_defaults() {
+        fn collect_widgets<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == widget_type {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_widgets(child, widget_type, out);
+            }
+        }
+
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+        }
+
+        fn assert_number_prop(node: &eseqlisp::layout::LayoutNode, prop: &str, expected: f64) {
+            assert_eq!(
+                node.props.get(prop),
+                Some(&Value::Number(expected)),
+                "expected {} {:?} to be {expected}",
+                node.widget_type,
+                prop
+            );
+        }
+
+        let state = Arc::new(SequencerState::new(
+            16,
+            (0..16).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+            ],
+            true,
+        );
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str(
+                r#"
+                (defstate seq-registered-step-tabs '())
+                (def seq-register-step-sequencer-tab (label buffer)
+                  (set! seq-registered-step-tabs
+                    (append
+                      (filter (lambda (tab) (not (= (nth tab 1) buffer)))
+                        seq-registered-step-tabs)
+                      (list (list label buffer)))))
+                "#,
+            )
+            .expect("install sequencer tab registration test stub");
+
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/graph-neural-16-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read graph 16 demo script");
+        runtime.eval_str(&source).expect("evaluate graph 16 demo");
+        assert_eq!(
+            runtime
+                .eval_str("seq-registered-step-tabs")
+                .expect("read registered step tabs"),
+            Some(gv_list(vec![gv_list(vec![
+                Value::String("16x16".to_string()),
+                Value::String("*16x16*".to_string()),
+            ])])),
+            "graph 16 demo should register a step-panel tab like the 8x8 demo"
+        );
+        assert!(
+            state.current_graph_overrides().is_empty(),
+            "loading the graph demo must publish graph/UI without writing pattern overrides"
+        );
+        let manifest = state
+            .published_sequencers()
+            .into_iter()
+            .find_map(|published| published.graph)
+            .expect("published graph manifest");
+        assert_eq!(
+            manifest.shape.num_nodes(),
+            16,
+            "the demo matrix must cover every materialized node"
+        );
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        let tree = pending
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("graph 16 script should publish widget tree");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((40.0, 56.0)))
+            .expect("graph 16 widget tree should lay out");
+
+        let mut matrices = Vec::new();
+        collect_widgets(&layout, "matrix", &mut matrices);
+        assert_eq!(
+            matrices.len(),
+            4,
+            "expected editable weight matrix plus trigger/energy/dampening telemetry"
+        );
+        for matrix in &matrices {
+            assert_measured(matrix);
+        }
+        for key in [
+            "graph-16-trigger-matrix",
+            "graph-16-energy-matrix",
+            "graph-16-weight-matrix",
+            "graph-16-dampening-matrix",
+        ] {
+            let widget =
+                find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
+            assert_measured(widget);
+        }
+        let trigger_matrix =
+            find_by_stable_key(&layout, "graph-16-trigger-matrix").expect("trigger matrix");
+        assert_number_prop(trigger_matrix, "height", 24.0);
+        let energy_matrix =
+            find_by_stable_key(&layout, "graph-16-energy-matrix").expect("energy matrix");
+        assert_number_prop(energy_matrix, "height", 24.0);
+        let weight_matrix =
+            find_by_stable_key(&layout, "graph-16-weight-matrix").expect("weight matrix");
+        assert_number_prop(weight_matrix, "width", 52.0);
+        assert_number_prop(weight_matrix, "height", 24.0);
+
+        let mut pickers = Vec::new();
+        collect_widgets(&layout, "number-picker", &mut pickers);
+        assert_eq!(
+            pickers.len(),
+            16 * 5 + 2,
+            "expected delay/transpose/vel/dampening/recovery per node + reset-bars + max-poly"
+        );
+        let mut dropdowns = Vec::new();
+        collect_widgets(&layout, "dropdown", &mut dropdowns);
+        assert_eq!(
+            dropdowns.len(),
+            16 * 3,
+            "expected route + resolution + quantize per node"
+        );
+        for idx in 0..16 {
+            for key in [
+                format!("graph-16-route-{idx}"),
+                format!("graph-16-delay-{idx}"),
+                format!("graph-16-transpose-{idx}"),
+                format!("graph-16-vel-decay-{idx}"),
+                format!("graph-16-dampening-{idx}"),
+                format!("graph-16-recovery-{idx}"),
+                format!("graph-16-resolution-{idx}"),
+                format!("graph-16-quantize-{idx}"),
+            ] {
+                let widget = find_by_stable_key(&layout, &key)
+                    .unwrap_or_else(|| panic!("missing control {key}"));
+                assert_measured(widget);
+            }
+        }
+
+        runtime
+            .eval_str("(g16-init-ring-defaults)")
+            .expect("explicitly initialize graph 16 demo defaults");
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-16-demo")
+            .expect("graph overrides after explicit init");
+        assert_eq!(
+            graph.edge_params.len(),
+            16 * 16,
+            "explicit init should write the full ring weight matrix"
+        );
+        assert!(
+            graph.edge_params.iter().any(|edge| {
+                edge.from == 0 && edge.to == 1 && edge.param == "weight" && edge.value == 1.0
+            }),
+            "explicit init should write the first ring edge"
+        );
+        assert!(
+            graph.edge_params.iter().any(|edge| {
+                edge.from == 15 && edge.to == 0 && edge.param == "weight" && edge.value == 1.0
+            }),
+            "explicit init should wrap the ring from the final node to node 0"
+        );
+        assert!(
+            graph.node_intrinsics.iter().any(|node| {
+                node.instance == 0
+                    && node.seed_from == Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0]))
+            }),
+            "explicit init should seed node 0 from track 0"
+        );
+    }
+
+    #[test]
     fn graph_8x8_demo_scratch_load_preserves_saved_overrides() {
         let state = Arc::new(SequencerState::new(
             8,

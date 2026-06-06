@@ -38,6 +38,13 @@ pub struct Theme {
     pub bg_match_paren: Color,
     pub fg_match_paren: Color,
     pub buffer_bg: Color,
+    pub buffer_tab_bar_bg: Color,
+    pub buffer_tab_selected_bg: Color,
+    pub buffer_tab_selected_border: Color,
+    pub buffer_tab_fg: Color,
+    pub buffer_tab_selected_fg: Color,
+    pub buffer_tab_selected_highlight: Color,
+    pub buffer_tab_selected_shadow: Color,
     pub status_fg: Color,
     pub status_bg: Color,
     pub status_edge: Color,
@@ -85,6 +92,9 @@ pub struct Theme {
     pub button_ghost_fg: Color,
     pub button_danger_bg: Color,
     pub button_danger_fg: Color,
+    pub button_border: Color,
+    pub button_highlight: Color,
+    pub button_shadow: Color,
     pub dropdown_bg: Color,
     pub dropdown_fg: Color,
     pub dropdown_ring: Color,
@@ -266,6 +276,41 @@ theme_slots!(
         Color::from_hex(0x05, 0x05, 0x05)
     ),
     (buffer_bg, BUFFER_BG, Color::from_hex(0x12, 0x12, 0x13)),
+    (
+        buffer_tab_bar_bg,
+        BUFFER_TAB_BAR_BG,
+        Color::from_hex(0x14, 0x14, 0x14)
+    ),
+    (
+        buffer_tab_selected_bg,
+        BUFFER_TAB_SELECTED_BG,
+        Color::from_hex(0x48, 0x48, 0x4d)
+    ),
+    (
+        buffer_tab_selected_border,
+        BUFFER_TAB_SELECTED_BORDER,
+        Color::from_hex(0x68, 0x68, 0x70)
+    ),
+    (
+        buffer_tab_fg,
+        BUFFER_TAB_FG,
+        Color::from_hex(0x8a, 0x8d, 0x92)
+    ),
+    (
+        buffer_tab_selected_fg,
+        BUFFER_TAB_SELECTED_FG,
+        Color::from_hex(0xe8, 0xe8, 0xea)
+    ),
+    (
+        buffer_tab_selected_highlight,
+        BUFFER_TAB_SELECTED_HIGHLIGHT,
+        Color::rgba(1.0, 1.0, 1.0, 0.18)
+    ),
+    (
+        buffer_tab_selected_shadow,
+        BUFFER_TAB_SELECTED_SHADOW,
+        Color::rgba(0.0, 0.0, 0.0, 0.22)
+    ),
     (status_fg, STATUS_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
     (status_bg, STATUS_BG, Color::from_hex(0x14, 0x14, 0x14)),
     (status_edge, STATUS_EDGE, Color::from_hex(0x23, 0x23, 0x23)),
@@ -472,6 +517,21 @@ theme_slots!(
         button_danger_fg,
         BUTTON_DANGER_FG,
         Color::from_hex(0xf4, 0xf4, 0xf5)
+    ),
+    (
+        button_border,
+        BUTTON_BORDER,
+        Color::rgba(1.0, 1.0, 1.0, 0.18)
+    ),
+    (
+        button_highlight,
+        BUTTON_HIGHLIGHT,
+        Color::rgba(1.0, 1.0, 1.0, 0.12)
+    ),
+    (
+        button_shadow,
+        BUTTON_SHADOW,
+        Color::rgba(0.0, 0.0, 0.0, 0.28)
     ),
     (dropdown_bg, DROPDOWN_BG, Color::from_hex(0x41, 0x43, 0x49)),
     (dropdown_fg, DROPDOWN_FG, Color::from_hex(0xf0, 0xf0, 0xf2)),

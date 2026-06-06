@@ -264,14 +264,14 @@
               (rgba 0.52 0.58 0.68 1.0)
               (rgba 0.18 0.19 0.21 1.0)))))
         (inner (if (= 1 active)
-          (rgba 0.42 0.88 1.0 1.0)
+          (rgba 0.82 0.88 1.0 1.0)
           (if (= 1 assigned)
             (rgba 0.16 0.18 0.21 1.0)
             (rgba 0.09 0.10 0.11 1.0)))))
     (sdf/layer
       (sdf/fill (sdf/rounded-rect width height 0.03)
         (material :color outer))
-      (sdf/fill (sdf/rounded-rect (* width 0.62) (* height 0.62) 0.015)
+      (sdf/fill (sdf/rounded-rect (* width 0.82) (* height 0.82) 0.015)
         (material :color inner)))))
 
 (def mixer-v2-track-pattern-cells (track)
@@ -283,17 +283,20 @@
   (do
     (mixer-v2-activate-track-control track)
     (seq-set-track track)
-    (host-command "launch-track-pattern"
-      (dict :track track :pattern-id (get cell :id)))))
+    (host-command "set-scene-cell"
+      (dict
+        :scene (or SEQ.current-pattern 0)
+        :track track
+        :pattern-id (get cell :id)))))
 
 (def mixer-v2-track-pattern-grid (track)
   (let ((cells (mixer-v2-track-pattern-cells track)))
-    (box :width :fill :height 0.92 :align :center :bg :transparent
-      (grid :cols 16 :col-width 1.00 :row-height 0.53 :align :center
+    (box :width :fill :height 3.02 :align :top :bg :black :background-color :buffer-bg
+      (grid :cols 8 :col-width 1.50 :row-height 0.75 :align :center
         (each cells |cell cell-idx|
           (box
             :key (str "mixer-v2-track-pattern-cell-" track "-" (get cell :id))
-            :width 1.08 :height 0.58
+            :width 1.50 :height 0.75
             :padding 0
             :bg :transparent
             :background "track-pattern-cell-bg"
@@ -467,7 +470,7 @@
     :show-value false
     :font-size 9 :label-font-size 5
     :text-color :dim :label-color :dim
-    :width 4.7  :height 2.0 :knob-size 1.44
+    :width 3.4  :height 2.0 :knob-size 1.44
     :on-change (lambda (v)
       (do
         (mixer-v2-clear-delete-target)
@@ -477,7 +480,7 @@
 (def mixer-v2-track-strip (i)
   (let ((muted (mixer-v2-muted? i))
       (sends (nth SEQ.track-bus-sends i)))
-    (box :width 10.9 :height 13.15
+    (box :width 12.9 :height 13.15
       :selected (mixer-v2-track-selected-binding i)
       :muted muted
       :background-color :mixer-strip-bg
@@ -502,25 +505,31 @@
             (do
               (mixer-v2-clear-delete-target)
               (host-command "set-track-output" (dict :track i :label v))))
-          :width 9.8 :height 1.2 :font-size 10)
+          :width :fill :height 1.2 :font-size 10)
         (mixer-v2-mod-port-row i)
         (mixer-v2-track-pattern-grid i)
-        (h-stack :gap 0.05
-          (each sends |send send-idx|
-            (mixer-v2-send-knob i send)))
-	(box :width :fill :height 0.2)
+        
+        	       
+        (box :width :fill :height 0.2)
         (h-stack :gap 1.6 :align :center
-          (knob-number :label "pan"
-            :key (str "mixer-v2-track-pan-" i)
-            :value (bind-seq (mixer-v2-track-pan-field i))
-            :min -1 :max 1 :decimals 2
-            :font-size 9 :label-font-size 8
-            :text-color :dim :label-color :dim
-            :width 3.9 :height 2.35 :knob-size 1.48
-            :on-change (lambda (v)
-              (do
-                (mixer-v2-clear-delete-target)
-                (seq-set-track-pan i v))))
+          (v-stack
+            
+            (h-stack :gap 0.05
+              (each sends |send send-idx|
+                (mixer-v2-send-knob i send)))
+            
+            (knob-number :label "pan"
+              :key (str "mixer-v2-track-pan-" i)
+              :value (bind-seq (mixer-v2-track-pan-field i))
+              :min -1 :max 1 :decimals 2
+              :font-size 9 :label-font-size 8
+              :text-color :dim :label-color :dim
+              :width 3.9 :height 2.35 :knob-size 1.88
+              :on-change (lambda (v)
+                (do
+                  (mixer-v2-clear-delete-target)
+                  (seq-set-track-pan i v)))))
+          
           (mixer-v2-track-meter-control i))
         (h-stack :gap 0.35
           (button (str (+ i 1))
@@ -540,7 +549,8 @@
             :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))
         (box
           :key (str "mixer-v2-track-label-" i)
-          :width 9.8 :height 1.0
+          :width :fill :height 1.0
+          :corner-radius 30
           :padding 0
           :selected (mixer-v2-track-delete-target-binding i)
           :background-color (rgba

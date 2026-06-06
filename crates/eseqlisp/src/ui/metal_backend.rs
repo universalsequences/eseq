@@ -4323,15 +4323,19 @@ fragment float4 waveform_frag(
                 let group_visual_top = group_top + group_inset_y / cell_h.max(1.0);
                 let group_visual_height_px = (group_height_px - group_inset_y * 2.0).max(1.0);
                 let group_visual_height = group_visual_height_px / cell_h.max(1.0);
-                let group_bg = theme::STATUS_BG();
-                let selected_tab_bg = Color::from_hex(0x48, 0x48, 0x4d);
-                push_rounded_instance_cells_with_normalized_radius(
+                let group_bg = theme::BUFFER_TAB_BAR_BG();
+                let selected_tab_bg = theme::BUFFER_TAB_SELECTED_BG();
+                push_tile_tab_instance_cells(
                     &mut tab_instances,
                     group_left,
                     group_visual_top,
                     group_width,
                     group_visual_height,
                     group_bg,
+                    Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    Color::rgba(1.0, 1.0, 1.0, 0.04),
+                    Color::rgba(0.0, 0.0, 0.0, 0.10),
+                    0.0,
                     0.95,
                     cell_w,
                     cell_h,
@@ -4348,13 +4352,17 @@ fragment float4 waveform_frag(
                         let selected_h = (group_visual_height
                             - selected_inset_px * 2.0 / cell_h.max(1.0))
                         .max(0.1);
-                        push_rounded_instance_cells_with_normalized_radius(
+                        push_tile_tab_instance_cells(
                             &mut tab_instances,
                             selected_x,
                             selected_y,
                             selected_w,
                             selected_h,
                             selected_tab_bg,
+                            theme::BUFFER_TAB_SELECTED_BORDER(),
+                            theme::BUFFER_TAB_SELECTED_HIGHLIGHT(),
+                            theme::BUFFER_TAB_SELECTED_SHADOW(),
+                            1.0,
                             0.95,
                             cell_w,
                             cell_h,
@@ -4363,9 +4371,9 @@ fragment float4 waveform_frag(
                         );
                     }
                     let fg = if tab.selected {
-                        theme::FG()
+                        theme::BUFFER_TAB_SELECTED_FG()
                     } else {
-                        theme::STATUS_FG()
+                        theme::BUFFER_TAB_FG()
                     };
                     tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
                         widget_render::MetalProportionalTextPrimitive {
@@ -4386,13 +4394,17 @@ fragment float4 waveform_frag(
                     ));
                 }
             }
-            if let Some(box_pipeline) = self.widget_pipelines.get("box") {
+            if let Some(tab_pipeline) = self
+                .widget_pipelines
+                .get("tile-tab")
+                .or_else(|| self.widget_pipelines.get("box"))
+            {
                 draw_widget_instances(
                     &enc,
                     &self.device,
                     &mut self.upload_arena,
                     &mut self.stats,
-                    box_pipeline,
+                    tab_pipeline,
                     tab_instances.as_slice(),
                 );
             }
@@ -7702,6 +7714,44 @@ fragment float4 waveform_frag(
             vp_h,
         );
         if let Some(instance) = instances.last_mut() {
+            instance.corner_radius = normalized_radius.clamp(0.001, 1.0);
+        }
+    }
+
+    fn push_tile_tab_instance_cells(
+        instances: &mut Vec<WidgetInstance>,
+        col: f32,
+        row: f32,
+        width: f32,
+        height: f32,
+        fill: Color,
+        border: Color,
+        highlight: Color,
+        shadow: Color,
+        selected: f32,
+        normalized_radius: f32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        push_rounded_instance_cells_rgba(
+            instances,
+            col,
+            row,
+            width,
+            height,
+            fill.to_rgba(),
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+        );
+        if let Some(instance) = instances.last_mut() {
+            instance.value_t = selected;
+            instance.color_b = border.to_rgba();
+            instance.color_c = highlight.to_rgba();
+            instance.color_d = shadow.to_rgba();
             instance.corner_radius = normalized_radius.clamp(0.001, 1.0);
         }
     }

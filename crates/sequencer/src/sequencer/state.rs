@@ -275,6 +275,172 @@ impl TrackPatternData {
         true
     }
 
+    fn remove_effect_slot(&mut self, slot_idx: usize) {
+        if slot_idx >= self.effect_slots.len() {
+            return;
+        }
+        for idx in slot_idx..self.effect_slots.len().saturating_sub(1) {
+            self.effect_slots[idx] = self.effect_slots[idx + 1].clone();
+        }
+        if let Some(last) = self.effect_slots.last_mut() {
+            last.clear();
+        }
+    }
+
+    fn insert_empty_effect_slot(&mut self, slot_idx: usize) {
+        if slot_idx >= self.effect_slots.len() {
+            return;
+        }
+        for idx in (slot_idx + 1..self.effect_slots.len()).rev() {
+            self.effect_slots[idx] = self.effect_slots[idx - 1].clone();
+        }
+        self.effect_slots[slot_idx].clear();
+    }
+
+    fn move_effect_slot_to(&mut self, source_slot: usize, target_slot: usize) {
+        if source_slot >= self.effect_slots.len()
+            || target_slot >= self.effect_slots.len()
+            || source_slot == target_slot
+        {
+            return;
+        }
+        let entry = self.effect_slots.remove(source_slot);
+        self.effect_slots.insert(target_slot, entry);
+        while self.effect_slots.len() <= target_slot.max(source_slot) {
+            self.effect_slots.push(EffectSlotSnapshot::new_empty());
+        }
+    }
+
+    fn sync_effect_slot_with_modulator(
+        &mut self,
+        slot_idx: usize,
+        desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
+        while self.effect_slots.len() <= slot_idx {
+            self.effect_slots.push(EffectSlotSnapshot::new_empty());
+        }
+        self.effect_slots[slot_idx].sync_to_descriptor_with_modulator(
+            desc,
+            node_id,
+            modulator_node_id,
+        );
+    }
+
+    fn remap_sidechain_references_after_track_delete(
+        &mut self,
+        owner_track_old: usize,
+        effect_descriptors: &[EffectDescriptor],
+        deleted_track: usize,
+        old_track_count: usize,
+    ) {
+        for (slot_idx, slot) in self.effect_slots.iter_mut().enumerate() {
+            let Some(desc) = effect_descriptors.get(slot_idx) else {
+                continue;
+            };
+            let num_params = slot.num_params as usize;
+            for param_idx in 0..num_params.min(desc.params.len()) {
+                if !matches!(
+                    desc.params[param_idx].host_control,
+                    Some(HostControl::FxSidechain { .. })
+                ) {
+                    continue;
+                }
+                if param_idx < slot.defaults.len() {
+                    slot.defaults[param_idx] = remap_sidechain_selection_after_track_delete(
+                        owner_track_old,
+                        slot.defaults[param_idx].round().max(0.0) as usize,
+                        deleted_track,
+                        old_track_count,
+                    ) as f32;
+                }
+                for step in 0..MAX_STEPS {
+                    if let Some(selection) = slot.plocks[step].get(param_idx).and_then(|v| *v) {
+                        slot.plocks[step][param_idx] =
+                            Some(remap_sidechain_selection_after_track_delete(
+                                owner_track_old,
+                                selection.round().max(0.0) as usize,
+                                deleted_track,
+                                old_track_count,
+                            ) as f32);
+                    }
+                }
+            }
+        }
+    }
+
+    fn remove_midi_fx_slot(&mut self, slot_idx: usize) {
+        if slot_idx < self.track_params.midi_fx_chain.len() {
+            self.track_params.midi_fx_chain.remove(slot_idx);
+        }
+        if slot_idx >= self.midi_fx_slots.len() {
+            return;
+        }
+        for idx in slot_idx..self.midi_fx_slots.len().saturating_sub(1) {
+            self.midi_fx_slots[idx] = self.midi_fx_slots[idx + 1].clone();
+        }
+        if let Some(last) = self.midi_fx_slots.last_mut() {
+            last.clear();
+        }
+    }
+
+    fn insert_midi_fx_slot(&mut self, slot_idx: usize, name: String, desc: &EffectDescriptor) {
+        let insert_idx = slot_idx.min(self.track_params.midi_fx_chain.len());
+        self.track_params.midi_fx_chain.insert(insert_idx, name);
+        if insert_idx >= self.midi_fx_slots.len() {
+            return;
+        }
+        for idx in (insert_idx + 1..self.midi_fx_slots.len()).rev() {
+            self.midi_fx_slots[idx] = self.midi_fx_slots[idx - 1].clone();
+        }
+        self.midi_fx_slots[insert_idx].sync_to_descriptor(desc, 0);
+    }
+
+    fn move_midi_fx_slot_to(&mut self, source_slot: usize, target_slot: usize) {
+        if source_slot >= self.track_params.midi_fx_chain.len() {
+            return;
+        }
+        let target_slot = target_slot.min(self.track_params.midi_fx_chain.len().saturating_sub(1));
+        if source_slot == target_slot {
+            return;
+        }
+        let name = self.track_params.midi_fx_chain.remove(source_slot);
+        self.track_params.midi_fx_chain.insert(target_slot, name);
+        if source_slot >= self.midi_fx_slots.len() || target_slot >= self.midi_fx_slots.len() {
+            return;
+        }
+        let entry = self.midi_fx_slots.remove(source_slot);
+        self.midi_fx_slots.insert(target_slot, entry);
+        while self.midi_fx_slots.len() <= target_slot.max(source_slot) {
+            self.midi_fx_slots.push(EffectSlotSnapshot::new_empty());
+        }
+    }
+
+    fn clear(
+        &mut self,
+        track: usize,
+        slot_descriptors: &[Vec<EffectDescriptor>],
+        instrument_type: InstrumentType,
+    ) {
+        self.track_bits = [0u64; TRACK_PATTERN_WORDS];
+        self.neural_reset_bits = [0u64; TRACK_PATTERN_WORDS];
+        self.step_data = PatternSnapshot::default_step_data();
+        self.track_params = TrackParamsSnapshot::default();
+        self.effect_slots = PatternSnapshot::default_effect_slots(track, slot_descriptors);
+        self.midi_fx_slots = PatternSnapshot::default_midi_fx_slots();
+        self.instrument_slot = PatternSnapshot::default_instrument_slot();
+        self.instrument_base_note_offset = 0.0;
+        self.track_sound_state = TrackSoundState::default();
+        self.sample_id = (-1, String::new(), 44_100);
+        self.chord_snapshot = ChordSnapshot::new_default();
+        self.timebase_plock_snapshot = [None; MAX_STEPS];
+        self.swing_plock_snapshot = [None; MAX_STEPS];
+        self.swing_resolution_plock_snapshot = [None; MAX_STEPS];
+        self.instrument_type = instrument_type;
+        self.instrument_run_mode = CustomInstrumentRunMode::Instrument;
+    }
+
     fn default_step_params() -> [f32; NUM_PARAMS] {
         let mut params = [0.0f32; NUM_PARAMS];
         for param in StepParam::ALL {
@@ -336,6 +502,7 @@ impl TrackPatternPool {
 pub struct Scene {
     pub name: String,
     pub cells: Vec<Option<PatternId>>,
+    pub bus_patterns: Vec<BusPatternSnapshot>,
     // These are scene-level because per-track launches must not swap project-wide
     // modulation, neural, or graph routing state.
     pub mod_connections: Vec<ModConnection>,
@@ -374,6 +541,7 @@ impl ProjectScenes {
             scenes.push(Scene {
                 name: format!("Scene {}", scene_idx + 1),
                 cells,
+                bus_patterns: Vec::new(),
                 mod_connections: snapshot.mod_connections.clone(),
                 neural_networks: snapshot.neural_networks.clone(),
                 graph_overrides: snapshot.graph_overrides.clone(),
@@ -384,6 +552,7 @@ impl ProjectScenes {
             scenes.push(Scene {
                 name: "Scene 1".to_string(),
                 cells: vec![None; track_count],
+                bus_patterns: Vec::new(),
                 mod_connections: Vec::new(),
                 neural_networks: Vec::new(),
                 graph_overrides: Vec::new(),
@@ -448,18 +617,16 @@ impl ProjectScenes {
             let Some(data) = snapshot.track_pattern_data(track) else {
                 continue;
             };
-            let id = self
+            let Some(id) = self
                 .track_overrides
                 .get(track)
                 .copied()
                 .flatten()
                 .or_else(|| scene.cells.get(track).copied().flatten())
                 .filter(|id| self.track_pools[track].contains(*id))
-                .unwrap_or_else(|| {
-                    let id = self.track_pools[track].insert(data.clone());
-                    scene.cells[track] = Some(id);
-                    id
-                });
+            else {
+                continue;
+            };
             if let Some(slot) = self.track_pools[track].get_mut(id) {
                 *slot = data;
             }
@@ -676,9 +843,10 @@ impl ProjectScenes {
         }
 
         let scene_idx = self.scenes.len();
-        let (mod_connections, neural_networks, graph_overrides) = source_scene
+        let (bus_patterns, mod_connections, neural_networks, graph_overrides) = source_scene
             .map(|scene| {
                 (
+                    scene.bus_patterns,
                     scene.mod_connections,
                     scene.neural_networks,
                     scene.graph_overrides,
@@ -688,6 +856,7 @@ impl ProjectScenes {
         self.scenes.push(Scene {
             name: format!("Scene {}", scene_idx + 1),
             cells,
+            bus_patterns,
             mod_connections,
             neural_networks,
             graph_overrides,
@@ -734,6 +903,22 @@ impl ProjectScenes {
             removed += before - self.track_pools[track].patterns.len();
         }
         removed
+    }
+
+    fn edit_other_track_patterns<F>(&mut self, track: usize, mut edit: F) -> bool
+    where
+        F: FnMut(&mut TrackPatternData),
+    {
+        let current_effective = self.effective_pattern_id(track);
+        let Some(pool) = self.track_pools.get_mut(track) else {
+            return false;
+        };
+        for (id, data) in &mut pool.patterns {
+            if Some(*id) != current_effective {
+                edit(data);
+            }
+        }
+        true
     }
 }
 
@@ -1647,6 +1832,7 @@ pub fn default_empty_effect_chain() -> Vec<EffectSlotState> {
 pub struct PatternState {
     pub patterns: Vec<TrackPattern>,
     pub neural_reset_patterns: Vec<TrackPattern>,
+    scene_silenced: Vec<AtomicBool>,
     pub step_data: Vec<StepData>,
     pub chord_data: Vec<ChordData>,
     pub track_params: Vec<TrackParams>,
@@ -1755,7 +1941,6 @@ pub struct SequencerState {
     published_sequencers_version: AtomicU64,
     scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
-    bus_pattern_bank: Mutex<Vec<Vec<BusPatternSnapshot>>>,
     pending_accumulator_reset_all: AtomicBool,
     pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
 }
@@ -1818,6 +2003,8 @@ impl SequencerState {
         let patterns: Vec<TrackPattern> = (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
         let neural_reset_patterns: Vec<TrackPattern> =
             (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
+        let scene_silenced: Vec<AtomicBool> =
+            (0..MAX_TRACKS).map(|_| AtomicBool::new(false)).collect();
         let step_data: Vec<StepData> = (0..MAX_TRACKS).map(|_| StepData::new()).collect();
         let track_params: Vec<TrackParams> = (0..MAX_TRACKS).map(|_| TrackParams::new()).collect();
         let trigger_flash: Vec<AtomicU32> = (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect();
@@ -1844,6 +2031,7 @@ impl SequencerState {
             pattern: PatternState {
                 patterns,
                 neural_reset_patterns,
+                scene_silenced,
                 step_data,
                 chord_data,
                 track_params,
@@ -1967,7 +2155,6 @@ impl SequencerState {
             published_sequencers_version: AtomicU64::new(0),
             scratch_effect_descriptors: Mutex::new(Vec::new()),
             scratch_instrument_descriptors: Mutex::new(Vec::new()),
-            bus_pattern_bank: Mutex::new(Vec::new()),
             pending_accumulator_reset_all: AtomicBool::new(false),
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
         };
@@ -1977,6 +2164,20 @@ impl SequencerState {
 
     pub fn active_track_count(&self) -> usize {
         self.transport.num_tracks.load(Ordering::Acquire) as usize
+    }
+
+    pub fn is_scene_silenced(&self, track: usize) -> bool {
+        self.pattern
+            .scene_silenced
+            .get(track)
+            .map(|flag| flag.load(Ordering::Acquire))
+            .unwrap_or(false)
+    }
+
+    fn set_scene_silenced(&self, track: usize, silenced: bool) {
+        if let Some(flag) = self.pattern.scene_silenced.get(track) {
+            flag.store(silenced, Ordering::Release);
+        }
     }
     pub fn scheduler_snapshot_version(&self) -> u64 {
         self.scheduler_snapshot_version.load(Ordering::Acquire)
@@ -2005,7 +2206,16 @@ impl SequencerState {
         let len = snapshots.len().max(1);
         {
             let mut scenes = self.pattern.scenes.lock().unwrap();
-            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, current_idx);
+            let bus_patterns = scenes
+                .scenes
+                .iter()
+                .map(|scene| scene.bus_patterns.clone())
+                .collect::<Vec<_>>();
+            let mut rebuilt = ProjectScenes::from_pattern_snapshots(&snapshots, current_idx);
+            for (scene, bus_patterns) in rebuilt.scenes.iter_mut().zip(bus_patterns) {
+                scene.bus_patterns = bus_patterns;
+            }
+            *scenes = rebuilt;
         }
         self.pattern
             .num_patterns
@@ -2042,14 +2252,20 @@ impl SequencerState {
     pub fn restore_current_pattern_from_repository(&self) -> Option<Vec<(i32, String, u32)>> {
         let current_pattern = self.current_pattern_index();
         let sample_ids = {
-            let snapshot = self
-                .pattern
-                .scenes
-                .lock()
-                .unwrap()
-                .scene_snapshot(current_pattern)?;
-            snapshot.restore(self);
-            snapshot.sample_ids.clone()
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let launched = scenes.launch_scene(current_pattern)?;
+            for (track, data) in launched.into_iter().enumerate() {
+                if let Some(data) = data {
+                    data.restore_to(self, track);
+                    self.set_scene_silenced(track, false);
+                } else {
+                    self.set_scene_silenced(track, true);
+                }
+            }
+            scenes
+                .scene_snapshot(current_pattern)
+                .map(|snapshot| snapshot.sample_ids)
+                .unwrap_or_default()
         };
         Some(sample_ids)
     }
@@ -2131,14 +2347,9 @@ impl SequencerState {
         modulator_node_id: u32,
     ) {
         self.save_current_track_effect_snapshot(track);
-        self.edit_non_current_pattern_snapshots(|snapshot| {
-            snapshot.sync_effect_slot_with_modulator(
-                track,
-                slot_idx,
-                descriptor,
-                node_id,
-                modulator_node_id,
-            );
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes.edit_other_track_patterns(track, |data| {
+            data.sync_effect_slot_with_modulator(slot_idx, descriptor, node_id, modulator_node_id);
         });
     }
 
@@ -2149,15 +2360,41 @@ impl SequencerState {
         track: usize,
         run_mode: CustomInstrumentRunMode,
     ) {
-        self.edit_pattern_repository(|bank, current_pattern| {
-            let Some(snapshot) = bank.get_mut(current_pattern) else {
-                return;
-            };
-            snapshot.normalize_track_count(track_count, slot_descriptors);
-            if let Some(mode) = snapshot.instrument_run_modes.get_mut(track) {
-                *mode = run_mode;
-            }
-        });
+        self.extend_all_pattern_snapshots_to_track(
+            track_count,
+            slot_descriptors,
+            track,
+            run_mode,
+            None,
+        );
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(id) = scenes.effective_pattern_id(track) else {
+            return;
+        };
+        if let Some(data) = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(id))
+        {
+            data.instrument_run_mode = run_mode;
+        }
+    }
+
+    fn default_track_pattern_data_for_track(
+        track_count: usize,
+        slot_descriptors: &[Vec<EffectDescriptor>],
+        track: usize,
+        run_mode: CustomInstrumentRunMode,
+        instrument: Option<(&EffectDescriptor, u32, InstrumentType)>,
+    ) -> Option<TrackPatternData> {
+        let mut snapshot = PatternSnapshot::new_default(track_count, slot_descriptors);
+        if let Some(mode) = snapshot.instrument_run_modes.get_mut(track) {
+            *mode = run_mode;
+        }
+        if let Some((descriptor, node_id, instrument_type)) = instrument {
+            snapshot.sync_instrument_slot(track, descriptor, node_id, instrument_type);
+        }
+        snapshot.track_pattern_data(track)
     }
 
     pub fn extend_all_pattern_snapshots_to_track(
@@ -2168,21 +2405,40 @@ impl SequencerState {
         run_mode: CustomInstrumentRunMode,
         instrument: Option<(&EffectDescriptor, u32, InstrumentType)>,
     ) {
-        self.edit_all_pattern_snapshots(|snapshot| {
-            snapshot.extend_to_tracks(track_count, slot_descriptors);
-            if let Some(mode) = snapshot.instrument_run_modes.get_mut(track) {
-                *mode = run_mode;
+        let Some(default_data) = Self::default_track_pattern_data_for_track(
+            track_count,
+            slot_descriptors,
+            track,
+            run_mode,
+            instrument,
+        ) else {
+            return;
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        while scenes.track_pools.len() < track_count {
+            scenes.track_pools.push(TrackPatternPool::default());
+            scenes.track_overrides.push(None);
+            for scene in &mut scenes.scenes {
+                scene.cells.push(None);
             }
-            if let Some((descriptor, node_id, instrument_type)) = instrument {
-                snapshot.sync_instrument_slot(track, descriptor, node_id, instrument_type);
+        }
+        if track >= scenes.track_pools.len() {
+            return;
+        }
+        for scene_idx in 0..scenes.scenes.len() {
+            while scenes.scenes[scene_idx].cells.len() < track_count {
+                scenes.scenes[scene_idx].cells.push(None);
             }
-        });
+            if scenes.scenes[scene_idx].cells[track].is_none() {
+                let id = scenes.track_pools[track].insert(default_data.clone());
+                scenes.scenes[scene_idx].cells[track] = Some(id);
+            }
+        }
     }
 
     pub fn insert_effect_slot_in_other_track_patterns(&self, track: usize, slot_idx: usize) {
-        self.edit_non_current_pattern_snapshots(|snapshot| {
-            snapshot.insert_empty_effect_slot(track, slot_idx)
-        });
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes.edit_other_track_patterns(track, |data| data.insert_empty_effect_slot(slot_idx));
     }
 
     pub fn move_effect_slot_in_other_track_patterns(
@@ -2191,16 +2447,16 @@ impl SequencerState {
         source_slot: usize,
         target_slot: usize,
     ) {
-        self.edit_non_current_pattern_snapshots(|snapshot| {
-            snapshot.move_effect_slot_to(track, source_slot, target_slot);
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes.edit_other_track_patterns(track, |data| {
+            data.move_effect_slot_to(source_slot, target_slot);
         });
     }
 
     pub fn remove_effect_slot_from_track_patterns(&self, track: usize, slot_idx: usize) {
         self.save_current_track_effect_snapshot(track);
-        self.edit_non_current_pattern_snapshots(|snapshot| {
-            snapshot.remove_effect_slot(track, slot_idx);
-        });
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes.edit_other_track_patterns(track, |data| data.remove_effect_slot(slot_idx));
     }
 
     pub fn insert_midi_fx_slot_in_other_track_patterns(
@@ -2210,8 +2466,9 @@ impl SequencerState {
         name: String,
         descriptor: &EffectDescriptor,
     ) {
-        self.edit_non_current_pattern_snapshots(|snapshot| {
-            snapshot.insert_midi_fx_slot(track, slot_idx, name.clone(), descriptor);
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes.edit_other_track_patterns(track, |data| {
+            data.insert_midi_fx_slot(slot_idx, name.clone(), descriptor);
         });
     }
 
@@ -2221,45 +2478,50 @@ impl SequencerState {
         source_slot: usize,
         target_slot: usize,
     ) {
-        self.edit_non_current_pattern_snapshots(|snapshot| {
-            snapshot.move_midi_fx_slot_to(track, source_slot, target_slot);
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes.edit_other_track_patterns(track, |data| {
+            data.move_midi_fx_slot_to(source_slot, target_slot);
         });
     }
 
     pub fn remove_midi_fx_slot_from_track_patterns(&self, track: usize, slot_idx: usize) {
         self.save_current_track_midi_fx_snapshot(track);
-        self.edit_non_current_pattern_snapshots(|snapshot| {
-            snapshot.remove_midi_fx_slot(track, slot_idx);
-        });
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        scenes.edit_other_track_patterns(track, |data| data.remove_midi_fx_slot(slot_idx));
     }
 
     pub fn remove_bus_references_from_all_track_patterns(&self, bus_id: BusId) {
-        self.edit_all_pattern_snapshots(|pattern| {
-            for params in &mut pattern.track_params {
-                if params.output == TrackOutput::Bus(bus_id) {
-                    params.output = TrackOutput::Mix;
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        for pool in &mut scenes.track_pools {
+            for data in pool.patterns.values_mut() {
+                if data.track_params.output == TrackOutput::Bus(bus_id) {
+                    data.track_params.output = TrackOutput::Mix;
                 }
-                params.sends.retain(|send| send.destination != bus_id);
+                data.track_params
+                    .sends
+                    .retain(|send| send.destination != bus_id);
             }
-        });
+        }
     }
 
-    fn ensure_bus_pattern_bank_len_locked(
-        bank: &mut Vec<Vec<BusPatternSnapshot>>,
+    fn ensure_scene_bus_patterns_len_locked(
+        scenes: &mut ProjectScenes,
         len: usize,
         default_snapshot: &[BusPatternSnapshot],
     ) {
-        while bank.len() < len {
-            bank.push(default_snapshot.to_vec());
+        for scene in scenes.scenes.iter_mut().take(len) {
+            if scene.bus_patterns.is_empty() {
+                scene.bus_patterns = default_snapshot.to_vec();
+            }
         }
     }
 
     pub fn save_current_bus_pattern_snapshot(&self, snapshot: Vec<BusPatternSnapshot>) {
         let current_scene = self.current_scene_index();
         let target_len = self.scene_count().max(current_scene + 1);
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        Self::ensure_bus_pattern_bank_len_locked(&mut bank, target_len, &snapshot);
-        bank[current_scene] = snapshot;
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, &snapshot);
+        scenes.scenes[current_scene].bus_patterns = snapshot;
     }
 
     pub fn bus_pattern_snapshot_or_default(
@@ -2267,9 +2529,13 @@ impl SequencerState {
         scene_idx: usize,
         default_snapshot: &[BusPatternSnapshot],
     ) -> Vec<BusPatternSnapshot> {
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        Self::ensure_bus_pattern_bank_len_locked(&mut bank, scene_idx + 1, default_snapshot);
-        bank[scene_idx].clone()
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, scene_idx + 1, default_snapshot);
+        scenes
+            .scenes
+            .get(scene_idx)
+            .map(|scene| scene.bus_patterns.clone())
+            .unwrap_or_else(|| default_snapshot.to_vec())
     }
 
     pub fn ensure_bus_pattern_repository_len(
@@ -2277,8 +2543,8 @@ impl SequencerState {
         len: usize,
         default_snapshot: &[BusPatternSnapshot],
     ) {
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        Self::ensure_bus_pattern_bank_len_locked(&mut bank, len, default_snapshot);
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, len, default_snapshot);
     }
 
     pub fn clone_bus_pattern_snapshot(
@@ -2287,29 +2553,36 @@ impl SequencerState {
         new_idx: usize,
         default_snapshot: &[BusPatternSnapshot],
     ) -> Vec<BusPatternSnapshot> {
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        Self::ensure_bus_pattern_bank_len_locked(
-            &mut bank,
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        Self::ensure_scene_bus_patterns_len_locked(
+            &mut scenes,
             source_idx.max(new_idx) + 1,
             default_snapshot,
         );
-        let source = bank[source_idx].clone();
-        bank[new_idx] = source.clone();
+        let source = scenes
+            .scenes
+            .get(source_idx)
+            .map(|scene| scene.bus_patterns.clone())
+            .unwrap_or_else(|| default_snapshot.to_vec());
+        if let Some(scene) = scenes.scenes.get_mut(new_idx) {
+            scene.bus_patterns = source.clone();
+        }
         source
     }
 
     pub fn delete_bus_pattern_snapshot(
         &self,
-        deleted_idx: usize,
+        _deleted_idx: usize,
         new_idx: usize,
         default_snapshot: &[BusPatternSnapshot],
     ) -> Vec<BusPatternSnapshot> {
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        if bank.len() > 1 && deleted_idx < bank.len() {
-            bank.remove(deleted_idx);
-        }
-        Self::ensure_bus_pattern_bank_len_locked(&mut bank, new_idx + 1, default_snapshot);
-        bank[new_idx].clone()
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, new_idx + 1, default_snapshot);
+        scenes
+            .scenes
+            .get(new_idx)
+            .map(|scene| scene.bus_patterns.clone())
+            .unwrap_or_else(|| default_snapshot.to_vec())
     }
 
     pub fn export_bus_pattern_repository(
@@ -2317,9 +2590,13 @@ impl SequencerState {
         default_snapshot: &[BusPatternSnapshot],
     ) -> Vec<Vec<BusPatternSnapshot>> {
         let target_len = self.scene_count();
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        Self::ensure_bus_pattern_bank_len_locked(&mut bank, target_len, default_snapshot);
-        bank.clone()
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, default_snapshot);
+        scenes
+            .scenes
+            .iter()
+            .map(|scene| scene.bus_patterns.clone())
+            .collect()
     }
 
     pub fn replace_bus_pattern_repository(
@@ -2327,9 +2604,12 @@ impl SequencerState {
         snapshots: Vec<Vec<BusPatternSnapshot>>,
         default_snapshot: &[BusPatternSnapshot],
     ) {
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        *bank = snapshots;
-        Self::ensure_bus_pattern_bank_len_locked(&mut bank, self.scene_count(), default_snapshot);
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let target_len = scenes.scene_count().max(snapshots.len());
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, default_snapshot);
+        for (scene, snapshot) in scenes.scenes.iter_mut().zip(snapshots) {
+            scene.bus_patterns = snapshot;
+        }
     }
 
     pub fn insert_bus_effect_slot_in_other_scene_patterns(
@@ -2339,17 +2619,14 @@ impl SequencerState {
         default_snapshot: &[BusPatternSnapshot],
     ) {
         let current_scene = self.current_scene_index();
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        Self::ensure_bus_pattern_bank_len_locked(
-            &mut bank,
-            self.scene_count().max(current_scene + 1),
-            default_snapshot,
-        );
-        for (scene_idx, buses) in bank.iter_mut().enumerate() {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let target_len = scenes.scene_count().max(current_scene + 1);
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, default_snapshot);
+        for (scene_idx, scene) in scenes.scenes.iter_mut().enumerate() {
             if scene_idx == current_scene {
                 continue;
             }
-            let Some(bus) = buses.get_mut(bus_idx) else {
+            let Some(bus) = scene.bus_patterns.get_mut(bus_idx) else {
                 continue;
             };
             if slot_idx > bus.effect_plocks.len() {
@@ -2369,17 +2646,14 @@ impl SequencerState {
         default_snapshot: &[BusPatternSnapshot],
     ) {
         let current_scene = self.current_scene_index();
-        let mut bank = self.bus_pattern_bank.lock().unwrap();
-        Self::ensure_bus_pattern_bank_len_locked(
-            &mut bank,
-            self.scene_count().max(current_scene + 1),
-            default_snapshot,
-        );
-        for (scene_idx, buses) in bank.iter_mut().enumerate() {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let target_len = scenes.scene_count().max(current_scene + 1);
+        Self::ensure_scene_bus_patterns_len_locked(&mut scenes, target_len, default_snapshot);
+        for (scene_idx, scene) in scenes.scenes.iter_mut().enumerate() {
             if scene_idx == current_scene {
                 continue;
             }
-            let Some(bus) = buses.get_mut(bus_idx) else {
+            let Some(bus) = scene.bus_patterns.get_mut(bus_idx) else {
                 continue;
             };
             if source_slot >= bus.effect_plocks.len() {
@@ -2402,9 +2676,18 @@ impl SequencerState {
     {
         let current_pattern = self.current_pattern_index();
         let mut scenes = self.pattern.scenes.lock().unwrap();
+        let bus_patterns = scenes
+            .scenes
+            .iter()
+            .map(|scene| scene.bus_patterns.clone())
+            .collect::<Vec<_>>();
         let mut snapshots = scenes.snapshots();
         let result = edit(&mut snapshots, current_pattern);
-        *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, current_pattern);
+        let mut rebuilt = ProjectScenes::from_pattern_snapshots(&snapshots, current_pattern);
+        for (scene, bus_patterns) in rebuilt.scenes.iter_mut().zip(bus_patterns) {
+            scene.bus_patterns = bus_patterns;
+        }
+        *scenes = rebuilt;
         result
     }
 
@@ -2696,6 +2979,7 @@ impl SequencerState {
     }
 
     fn clear_runtime_track_binding_in_place(&self, track: usize) {
+        self.set_scene_silenced(track, false);
         self.transport.track_playheads[track].store(0, Ordering::Relaxed);
         self.transport.trigger_flash[track].store(0, Ordering::Relaxed);
         self.runtime.sampler_lids[track].store(0, Ordering::Relaxed);
@@ -2741,6 +3025,10 @@ impl SequencerState {
             );
             self.transport.trigger_flash[idx].store(
                 self.transport.trigger_flash[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.pattern.scene_silenced[idx].store(
+                self.pattern.scene_silenced[next].load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
             self.runtime.sampler_lids[idx].store(
@@ -2848,6 +3136,7 @@ impl SequencerState {
             return;
         }
         let last = old_count - 1;
+        self.set_scene_silenced(last, false);
         self.transport.track_playheads[last].store(0, Ordering::Relaxed);
         self.transport.trigger_flash[last].store(0, Ordering::Relaxed);
         self.runtime.sampler_lids[last].store(0, Ordering::Relaxed);
@@ -2915,6 +3204,31 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            scenes.save_scene_snapshot(current_pattern, current_snapshot.clone());
+            for owner_track in 0..old_count {
+                if owner_track == track_idx {
+                    continue;
+                }
+                let Some(track_descs) = effect_descriptors.get(owner_track) else {
+                    continue;
+                };
+                let Some(pool) = scenes.track_pools.get_mut(owner_track) else {
+                    continue;
+                };
+                for data in pool.patterns.values_mut() {
+                    data.remap_sidechain_references_after_track_delete(
+                        owner_track,
+                        track_descs,
+                        track_idx,
+                        old_count,
+                    );
+                }
+            }
+            scenes.remove_track(track_idx);
+        }
+
         remap_snapshot_sidechain_references_after_track_delete(
             &mut current_snapshot,
             effect_descriptors,
@@ -2922,23 +3236,6 @@ impl SequencerState {
             old_count,
         );
         current_snapshot.remove_track(track_idx);
-
-        self.edit_pattern_repository(|bank, _| {
-            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
-                if pattern_idx == current_pattern {
-                    *snapshot = current_snapshot.clone();
-                } else {
-                    remap_snapshot_sidechain_references_after_track_delete(
-                        snapshot,
-                        effect_descriptors,
-                        track_idx,
-                        old_count,
-                    );
-                    snapshot.remove_track(track_idx);
-                }
-            }
-        });
-
         current_snapshot.restore(self);
         self.shift_runtime_track_bindings_left(track_idx, old_count);
         self.clear_live_track_lane(old_count - 1);
@@ -2962,9 +3259,15 @@ impl SequencerState {
             return false;
         }
 
-        self.edit_all_pattern_snapshots(|snapshot| {
-            snapshot.clear_track(track_idx, effect_descriptors, InstrumentType::Sampler);
-        });
+        {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let Some(pool) = scenes.track_pools.get_mut(track_idx) else {
+                return false;
+            };
+            for data in pool.patterns.values_mut() {
+                data.clear(track_idx, effect_descriptors, InstrumentType::Sampler);
+            }
+        }
 
         self.clear_live_track_lane(track_idx);
         self.clear_runtime_track_binding_in_place(track_idx);
@@ -3124,42 +3427,6 @@ impl SequencerState {
             .track_pattern_cells(track)
     }
 
-    fn silence_track_pattern(&self, track: usize) -> bool {
-        if track >= self.pattern.patterns.len()
-            || track >= self.pattern.neural_reset_patterns.len()
-            || track >= self.pattern.step_data.len()
-            || track >= self.pattern.chord_data.len()
-            || track >= self.pattern.timebase_plocks.len()
-            || track >= self.pattern.swing_plocks.len()
-            || track >= self.pattern.swing_resolution_plocks.len()
-        {
-            return false;
-        }
-
-        self.pattern.patterns[track].store_bits([0; TRACK_PATTERN_WORDS]);
-        self.pattern.neural_reset_patterns[track].store_bits([0; TRACK_PATTERN_WORDS]);
-        for step in 0..MAX_STEPS {
-            for param in StepParam::ALL {
-                self.pattern.step_data[track].set(step, param, param.default_value());
-            }
-            self.pattern.chord_data[track].clear_step(step);
-        }
-        self.pattern.timebase_plocks[track].restore(&[None; MAX_STEPS]);
-        self.pattern.swing_plocks[track].restore(&[None; MAX_STEPS]);
-        self.pattern.swing_resolution_plocks[track].restore(&[None; MAX_STEPS]);
-        for slot in self.pattern.effect_chains.get(track).into_iter().flatten() {
-            for step in 0..MAX_STEPS {
-                slot.plocks.clear_step(step);
-            }
-        }
-        if let Some(slot) = self.pattern.instrument_slots.get(track) {
-            for step in 0..MAX_STEPS {
-                slot.plocks.clear_step(step);
-            }
-        }
-        true
-    }
-
     pub fn launch_scene(
         &self,
         scene_idx: usize,
@@ -3187,8 +3454,9 @@ impl SequencerState {
             for (track, data) in launched.into_iter().enumerate() {
                 if let Some(data) = data {
                     data.restore_to(self, track);
+                    self.set_scene_silenced(track, false);
                 } else {
-                    self.silence_track_pattern(track);
+                    self.set_scene_silenced(track, true);
                 }
             }
             let sample_ids = scenes
@@ -3241,6 +3509,7 @@ impl SequencerState {
             return false;
         };
         data.restore_to(self, track);
+        self.set_scene_silenced(track, false);
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
         true
@@ -3271,8 +3540,103 @@ impl SequencerState {
             scenes.save_scene_snapshot(current_scene, current_snapshot);
             scenes.fork_track_pattern(track)?
         };
+        self.set_scene_silenced(track, false);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
         Some(id)
+    }
+
+    pub fn set_scene_cell(
+        &self,
+        scene: usize,
+        track: usize,
+        pattern_id: PatternId,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> bool {
+        if track >= num_tracks {
+            return false;
+        }
+        let current_snapshot = self.capture_current_pattern_snapshot(
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
+        let restore_current_track = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let current_scene = self.current_scene_index();
+            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+                return false;
+            }
+            if !scenes.set_cell(scene, track, pattern_id) {
+                return false;
+            }
+            if scene == current_scene {
+                if let Some(override_slot) = scenes.track_overrides.get_mut(track) {
+                    *override_slot = None;
+                }
+                scenes
+                    .track_pools
+                    .get(track)
+                    .and_then(|pool| pool.get(pattern_id))
+                    .cloned()
+            } else {
+                None
+            }
+        };
+
+        if let Some(data) = restore_current_track {
+            data.restore_to(self, track);
+            self.set_scene_silenced(track, false);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            self.publish_scheduler_snapshot();
+        }
+        true
+    }
+
+    pub fn clear_scene_cell(
+        &self,
+        scene: usize,
+        track: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> Option<PatternId> {
+        if track >= num_tracks {
+            return None;
+        }
+        let current_snapshot = self.capture_current_pattern_snapshot(
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
+        let (cleared, should_silence) = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let current_scene = self.current_scene_index();
+            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+                return None;
+            }
+            let cleared = scenes.clear_cell(scene, track)?;
+            let should_silence =
+                scene == current_scene && scenes.effective_pattern_id(track).is_none();
+            (cleared, should_silence)
+        };
+
+        if should_silence {
+            self.set_scene_silenced(track, true);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            self.publish_scheduler_snapshot();
+        }
+        Some(cleared)
     }
 
     pub fn switch_pattern(
@@ -3288,40 +3652,14 @@ impl SequencerState {
         if new_idx == cur {
             return None;
         }
-        let sample_ids = {
-            let mut scenes = self.pattern.scenes.lock().unwrap();
-            if new_idx >= scenes.scene_count() {
-                return None;
-            }
-            let current_metadata = scenes.current_scene_metadata();
-            let current_snapshot = PatternSnapshot::capture_with_mod_connections(
-                self,
-                num_tracks,
-                buffer_ids,
-                sample_rates,
-                names,
-                instrument_types,
-                current_metadata.0,
-                current_metadata.1,
-                current_metadata.2,
-            );
-            scenes.save_scene_snapshot(cur, current_snapshot);
-            let snapshot = scenes.scene_snapshot(new_idx)?;
-            snapshot.restore(self);
-            scenes.current_scene = new_idx;
-            scenes.track_overrides.fill(None);
-            self.pattern
-                .current_pattern
-                .store(new_idx as u32, Ordering::Relaxed);
-            self.pattern
-                .num_patterns
-                .store(scenes.scene_count() as u32, Ordering::Relaxed);
-            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
-            snapshot.sample_ids.clone()
-        };
-        self.schedule_mod_resync();
-        self.publish_scheduler_snapshot();
-        Some(sample_ids)
+        self.launch_scene(
+            new_idx,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        )
     }
 
     pub fn clone_pattern(
@@ -3390,8 +3728,19 @@ impl SequencerState {
             );
             scenes.save_scene_snapshot(cur, current_snapshot);
             let new_idx = scenes.delete_scene(cur)?;
-            let snapshot = scenes.scene_snapshot(new_idx)?;
-            snapshot.restore(self);
+            let launched = scenes.launch_scene(new_idx)?;
+            for (track, data) in launched.into_iter().enumerate() {
+                if let Some(data) = data {
+                    data.restore_to(self, track);
+                    self.set_scene_silenced(track, false);
+                } else {
+                    self.set_scene_silenced(track, true);
+                }
+            }
+            let sample_ids = scenes
+                .scene_snapshot(new_idx)
+                .map(|snapshot| snapshot.sample_ids)
+                .unwrap_or_default();
             self.pattern
                 .current_pattern
                 .store(new_idx as u32, Ordering::Relaxed);
@@ -3399,7 +3748,7 @@ impl SequencerState {
                 .num_patterns
                 .store(scenes.scene_count() as u32, Ordering::Relaxed);
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
-            snapshot.sample_ids.clone()
+            sample_ids
         };
         self.schedule_mod_resync();
         self.publish_scheduler_snapshot();
@@ -3442,7 +3791,16 @@ impl SequencerState {
                 snapshot.clone_track_lane_from(&source, track);
             }
         }
-        *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, cur);
+        let bus_patterns = scenes
+            .scenes
+            .iter()
+            .map(|scene| scene.bus_patterns.clone())
+            .collect::<Vec<_>>();
+        let mut rebuilt = ProjectScenes::from_pattern_snapshots(&snapshots, cur);
+        for (scene, bus_patterns) in rebuilt.scenes.iter_mut().zip(bus_patterns) {
+            scene.bus_patterns = bus_patterns;
+        }
+        *scenes = rebuilt;
         true
     }
 
@@ -4050,6 +4408,29 @@ mod tests {
     }
 
     #[test]
+    fn topology_edit_preserves_shared_track_pattern_identity() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let shared = state.scene_track_pattern_id(0, 0).unwrap();
+        {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            assert!(scenes.set_cell(1, 0, shared));
+        }
+
+        state.insert_effect_slot_in_other_track_patterns(0, BUILTIN_SLOT_COUNT);
+
+        let scenes = state.pattern.scenes.lock().unwrap();
+        assert_eq!(scenes.scenes[0].cells[0], Some(shared));
+        assert_eq!(scenes.scenes[1].cells[0], Some(shared));
+    }
+
+    #[test]
     fn repository_midi_fx_insert_applies_to_other_patterns_for_one_track_only() {
         let state = SequencerState::new(2, (0..2).map(|_| default_empty_effect_chain()).collect());
         state.replace_pattern_repository(
@@ -4108,15 +4489,41 @@ mod tests {
         let second = sample_bus_pattern_snapshot(0.75);
         state.replace_bus_pattern_repository(vec![first.clone(), second], &first);
 
-        let cloned = state.clone_bus_pattern_snapshot(0, 2, &first);
+        let new_scene = state.clone_pattern(
+            1,
+            &[-1],
+            &[44_100],
+            &[String::from("track")],
+            &[InstrumentType::Sampler],
+        );
+        let cloned = state.clone_bus_pattern_snapshot(0, new_scene, &first);
         assert_eq!(cloned[0].gate_sequence.velocities[0], 0.25);
         assert_eq!(
-            state.bus_pattern_snapshot_or_default(2, &first)[0]
+            state.bus_pattern_snapshot_or_default(new_scene, &first)[0]
                 .gate_sequence
                 .velocities[0],
             0.25
         );
 
+        state
+            .switch_pattern(
+                0,
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+            )
+            .unwrap();
+        state
+            .delete_pattern(
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+            )
+            .unwrap();
         let restored = state.delete_bus_pattern_snapshot(0, 0, &first);
         assert_eq!(restored[0].gate_sequence.velocities[0], 0.75);
     }
@@ -5107,7 +5514,125 @@ mod tests {
     }
 
     #[test]
-    fn launch_scene_with_empty_cell_silences_track_without_resetting_params() {
+    fn set_current_scene_cell_restores_shared_pattern_without_override() {
+        let state = make_state_with_tracks(1);
+        let first = PatternSnapshot::new_default(1, &[]);
+        let second = snapshot_with_active_step(1, 0, 4);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let shared = state.scene_track_pattern_id(1, 0).unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        assert!(state.set_scene_cell(
+            0,
+            0,
+            shared,
+            1,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+
+        assert!(state.pattern.patterns[0].is_active(4));
+        let cells = state.track_pattern_cells(0);
+        let shared_cell = cells.iter().find(|cell| cell.pattern_id == shared).unwrap();
+        assert!(shared_cell.assigned_to_current_scene);
+        assert!(shared_cell.active_effective);
+        assert!(!shared_cell.overridden);
+        assert!(!state.is_scene_silenced(0));
+    }
+
+    #[test]
+    fn set_current_scene_cell_clears_override_and_persists_after_scene_return() {
+        let state = make_state_with_tracks(1);
+        let first = PatternSnapshot::new_default(1, &[]);
+        let second = snapshot_with_active_step(1, 0, 4);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let shared = state.scene_track_pattern_id(1, 0).unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        assert!(state.launch_track_pattern(
+            0,
+            shared,
+            1,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+        assert!(state
+            .track_pattern_cells(0)
+            .into_iter()
+            .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden));
+
+        assert!(state.set_scene_cell(
+            0,
+            0,
+            shared,
+            1,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+        assert!(state.track_pattern_cells(0).into_iter().any(|cell| {
+            cell.pattern_id == shared
+                && cell.assigned_to_current_scene
+                && cell.active_effective
+                && !cell.overridden
+        }));
+
+        state
+            .launch_scene(1, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .unwrap();
+        state
+            .launch_scene(0, 1, &buffer_ids, &sample_rates, &names, &instrument_types)
+            .unwrap();
+
+        assert_eq!(state.scene_track_pattern_id(0, 0), Some(shared));
+        assert!(state.pattern.patterns[0].is_active(4));
+        assert!(state.track_pattern_cells(0).into_iter().any(|cell| {
+            cell.pattern_id == shared
+                && cell.assigned_to_current_scene
+                && cell.active_effective
+                && !cell.overridden
+        }));
+    }
+
+    #[test]
+    fn clear_current_scene_cell_silences_without_deleting_pattern() {
+        let state = make_state_with_tracks(1);
+        let first = snapshot_with_active_step(1, 0, 2);
+        state.replace_pattern_repository(vec![first], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let assigned = state.scene_track_pattern_id(0, 0).unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        let cleared = state.clear_scene_cell(
+            0,
+            0,
+            1,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        );
+
+        assert_eq!(cleared, Some(assigned));
+        assert!(state.is_scene_silenced(0));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(state.track_pattern_cells(0).iter().any(|cell| {
+            cell.pattern_id == assigned
+                && !cell.assigned_to_current_scene
+                && !cell.active_effective
+                && !cell.overridden
+        }));
+    }
+
+    #[test]
+    fn launch_scene_with_empty_cell_silences_track_without_mutating_live_lane() {
         let state = make_state_with_tracks(1);
         state.clone_pattern(
             1,
@@ -5134,9 +5659,30 @@ mod tests {
         );
 
         assert!(sample_ids.is_some());
-        assert!((0..MAX_STEPS).all(|step| !state.pattern.patterns[0].is_active(step)));
+        assert!(state.is_scene_silenced(0));
+        assert!(state.latest_scheduler_snapshot().tracks[0].scene_silenced);
+        assert!(state.pattern.patterns[0].is_active(3));
         assert_eq!(state.pattern.track_params[0].get_num_steps(), 7);
         assert_eq!(state.current_scene_index(), 0);
+    }
+
+    #[test]
+    fn saving_scene_snapshot_preserves_empty_scene_cells() {
+        let first = sample_pattern_snapshot(1);
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first], 0);
+        let orphan = scenes.clear_cell(0, 0).unwrap();
+        let mut live = sample_pattern_snapshot(1);
+        live.track_bits[0][0] = 99;
+
+        assert!(scenes.save_scene_snapshot(0, live));
+
+        assert_eq!(scenes.scenes[0].cells[0], None);
+        assert!(scenes.track_pools[0].contains(orphan));
+        assert_eq!(
+            scenes.track_pools[0].get(orphan).unwrap().track_bits[0],
+            1,
+            "capturing while an empty cell is active must not overwrite orphan data"
+        );
     }
 
     #[test]

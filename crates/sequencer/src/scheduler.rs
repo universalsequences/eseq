@@ -294,14 +294,16 @@ impl SnapshotSequencerClock {
                                 .timebase_override
                                 .unwrap_or(track.params.timebase);
                             let samples_per_step = (tb.step_beats(ns) * samples_per_quarter) as f32;
-                            triggers.push(SnapshotTrigger {
-                                track: t,
-                                step,
-                                offset,
-                                cycle_start_beats: tc.boundaries[step],
-                                absolute_beats: self.total_beats,
-                                samples_per_step,
-                            });
+                            if !track.scene_silenced {
+                                triggers.push(SnapshotTrigger {
+                                    track: t,
+                                    step,
+                                    offset,
+                                    cycle_start_beats: tc.boundaries[step],
+                                    absolute_beats: self.total_beats,
+                                    samples_per_step,
+                                });
+                            }
                             state.transport.track_playheads[t].store(step_u32, Ordering::Relaxed);
                         }
                     }
@@ -4900,6 +4902,20 @@ mod tests {
         assert!(!triggers.is_empty());
         assert_eq!(triggers[0].track, 0);
         assert_eq!(triggers[0].step, 0);
+    }
+
+    #[test]
+    fn snapshot_clock_suppresses_triggers_for_scene_silenced_tracks() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.toggle_play();
+        state.toggle_step_and_clear_plocks(0, 0);
+        let mut snapshot = (*state.latest_scheduler_snapshot()).clone();
+        snapshot.tracks[0].scene_silenced = true;
+        let mut clock = SnapshotSequencerClock::new(48_000);
+
+        let triggers = clock.process_chunk(12_000, &snapshot, &state);
+
+        assert!(triggers.is_empty());
     }
 
     #[test]

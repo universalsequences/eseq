@@ -3276,6 +3276,7 @@ mod tests {
         let sample_rate = eng.sample_rate;
         let _engine_guard = TestEngineGuard { lg_raw };
         let _audio_pump = HeadlessAudioPump::start(lg_ptr, eng.channels as usize);
+        let master_recorder = eng.master_recorder.clone();
         let mut app = ui::App::new(
             state.clone(),
             lg_ptr,
@@ -3301,6 +3302,7 @@ mod tests {
         let ui_invalidations = Arc::new(UiInvalidationQueue::new());
         let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
         let recording = Arc::new(AtomicBool::new(false));
+        let master_recording = Arc::new(AtomicBool::new(false));
         let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
         let active_delete_target = Arc::new(Mutex::new(None));
         let active_delete_target_version = Arc::new(AtomicUsize::new(0));
@@ -3324,6 +3326,8 @@ mod tests {
             piano_roll_selection.clone(),
             piano_roll_move_state,
             recording.clone(),
+            master_recording.clone(),
+            master_recorder.clone(),
             record_armed.clone(),
             ui_epoch.clone(),
             fx_epoch.clone(),
@@ -3664,6 +3668,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Create App. Start intentionally empty so the first action is choosing
     // a sound instead of editing a canned pattern.
+    let master_recorder = eng.master_recorder.clone();
     let mut app = ui::App::new(
         eng.state.clone(),
         eng.lg_ptr,
@@ -3710,6 +3715,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Recording state shared between native functions and event loop
     let recording = Arc::new(AtomicBool::new(false));
+    let master_recording = Arc::new(AtomicBool::new(false));
     let record_armed: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(vec![false; track_names.len()]));
     // Keyboard trigger sender for live playing when armed
     let keyboard_tx = app.graph.keyboard_tx.clone();
@@ -3736,6 +3742,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         piano_roll_selection.clone(),
         piano_roll_move_state.clone(),
         recording.clone(),
+        master_recording.clone(),
+        master_recorder.clone(),
         record_armed.clone(),
         ui_epoch.clone(),
         fx_epoch.clone(),
@@ -3782,6 +3790,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_cpu_load_bits: u32 = u32::MAX;
     let mut prev_peak_l_level = -1.0f64;
     let mut prev_peak_r_level = -1.0f64;
+    let mut prev_master_recording = false;
     let mut prev_track_peak_levels: Vec<f64> = Vec::new();
     let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
     let mut prev_modulator_phases: Vec<f64> = Vec::new();
@@ -8526,6 +8535,158 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ))),
                         }
                     }
+                    "fork-track-pattern" => {
+                        let track = match payload {
+                            Value::Map(ref map) => map
+                                .get("track")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| current_track.load(Ordering::Relaxed)),
+                            Value::Number(n) => n as usize,
+                            _ => current_track.load(Ordering::Relaxed),
+                        };
+                        let num_tracks = app.tracks.len();
+                        if track >= num_tracks {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Track pattern fork failed: track {} is out of range",
+                                track + 1
+                            )));
+                            continue;
+                        }
+                        let Some(pattern_id) = app.state.fork_current_track_pattern(
+                            track,
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        ) else {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Track pattern fork failed for track {}",
+                                track + 1
+                            )));
+                            continue;
+                        };
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Forked track {} pattern {}",
+                            track + 1,
+                            pattern_id.0
+                        )));
+                    }
+                    "set-scene-cell" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Scene cell share failed: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let scene = map.get("scene").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        });
+                        let track = map.get("track").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        });
+                        let pattern_id = map
+                            .get("pattern-id")
+                            .or_else(|| map.get("pattern_id"))
+                            .and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) if *n >= 1.0 => Some(*n as u64),
+                                _ => None,
+                            });
+                        let (Some(scene), Some(track), Some(pattern_id)) =
+                            (scene, track, pattern_id)
+                        else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Scene cell share failed: missing scene, track, or pattern id"
+                                    .to_string(),
+                            ));
+                            continue;
+                        };
+                        let num_tracks = app.tracks.len();
+                        if !app.state.set_scene_cell(
+                            scene,
+                            track,
+                            PatternId(pattern_id),
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        ) {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Scene cell share failed: scene {}, track {}, pattern {}",
+                                scene + 1,
+                                track + 1,
+                                pattern_id
+                            )));
+                            continue;
+                        }
+                        let sample_ids = app.state.effective_pattern_sample_ids(num_tracks);
+                        app.graph_controller().apply_sample_ids(&sample_ids);
+                        if let Err(error) = app
+                            .graph_controller()
+                            .sync_track_instrument_run_modes_from_live_state()
+                        {
+                            app.editor.status_message =
+                                Some((format!("Scene cell share failed: {error}"), Instant::now()));
+                        }
+                        app.push_all_restored_defaults();
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Shared track {} pattern {} into scene {}",
+                            track + 1,
+                            pattern_id,
+                            scene + 1
+                        )));
+                    }
+                    "clear-scene-cell" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Scene cell clear failed: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let scene = map.get("scene").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        });
+                        let track = map.get("track").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        });
+                        let (Some(scene), Some(track)) = (scene, track) else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Scene cell clear failed: missing scene or track".to_string(),
+                            ));
+                            continue;
+                        };
+                        let num_tracks = app.tracks.len();
+                        let Some(pattern_id) = app.state.clear_scene_cell(
+                            scene,
+                            track,
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        ) else {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Scene cell clear failed: scene {}, track {}",
+                                scene + 1,
+                                track + 1
+                            )));
+                            continue;
+                        };
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Cleared scene {} track {} pattern {}",
+                            scene + 1,
+                            track + 1,
+                            pattern_id.0
+                        )));
+                    }
                     "launch-track-pattern" => {
                         let Value::Map(ref map) = payload else {
                             editor.handle_host_event(HostEvent::Status(
@@ -11473,6 +11634,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.set_reactive("SEQ", "cpu-load-pct", Value::Number(cpu_load_pct as f64));
                         rt.set_reactive("SEQ", "master-peak-l", Value::Number(cached_peak_l_level));
                         rt.set_reactive("SEQ", "master-peak-r", Value::Number(cached_peak_r_level));
+                        rt.set_reactive(
+                            "SEQ",
+                            "master-recording",
+                            Value::Bool(master_recording.load(Ordering::Acquire)),
+                        );
                         sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                         sync_modulator_phase_fields(rt, &cached_modulator_phases);
                         sync_modulator_level_fields(rt, &cached_modulator_levels);
@@ -11602,6 +11768,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_cpu_load_bits = cached_cpu_load_bits;
                         prev_peak_l_level = cached_peak_l_level;
                         prev_peak_r_level = cached_peak_r_level;
+                        prev_master_recording = master_recording.load(Ordering::Acquire);
                         prev_track_peak_levels = cached_track_peak_levels.clone();
                         prev_modulator_phases = cached_modulator_phases.clone();
                         prev_modulator_levels = cached_modulator_levels.clone();
@@ -12391,6 +12558,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !transport_visible && cpu_load_bits != prev_cpu_load_bits {
                 prev_cpu_load_bits = cpu_load_bits;
             }
+            let master_rec_on = master_recording.load(Ordering::Acquire);
+            app.ui.master_recording = master_rec_on;
+            if transport_visible && master_rec_on != prev_master_recording {
+                needs_reactive_cycle |= editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "master-recording", Value::Bool(master_rec_on))
+                    .effects_dirty;
+                prev_master_recording = master_rec_on;
+            }
+            if !transport_visible && master_rec_on != prev_master_recording {
+                prev_master_recording = master_rec_on;
+            }
             if master_meter_visible && cached_peak_l_level != prev_peak_l_level {
                 needs_reactive_cycle |= editor
                     .runtime_mut()
@@ -12778,7 +12957,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // Sync recording state
                 let rec_on = recording.load(Ordering::Relaxed);
+                let master_rec_on = master_recording.load(Ordering::Acquire);
                 rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
+                rt.set_reactive("SEQ", "master-recording", Value::Bool(master_rec_on));
                 rt.set_reactive(
                     "SEQ",
                     "delete-target-version",
@@ -12798,6 +12979,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "record-armed", build_record_armed_value(&armed));
                 // Sync to app for TUI recording logic
                 app.ui.recording = rec_on;
+                app.ui.master_recording = master_rec_on;
+                prev_master_recording = master_rec_on;
                 for (i, a) in armed.iter().enumerate() {
                     if i < app.graph.record_armed.len() {
                         app.graph.record_armed[i] = *a;

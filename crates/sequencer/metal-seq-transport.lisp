@@ -322,7 +322,20 @@
           (play-icon :active (if SEQ.playing 1 0)))
         (box :width 2.5 
           :on-click |x y r| (seq-toggle-record)
-          (rec-icon :active (if SEQ.recording 1 0)))))
+          (rec-icon :active (if SEQ.recording 1 0)))
+        (subtree :key "transport-master-record-button"
+          (box :debug-name "transport-master-record-button"
+            :width 4.2 :height 1.1
+            :background "pattern-pill-bg"
+            :active (if SEQ.master-recording 1 0)
+            :style transport-icon-style
+            :on-click |x y r| (seq-toggle-master-recording)
+            (v-stack :align :center
+              (label "WAV"
+                :font-size 10
+                :color (if SEQ.master-recording :white :gray)
+                :hover-color :white
+                :bg :transparent))))))
     
     ;; Single continuous LED panel
     (box :background "transport-led-bg" :height 1.4 :width 41

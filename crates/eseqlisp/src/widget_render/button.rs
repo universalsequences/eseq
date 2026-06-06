@@ -67,6 +67,18 @@ fn variant_fg(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "color", default)
 }
 
+fn button_border(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "border-color", theme::BUTTON_BORDER())
+}
+
+fn button_highlight(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "highlight-color", theme::BUTTON_HIGHLIGHT())
+}
+
+fn button_shadow(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "shadow-color", theme::BUTTON_SHADOW())
+}
+
 fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
     match props.get("icon") {
         Some(Value::Keyword(value)) | Some(Value::String(value)) => match value.as_str() {
@@ -161,6 +173,79 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float mask = smoothstep(edge, -edge, d);
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
+}
+"#;
+
+#[cfg(target_os = "macos")]
+const BUTTON_SURFACE_SHADER: &str = r#"
+float button_surface_rounded_rect(float2 p, float2 size, float radius)
+{
+    float2 q = abs(p) - (size - float2(radius));
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float button_surface_smooth(float2 p, float2 size, float radius, float edge_min, float edge_max)
+{
+    return smoothstep(edge_min, edge_max, button_surface_rounded_rect(p, size, radius));
+}
+
+float3 button_surface_normal(float2 p, float2 size, float radius, float eps)
+{
+    float right = button_surface_smooth(p + float2(eps, 0.0), size, radius, -0.10, 0.92);
+    float left = button_surface_smooth(p - float2(eps, 0.0), size, radius, -0.10, 0.92);
+    float down = button_surface_smooth(p + float2(0.0, eps), size, radius, -0.10, 0.92);
+    float up = button_surface_smooth(p - float2(0.0, eps), size, radius, -0.10, 0.92);
+    return normalize(float3((right - left) / (2.0 * eps), (down - up) / (2.0 * eps), 1.0));
+}
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+    float2 size = float2(aspect, 1.0);
+
+    float r = in.corner_radius > 0.0 ? in.corner_radius : 0.75;
+    r = min(r, min(aspect, 1.0));
+    float d = button_surface_rounded_rect(p, size, r);
+
+    float edge = fwidth(d) * 1.2;
+    float mask = smoothstep(edge, -edge, d);
+    if (mask < 0.002) { discard_fragment(); }
+
+    float px = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
+    float border_width = 1.35 * px;
+    float2 inner_size = max(size - float2(border_width), float2(0.001));
+    float inner_d = button_surface_rounded_rect(p, inner_size, max(r - border_width, 0.0));
+    float inner_edge = fwidth(inner_d) * 1.2;
+    float inner_mask = smoothstep(inner_edge, -inner_edge, inner_d);
+    float border_mask = clamp(mask - inner_mask, 0.0, 1.0);
+
+    float3 normal = button_surface_normal(p, size, r, max(px * 1.5, 0.004));
+    float3 view_dir = float3(0.0, 0.0, 1.0);
+    float3 key_light = normalize(float3(-0.72, -0.92, 1.30));
+    float3 bounce_light = normalize(float3(0.82, 0.78, 1.10));
+    float key_diffuse = max(0.0, dot(normal, key_light));
+    float bounce_diffuse = max(0.0, dot(normal, bounce_light));
+    float key_specular = pow(max(0.0, dot(normal, normalize(key_light + view_dir))), 56.0);
+    float bounce_specular = pow(max(0.0, dot(normal, normalize(bounce_light + view_dir))), 42.0);
+    float edge_fade = smoothstep(0.12, -0.04, d);
+
+    float quadrant_shade = (key_diffuse - 0.34 * bounce_diffuse) * 0.16;
+    quadrant_shade += (bounce_diffuse - 0.30 * key_diffuse) * 0.10;
+    float3 fill_lit = in.color_a.rgb * (1.0 + quadrant_shade * 0.08);
+    fill_lit += in.color_c.rgb * in.color_c.a * key_specular * edge_fade * 0.10;
+    fill_lit = mix(fill_lit, in.color_d.rgb, in.color_d.a * (1.0 - key_diffuse) * 0.05);
+
+    float3 border_lit = in.color_b.rgb * (0.72 + 0.34 * key_diffuse + 0.26 * bounce_diffuse);
+    border_lit += in.color_c.rgb * in.color_c.a * (key_specular * 1.8 + bounce_specular * 1.25) * edge_fade;
+    border_lit = mix(border_lit, in.color_d.rgb, in.color_d.a * (1.0 - max(key_diffuse, bounce_diffuse)) * 0.42);
+
+    float4 fill = float4(fill_lit, in.color_a.a * inner_mask);
+    float4 border = float4(border_lit, in.color_b.a * border_mask);
+    float out_alpha = fill.a + border.a * (1.0 - fill.a);
+    if (out_alpha <= 0.002) { discard_fragment(); }
+    float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
+    return float4(out_rgb, out_alpha);
 }
 "#;
 
@@ -276,7 +361,7 @@ impl WidgetDefinition for ButtonWidget {
         if widget_type == "button-icon" {
             Some(BUTTON_ICON_SHADER)
         } else {
-            Some(super::ROUNDED_RECT_SHADER)
+            Some(BUTTON_SURFACE_SHADER)
         }
     }
 
@@ -304,9 +389,9 @@ impl WidgetDefinition for ButtonWidget {
                     uniform_a: [0.0; 4],
                     uniform_b: [0.0; 4],
                     color_a: bg.to_rgba(),
-                    color_b: [0.0; 4],
-                    color_c: [0.0; 4],
-                    color_d: [0.0; 4],
+                    color_b: button_border(&node.props).to_rgba(),
+                    color_c: button_highlight(&node.props).to_rgba(),
+                    color_d: button_shadow(&node.props).to_rgba(),
                     corner_radius: normalized_corner_radius(node.rect, viewport, 12.0),
                     pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                 },
@@ -382,16 +467,37 @@ impl WidgetDefinition for ButtonWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn color_value(r: f64, g: f64, b: f64, a: f64) -> Value {
+        Value::List(
+            [r, g, b, a]
+                .into_iter()
+                .map(|value| Rc::new(RefCell::new(Value::Number(value))))
+                .collect(),
+        )
+    }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn button_metal_centers_text_vertically() {
-        let props = HashMap::from([
-            ("text".to_string(), Value::String("Go".to_string())),
-            ("variant".to_string(), Value::Keyword("primary".to_string())),
-            ("font-size".to_string(), Value::Number(11.0)),
-        ]);
-        let node = LayoutNode {
+    fn test_viewport() -> super::super::WidgetViewport {
+        super::super::WidgetViewport {
+            vp_w: 100.0,
+            vp_h: 100.0,
+            cell_w: 10.0,
+            cell_h: 10.0,
+            scroll_top: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 10.0,
+            inherited_hover: false,
+            time_seconds: 0.0,
+            scroll_left: 0.0,
+        }
+    }
+
+    fn test_button_node(props: HashMap<String, Value>) -> LayoutNode {
+        LayoutNode {
             widget_id: 1,
             stable_widget_id: None,
             subtree_root_id: None,
@@ -407,20 +513,19 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: true,
-        };
-        let viewport = super::super::WidgetViewport {
-            vp_w: 100.0,
-            vp_h: 100.0,
-            cell_w: 10.0,
-            cell_h: 10.0,
-            scroll_top: 0.0,
-            focused_widget_id: None,
-            focused_branch: false,
-            tile_content_rows: 10.0,
-            inherited_hover: false,
-            time_seconds: 0.0,
-            scroll_left: 0.0,
-        };
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn button_metal_centers_text_vertically() {
+        let props = HashMap::from([
+            ("text".to_string(), Value::String("Go".to_string())),
+            ("variant".to_string(), Value::Keyword("primary".to_string())),
+            ("font-size".to_string(), Value::Number(11.0)),
+        ]);
+        let node = test_button_node(props);
+        let viewport = test_viewport();
 
         let prims = ButtonWidget.build_metal_primitives("button", &node, viewport);
         let background_is_marked_background = prims.iter().any(|prim| {
@@ -449,5 +554,41 @@ mod tests {
         assert!((text.col - node.rect.col).abs() < 0.0001);
         assert!((text.align_width - node.rect.width).abs() < 0.0001);
         assert!((text.h_align - 0.5).abs() < 0.0001);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn button_metal_background_carries_surface_detail_colors() {
+        let props = HashMap::from([
+            ("text".to_string(), Value::String("Go".to_string())),
+            (
+                "background-color".to_string(),
+                color_value(0.1, 0.2, 0.3, 1.0),
+            ),
+            ("border-color".to_string(), color_value(0.4, 0.5, 0.6, 0.7)),
+            (
+                "highlight-color".to_string(),
+                color_value(0.8, 0.85, 0.9, 0.2),
+            ),
+            ("shadow-color".to_string(), color_value(0.0, 0.0, 0.0, 0.3)),
+        ]);
+        let node = test_button_node(props);
+        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let instance = prims
+            .iter()
+            .find_map(|prim| match prim {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    is_background: true,
+                } if widget_type == "button" => Some(instance),
+                _ => None,
+            })
+            .expect("button should emit a detailed background primitive");
+
+        assert_eq!(instance.color_a, [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(instance.color_b, [0.4, 0.5, 0.6, 0.7]);
+        assert_eq!(instance.color_c, [0.8, 0.85, 0.9, 0.2]);
+        assert_eq!(instance.color_d, [0.0, 0.0, 0.0, 0.3]);
     }
 }
