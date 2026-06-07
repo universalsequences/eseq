@@ -838,10 +838,30 @@ impl ProjectScenes {
     }
 
     pub fn clone_track_pattern_into_current_scene(&mut self, track: usize) -> Option<PatternId> {
+        let source_id = self
+            .track_overrides
+            .get(track)
+            .copied()
+            .flatten()
+            .or_else(|| {
+                self.scenes
+                    .get(self.current_scene)
+                    .and_then(|scene| scene.cells.get(track))
+                    .copied()
+                    .flatten()
+            })?;
+        self.clone_track_pattern_id_into_current_scene(track, source_id)
+    }
+
+    pub fn clone_track_pattern_id_into_current_scene(
+        &mut self,
+        track: usize,
+        source_id: PatternId,
+    ) -> Option<PatternId> {
         if track >= self.scenes.get(self.current_scene)?.cells.len() {
             return None;
         }
-        let source = self.effective_track_pattern(track)?.clone();
+        let source = self.track_pools.get(track)?.get(source_id)?.clone();
         let id = self.track_pools.get_mut(track)?.insert(source);
         let scene = self.scenes.get_mut(self.current_scene)?;
         scene.cells[track] = Some(id);
@@ -3614,6 +3634,41 @@ impl SequencerState {
         Some(id)
     }
 
+    pub fn clone_track_pattern_id_into_current_scene(
+        &self,
+        track: usize,
+        source_id: PatternId,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> Option<PatternId> {
+        if track >= num_tracks {
+            return None;
+        }
+        let current_snapshot = self.capture_current_pattern_snapshot(
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
+        let (id, data) = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let current_scene = self.current_scene_index();
+            scenes.save_scene_snapshot(current_scene, current_snapshot);
+            let id = scenes.clone_track_pattern_id_into_current_scene(track, source_id)?;
+            let data = scenes.effective_track_pattern(track)?.clone();
+            (id, data)
+        };
+        data.restore_to(self, track);
+        self.set_scene_silenced(track, false);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+        Some(id)
+    }
+
     pub fn delete_track_pattern(
         &self,
         track: usize,
@@ -5749,6 +5804,42 @@ mod tests {
             && cell.assigned_to_current_scene
             && cell.active_effective
             && !cell.overridden));
+    }
+
+    #[test]
+    fn clone_selected_track_pattern_id_commits_that_source_into_current_scene() {
+        let state = make_state_with_tracks(1);
+        let first = snapshot_with_active_step(1, 0, 2);
+        let second = snapshot_with_active_step(1, 0, 7);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let source = state.scene_track_pattern_id(1, 0).unwrap();
+        let original = state.scene_track_pattern_id(0, 0).unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        let cloned = state
+            .clone_track_pattern_id_into_current_scene(
+                0,
+                source,
+                1,
+                &buffer_ids,
+                &sample_rates,
+                &names,
+                &instrument_types,
+            )
+            .unwrap();
+
+        assert_ne!(cloned, source);
+        assert_ne!(cloned, original);
+        assert_eq!(state.scene_track_pattern_id(0, 0), Some(cloned));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(7));
+        assert!(state.track_pattern_cells(0).iter().any(|cell| {
+            cell.pattern_id == cloned
+                && cell.assigned_to_current_scene
+                && cell.active_effective
+                && !cell.overridden
+        }));
     }
 
     #[test]

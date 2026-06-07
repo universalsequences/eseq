@@ -76,7 +76,7 @@
       :mixer-strip-bg    '(0.285 0.295 0.310)
       :mixer-strip-selected-bg '(0.345 0.358 0.382)
       :mixer-strip-muted-bg '(0.170 0.180 0.195)
-      :mixer-strip-border '(0.245 0.258 0.275)
+      :mixer-strip-border '(0.445 0.458 0.475)
       :mixer-strip-selected-border '(0.94 0.96 0.98)
       :mixer-control-bg  '(0.145 0.155 0.170)
       :mixer-label-bg    '(0.240 0.252 0.268)

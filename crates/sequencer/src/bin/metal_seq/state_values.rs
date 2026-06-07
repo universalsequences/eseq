@@ -2899,6 +2899,12 @@ fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisualizationSnap
         })),
     );
     map.insert(
+        "delay-matrix".to_string(),
+        value_cell(graph_dense_edge_matrix_value(snapshot, |edge| {
+            edge.delay_steps as f64
+        })),
+    );
+    map.insert(
         "edges".to_string(),
         value_cell(Value::List(
             snapshot
@@ -2979,6 +2985,19 @@ fn graph_edge_value(edge: sequencer::graph::GraphVisualizationEdge) -> Value {
         value_cell(Value::Number(neural_dampening_display_value(
             edge.dampening as f32,
         ))),
+    );
+    map.insert(
+        "delay".to_string(),
+        value_cell(Value::Number(edge.delay_steps as f64)),
+    );
+    map.insert(
+        "distribution".to_string(),
+        value_cell(Value::String(match edge.distribution {
+            sequencer::graph::EdgeDistribution::BroadcastWeighted => {
+                "broadcast-weighted".to_string()
+            }
+            sequencer::graph::EdgeDistribution::WeightedChoice => "weighted-choice".to_string(),
+        })),
     );
     Value::Map(map)
 }
@@ -6441,6 +6460,8 @@ mod tests {
                 to: 1,
                 weight: 0.333,
                 dampening: 0.625,
+                delay_steps: 3,
+                distribution: sequencer::graph::EdgeDistribution::WeightedChoice,
             }],
         }]);
 
@@ -9439,54 +9460,75 @@ mod tests {
             );
         }
 
-        editor
-            .runtime_mut()
-            .register_native("seq-delete-active-target", move |_args, ctx| {
-                let Some((key, payload)) = active.lock().unwrap().take() else {
+        {
+            let active = Arc::clone(&active);
+            editor
+                .runtime_mut()
+                .register_native("seq-delete-active-target", move |_args, ctx| {
+                    let Some((key, payload)) = active.lock().unwrap().take() else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let kind = key.split(':').next().unwrap_or_default();
+                    let name = match (ctx.current_buffer_name().as_str(), kind) {
+                        ("*mixer*", "mixer-track") => {
+                            let Value::Map(map) = &payload else {
+                                return Ok(Value::Bool(false));
+                            };
+                            let track = map.get("track").and_then(|value| match &*value.borrow() {
+                                Value::Number(track) => Some(*track as usize),
+                                _ => None,
+                            });
+                            if track_count <= 1 || track.is_none_or(|track| track >= track_count) {
+                                return Ok(Value::Bool(false));
+                            }
+                            "delete-track"
+                        }
+                        ("*mixer*", "mod-route") => "delete-mod-route",
+                        ("*mixer*", "track-pattern") => "delete-track-pattern",
+                        ("*fx*", "fx-effect") => {
+                            let chain = match &payload {
+                                Value::Map(map) => {
+                                    map.get("chain").and_then(|value| match &*value.borrow() {
+                                        Value::String(chain) => Some(chain.clone()),
+                                        _ => None,
+                                    })
+                                }
+                                _ => None,
+                            };
+                            match chain.as_deref() {
+                                Some("audio") => "delete-effect",
+                                Some("midi") => "delete-midi-fx",
+                                Some("bus") => "delete-bus-effect",
+                                _ => return Ok(Value::Bool(false)),
+                            }
+                        }
+                        _ => return Ok(Value::Bool(false)),
+                    };
+                    ctx.enqueue_command(eseqlisp::host::HostCommand::Custom {
+                        name: name.to_string(),
+                        payload,
+                    });
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        let active = Arc::clone(&active);
+        editor.runtime_mut().register_native(
+            "seq-clone-active-track-pattern",
+            move |_args, ctx| {
+                let Some((key, payload)) = active.lock().unwrap().clone() else {
                     return Ok(Value::Bool(false));
                 };
-                let kind = key.split(':').next().unwrap_or_default();
-                let name = match (ctx.current_buffer_name().as_str(), kind) {
-                    ("*mixer*", "mixer-track") => {
-                        let Value::Map(map) = &payload else {
-                            return Ok(Value::Bool(false));
-                        };
-                        let track = map.get("track").and_then(|value| match &*value.borrow() {
-                            Value::Number(track) => Some(*track as usize),
-                            _ => None,
-                        });
-                        if track_count <= 1 || track.is_none_or(|track| track >= track_count) {
-                            return Ok(Value::Bool(false));
-                        }
-                        "delete-track"
-                    }
-                    ("*mixer*", "mod-route") => "delete-mod-route",
-                    ("*mixer*", "track-pattern") => "delete-track-pattern",
-                    ("*fx*", "fx-effect") => {
-                        let chain = match &payload {
-                            Value::Map(map) => {
-                                map.get("chain").and_then(|value| match &*value.borrow() {
-                                    Value::String(chain) => Some(chain.clone()),
-                                    _ => None,
-                                })
-                            }
-                            _ => None,
-                        };
-                        match chain.as_deref() {
-                            Some("audio") => "delete-effect",
-                            Some("midi") => "delete-midi-fx",
-                            Some("bus") => "delete-bus-effect",
-                            _ => return Ok(Value::Bool(false)),
-                        }
-                    }
-                    _ => return Ok(Value::Bool(false)),
-                };
+                if ctx.current_buffer_name() != "*mixer*" || !key.starts_with("track-pattern:") {
+                    return Ok(Value::Bool(false));
+                }
                 ctx.enqueue_command(eseqlisp::host::HostCommand::Custom {
-                    name: name.to_string(),
+                    name: "clone-track-pattern".to_string(),
                     payload,
                 });
                 Ok(Value::Bool(true))
-            });
+            },
+        );
     }
 
     fn value_contains_string(value: &Value, needle: &str) -> bool {
@@ -12496,6 +12538,147 @@ mod tests {
             collect_tile_buffer_names(&editor),
             vec!["*code*".to_string(), "*fake-seq*".to_string()],
             "reloading metal-seq-grid.lisp should refresh definitions without replacing the active layout"
+        );
+    }
+
+    #[test]
+    fn metal_seq_script_picker_lists_lisp_scripts() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let value = editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (map
+                  (lambda (entry) (get entry :name))
+                  (filter
+                    (lambda (entry) (seq-script-entry-visible? entry))
+                    (list-directory seq-script-picker-current-dir)))
+                "#,
+            )
+            .expect("list script picker entries")
+            .expect("script picker entries value");
+        let Value::List(items) = value else {
+            panic!("expected script picker entries to be a list");
+        };
+        let text = items
+            .iter()
+            .map(|item| match &*item.borrow() {
+                Value::String(name) => name.clone(),
+                other => panic!("expected script name string, got {other:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("graph-neural-8x8-demo.lisp"),
+            "script picker should list lisp scripts; entries:\n{text}"
+        );
+        assert!(
+            text.contains("graph-neural-16-demo.lisp"),
+            "script picker should include graph demos; entries:\n{text}"
+        );
+        assert!(
+            !text.contains("generate_dgenlisp_api.py"),
+            "script picker should filter non-lisp files; entries:\n{text}"
+        );
+
+        let scratch_entry = editor
+            .runtime_mut()
+            .eval_str(r#"(seq-script-scratch-entry "scripts/graph-neural-8x8-demo.lisp")"#)
+            .expect("build script scratch entry")
+            .expect("script scratch entry value");
+        let Value::List(lines) = scratch_entry else {
+            panic!("expected script scratch entry to be a list");
+        };
+        let lines = lines
+            .iter()
+            .map(|line| match &*line.borrow() {
+                Value::String(line) => line.clone(),
+                other => panic!("expected scratch entry line string, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            vec!["(load \"crates/sequencer/scripts/graph-neural-8x8-demo.lisp\")"],
+            "scratch entry should persist only the project-relative load form"
+        );
+    }
+
+    #[test]
+    fn metal_seq_script_picker_load_returns_to_source_and_registers_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let script_path = std::env::temp_dir().join(format!(
+            "eseq-script-picker-test-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script_path,
+            r#"
+            (def script-buffer-name "*picker-test-seq*")
+            (def script-tab-label "Picker Test")
+            (def script-init-called false)
+            (def script-init-fn ()
+              (do
+                (set! script-init-called true)
+                (effect-buffer "*picker-test-seq*" (label "picker test"))))
+            "#,
+        )
+        .expect("write script picker fixture");
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (set-window-buffer "*sequencer*")
+                (set! seq-script-picker-source-buffer "*sequencer*")
+                "#,
+            )
+            .expect("select sequencer source buffer");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.active_buffer().name, "*sequencer*");
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (create-buffer "*scripts*")
+                "#,
+            )
+            .expect("show script picker buffer");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.active_buffer().name, "*scripts*");
+
+        let load_form = format!(
+            "(seq-script-load-file {:?})",
+            script_path.display().to_string()
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&load_form)
+            .expect("load selected script through script picker");
+        editor.refresh_runtime_side_effects();
+        let _ = std::fs::remove_file(&script_path);
+
+        assert_eq!(
+            editor.active_buffer().name,
+            "*sequencer*",
+            "script picker should return to the buffer that opened it instead of showing scratch"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("script-init-called")
+                .expect("read script init flag"),
+            Some(Value::Bool(true)),
+            "script picker should call script-init-fn after loading the script"
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Picker Test".to_string(), "*picker-test-seq*".to_string())
+            ],
+            "loading through the picker should register the script buffer tab on the first load"
         );
     }
 
@@ -22164,7 +22347,20 @@ mod tests {
         editor
             .runtime_mut()
             .eval_str("(mixer-v2-select-track 0)")
-            .expect("explicit mixer track selection should claim delete target");
+            .expect("explicit mixer track selection should not claim delete target");
+        assert_reveal_command(&editor.drain_host_commands(), 0.0);
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("read delete target kind after background track select"),
+            Some(Value::Bool(false)),
+            "mixer track background selection should not claim mixer-track deletion"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-select-track-delete-target 0)")
+            .expect("explicit mixer track badge selection should claim delete target");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
             editor
@@ -22467,6 +22663,55 @@ mod tests {
         }
         editor
             .runtime_mut()
+            .set_reactive("SEQ", "delete-target-version", Value::Number(1.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout_with_focused_pattern = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("mixer layout should refresh after selecting a track pattern");
+        let focused_pattern_cell = find_node_by_stable_key(
+            &layout_with_focused_pattern,
+            "mixer-v2-track-pattern-cell-1-4",
+        )
+        .expect("focused track pattern cell");
+        assert_eq!(
+            focused_pattern_cell.props.get("selected"),
+            Some(&Value::Bool(true)),
+            "clicked track pattern should show keyboard focus immediately"
+        );
+        assert!(
+            find_node_by_stable_key(&layout, "mixer-v2-track-pattern-clone-1").is_none(),
+            "the mixer grid should not render a dedicated track-pattern clone cell"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(seq-clone-active-track-pattern)")
+            .expect("clone selected track pattern from mixer grid");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "clone-track-pattern");
+                let Value::Map(payload) = payload else {
+                    panic!("clone-track-pattern payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("pattern-id")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(4.0))
+                );
+            }
+            other => panic!("expected clone-track-pattern host command, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
             .eval_str("(mixer-v2-handle-key \"BS\" nil)")
             .expect("delete selected track pattern from mixer grid");
         let commands = editor.drain_host_commands();
@@ -22490,37 +22735,31 @@ mod tests {
             }
             other => panic!("expected delete-track-pattern host command, got {other:?}"),
         }
-        let clone_cell = find_node_by_stable_key(&layout, "mixer-v2-track-pattern-clone-1")
-            .expect("track 2 clone pattern cell");
-        assert!(
-            clone_cell.rect.width > 0.0 && clone_cell.rect.height > 0.0,
-            "track pattern clone cell should have a finite visible rect: {:?}",
-            clone_cell.rect
-        );
-        editor
-            .runtime_mut()
-            .eval_str("(mixer-v2-clone-track-pattern 1)")
-            .expect("clone track pattern from mixer grid");
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        match &commands[0] {
-            eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "clone-track-pattern");
-                let Value::Map(payload) = payload else {
-                    panic!("clone-track-pattern payload should be a dict: {payload:?}");
-                };
-                assert_eq!(
-                    payload.get("track").map(|value| value.borrow().clone()),
-                    Some(Value::Number(1.0))
-                );
-            }
-            other => panic!("expected clone-track-pattern host command, got {other:?}"),
-        }
         editor
             .runtime_mut()
             .eval_str("(mixer-v2-select-track 0)")
             .expect("select track before clicking track control");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout_after_track_select = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("mixer layout should refresh after selecting another track");
+        let unfocused_pattern_cell = find_node_by_stable_key(
+            &layout_after_track_select,
+            "mixer-v2-track-pattern-cell-1-4",
+        )
+        .expect("previously focused track pattern cell");
+        assert_eq!(
+            unfocused_pattern_cell.props.get("selected"),
+            Some(&Value::Bool(false)),
+            "selecting a different track target should clear the track-pattern focus border"
+        );
         editor
             .runtime_mut()
             .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));

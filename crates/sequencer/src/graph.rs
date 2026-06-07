@@ -130,10 +130,20 @@ impl EventSelect {
     }
 }
 
+/// How a firing source distributes its outgoing payload across positive outgoing
+/// edges. `BroadcastWeighted` is the existing neural-style behavior: every positive
+/// edge receives the payload. `WeightedChoice` is Markov-style: exactly one positive
+/// outgoing edge is selected with probability proportional to its gathered weight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EdgeDistribution {
+    #[default]
+    BroadcastWeighted,
+    WeightedChoice,
+}
+
 /// One directed edge in the graph. `weight`/`dampening` are edge fields read by the
-/// native gather kernel; `dampening` is mutated at runtime by Ext 2 (v1c) and is 0 in
-/// v1a. `delay_steps` is per-edge transport delay (0 in v1a; node `delay_steps`
-/// carries the propagation latency for now).
+/// native gather kernel; `dampening` is mutated at runtime by Ext 2. `delay_steps`
+/// is per-edge transport delay; 0 means inherit the source node's `delay_steps`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GraphEdge {
     pub from: usize,
@@ -141,6 +151,7 @@ pub struct GraphEdge {
     pub weight: f64,
     pub dampening: f64,
     pub delay_steps: u32,
+    pub distribution: EdgeDistribution,
 }
 
 /// One materialized graph edge as exposed through runtime visualization. This is a
@@ -152,6 +163,8 @@ pub struct GraphVisualizationEdge {
     pub to: usize,
     pub weight: f64,
     pub dampening: f64,
+    pub delay_steps: u32,
+    pub distribution: EdgeDistribution,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -184,6 +197,7 @@ impl GraphEdge {
             weight,
             dampening: 0.0,
             delay_steps: 0,
+            distribution: EdgeDistribution::BroadcastWeighted,
         }
     }
 
@@ -315,12 +329,7 @@ impl GraphSwingSpec {
         }
     }
 
-    fn apply_to_timing(
-        self,
-        sample_time: u64,
-        beats: f64,
-        samples_per_quarter: f64,
-    ) -> (u64, f64) {
+    fn apply_to_timing(self, sample_time: u64, beats: f64, samples_per_quarter: f64) -> (u64, f64) {
         if self.amount <= 50.0 || !samples_per_quarter.is_finite() || samples_per_quarter <= 0.0 {
             return (sample_time, beats);
         }
@@ -599,6 +608,7 @@ struct GraphPropagation {
     ready_after_beats: f64,
     payload: GraphPayload,
     external_seed: bool,
+    edge_index: usize,
 }
 
 /// A fired node awaiting `max_poly` selection within one boundary.
@@ -873,6 +883,8 @@ impl GraphRuntime {
                     to: edge.to,
                     weight: edge.weight,
                     dampening: edge.dampening,
+                    delay_steps: edge.delay_steps,
+                    distribution: edge.distribution,
                 })
                 .collect(),
         }
@@ -1317,53 +1329,56 @@ impl GraphRuntime {
     }
 
     /// Decrement this node's pending scatters, then for each that became ready deposit
-    /// `gather()` along its out-edges into the targets' input accumulators, carrying the
-    /// scatter's payload into each target's `source_event` (Ext 1).
+    /// `gather()` along its already-selected edge into the target's input accumulator,
+    /// carrying the scatter's payload into the target's `source_event` (Ext 1).
     fn deposit_ready_propagations(&mut self, node_index: usize, boundary_beats: f64) {
-        let mut ready: Vec<(GraphPayload, bool)> = Vec::new();
+        let mut ready: Vec<(usize, GraphPayload, bool)> = Vec::new();
         let mut kept = Vec::with_capacity(self.pending[node_index].len());
         for mut prop in std::mem::take(&mut self.pending[node_index]) {
             if boundary_beats > prop.ready_after_beats + 1e-9 {
                 prop.remaining_steps = prop.remaining_steps.saturating_sub(1);
             }
             if prop.remaining_steps == 0 {
-                ready.push((prop.payload, prop.external_seed));
+                ready.push((prop.edge_index, prop.payload, prop.external_seed));
             } else {
                 kept.push(prop);
             }
         }
         self.pending[node_index] = kept;
-        for (payload, is_seed) in ready {
-            for &edge_idx in &self.out_edges[node_index] {
-                let edge = self.edges[edge_idx];
-                let amount = edge.gather();
-                if amount <= 0.0 {
-                    continue;
-                }
-                let target = edge.to;
-                let reduce = self.nodes[target].reduce;
-                let first = !self.input_seen[target];
-                self.input_accum[target] = reduce.fold(self.input_accum[target], amount, first);
-                self.input_seen[target] = true;
-                // Energy always accumulates; the *payload* is chosen by the node's
-                // EventSelect so a loud seed isn't clobbered by a quiet neural hit.
-                let take = first
-                    || self.nodes[target].event_select.prefer(
-                        self.source_event_seed[target],
-                        self.source_event_strength[target],
-                        self.source_event[target].map(|p| p.velocity).unwrap_or(0.0),
-                        is_seed,
-                        amount,
-                        payload.velocity,
-                    );
-                if take {
-                    self.source_event[target] = Some(payload);
-                    self.source_event_seed[target] = is_seed;
-                    self.source_event_strength[target] = amount;
-                }
-                if !self.incoming_triggers[target].contains(&edge_idx) {
-                    self.incoming_triggers[target].push(edge_idx);
-                }
+        for (edge_idx, payload, is_seed) in ready {
+            let Some(edge) = self.edges.get(edge_idx).copied() else {
+                continue;
+            };
+            if edge.from != node_index {
+                continue;
+            }
+            let amount = edge.gather();
+            if amount <= 0.0 {
+                continue;
+            }
+            let target = edge.to;
+            let reduce = self.nodes[target].reduce;
+            let first = !self.input_seen[target];
+            self.input_accum[target] = reduce.fold(self.input_accum[target], amount, first);
+            self.input_seen[target] = true;
+            // Energy always accumulates; the *payload* is chosen by the node's
+            // EventSelect so a loud seed isn't clobbered by a quiet neural hit.
+            let take = first
+                || self.nodes[target].event_select.prefer(
+                    self.source_event_seed[target],
+                    self.source_event_strength[target],
+                    self.source_event[target].map(|p| p.velocity).unwrap_or(0.0),
+                    is_seed,
+                    amount,
+                    payload.velocity,
+                );
+            if take {
+                self.source_event[target] = Some(payload);
+                self.source_event_seed[target] = is_seed;
+                self.source_event_strength[target] = amount;
+            }
+            if !self.incoming_triggers[target].contains(&edge_idx) {
+                self.incoming_triggers[target].push(edge_idx);
             }
         }
     }
@@ -1468,7 +1483,7 @@ impl GraphRuntime {
             self.dampen_incoming(node_index, amount);
         }
         self.clear_incoming_triggers(node_index);
-        self.push_propagation(node_index, candidate.fire_beats, payload);
+        self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, false);
     }
 
     fn drop_firing(&mut self, node_index: usize) {
@@ -1621,18 +1636,13 @@ impl GraphRuntime {
         (self.next_random_u64() % upper as u64) as usize
     }
 
+    fn next_random_unit(&mut self) -> f64 {
+        (self.next_random_u64() >> 11) as f64 / (1_u64 << 53) as f64
+    }
+
     fn next_random_u64(&mut self) -> u64 {
         self.random_state = self.random_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         splitmix64(self.random_state)
-    }
-
-    fn push_propagation(
-        &mut self,
-        node_index: usize,
-        ready_after_beats: f64,
-        payload: GraphPayload,
-    ) {
-        self.push_propagation_with_origin(node_index, ready_after_beats, payload, false);
     }
 
     fn push_seed_propagation(
@@ -1641,22 +1651,123 @@ impl GraphRuntime {
         ready_after_beats: f64,
         payload: GraphPayload,
     ) {
-        self.push_propagation_with_origin(node_index, ready_after_beats, payload, true);
+        self.push_outgoing_propagations(node_index, ready_after_beats, payload, true);
     }
 
-    fn push_propagation_with_origin(
+    fn push_propagation(
+        &mut self,
+        node_index: usize,
+        ready_after_beats: f64,
+        payload: GraphPayload,
+    ) {
+        self.push_outgoing_propagations(node_index, ready_after_beats, payload, false);
+    }
+
+    fn push_outgoing_propagations(
         &mut self,
         node_index: usize,
         ready_after_beats: f64,
         payload: GraphPayload,
         external_seed: bool,
     ) {
-        let remaining = self.nodes[node_index].delay_steps.max(1);
+        let outgoing = self.out_edges.get(node_index).cloned().unwrap_or_default();
+        for distribution in [
+            EdgeDistribution::BroadcastWeighted,
+            EdgeDistribution::WeightedChoice,
+        ] {
+            let edge_indices = outgoing
+                .iter()
+                .copied()
+                .filter(|&edge_idx| {
+                    self.edges
+                        .get(edge_idx)
+                        .map(|edge| edge.distribution == distribution && edge.gather() > 0.0)
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+            match distribution {
+                EdgeDistribution::BroadcastWeighted => {
+                    for edge_idx in edge_indices {
+                        self.push_edge_propagation(
+                            node_index,
+                            edge_idx,
+                            ready_after_beats,
+                            payload,
+                            external_seed,
+                        );
+                    }
+                }
+                EdgeDistribution::WeightedChoice => {
+                    if let Some(edge_idx) = self.choose_weighted_edge(&edge_indices) {
+                        self.push_edge_propagation(
+                            node_index,
+                            edge_idx,
+                            ready_after_beats,
+                            payload,
+                            external_seed,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn choose_weighted_edge(&mut self, edge_indices: &[usize]) -> Option<usize> {
+        let mut total = 0.0;
+        for &edge_idx in edge_indices {
+            total += self
+                .edges
+                .get(edge_idx)
+                .map(|edge| edge.gather())
+                .unwrap_or(0.0);
+        }
+        if total <= 0.0 || !total.is_finite() {
+            return None;
+        }
+        let mut cursor = self.next_random_unit() * total;
+        for &edge_idx in edge_indices {
+            let amount = self
+                .edges
+                .get(edge_idx)
+                .map(|edge| edge.gather())
+                .unwrap_or(0.0);
+            if amount <= 0.0 {
+                continue;
+            }
+            if cursor < amount {
+                return Some(edge_idx);
+            }
+            cursor -= amount;
+        }
+        edge_indices.last().copied()
+    }
+
+    fn push_edge_propagation(
+        &mut self,
+        node_index: usize,
+        edge_index: usize,
+        ready_after_beats: f64,
+        payload: GraphPayload,
+        external_seed: bool,
+    ) {
+        let Some(edge) = self.edges.get(edge_index).copied() else {
+            return;
+        };
+        if edge.from != node_index {
+            return;
+        }
+        let delay_steps = if edge.delay_steps > 0 {
+            edge.delay_steps
+        } else {
+            self.nodes[node_index].delay_steps
+        };
+        let remaining = delay_steps.max(1);
         self.pending[node_index].push(GraphPropagation {
             remaining_steps: remaining,
             ready_after_beats,
             payload,
             external_seed,
+            edge_index,
         });
     }
 }
@@ -1834,12 +1945,14 @@ pub enum Topology {
 }
 
 /// An edge set (`edges`): source/target prototype names, topology, the `:gather`
-/// kernel source, and edge param defaults (`weight`, `dampening`).
+/// kernel source, distribution policy, and edge param defaults (`weight`,
+/// `dampening`, `delay`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct EdgeSetSpec {
     pub from: String,
     pub to: String,
     pub topology: Topology,
+    pub distribution: EdgeDistribution,
     pub gather_source: Option<String>,
     pub params: Vec<ParamSpec>,
 }
@@ -1982,6 +2095,7 @@ impl GraphManifest {
             let edge_group = edge_set_group_id(set);
             let weight = set.param_default("weight");
             let dampening = set.param_default("dampening");
+            let delay_steps = set.param_default("delay").max(0.0).round() as u32;
             match set.topology {
                 Topology::AllToAll => {
                     for from in 0..num_nodes {
@@ -1991,7 +2105,8 @@ impl GraphManifest {
                                 to,
                                 weight,
                                 dampening,
-                                delay_steps: 0,
+                                delay_steps,
+                                distribution: set.distribution,
                             };
                             if let Some(overrides) = overrides {
                                 for param in overrides.edge_params.iter().filter(|param| {
@@ -2002,6 +2117,9 @@ impl GraphManifest {
                                     match param.param.as_str() {
                                         "weight" => edge.weight = param.value,
                                         "dampening" => edge.dampening = param.value.clamp(0.0, 1.0),
+                                        "delay" | "delay-steps" => {
+                                            edge.delay_steps = param.value.max(0.0).round() as u32
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -2326,6 +2444,203 @@ mod tests {
     }
 
     #[test]
+    fn weighted_choice_distribution_selects_one_positive_outgoing_edge() {
+        let nodes = vec![
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+        ];
+        let mut edges = vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(0, 2, 1.0)];
+        for edge in &mut edges {
+            edge.distribution = EdgeDistribution::WeightedChoice;
+        }
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0, 1.0]);
+
+        assert_eq!(out.len(), 1, "weighted choice must not broadcast");
+        assert!(
+            out[0].node_index == 1 || out[0].node_index == 2,
+            "chosen target should be one of the weighted outgoing edges: {out:?}"
+        );
+    }
+
+    #[test]
+    fn broadcast_distribution_deposits_to_every_positive_outgoing_edge() {
+        let nodes = vec![
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+        ];
+        let edges = vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(0, 2, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0, 1.0]);
+        let nodes = out
+            .iter()
+            .map(|emission| emission.node_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(nodes, vec![1, 2]);
+    }
+
+    #[test]
+    fn weighted_choice_uses_effective_edge_weights_deterministically() {
+        let nodes = vec![
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+        ];
+        let mut edges = vec![GraphEdge::new(0, 1, 0.2), GraphEdge::new(0, 2, 0.8)];
+        for edge in &mut edges {
+            edge.distribution = EdgeDistribution::WeightedChoice;
+        }
+
+        let mut chooses_first =
+            GraphRuntime::new(3, "g".into(), nodes.clone(), edges.clone(), 1.0, 0.0);
+        chooses_first.random_state = 3;
+        chooses_first.push_propagation(0, 0.0, GraphPayload::default());
+        let first_out = run(&mut chooses_first, 1.0, 0, vec![1.0, 0.1, 0.1]);
+        assert_eq!(first_out.len(), 1);
+        assert_eq!(first_out[0].node_index, 1);
+
+        let mut chooses_second = GraphRuntime::new(0, "g".into(), nodes, edges, 1.0, 0.0);
+        chooses_second.random_state = 0;
+        chooses_second.push_propagation(0, 0.0, GraphPayload::default());
+        let second_out = run(&mut chooses_second, 1.0, 0, vec![1.0, 0.1, 0.1]);
+        assert_eq!(second_out.len(), 1);
+        assert_eq!(second_out[0].node_index, 2);
+    }
+
+    #[test]
+    fn weighted_choice_schedules_nothing_when_row_has_no_positive_weight() {
+        let nodes = vec![
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+            node(Timebase::Quarter),
+        ];
+        let mut edges = vec![GraphEdge::new(0, 1, 0.0), GraphEdge::new(0, 2, -1.0)];
+        for edge in &mut edges {
+            edge.distribution = EdgeDistribution::WeightedChoice;
+        }
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        assert_eq!(runtime.pending_count_for_node(0), Some(0));
+        let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0, 1.0]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn zero_edge_delay_inherits_source_node_delay() {
+        let mut source = node(Timebase::Quarter);
+        source.delay_steps = 2;
+        let nodes = vec![source, node(Timebase::Quarter)];
+        let edge = GraphEdge::new(0, 1, 1.0);
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, vec![edge], 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let out = run(&mut runtime, 2.0, 0, vec![1.0, 1.0]);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].sample_time, 96_000);
+    }
+
+    #[test]
+    fn edge_delay_overrides_source_node_delay_for_scheduled_transition() {
+        let mut source = node(Timebase::Quarter);
+        source.delay_steps = 1;
+        let nodes = vec![source, node(Timebase::Quarter)];
+        let mut edge = GraphEdge::new(0, 1, 1.0);
+        edge.delay_steps = 3;
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, vec![edge], 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+
+        let out = run(&mut runtime, 3.0, 0, vec![1.0, 1.0]);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_index, 1);
+        assert_eq!(out[0].sample_time, 144_000);
+    }
+
+    #[test]
+    fn materialized_edge_delay_defaults_and_overrides_reach_runtime_edges() {
+        let manifest = GraphManifest {
+            id: 1,
+            name: "markov".into(),
+            shape: ShapeSpec::Line(2),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: GraphDurationSpec::default(),
+            swing: GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "state".into(),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "state".into(),
+                to: "state".into(),
+                topology: Topology::AllToAll,
+                distribution: EdgeDistribution::WeightedChoice,
+                gather_source: None,
+                params: vec![
+                    ParamSpec {
+                        name: "weight".into(),
+                        min: 0.0,
+                        max: 1.0,
+                        default: 0.5,
+                        is_int: false,
+                    },
+                    ParamSpec {
+                        name: "delay".into(),
+                        min: 0.0,
+                        max: 16.0,
+                        default: 2.0,
+                        is_int: true,
+                    },
+                ],
+            }],
+        };
+        let group = edge_set_group_id(&manifest.edge_sets[0]);
+        let overrides = ProjectGraphOverrides {
+            sequencer_id: manifest.id,
+            sequencer_name: manifest.name.clone(),
+            edge_params: vec![ProjectGraphEdgeParamOverride {
+                group,
+                from: 0,
+                to: 1,
+                param: "delay".into(),
+                value: 5.0,
+            }],
+            ..ProjectGraphOverrides::default()
+        };
+
+        let runtime = manifest.materialize_with_overrides(Some(&overrides));
+        let snapshot = runtime.visualization_snapshot();
+        let default_edge = snapshot
+            .edges
+            .iter()
+            .find(|edge| edge.from == 0 && edge.to == 0)
+            .expect("default edge");
+        let overridden_edge = snapshot
+            .edges
+            .iter()
+            .find(|edge| edge.from == 0 && edge.to == 1)
+            .expect("overridden edge");
+        assert_eq!(default_edge.delay_steps, 2);
+        assert_eq!(overridden_edge.delay_steps, 5);
+        assert_eq!(
+            overridden_edge.distribution,
+            EdgeDistribution::WeightedChoice
+        );
+    }
+
+    #[test]
     fn process_block_evaluates_due_boundaries_across_audio_sized_chunks() {
         let nodes = vec![node(Timebase::Sixteenth)];
         let mut runtime = GraphRuntime::new(1, "g".into(), nodes, Vec::new(), 1.0, 0.0);
@@ -2516,6 +2831,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -3132,6 +3448,7 @@ mod tests {
             ready_after_beats: 2.0,
             payload: GraphPayload::default(),
             external_seed: false,
+            edge_index: 0,
         });
         runtime.incoming_triggers[1].push(0);
         runtime.random_state = 123;
@@ -3219,12 +3536,14 @@ mod tests {
         let mut n0 = node(Timebase::Quarter);
         n0.delay_steps = 3;
         n0.seed_track_mask = seed_track_mask(&[0]);
-        let mut runtime = GraphRuntime::new(1, "g".into(), vec![n0.clone()], Vec::new(), 1.0, 0.0);
+        let edges = vec![GraphEdge::new(0, 0, 1.0)];
+        let mut runtime =
+            GraphRuntime::new(1, "g".into(), vec![n0.clone()], edges.clone(), 1.0, 0.0);
         runtime.seed(0, 0.0, GraphPayload::default());
         assert_eq!(runtime.pending[0][0].remaining_steps, 3);
 
         n0.delay_steps = 6;
-        let config = runtime_config(1, vec![n0], Vec::new());
+        let config = runtime_config(1, vec![n0], edges);
         assert!(runtime.apply_config_preserving_state(config, 0.0));
         assert_eq!(runtime.pending[0][0].remaining_steps, 3);
 

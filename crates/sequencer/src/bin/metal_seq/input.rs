@@ -626,6 +626,15 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 editor.refresh_runtime_side_effects();
                 return true;
             }
+            (KeyCode::Char('d') | KeyCode::Char('D'), KeyModifiers::SUPER)
+                if editor.active_buffer().name == "*mixer*" =>
+            {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(seq-clone-active-track-pattern)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
             (KeyCode::Up | KeyCode::Down, KeyModifiers::NONE)
                 if editor.active_buffer().name != "*piano-roll*" =>
             {
@@ -966,7 +975,7 @@ mod live_keyboard_tests {
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -1457,6 +1466,42 @@ mod live_keyboard_tests {
                 HostCommand::Custom { name, .. } if name == "enter-new-instrument-editor"
             )),
             "Cmd+i should queue the new instrument editor command: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn command_d_clones_selected_track_pattern_in_mixer() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*mixer*", "");
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let cloned = Arc::new(AtomicBool::new(false));
+        {
+            let cloned = Arc::clone(&cloned);
+            editor.runtime_mut().register_native(
+                "seq-clone-active-track-pattern",
+                move |_args, _ctx| {
+                    cloned.store(true, Ordering::Relaxed);
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(
+            cloned.load(Ordering::Relaxed),
+            "Cmd+D in the mixer should invoke selected track-pattern clone"
         );
     }
 

@@ -1135,6 +1135,48 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(true))
     });
 
+    let st = state.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-clone-active-track-pattern", move |_args, ctx| {
+        let target = delete_target.lock().unwrap().clone();
+        let Some(ActiveDeleteTarget::TrackPattern { track, pattern_id }) = target else {
+            ctx.set_status("Select a track pattern to clone");
+            return Ok(Value::Bool(false));
+        };
+        if ctx.current_buffer_name() != "*mixer*" {
+            return Ok(Value::Bool(false));
+        }
+        let valid = track < st.active_track_count()
+            && st
+                .track_pattern_cells(track)
+                .iter()
+                .any(|cell| cell.pattern_id == pattern_id);
+        if !valid {
+            ctx.set_status("Cannot clone missing track pattern");
+            let mut guard = delete_target.lock().unwrap();
+            if guard.take().is_some() {
+                bump_delete_target_version(&delete_target_version, &ui_ep);
+            }
+            return Ok(Value::Bool(false));
+        }
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(track as f64))),
+        );
+        map.insert(
+            "pattern-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(pattern_id.0 as f64))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "clone-track-pattern".to_string(),
+            payload: Value::Map(map),
+        });
+        Ok(Value::Bool(true))
+    });
+
     // seq-toggle-step — toggle step on current track
     let st = state.clone();
     let ct = current_track.clone();
@@ -1333,6 +1375,8 @@ pub(crate) fn init_runtime(
     let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
     let ui_inv = ui_invalidations.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
     runtime.register_native("seq-set-track", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-set-track: expected track number".into());
@@ -1346,6 +1390,14 @@ pub(crate) fn init_runtime(
         if previous != track {
             sel.lock().unwrap().clear();
             piano_sel.lock().unwrap().clear();
+            let mut guard = delete_target.lock().unwrap();
+            if matches!(
+                guard.as_ref(),
+                Some(ActiveDeleteTarget::TrackPattern { .. })
+            ) {
+                guard.take();
+                bump_delete_target_version(&delete_target_version, &ui_ep);
+            }
             ui_inv.push(UiInvalidation::CurrentTrack {
                 previous,
                 current: track,
@@ -3705,6 +3757,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-delete-active-target",
             "(seq-delete-active-target)",
             "Delete the active destructive keyboard target when valid for the current buffer.",
+        ),
+        (
+            "seq-clone-active-track-pattern",
+            "(seq-clone-active-track-pattern)",
+            "Clone the selected mixer track-pattern cell into the current scene.",
         ),
         (
             "seq-set-track-volume",

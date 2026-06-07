@@ -26,7 +26,9 @@
   (bind-seq (str "mixer-track-delete-target-" i)))
 
 (def mixer-v2-track-pattern-delete-target? (track pattern-id)
-  (seq-delete-target? :track-pattern (dict :track track :pattern-id pattern-id)))
+  (do
+    SEQ.delete-target-version
+    (seq-delete-target? :track-pattern (dict :track track :pattern-id pattern-id))))
 
 (def mixer-v2-track-color (i)
   (if (< i (len SEQ.track-colors))
@@ -74,6 +76,13 @@
   (mixer-v2-pointer-volume (get event :sy)))
 
 (def mixer-v2-select-track (i)
+  (do
+    (set! selected-bus -1)
+    (mixer-v2-clear-delete-target)
+    (seq-set-track i)
+    (host-command "reveal-sequencer-track" (dict :track i))))
+
+(def mixer-v2-select-track-delete-target (i)
   (do
     (set! selected-bus -1)
     (seq-set-track i)
@@ -257,31 +266,33 @@
 (defwidget track-pattern-cell-bg
   :width 0.88 :height 0.38
   :paint-margin 0.04
-  :state (active assigned override selected clone)
+  :state (active assigned override selected track-r track-g track-b)
   :shader
-  (let ((outer (if (= selected 1)
-          (rgba 1.0 0.62 0.22 1.0)
-          (if (= clone 1)
-            (rgba 0.78 0.82 0.86 1.0)
-            (if (= active 1)
-          (rgba 0.82 0.96 1.0 1.0)
-          (if (= 1 (* assigned override))
-            (rgba 0.95 0.48 0.18 1.0)
-            (if (= assigned 1)
-              (rgba 0.52 0.58 0.68 1.0)
-              (rgba 0.18 0.19 0.21 1.0)))))))
-        (inner (if (= clone 1)
-          (rgba 0.34 0.37 0.40 1.0)
-          (if (= 1 active)
-          (rgba 0.82 0.88 1.0 1.0)
-          (if (= 1 assigned)
-            (rgba 0.16 0.18 0.21 1.0)
-            (rgba 0.09 0.10 0.11 1.0))))))
+  (let ((track-col (rgba track-r track-g track-b 1.0))
+        (outer (if (= selected 1)
+          (rgba 0.94 0.96 1.0 1.0)
+          (rgba track-r track-g track-b 1.0)))
+        (middle (rgba track-r track-g track-b 1.0))
+        (inner (if (= active 1)
+          (rgba 0.02 0.025 0.03 1.0)
+          track-col))
+        (play-col (if (= active 1)
+          (rgba 0.1 0.95 0.38 1.0)
+          (rgba 0 0 0 0))))
     (sdf/layer
       (sdf/fill (sdf/rounded-rect width height 0.03)
         (material :color outer))
-      (sdf/fill (sdf/rounded-rect (* width 0.82) (* height 0.82) 0.015)
-        (material :color inner)))))
+      (sdf/fill (sdf/rounded-rect (* width 0.84) (* height 0.84) 0.02)
+        (material :color middle))
+      (sdf/fill (sdf/rounded-rect (* width 0.66) (* height 0.68) 0.015)
+        (material :color inner))
+      (sdf/fill
+        (let ((p1x -0.26) (p1y -0.36) (p2x -0.26) (p2y 0.36) (p3x 0.36) (p3y 0.0))
+          (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
+                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
+                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
+            (max (max d1 d2) d3)))
+        (material :color play-col)))))
 
 (def mixer-v2-track-pattern-cells (track)
   (if (< track (len SEQ.track-pattern-cells))
@@ -299,12 +310,6 @@
         :pattern-id (get cell :id)))
     (seq-set-delete-target :track-pattern (dict :track track :pattern-id (get cell :id)))))
 
-(def mixer-v2-clone-track-pattern (track)
-  (do
-    (mixer-v2-activate-track-control track)
-    (seq-set-track track)
-    (host-command "clone-track-pattern" (dict :track track))))
-
 (def mixer-v2-track-pattern-grid (track)
   (let ((cells (mixer-v2-track-pattern-cells track)))
     (box :width :fill :height 3.02 :align :top :bg :black :background-color :buffer-bg
@@ -320,20 +325,10 @@
             :assigned (get cell :assigned)
             :override (get cell :override)
             :selected (mixer-v2-track-pattern-delete-target? track (get cell :id))
-            :clone 0
-            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell))))
-        (box
-          :key (str "mixer-v2-track-pattern-clone-" track)
-          :width 1.50 :height 0.75
-          :padding 0
-          :bg :transparent
-          :background "track-pattern-cell-bg"
-          :active 0
-          :assigned 0
-          :override 0
-          :selected 0
-          :clone 1
-          :on-click (lambda (event) (mixer-v2-clone-track-pattern track)))))))
+            :track-r (mixer-v2-track-color-r track false)
+            :track-g (mixer-v2-track-color-g track false)
+            :track-b (mixer-v2-track-color-b track false)
+            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell))))))))
 
 (def mixer-v2-mod-output-style
   (ui/style
@@ -590,7 +585,7 @@
             (mixer-v2-track-color-b i muted)
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
-          :on-click (lambda (event) (mixer-v2-select-track i))
+          :on-click (lambda (event) (mixer-v2-select-track-delete-target i))
           :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
           (label (substring (nth SEQ.track-names i) 0 10)
             :width 9.8
@@ -643,7 +638,7 @@
             (mixer-v2-track-color-b i muted)
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
-          :on-click (lambda (event) (mixer-v2-select-track i))
+          :on-click (lambda (event) (mixer-v2-select-track-delete-target i))
           :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
           (label (mixer-v2-track-collapsed-label i)
             :width 3.65

@@ -9102,8 +9102,8 @@ fn graph_parse_swing_spec(value: &EValue) -> Result<GraphSwingSpec, String> {
     }
     let items = graph_list_items(value)
         .ok_or_else(|| "swing expects a number or (swing pct [:16|:8|:4|:2])".to_string())?;
-    let head = graph_head_symbol(&items)
-        .ok_or_else(|| "swing form expects a symbol head".to_string())?;
+    let head =
+        graph_head_symbol(&items).ok_or_else(|| "swing form expects a symbol head".to_string())?;
     if head != "swing" {
         return Err(format!("unknown swing form `{head}`"));
     }
@@ -9243,6 +9243,20 @@ fn graph_parse_topology(value: &EValue) -> Result<Topology, String> {
     }
 }
 
+fn graph_edge_distribution(value: &EValue) -> Result<crate::graph::EdgeDistribution, String> {
+    match graph_keyword(value).as_deref() {
+        Some("broadcast") | Some("broadcast-weighted") | Some("all") => {
+            Ok(crate::graph::EdgeDistribution::BroadcastWeighted)
+        }
+        Some("weighted-choice") | Some("choice") | Some("markov") => {
+            Ok(crate::graph::EdgeDistribution::WeightedChoice)
+        }
+        other => Err(format!(
+            "unsupported edge :distribution {other:?}; expected :broadcast-weighted or :weighted-choice"
+        )),
+    }
+}
+
 fn graph_parse_node_proto(items: &[EValue]) -> Result<NodeProto, String> {
     let name = match items.get(1) {
         Some(EValue::Symbol(s) | EValue::String(s)) => s.clone(),
@@ -9288,6 +9302,7 @@ fn graph_parse_edge_set(items: &[EValue]) -> Result<EdgeSetSpec, String> {
         from: String::new(),
         to: String::new(),
         topology: Topology::AllToAll,
+        distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
         gather_source: None,
         params: Vec::new(),
     };
@@ -9304,6 +9319,7 @@ fn graph_parse_edge_set(items: &[EValue]) -> Result<EdgeSetSpec, String> {
             "from" => set.from = graph_symbol_string(value),
             "to" => set.to = graph_symbol_string(value),
             "topology" => set.topology = graph_parse_topology(value)?,
+            "distribution" | "scatter" => set.distribution = graph_edge_distribution(value)?,
             "gather" => set.gather_source = Some(eseqlisp::vm::format_lisp_source(value)),
             "params" => set.params = graph_parse_param_list(value),
             _ => return Err(format!("edges unknown key :{key}")),
@@ -12788,15 +12804,27 @@ mod tests {
                 gv_sym("nrn"),
                 gv_kw("topology"),
                 gv_list(vec![gv_sym("all-to-all")]),
+                gv_kw("distribution"),
+                gv_kw("weighted-choice"),
                 gv_kw("params"),
-                gv_list(vec![gv_list(vec![
-                    gv_sym("weight"),
-                    gv_kw("float"),
-                    gv_num(-1.0),
-                    gv_num(1.0),
-                    gv_kw("default"),
-                    gv_num(0.5),
-                ])]),
+                gv_list(vec![
+                    gv_list(vec![
+                        gv_sym("weight"),
+                        gv_kw("float"),
+                        gv_num(-1.0),
+                        gv_num(1.0),
+                        gv_kw("default"),
+                        gv_num(0.5),
+                    ]),
+                    gv_list(vec![
+                        gv_sym("delay"),
+                        gv_kw("int"),
+                        gv_num(0.0),
+                        gv_num(16.0),
+                        gv_kw("default"),
+                        gv_num(3.0),
+                    ]),
+                ]),
             ]),
         ]
     }
@@ -12818,7 +12846,8 @@ mod tests {
     #[test]
     fn parse_graph_manifest_extracts_full_shape() {
         use crate::graph::{
-            GraphDurationSpec, GraphSwingSpec, LeakSpec, Reduce, SeedFrom, ShapeSpec, Topology,
+            EdgeDistribution, GraphDurationSpec, GraphSwingSpec, LeakSpec, Reduce, SeedFrom,
+            ShapeSpec, Topology,
         };
         use crate::sequencer::Timebase;
 
@@ -12858,12 +12887,27 @@ mod tests {
         assert_eq!(edges.from, "nrn");
         assert_eq!(edges.to, "nrn");
         assert_eq!(edges.topology, Topology::AllToAll);
+        assert_eq!(edges.distribution, EdgeDistribution::WeightedChoice);
         assert_eq!(edges.params[0].name, "weight");
         assert_eq!(edges.params[0].default, 0.5);
+        assert_eq!(
+            edges
+                .params
+                .iter()
+                .find(|param| param.name == "delay")
+                .map(|param| param.default),
+            Some(3.0)
+        );
 
         // Materialize: 2 nodes, 2x2 all-to-all edges.
         let runtime = manifest.materialize();
         assert_eq!(runtime.num_nodes(), 2);
+        assert!(runtime
+            .visualization_snapshot()
+            .edges
+            .iter()
+            .all(|edge| edge.delay_steps == 3
+                && edge.distribution == EdgeDistribution::WeightedChoice));
     }
 
     #[test]
@@ -12904,6 +12948,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -12985,6 +13030,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -13069,6 +13115,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -13224,6 +13271,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -13304,6 +13352,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -13385,6 +13434,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -13498,6 +13548,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -14195,6 +14246,153 @@ mod tests {
     }
 
     #[test]
+    fn graph_markov_8x8_demo_loads_weight_matrix_and_node_delays() {
+        fn collect_widgets<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == widget_type {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_widgets(child, widget_type, out);
+            }
+        }
+
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+        }
+
+        let state = Arc::new(SequencerState::new(
+            8,
+            (0..8).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+            ],
+            true,
+        );
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
+            .expect("install sequencer tab registration test stub");
+
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/graph-markov-8x8-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read markov 8x8 demo script");
+        runtime.eval_str(&source).expect("evaluate markov 8x8 demo");
+        assert!(
+            state.current_graph_overrides().is_empty(),
+            "loading the markov demo must not write pattern overrides"
+        );
+        let manifest = state
+            .published_sequencers()
+            .into_iter()
+            .find_map(|published| published.graph)
+            .expect("published markov graph manifest");
+        assert_eq!(manifest.name, "markov-8x8-demo");
+        assert_eq!(manifest.shape.num_nodes(), 8);
+        assert_eq!(
+            manifest.edge_sets[0].distribution,
+            crate::graph::EdgeDistribution::WeightedChoice
+        );
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        let tree = pending
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("markov script should publish widget tree");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((70.0, 70.0)))
+            .expect("markov widget tree should lay out");
+
+        let mut matrices = Vec::new();
+        collect_widgets(&layout, "matrix", &mut matrices);
+        assert_eq!(
+            matrices.len(),
+            3,
+            "expected trigger/energy telemetry plus editable weight matrix"
+        );
+        for key in [
+            "markov-8x8-trigger-matrix",
+            "markov-8x8-energy-matrix",
+            "markov-8x8-weight-matrix",
+        ] {
+            let widget =
+                find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
+            assert_measured(widget);
+        }
+        let mut pickers = Vec::new();
+        collect_widgets(&layout, "number-picker", &mut pickers);
+        assert_eq!(
+            pickers.len(),
+            8 * 3 + 1,
+            "expected delay/transpose/vel-scale per node plus max-poly"
+        );
+        let mut dropdowns = Vec::new();
+        collect_widgets(&layout, "dropdown", &mut dropdowns);
+        assert_eq!(
+            dropdowns.len(),
+            24,
+            "expected route + resolution + quantize per node"
+        );
+
+        runtime
+            .eval_str("(m8-init-defaults)")
+            .expect("explicitly initialize markov defaults");
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "markov-8x8-demo")
+            .expect("markov graph overrides after explicit init");
+        assert_eq!(
+            graph.edge_params.len(),
+            64,
+            "explicit init should write only the weight matrix"
+        );
+        assert!(graph.edge_params.iter().any(|edge| {
+            edge.from == 0 && edge.to == 1 && edge.param == "weight" && edge.value == 0.65
+        }));
+        assert!(graph.node_intrinsics.iter().any(|node| {
+            node.instance == 0
+                && node.seed_from == Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0]))
+        }));
+        assert!(graph
+            .node_intrinsics
+            .iter()
+            .any(|node| { node.instance == 4 && node.delay_steps == Some(3) }));
+    }
+
+    #[test]
     fn graph_16_demo_ui_exposes_all_node_controls_and_ring_defaults() {
         fn collect_widgets<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
@@ -14348,8 +14546,8 @@ mod tests {
         collect_widgets(&layout, "number-picker", &mut pickers);
         assert_eq!(
             pickers.len(),
-            16 * 8 + 2,
-            "expected delay/transpose/reset/vel/dampening/recovery per node + reset-bars + max-poly"
+            16 * 8 + 4,
+            "expected delay/transpose/reset/vel/dampening/recovery per node + reset-bars/max-poly/dur-factor/swing"
         );
         let mut dropdowns = Vec::new();
         collect_widgets(&layout, "dropdown", &mut dropdowns);
@@ -14399,6 +14597,20 @@ mod tests {
         runtime
             .invoke(state_reset_change, vec![Value::Number(1.0)])
             .expect("invoke state-reset callback");
+        let dur_factor_change = find_by_stable_key(&layout, "graph-16-dur-factor")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("dur-factor callback");
+        runtime
+            .invoke(dur_factor_change, vec![Value::Number(2.0)])
+            .expect("invoke dur-factor callback");
+        let swing_change = find_by_stable_key(&layout, "graph-16-swing")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("swing callback");
+        runtime
+            .invoke(swing_change, vec![Value::Number(64.0)])
+            .expect("invoke swing callback");
 
         let overrides = state.current_graph_overrides();
         let graph = overrides
@@ -14422,6 +14634,22 @@ mod tests {
                 param.instance == 7 && param.param == "state-reset" && param.value == 1.0
             }),
             "state-reset knob should write a node param override"
+        );
+        assert!(
+            (0..16).all(|idx| {
+                graph.node_params.iter().any(|param| {
+                    param.instance == idx && param.param == "dur-factor" && param.value == 2.0
+                })
+            }),
+            "dur-factor global knob should write every node param override"
+        );
+        assert!(
+            (0..16).all(|idx| {
+                graph.node_params.iter().any(|param| {
+                    param.instance == idx && param.param == "swing" && param.value == 64.0
+                })
+            }),
+            "swing global knob should write every node param override"
         );
 
         runtime
@@ -14634,6 +14862,7 @@ mod tests {
                 from: "nrn".into(),
                 to: "nrn".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -14665,6 +14894,9 @@ mod tests {
         runtime
             .eval_str("(graph-edge \"neural\" :from 0 :to 1 :weight 0.5)")
             .expect("graph-edge");
+        runtime
+            .eval_str("(graph-edge \"neural\" :from 0 :to 1 :delay 7)")
+            .expect("graph-edge delay");
 
         let overrides = state.current_graph_overrides();
         assert_eq!(overrides.len(), 1);
@@ -14678,7 +14910,14 @@ mod tests {
             Some(crate::graph::GraphSwingSpec::new(60.0, 0))
         );
         assert_eq!(overrides[0].node_params[0].value, 0.75);
-        assert_eq!(overrides[0].edge_params[0].value, 0.5);
+        assert!(overrides[0]
+            .edge_params
+            .iter()
+            .any(|edge| edge.param == "weight" && edge.value == 0.5));
+        assert!(overrides[0]
+            .edge_params
+            .iter()
+            .any(|edge| edge.param == "delay" && edge.value == 7.0));
         assert_eq!(
             runtime
                 .eval_str("(graph-node-value \"neural\" 1 :delay)")
@@ -14708,6 +14947,12 @@ mod tests {
                 .eval_str("(graph-edge-value \"neural\" 0 1 :weight)")
                 .expect("graph-edge-value positional syntax"),
             Some(Value::Number(0.5))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-edge-value \"neural\" 0 1 :delay)")
+                .expect("graph-edge-value delay"),
+            Some(Value::Number(7.0))
         );
     }
 
@@ -14743,6 +14988,7 @@ mod tests {
                 from: "nrn".into(),
                 to: "nrn".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -14772,6 +15018,9 @@ mod tests {
         runtime
             .eval_str("(graph-edge \"neural\" :from 0 :to 1 :weight 0.5)")
             .expect("graph-edge");
+        runtime
+            .eval_str("(graph-edge \"neural\" :from 0 :to 1 :delay 6)")
+            .expect("graph-edge delay");
 
         // Numeric intrinsic + param bind-graph handles read the resolved value from the slot.
         assert_eq!(
@@ -14803,6 +15052,12 @@ mod tests {
                 .eval_str("(reactive-value (bind-graph-edge \"neural\" 0 1 :weight))")
                 .expect("bind-graph-edge weight"),
             Some(Value::Number(0.5))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph-edge \"neural\" 0 1 :delay))")
+                .expect("bind-graph-edge delay"),
+            Some(Value::Number(6.0))
         );
 
         // graph-key / graph-edge-key name the exact slot a reactive-set dirties, so a
@@ -14861,6 +15116,7 @@ mod tests {
                 from: "nrn".into(),
                 to: "nrn".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),

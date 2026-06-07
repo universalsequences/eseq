@@ -393,6 +393,66 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "set-buffer-text-for",
+        "(set-buffer-text-for name text)",
+        "Replace a named buffer's contents, creating a scratch buffer when needed.",
+        |args, ctx| {
+            let (Some(Value::String(name)), Some(Value::String(text))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("set-buffer-text-for expects (buffer-name text)".to_string());
+            };
+            ctx.set_buffer_text_for(name.clone(), text.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "append-buffer-text-for",
+        "(append-buffer-text-for name text separator)",
+        "Append text to a named buffer, creating a scratch buffer when needed. The separator is inserted only when the target buffer is non-empty.",
+        |args, ctx| {
+            let (Some(Value::String(name)), Some(Value::String(text))) = (args.first(), args.get(1))
+            else {
+                return Err("append-buffer-text-for expects (buffer-name text [separator])".to_string());
+            };
+            let separator = match args.get(2) {
+                Some(Value::String(separator)) => separator.clone(),
+                None => String::new(),
+                _ => {
+                    return Err(
+                        "append-buffer-text-for separator must be a string when provided"
+                            .to_string(),
+                    );
+                }
+            };
+            ctx.append_buffer_text_for(name.clone(), text.clone(), separator);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "append-buffer-lines-for",
+        "(append-buffer-lines-for name lines)",
+        "Append lines to a named buffer, creating a scratch buffer when needed. A blank line separates appended groups when the target buffer is non-empty.",
+        |args, ctx| {
+            let (Some(Value::String(name)), Some(Value::List(items))) = (args.first(), args.get(1))
+            else {
+                return Err("append-buffer-lines-for expects (buffer-name lines)".to_string());
+            };
+            let lines = items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::String(s) => s.clone(),
+                    other => format_lisp_value(other),
+                })
+                .collect();
+            ctx.append_buffer_lines_for(name.clone(), lines);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "set-buffer-lines",
         "(set-buffer-lines lines)",
         "Set the buffer contents from a list of line strings.",

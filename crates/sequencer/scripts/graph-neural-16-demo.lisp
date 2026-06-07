@@ -16,7 +16,7 @@
 ;;
 ;; Loading this file only publishes the graph/UI and syncs controls from the current
 ;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
-;;   (g16-init-ring-defaults)
+;;   (script-init-fn)
 
 (def-sequencer "neural-16-demo"
   :shape (line 16)
@@ -41,10 +41,12 @@
     ;; (note/velocity). :loudest keeps the highest-velocity arrival, so a
     ;; full-velocity seed punches through instead of being clobbered by a decayed
     ;; neural hit. Options: :newest :loudest :seed-priority :strongest.
-    :event :newest
-    :params ((threshold :float 0 4 :default 0.55)
+    :event :loudest
+    :params ((threshold :float 0 4 :default 0.8)
       (transpose :int -48 48 :default 0)
       (transpose-reset :int 0 1 :default 0)
+      (dur-factor :float 0 8 :default 1)
+      (swing :float 50 75 :default 62)
       (vel-decay :float 0 2 :default 0.9)
       (vel-reset :int 0 1 :default 0)
       (state-reset :int 0 1 :default 0)
@@ -59,8 +61,8 @@
         (emit :note (if (>= (param :transpose-reset) 1)
             (param :transpose)
             (+ (in-note) (param :transpose)))
-          :dur (delay)
-          :swing (swing 62 :16)
+          :dur (* (delay) (param :dur-factor))
+          :swing (swing (param :swing) :16)
           :vel  (if (>= (param :vel-reset) 1)
             1
             (* (in-vel) (param :vel-decay)))))
@@ -76,6 +78,8 @@
 
 (def g16-name "neural-16-demo")
 (def g16-node-count 16)
+(def script-buffer-name "*16x16*")
+(def script-tab-label "16x16")
 
 ;; Dropdown option lists. Order is the index space bind-graph maps into.
 
@@ -107,6 +111,8 @@
     (range 0 g16-node-count)))
 
 (defstate g16-weights (list))
+(defstate g16-dur-factor 1)
+(defstate g16-swing 62)
 
 (def g16-read-weights ()
   (map
@@ -152,6 +158,9 @@
     (g16-apply-weights g16-weights)
     (graph-node g16-name 0 :seed-from 0)))
 
+(def script-init-fn ()
+  (g16-init-ring-defaults))
+
 ;; Edit helpers dirty the bound widget (reactive-set) and persist the override.
 
 (def g16-edit-num (n field v)
@@ -163,6 +172,14 @@
   (do
     (reactive-set "GRAPH" (graph-key g16-name n field) v)
     (graph-param g16-name n field v)))
+
+(def g16-edit-global-param (field v)
+  (for-each
+    (lambda (n)
+      (do
+        (reactive-set "GRAPH" (graph-key g16-name n field) v)
+        (graph-param g16-name n field v)))
+    (range 0 g16-node-count)))
 
 (def g16-edit-enum (n field options label internal)
   (do
@@ -254,12 +271,14 @@
     ;; per-node knobs need no sync; bind-graph re-seeds their slots as rows render.
     current-pattern
     (set! g16-weights (g16-read-weights))
+    (set! g16-dur-factor (graph-param-value g16-name 0 :dur-factor))
+    (set! g16-swing (graph-param-value g16-name 0 :swing))
     (let ((viz (g16-viz graph-visualizations)))
       (box
         :padding 0.85
         :gap 0.6
         :width 37
-        :height 45
+        :height 47
         (v-stack :gap 0.5
           (h-stack :gap 0.6 :align :center
             (label "16x16 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
@@ -271,6 +290,22 @@
             (g16-num "graph-16-max-poly"
               (bind-graph-config g16-name :max-poly) 0 16 1 0
               (lambda (v) (g16-edit-config :max-poly v))))
+          (h-stack :gap 0.6 :align :center
+            (label "timing" :width 8 :height 1.2 :font-size 9 :color :dim)
+            (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+            (g16-num "graph-16-dur-factor"
+              g16-dur-factor 0 8 0.25 2
+              (lambda (v)
+                (do
+                  (set! g16-dur-factor v)
+                  (g16-edit-global-param :dur-factor v))))
+            (label "swing" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+            (g16-num "graph-16-swing"
+              g16-swing 50 75 1 0
+              (lambda (v)
+                (do
+                  (set! g16-swing v)
+                  (g16-edit-global-param :swing v)))))
           (h-stack
             (v-stack :gap 0.5
               (h-stack :gap 0.5 :align :center
@@ -331,4 +366,4 @@
               :value (g16-viz-matrix viz :dampening-matrix (g16-zero-matrix)))))))))
 
 (effect-buffer "*16x16*" (g16-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-step-sequencer-tab "16x16" "*16x16*")
+(seq-register-step-sequencer-tab script-tab-label script-buffer-name)

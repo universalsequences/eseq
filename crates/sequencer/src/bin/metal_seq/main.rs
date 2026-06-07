@@ -8583,16 +8583,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )));
                     }
                     "clone-track-pattern" => {
-                        let track = match payload {
-                            Value::Map(ref map) => map
-                                .get("track")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::Number(n) => Some(*n as usize),
-                                    _ => None,
-                                })
-                                .unwrap_or_else(|| current_track.load(Ordering::Relaxed)),
-                            Value::Number(n) => n as usize,
-                            _ => current_track.load(Ordering::Relaxed),
+                        let (track, source_pattern_id) = match payload {
+                            Value::Map(ref map) => (
+                                map.get("track")
+                                    .and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| current_track.load(Ordering::Relaxed)),
+                                map.get("pattern-id")
+                                    .or_else(|| map.get("pattern_id"))
+                                    .and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) if *n >= 0.0 => Some(PatternId(*n as u64)),
+                                        _ => None,
+                                    }),
+                            ),
+                            Value::Number(n) => (n as usize, None),
+                            _ => (current_track.load(Ordering::Relaxed), None),
                         };
                         let num_tracks = app.tracks.len();
                         if track >= num_tracks {
@@ -8602,14 +8609,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let Some(pattern_id) = app.state.clone_current_scene_track_pattern(
-                            track,
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) else {
+                        let cloned = if let Some(source_id) = source_pattern_id {
+                            app.state.clone_track_pattern_id_into_current_scene(
+                                track,
+                                source_id,
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            )
+                        } else {
+                            app.state.clone_current_scene_track_pattern(
+                                track,
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            )
+                        };
+                        let Some(pattern_id) = cloned else {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Track pattern clone failed for track {}",
                                 track + 1

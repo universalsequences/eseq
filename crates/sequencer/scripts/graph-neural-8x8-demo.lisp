@@ -24,7 +24,7 @@
 ;;
 ;; Loading this file only publishes the graph/UI and syncs controls from the current
 ;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
-;;   (g8-init-ring-defaults)
+;;   (script-init-fn)
 
 (def-sequencer "neural-8x8-demo"
   :shape (line 8)
@@ -37,7 +37,7 @@
   ;; :seed-first (seed-originated fires win their slots before neural-only ones).
   :max-poly-selection :propagation
   :duration (steps 1)
-
+  
   (def-node nrn
     :resolution :16
     :delay 1
@@ -52,29 +52,32 @@
     ;; :strongest.
     :event :newest
     :params ((threshold :float 0 4 :default 0.55)
-             (transpose :int -48 48 :default 0)
-             (vel-decay :float 0 2 :default 0.9)
-             (dampening :float 0 1 :default 0.14)
-             (recovery :float 0 1 :default 0.94))
+      (transpose :int -48 48 :default 0)
+      (vel-decay :float 0 2 :default 0.9)
+      (dampening :float 0 1 :default 0.14)
+      (recovery :float 0 1 :default 0.94))
     :state ((energy :leak (per-step :energy-decay)))
     ;; Fire when energy clears threshold. The else-branch returns nil (no fire).
     :update (if (>= (energy) (param :threshold))
-              (do
-                (dampen-incoming (param :dampening))
-                (emit :note (+ (in-note) (param :transpose))
-                      :vel  (* (in-vel) (param :vel-decay))))
-              (recover-incoming (param :recovery))))
-
+      (do
+        (dampen-incoming (param :dampening))
+        (emit :note (+ (in-note) (param :transpose))
+          :dur (* 4 (delay))
+          :vel  (* (in-vel) (param :vel-decay))))
+      (recover-incoming (param :recovery))))
+  
   (edges
     :from nrn
     :to nrn
     :topology (all-to-all)
     :gather (- (edge :weight) (edge :dampening))
     :params ((weight :float -1 1 :default 0.0)
-             (dampening :float 0 1 :default 0))))
+      (dampening :float 0 1 :default 0))))
 
 (def g8-name "neural-8x8-demo")
 (def g8-node-count 8)
+(def script-buffer-name "*8x8*")
+(def script-tab-label "8x8")
 
 ;; ── dropdown option lists (order is the index space bind-graph maps into) ──
 
@@ -153,7 +156,14 @@
   (do
     (set! g8-weights (g8-ring-weights))
     (g8-apply-weights g8-weights)
-    (graph-node g8-name 0 :seed-from 0)))
+    (graph-node g8-name 0 :seed-from 0)
+    (graph-node g8-name 1 :seed-from 1)
+    (graph-node g8-name 2 :seed-from 2)
+    (graph-node g8-name 3 :seed-from 4)
+    ))
+
+(def script-init-fn ()
+  (g8-init-ring-defaults))
 
 ;; ── edit helpers: dirty the bound widget (reactive-set) + persist the override ──
 ;; `graph-key` gives the canonical GRAPH field name a `bind-graph` handle reads, so a
@@ -306,6 +316,7 @@
                 :width 26
                 :height 12
                 :min 0
+                :color :blue
                 :max 1
                 :value g8-weights
                 :on-cell-change (lambda (r c v)
@@ -323,12 +334,12 @@
               :width 26
               :height 12
               
-            :control :grid
-            :background :black
-            :fill :primary
+              :control :grid
+              :background :black
+              :fill :primary
               :min 0
               :max 1
               :value (g8-viz-matrix viz :dampening-matrix (g8-zero-matrix)))))))))
 
 (effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-step-sequencer-tab "8x8" "*8x8*")
+(seq-register-step-sequencer-tab script-tab-label script-buffer-name)

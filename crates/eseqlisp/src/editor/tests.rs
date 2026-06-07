@@ -6827,6 +6827,54 @@ fn buffer_list_native_order_tracks_recent_buffer_switches() {
 }
 
 #[test]
+fn named_buffer_text_natives_replace_append_and_create_buffers() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+
+    let target_id = editor.create_scratch_buffer("*target*", "alpha", BufferMode::ESeqLisp);
+    editor.set_active_buffer(target_id);
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-buffer-text-for "*target*" "beta")"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let target = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*target*")
+        .expect("target buffer");
+    assert_eq!(target.text(), "beta");
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(append-buffer-lines-for "*target*" (list "delta" "epsilon"))"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let target = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*target*")
+        .expect("target buffer");
+    assert_eq!(target.text(), "beta\n\ndelta\nepsilon");
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(append-buffer-lines-for "*created*" (list "gamma"))"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let created = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*created*")
+        .expect("created buffer");
+    assert_eq!(created.text(), "gamma");
+}
+
+#[test]
 fn buffer_list_mode_shows_previous_buffer_first() {
     let init = include_str!("../../init.lisp").to_string();
     let runtime = Runtime::with_init_source(&init);

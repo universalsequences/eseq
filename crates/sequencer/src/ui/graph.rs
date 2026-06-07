@@ -33,6 +33,18 @@ fn instrument_display_name(name: &str) -> String {
         .to_string()
 }
 
+fn free_patch_idle_route_value(
+    route_track: usize,
+    target_track: usize,
+    transport_playing: bool,
+) -> f32 {
+    if transport_playing && route_track == target_track {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 struct TrackShell {
     voice_sum_id: i32,
     voice_sum_r_id: i32,
@@ -1933,8 +1945,9 @@ impl GraphController<'_> {
                 "Instrument engine {engine_id} has no voice 0 runtime for free-patch mode"
             ));
         }
+        let transport_playing = self.app.state.transport.playing.load(Ordering::Acquire);
         for track_idx in 0..self.app.tracks.len() {
-            let value = if track_idx == track { 1.0 } else { 0.0 };
+            let value = free_patch_idle_route_value(track_idx, track, transport_playing);
             self.set_engine_voice_route_to_track(engine_id, 0, track_idx, value);
         }
         Ok(())
@@ -3536,5 +3549,22 @@ fn delete_without_shift_enabled() -> bool {
             "1" | "true" | "yes" | "on"
         ),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::free_patch_idle_route_value;
+
+    #[test]
+    fn free_patch_idle_route_stays_closed_while_transport_is_stopped() {
+        assert_eq!(free_patch_idle_route_value(2, 2, false), 0.0);
+        assert_eq!(free_patch_idle_route_value(1, 2, false), 0.0);
+    }
+
+    #[test]
+    fn free_patch_idle_route_opens_only_target_track_while_transport_is_playing() {
+        assert_eq!(free_patch_idle_route_value(2, 2, true), 1.0);
+        assert_eq!(free_patch_idle_route_value(1, 2, true), 0.0);
     }
 }

@@ -734,6 +734,9 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_cleared_effect_sources: Vec<ClearedEffectSource>,
     pub pending_switch_buffer: Option<String>,
     pub pending_set_text: Option<String>,
+    pub pending_set_text_for: Vec<(String, String)>,
+    pub pending_append_text_for: Vec<(String, String, String)>,
+    pub pending_append_lines_for: Vec<(String, Vec<String>)>,
     pub pending_set_lines: Option<Vec<String>>,
     pub pending_set_buffer_styles: Option<Vec<BufferTextStyle>>,
     pub pending_goto_line: Option<usize>,
@@ -920,6 +923,27 @@ impl NativeContext {
 
     pub fn buffer_names(&self) -> Vec<String> {
         self.shared.borrow().buffer_names.clone()
+    }
+
+    pub fn set_buffer_text_for(&mut self, name: String, text: String) {
+        self.shared
+            .borrow_mut()
+            .pending_set_text_for
+            .push((name, text));
+    }
+
+    pub fn append_buffer_text_for(&mut self, name: String, text: String, separator: String) {
+        self.shared
+            .borrow_mut()
+            .pending_append_text_for
+            .push((name, text, separator));
+    }
+
+    pub fn append_buffer_lines_for(&mut self, name: String, lines: Vec<String>) {
+        self.shared
+            .borrow_mut()
+            .pending_append_lines_for
+            .push((name, lines));
     }
 
     // ── Tiling operations ─────────────────────────────────────────────────
@@ -2438,6 +2462,18 @@ impl Runtime {
 
     pub(crate) fn take_pending_set_text(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_set_text.take()
+    }
+
+    pub(crate) fn take_pending_set_text_for(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_set_text_for)
+    }
+
+    pub(crate) fn take_pending_append_text_for(&mut self) -> Vec<(String, String, String)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_append_text_for)
+    }
+
+    pub(crate) fn take_pending_append_lines_for(&mut self) -> Vec<(String, Vec<String>)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_append_lines_for)
     }
 
     pub(crate) fn take_pending_set_lines(&mut self) -> Option<Vec<String>> {

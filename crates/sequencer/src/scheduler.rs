@@ -1661,6 +1661,49 @@ fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+enum EmittedNetworkEventSource {
+    Generator {
+        index: usize,
+    },
+    Graph {
+        graph_index: usize,
+        node_index: usize,
+    },
+}
+
+impl EmittedNetworkEventSource {
+    fn event_source_index(self) -> usize {
+        match self {
+            Self::Generator { index } => index,
+            Self::Graph { node_index, .. } => node_index,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Generator { .. } => "generator",
+            Self::Graph { .. } => "graph",
+        }
+    }
+
+    fn owner_index(self) -> usize {
+        match self {
+            Self::Generator { index }
+            | Self::Graph {
+                graph_index: index, ..
+            } => index,
+        }
+    }
+
+    fn resolve_track(self, emitted_track: Option<usize>) -> Option<usize> {
+        match self {
+            Self::Generator { .. } => emitted_track.or(Some(0)),
+            Self::Graph { .. } => emitted_track,
+        }
+    }
+}
+
 fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
@@ -1669,16 +1712,29 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
     sample_time: u64,
     samples_per_quarter: f32,
     arp_phase_beats: f32,
-    source_index: usize,
+    source: EmittedNetworkEventSource,
     emitted: lisp_effect::EmittedAccumulatorEvent,
     debug_accum: bool,
 ) -> bool {
-    let track_idx = emitted.track.unwrap_or(0);
+    let Some(track_idx) = source.resolve_track(emitted.track) else {
+        if debug_routing_enabled() {
+            eprintln!(
+                "[routing] skip emitted-network reason=route-off source={} owner_index={} source_index={} sample={}",
+                source.label(),
+                source.owner_index(),
+                source.event_source_index(),
+                sample_time
+            );
+        }
+        return true;
+    };
     if track_idx >= snapshot.tracks.len() {
         if debug_routing_enabled() {
             eprintln!(
-                "[routing] skip emitted-network reason=track-out-of-range source_index={} track={:?} tracks={} sample={}",
-                source_index,
+                "[routing] skip emitted-network reason=track-out-of-range source={} owner_index={} source_index={} track={:?} tracks={} sample={}",
+                source.label(),
+                source.owner_index(),
+                source.event_source_index(),
                 emitted.track,
                 snapshot.tracks.len(),
                 sample_time
@@ -1688,8 +1744,10 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
     }
     if debug_routing_enabled() {
         eprintln!(
-            "[routing] emitted-network source_index={} track={} sample={} event_beats={} chain={:?} transpose={} vel={} emitted_fx_params={} emitted_inst_params={}",
-            source_index,
+            "[routing] emitted-network source={} owner_index={} source_index={} track={} sample={} event_beats={} chain={:?} transpose={} vel={} emitted_fx_params={} emitted_inst_params={}",
+            source.label(),
+            source.owner_index(),
+            source.event_source_index(),
             track_idx,
             sample_time,
             arp_phase_beats,
@@ -1718,7 +1776,7 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
         sampler_params: resolve_sampler_defaults(snapshot, track_idx),
         source: EventSource::Network {
             seed: None,
-            neuron: source_index,
+            neuron: source.event_source_index(),
             instrument_fingerprint: 0,
         },
     };
@@ -4097,7 +4155,9 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     emission.sample_time,
                     samples_per_quarter as f32,
                     event_beats,
-                    emission.generator_index,
+                    EmittedNetworkEventSource::Generator {
+                        index: emission.generator_index,
+                    },
                     emission.event,
                     debug_accum,
                 ) {
@@ -4224,7 +4284,10 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     emission.sample_time,
                     samples_per_quarter as f32,
                     event_beats,
-                    emission.node_index,
+                    EmittedNetworkEventSource::Graph {
+                        graph_index,
+                        node_index: emission.node_index,
+                    },
                     emission.event,
                     debug_accum,
                 ) {
@@ -4640,8 +4703,8 @@ mod tests {
         quantized_live_tick_sample, reconcile_graph_runtimes, resolve_effect_params,
         resolve_instrument_plocks, resolve_sampler_params, run_midi_fx_chain_for_track,
         schedule_playing_lookahead, should_reload_neural_runtime, swung_network_sample_time,
-        track_active_note_spans_at_beat, track_note_spans_for_trigger, LiveMidiFxTrackState,
-        MidiFxEvent, SchedulerLookaheadState, SnapshotSequencerClock,
+        track_active_note_spans_at_beat, track_note_spans_for_trigger, EmittedNetworkEventSource,
+        LiveMidiFxTrackState, MidiFxEvent, SchedulerLookaheadState, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
@@ -4706,6 +4769,7 @@ mod tests {
                 from: "n".into(),
                 to: "n".into(),
                 topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
                 gather_source: None,
                 params: vec![ParamSpec {
                     name: "weight".into(),
@@ -5206,7 +5270,7 @@ mod tests {
             1_000,
             48_000.0,
             0.0,
-            0,
+            EmittedNetworkEventSource::Generator { index: 0 },
             lisp_effect::EmittedAccumulatorEvent {
                 offset_beats: 0.0,
                 track: Some(0),
@@ -5287,7 +5351,7 @@ mod tests {
             1_000,
             48_000.0,
             0.0,
-            0,
+            EmittedNetworkEventSource::Generator { index: 0 },
             lisp_effect::EmittedAccumulatorEvent {
                 offset_beats: 0.0,
                 track: Some(0),
@@ -5410,7 +5474,10 @@ mod tests {
             graph_emissions[0].sample_time,
             48_000.0,
             1.0,
-            graph_emissions[0].node_index,
+            EmittedNetworkEventSource::Graph {
+                graph_index: 0,
+                node_index: graph_emissions[0].node_index,
+            },
             graph_emissions.remove(0).event,
             false,
         ));
@@ -5426,6 +5493,54 @@ mod tests {
         }
         tracks_and_transposes.sort_by_key(|(track, _)| *track);
         assert_eq!(tracks_and_transposes, vec![(1, 7.0), (4, 7.0)]);
+    }
+
+    #[test]
+    fn graph_route_off_emission_does_not_fall_back_to_track_zero() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["trigger-to-track".to_string()]);
+        let trigger_desc = lisp_effect::load_midi_fx_descriptor("trigger-to-track")
+            .expect("trigger-to-track descriptor");
+        state.pattern.midi_fx_slots[0][0].apply_descriptor(&trigger_desc, 0);
+        state.pattern.midi_fx_slots[0][0].defaults.set(0, 2.0);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<8>::new();
+
+        assert!(super::enqueue_emitted_network_event_with_midi_fx(
+            &queue,
+            &snapshot,
+            None,
+            0,
+            1_000,
+            48_000.0,
+            0.0,
+            EmittedNetworkEventSource::Graph {
+                graph_index: 0,
+                node_index: 0,
+            },
+            lisp_effect::EmittedAccumulatorEvent {
+                offset_beats: 0.0,
+                track: None,
+                resolved: ResolvedStep {
+                    transpose: 7.0,
+                    ..test_resolved_step()
+                },
+                chord: Vec::new(),
+                chord_durations: Vec::new(),
+                chord_step_transpose: 0.0,
+                effect_params: Vec::new(),
+                instrument_params: Vec::new(),
+            },
+            false,
+        ));
+
+        assert!(
+            queue.pop().is_none(),
+            "graph route Off must not enqueue a source-track event or run source-track MIDI FX"
+        );
     }
 
     #[test]
@@ -5463,7 +5578,10 @@ mod tests {
             1_000,
             48_000.0,
             0.0,
-            0,
+            EmittedNetworkEventSource::Graph {
+                graph_index: 0,
+                node_index: 0,
+            },
             lisp_effect::EmittedAccumulatorEvent {
                 offset_beats: 0.0,
                 track: Some(1),

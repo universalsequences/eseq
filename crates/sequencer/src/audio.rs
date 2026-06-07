@@ -252,6 +252,7 @@ struct AudioCallbackData {
     last_topology_epoch: u64,
     host_clock_was_playing: bool,
     host_clock_play_start_sample: u64,
+    free_patch_transport_routes: [FreePatchTransportRouteState; MAX_TRACKS],
     /// Per-track flag set on pattern switch/play-start; each track clears its own flag at step 0.
     pending_accum_reset: [bool; MAX_TRACKS],
     scheduled_events: Arc<ScheduledEventQueue<4096>>,
@@ -269,6 +270,21 @@ struct AudioCallbackData {
     trace_callback_counter: u64,
     trace_render_probe_blocks: u32,
     trace_silent_active_callbacks: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FreePatchTransportRouteState {
+    valid: bool,
+    engine_id: usize,
+    route_hash: u64,
+    open: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FreePatchTransportRouteTarget {
+    engine_id: usize,
+    route_hash: u64,
+    open: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -656,6 +672,167 @@ fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut 
     }
 }
 
+fn free_patch_route_lids_hash(
+    state: &SequencerState,
+    engine_id: usize,
+    num_tracks: usize,
+) -> Option<u64> {
+    if engine_id >= state.runtime.engine_route_lids.len() {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    engine_id.hash(&mut hasher);
+    num_tracks.hash(&mut hasher);
+    for track in 0..num_tracks.min(MAX_TRACKS) {
+        state.runtime.engine_route_lids[engine_id][0][track]
+            .load(Ordering::Acquire)
+            .hash(&mut hasher);
+        state.runtime.engine_route_lids_r[engine_id][0][track]
+            .load(Ordering::Acquire)
+            .hash(&mut hasher);
+        for input in 0..crate::sequencer::EXT_MOD_INPUT_COUNT {
+            state.runtime.engine_ext_route_lids[engine_id][0][track][input]
+                .load(Ordering::Acquire)
+                .hash(&mut hasher);
+        }
+    }
+    Some(hasher.finish())
+}
+
+fn free_patch_transport_route_target(
+    state: &SequencerState,
+    track: usize,
+    num_tracks: usize,
+    playing: bool,
+) -> Option<FreePatchTransportRouteTarget> {
+    if track >= num_tracks || track >= MAX_TRACKS {
+        return None;
+    }
+    if InstrumentType::from_runtime_flag(
+        state.runtime.instrument_type_flags[track].load(Ordering::Acquire),
+    ) != InstrumentType::Custom
+    {
+        return None;
+    }
+    if track_custom_run_mode(state, track) != CustomInstrumentRunMode::FreePatch {
+        return None;
+    }
+    let engine_id = track_engine_id(state, track)?;
+    let route_hash = free_patch_route_lids_hash(state, engine_id, num_tracks)?;
+    Some(FreePatchTransportRouteTarget {
+        engine_id,
+        route_hash,
+        open: playing,
+    })
+}
+
+fn free_patch_transport_route_cache_is_fresh(
+    cached: FreePatchTransportRouteState,
+    target: FreePatchTransportRouteTarget,
+) -> bool {
+    cached.valid
+        && cached.engine_id == target.engine_id
+        && cached.route_hash == target.route_hash
+        && cached.open == target.open
+        && target.open
+}
+
+unsafe fn set_free_patch_transport_route(
+    lg: *mut LiveGraph,
+    state: &SequencerState,
+    engine_id: usize,
+    track: usize,
+    num_tracks: usize,
+    open: bool,
+) {
+    if engine_id >= state.runtime.engine_route_lids.len() {
+        return;
+    }
+
+    for route_track in 0..num_tracks.min(MAX_TRACKS) {
+        let value = if open && route_track == track {
+            1.0
+        } else {
+            0.0
+        };
+        let lid_l =
+            state.runtime.engine_route_lids[engine_id][0][route_track].load(Ordering::Acquire);
+        if lid_l != 0 {
+            params_push_wrapper(
+                lg,
+                ParamMsg {
+                    idx: 0,
+                    logical_id: lid_l,
+                    fvalue: value,
+                },
+            );
+        }
+
+        let lid_r =
+            state.runtime.engine_route_lids_r[engine_id][0][route_track].load(Ordering::Acquire);
+        if lid_r != 0 {
+            params_push_wrapper(
+                lg,
+                ParamMsg {
+                    idx: 0,
+                    logical_id: lid_r,
+                    fvalue: value,
+                },
+            );
+        }
+
+        for input in 0..crate::sequencer::EXT_MOD_INPUT_COUNT {
+            let ext_lid = state.runtime.engine_ext_route_lids[engine_id][0][route_track][input]
+                .load(Ordering::Acquire);
+            if ext_lid != 0 {
+                params_push_wrapper(
+                    lg,
+                    ParamMsg {
+                        idx: 0,
+                        logical_id: ext_lid,
+                        fvalue: value,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn sync_free_patch_transport_routes(data: &mut AudioCallbackData, num_tracks: usize) {
+    let playing = data.state.transport.playing.load(Ordering::Acquire);
+    for track in 0..MAX_TRACKS {
+        let Some(target) =
+            free_patch_transport_route_target(&data.state, track, num_tracks, playing)
+        else {
+            data.free_patch_transport_routes[track].valid = false;
+            continue;
+        };
+
+        let cached = data.free_patch_transport_routes[track];
+        if free_patch_transport_route_cache_is_fresh(cached, target) {
+            continue;
+        }
+
+        unsafe {
+            set_free_patch_transport_route(
+                data.lg.0,
+                &data.state,
+                target.engine_id,
+                track,
+                num_tracks,
+                target.open,
+            );
+        }
+        data.free_patch_transport_routes[track] = FreePatchTransportRouteState {
+            valid: true,
+            engine_id: target.engine_id,
+            route_hash: target.route_hash,
+            open: target.open,
+        };
+    }
+}
+
 fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_tracks: usize) {
     // Topology edits can invalidate the per-track gate-off bookkeeping for
     // already-ringing custom voices. Explicitly send gate-off to every live
@@ -702,6 +879,7 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     data.last_playing = false;
     data.host_clock_was_playing = false;
     data.host_clock_play_start_sample = 0;
+    data.free_patch_transport_routes = [FreePatchTransportRouteState::default(); MAX_TRACKS];
     data.last_pattern = u32::MAX;
 
     for t in 0..num_tracks {
@@ -2758,9 +2936,12 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             );
         }
     }
+    sync_free_patch_transport_routes(data, num_tracks);
 
     // Process keyboard triggers
+    let mut processed_keyboard_trigger = false;
     while let Ok(kt) = data.keyboard_rx.try_recv() {
+        processed_keyboard_trigger = true;
         if kt.track >= num_tracks {
             continue;
         }
@@ -3020,6 +3201,9 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             }
             data.state.transport.trigger_flash[kt.track].store(255, Ordering::Relaxed);
         }
+    }
+    if processed_keyboard_trigger {
+        sync_free_patch_transport_routes(data, num_tracks);
     }
 
     // Schedule accumulator reset on play-start or pattern change; consumed at next step 0.
@@ -3689,6 +3873,7 @@ pub fn build_output_stream(
         last_topology_epoch: initial_topology_epoch,
         host_clock_was_playing: false,
         host_clock_play_start_sample: 0,
+        free_patch_transport_routes: [FreePatchTransportRouteState::default(); MAX_TRACKS],
         pending_accum_reset: [false; MAX_TRACKS],
         scheduled_events: Arc::clone(&scheduled_events),
         rendered_samples: Arc::clone(&rendered_samples),
@@ -3788,15 +3973,19 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        bus_gate_target_at, instrument_sound_fingerprint, resolve_live_keyboard_transpose,
-        resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
-        select_output_config, swing_delay_samples, track_accepts_scheduled_trigger,
-        CustomEnginePool, GateOffTracker, OutputDeviceConfig, OutputFormatRange,
+        bus_gate_target_at, free_patch_transport_route_cache_is_fresh,
+        free_patch_transport_route_target, instrument_sound_fingerprint,
+        resolve_live_keyboard_transpose, resolved_chord_transpose, sampler_warp_runtime,
+        select_output_channels, select_output_config, swing_delay_samples,
+        track_accepts_scheduled_trigger, CustomEnginePool, FreePatchTransportRouteState,
+        FreePatchTransportRouteTarget, GateOffTracker, OutputDeviceConfig, OutputFormatRange,
         FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::AccumulatorRuntimeState;
     use crate::analysis::{pack_ptr, OnsetTableShared};
-    use crate::sequencer::{SequencerState, SwingResolution};
+    use crate::sequencer::{
+        CustomInstrumentRunMode, InstrumentType, SequencerState, SwingResolution,
+    };
 
     #[test]
     fn output_config_prefers_system_default_sample_rate_over_44100() {
@@ -4190,6 +4379,104 @@ mod tests {
         assert!(!pool.voices[0].active);
         assert_eq!(pool.voices[0].assigned_track, Some(2));
         assert_eq!(pool.voices[0].release_started_sample, None);
+    }
+
+    #[test]
+    fn free_patch_transport_route_target_only_matches_custom_free_patch_tracks() {
+        let state = SequencerState::new(3, Vec::new());
+        state.runtime.instrument_type_flags[0]
+            .store(InstrumentType::Custom.runtime_flag(), Ordering::Relaxed);
+        state.runtime.instrument_run_mode_flags[0].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Relaxed,
+        );
+        state.runtime.track_engine_ids[0].store(10, Ordering::Relaxed);
+
+        state.runtime.instrument_type_flags[1]
+            .store(InstrumentType::Custom.runtime_flag(), Ordering::Relaxed);
+        state.runtime.instrument_run_mode_flags[1].store(
+            CustomInstrumentRunMode::FreePatch.runtime_flag(),
+            Ordering::Relaxed,
+        );
+        state.runtime.track_engine_ids[1].store(11, Ordering::Relaxed);
+
+        state.runtime.instrument_type_flags[2]
+            .store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
+        state.runtime.instrument_run_mode_flags[2].store(
+            CustomInstrumentRunMode::FreePatch.runtime_flag(),
+            Ordering::Relaxed,
+        );
+        state.runtime.track_engine_ids[2].store(12, Ordering::Relaxed);
+
+        assert_eq!(free_patch_transport_route_target(&state, 0, 3, true), None);
+        assert_eq!(free_patch_transport_route_target(&state, 2, 3, true), None);
+
+        let target = free_patch_transport_route_target(&state, 1, 3, true)
+            .expect("custom free-patch track should produce a route target");
+        assert_eq!(target.engine_id, 11);
+        assert!(target.open);
+
+        let stopped_target = free_patch_transport_route_target(&state, 1, 3, false)
+            .expect("custom free-patch track should still be tracked while stopped");
+        assert_eq!(stopped_target.engine_id, 11);
+        assert!(!stopped_target.open);
+        assert_eq!(stopped_target.route_hash, target.route_hash);
+    }
+
+    #[test]
+    fn free_patch_transport_route_target_hash_changes_when_route_nodes_change() {
+        let state = SequencerState::new(2, Vec::new());
+        state.runtime.instrument_type_flags[0]
+            .store(InstrumentType::Custom.runtime_flag(), Ordering::Relaxed);
+        state.runtime.instrument_run_mode_flags[0].store(
+            CustomInstrumentRunMode::FreePatch.runtime_flag(),
+            Ordering::Relaxed,
+        );
+        state.runtime.track_engine_ids[0].store(4, Ordering::Relaxed);
+        state.runtime.engine_route_lids[4][0][0].store(100, Ordering::Relaxed);
+        state.runtime.engine_route_lids_r[4][0][0].store(101, Ordering::Relaxed);
+
+        let before = free_patch_transport_route_target(&state, 0, 2, false)
+            .expect("route target should exist")
+            .route_hash;
+
+        state.runtime.engine_route_lids[4][0][0].store(200, Ordering::Relaxed);
+        let after = free_patch_transport_route_target(&state, 0, 2, false)
+            .expect("route target should exist after route-node change")
+            .route_hash;
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn free_patch_transport_route_cache_does_not_suppress_stopped_mute() {
+        let cached = FreePatchTransportRouteState {
+            valid: true,
+            engine_id: 3,
+            route_hash: 99,
+            open: false,
+        };
+        let stopped_target = FreePatchTransportRouteTarget {
+            engine_id: 3,
+            route_hash: 99,
+            open: false,
+        };
+        let playing_target = FreePatchTransportRouteTarget {
+            open: true,
+            ..stopped_target
+        };
+
+        assert!(!free_patch_transport_route_cache_is_fresh(
+            cached,
+            stopped_target
+        ));
+        assert!(free_patch_transport_route_cache_is_fresh(
+            FreePatchTransportRouteState {
+                open: true,
+                ..cached
+            },
+            playing_target
+        ));
     }
 
     #[test]

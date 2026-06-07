@@ -5704,6 +5704,40 @@ impl Editor {
             self.active_buffer_mut().set_text(&text);
         }
 
+        for (name, text) in self.runtime.take_pending_set_text_for() {
+            let buffer_idx = self.ensure_scratch_buffer_named(&name);
+            self.buffers[buffer_idx].set_text(&text);
+            if self.active_buffer_idx() == buffer_idx {
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+
+        for (name, text, separator) in self.runtime.take_pending_append_text_for() {
+            let buffer_idx = self.ensure_scratch_buffer_named(&name);
+            let mut next_text = self.buffers[buffer_idx].text();
+            if !next_text.trim().is_empty() {
+                next_text.push_str(&separator);
+            }
+            next_text.push_str(&text);
+            self.buffers[buffer_idx].set_text(&next_text);
+            if self.active_buffer_idx() == buffer_idx {
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+
+        for (name, lines) in self.runtime.take_pending_append_lines_for() {
+            let buffer_idx = self.ensure_scratch_buffer_named(&name);
+            let mut next_text = self.buffers[buffer_idx].text();
+            if !next_text.trim().is_empty() {
+                next_text.push_str("\n\n");
+            }
+            next_text.push_str(&lines.join("\n"));
+            self.buffers[buffer_idx].set_text(&next_text);
+            if self.active_buffer_idx() == buffer_idx {
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+
         if let Some(lines) = self.runtime.take_pending_set_lines() {
             let buffer = self.active_buffer_mut();
             buffer.lines = if lines.is_empty() {
