@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {},
+    "cables": {}
+  },
+  "macros": {
+    "gain2": {
+      "nodes": {
+        "out": {
+          "x": 7.5600586,
+          "y": 17.365
+        },
+        "return": {
+          "x": 8.059999,
+          "y": 10.6825
+        },
+        "x": {
+          "x": 6.938476,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "x:0->return:0": {
+          "segmented": true,
+          "y": 8.13125
+        }
+      }
+    }
+  }
+}

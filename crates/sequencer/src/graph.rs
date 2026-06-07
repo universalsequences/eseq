@@ -366,18 +366,64 @@ impl ProjectGraphRouteOverride {
     }
 }
 
+/// Deserialize a `Vec<u8>` that may have been serialized as a bare integer by an
+/// older single-value format. Keeps p-locked patterns saved before resolution/quantize
+/// became round-robin cycles loadable.
+fn de_u8_cycle<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(u8),
+        Many(Vec<u8>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(value) => vec![value],
+        OneOrMany::Many(values) => values,
+    })
+}
+
+/// Same as [`de_u8_cycle`] but through an `Option` (an absent field stays `None`).
+fn de_opt_u8_cycle<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(u8),
+        Many(Vec<u8>),
+    }
+    Ok(
+        Option::<OneOrMany>::deserialize(deserializer)?.map(|value| match value {
+            OneOrMany::One(value) => vec![value],
+            OneOrMany::Many(values) => values,
+        }),
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectGraphQuantizeOverride {
     Off,
-    Timebase(u8),
+    /// A round-robin cycle of timebase indices, advanced one slot per fire. A bare
+    /// integer from the legacy single-value format still loads (see [`de_u8_cycle`]).
+    Timebase(#[serde(deserialize_with = "de_u8_cycle")] Vec<u8>),
 }
 
 impl ProjectGraphQuantizeOverride {
-    fn to_quantize(&self) -> Option<Timebase> {
+    /// Expand to a per-fire cycle of resolved quantize grids (`None` = quantize off).
+    /// Empty/`Off` collapses to a single `None` slot.
+    fn to_quantize_cycle(&self) -> Vec<Option<Timebase>> {
         match self {
-            Self::Off => None,
-            Self::Timebase(index) => Some(Timebase::from_index(*index as u32)),
+            Self::Off => vec![None],
+            Self::Timebase(indices) if indices.is_empty() => vec![None],
+            Self::Timebase(indices) => indices
+                .iter()
+                .map(|index| Some(Timebase::from_index(*index as u32)))
+                .collect(),
         }
     }
 }
@@ -411,8 +457,14 @@ impl From<&ProjectGraphSeedFrom> for SeedFrom {
 pub struct ProjectGraphNodeIntrinsicOverride {
     pub group: String,
     pub instance: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolution: Option<u8>,
+    /// A round-robin cycle of resolution timebase indices, advanced one slot per fire.
+    /// A bare integer from the legacy single-value format still loads.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_opt_u8_cycle"
+    )]
+    pub resolution: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_steps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -463,9 +515,19 @@ pub struct ProjectGraphOverrides {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphNode {
+    /// The resolution in effect at the node's current cycle position. Kept in sync with
+    /// `resolution_cycle[cycle_pos]` by the runtime so every read site (eval grid,
+    /// duration resolve) sees the live slot without threading the cycle through.
     pub resolution: Timebase,
+    /// Round-robin cycle of resolutions, advanced one slot per fire. Always non-empty;
+    /// a length-1 cycle is the ordinary static-resolution case.
+    pub resolution_cycle: Vec<Timebase>,
     pub delay_steps: u32,
+    /// The quantize grid in effect at the current cycle position (`None` = off), kept in
+    /// sync with `quantize_cycle[cycle_pos]`.
     pub quantize: Option<Timebase>,
+    /// Round-robin cycle of quantize grids, advanced one slot per fire. Always non-empty.
+    pub quantize_cycle: Vec<Option<Timebase>>,
     pub route: Option<usize>,
     pub seed_track_mask: u128,
     pub reduce: Reduce,
@@ -489,8 +551,10 @@ impl Default for GraphNode {
     fn default() -> Self {
         Self {
             resolution: Timebase::Sixteenth,
+            resolution_cycle: vec![Timebase::Sixteenth],
             delay_steps: 0,
             quantize: None,
+            quantize_cycle: vec![None],
             route: None,
             seed_track_mask: 0,
             reduce: Reduce::Sum,
@@ -745,6 +809,10 @@ pub struct GraphRuntime {
     source_event_seed: Vec<bool>,
     source_event_strength: Vec<f64>,
     tick_count: Vec<u64>,
+    /// Round-robin position into each node's `resolution_cycle` / `quantize_cycle`,
+    /// advanced one slot per *accepted fire* (not per evaluation, unlike `tick_count`)
+    /// and zeroed on reset. The node's live `resolution`/`quantize` mirror the slot here.
+    cycle_pos: Vec<usize>,
     pending: Vec<Vec<GraphPropagation>>,
     /// Edge indices that contributed positive current to each target since that target
     /// last evaluated. Cleared when the target's update/recovery path commits.
@@ -849,6 +917,7 @@ impl GraphRuntime {
             source_event_seed: vec![false; num_nodes],
             source_event_strength: vec![0.0; num_nodes],
             tick_count: vec![0; num_nodes],
+            cycle_pos: vec![0; num_nodes],
             pending: vec![Vec::new(); num_nodes],
             incoming_triggers: vec![Vec::new(); num_nodes],
             last_eval_indices: vec![0; num_nodes],
@@ -920,6 +989,12 @@ impl GraphRuntime {
         self.name = config.name;
         self.num_nodes = num_nodes;
         self.nodes = config.nodes;
+        // Re-seat each node's live resolution/quantize at its held cycle position (the new
+        // cycle may be a different length — `sync_cycle_slot` wraps), so the grid-change
+        // detection below compares against the correct current spacing.
+        for idx in 0..self.num_nodes {
+            self.sync_cycle_slot(idx);
+        }
         self.out_edges = config.out_edges;
         self.in_edges = config.in_edges;
         self.energy_decay = config.energy_decay;
@@ -1026,6 +1101,8 @@ impl GraphRuntime {
             self.source_event_seed[idx] = false;
             self.source_event_strength[idx] = 0.0;
             self.tick_count[idx] = 0;
+            self.cycle_pos[idx] = 0;
+            self.sync_cycle_slot(idx);
             self.pending[idx] = preserved_external_seeds;
             self.incoming_triggers[idx].clear();
             let step_beats = self.node_step_beats(idx);
@@ -1210,6 +1287,9 @@ impl GraphRuntime {
                 if accepted[cand_idx] {
                     accepted_node[candidate.node_index] = true;
                     self.commit_firing(candidate, out);
+                    // Round-robin advances only on an accepted fire, after the firing has
+                    // consumed this slot's resolution (duration) and quantize.
+                    self.advance_cycle(candidate.node_index, boundary_beats);
                 } else {
                     rejected[candidate.node_index] = true;
                 }
@@ -1286,6 +1366,42 @@ impl GraphRuntime {
             .resolution
             .step_beats(GRAPH_RESOLUTION_REF_STEPS)
             .max(1e-9)
+    }
+
+    /// Point a node's live `resolution`/`quantize` at the slot its `cycle_pos` selects.
+    /// A length-1 (or empty) cycle is a deliberate no-op: the static `resolution` /
+    /// `quantize` field stays authoritative. That keeps round-robin free for ordinary
+    /// nodes and means partial `GraphNode { resolution, ..default() }` construction (a
+    /// length-1 default cycle) never clobbers the chosen resolution.
+    fn sync_cycle_slot(&mut self, node_index: usize) {
+        let pos = self.cycle_pos[node_index];
+        let node = &mut self.nodes[node_index];
+        if node.resolution_cycle.len() > 1 {
+            node.resolution = node.resolution_cycle[pos % node.resolution_cycle.len()];
+        }
+        if node.quantize_cycle.len() > 1 {
+            node.quantize = node.quantize_cycle[pos % node.quantize_cycle.len()];
+        }
+    }
+
+    /// Advance a node one slot through its resolution/quantize cycles after it fires.
+    /// Because resolution sets the node's evaluation grid, the grid spacing can change
+    /// here, so realign the node's clock to `at_beats` at the new spacing (the same
+    /// absolute-grid realignment used on reset / hot-reload) to avoid double-triggers or
+    /// gaps. Decay realignment self-heals in `apply_energy_decay`.
+    fn advance_cycle(&mut self, node_index: usize, at_beats: f64) {
+        let res_len = self.nodes[node_index].resolution_cycle.len().max(1);
+        let quant_len = self.nodes[node_index].quantize_cycle.len().max(1);
+        // Nothing cycles: leave the clock untouched so unrelated nodes aren't perturbed.
+        if res_len <= 1 && quant_len <= 1 {
+            return;
+        }
+        self.cycle_pos[node_index] = self.cycle_pos[node_index].wrapping_add(1);
+        self.sync_cycle_slot(node_index);
+        if res_len > 1 {
+            let step_beats = self.node_step_beats(node_index);
+            self.last_eval_indices[node_index] = grid_index_at(at_beats, step_beats);
+        }
     }
 
     /// Next boundary across the union of all node grids in `(start, end]`, advancing
@@ -2027,9 +2143,9 @@ impl GraphManifest {
         for idx in 0..num_nodes {
             let mut route = self.node.route;
             let mut seed_from = self.node.seed_from.clone();
-            let mut resolution = self.node.resolution;
+            let mut resolution_cycle = vec![self.node.resolution];
             let mut delay_steps = self.node.delay_steps;
-            let mut quantize = self.node.quantize;
+            let mut quantize_cycle = vec![self.node.quantize];
             let mut duration = self
                 .node
                 .duration
@@ -2040,14 +2156,19 @@ impl GraphManifest {
                 for intrinsic in overrides.node_intrinsics.iter().filter(|intrinsic| {
                     intrinsic.group == self.node.name && intrinsic.instance == idx
                 }) {
-                    if let Some(value) = intrinsic.resolution {
-                        resolution = Timebase::from_index(value as u32);
+                    if let Some(values) = &intrinsic.resolution {
+                        if !values.is_empty() {
+                            resolution_cycle = values
+                                .iter()
+                                .map(|index| Timebase::from_index(*index as u32))
+                                .collect();
+                        }
                     }
                     if let Some(value) = intrinsic.delay_steps {
                         delay_steps = value;
                     }
                     if let Some(value) = &intrinsic.quantize {
-                        quantize = value.to_quantize();
+                        quantize_cycle = value.to_quantize_cycle();
                     }
                     if let Some(value) = &intrinsic.route {
                         route = value.to_route();
@@ -2075,9 +2196,11 @@ impl GraphManifest {
                 SeedFrom::Tracks(tracks) => seed_track_mask(tracks),
             };
             nodes.push(GraphNode {
-                resolution,
+                resolution: resolution_cycle[0],
+                resolution_cycle,
                 delay_steps,
-                quantize,
+                quantize: quantize_cycle[0],
+                quantize_cycle,
                 route,
                 seed_track_mask,
                 reduce: self.node.reduce,
@@ -2178,6 +2301,7 @@ mod tests {
     fn node(resolution: Timebase) -> GraphNode {
         GraphNode {
             resolution,
+            resolution_cycle: vec![resolution],
             ..GraphNode::default()
         }
     }
@@ -3646,6 +3770,7 @@ mod tests {
         // fire at beat 0.5 snaps forward to beat 1.0.
         let mut n0 = node(Timebase::Eighth);
         n0.quantize = Some(Timebase::Quarter);
+        n0.quantize_cycle = vec![Some(Timebase::Quarter)];
         let nodes = vec![n0];
         let edges = vec![GraphEdge::new(0, 0, 1.0)];
         let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 0.0, 0.0);
@@ -3658,5 +3783,37 @@ mod tests {
         assert_eq!(out.len(), 1);
         // beat 0.5 boundary snapped to beat 1.0 -> sample 48000.
         assert_eq!(out[0].sample_time, 48_000);
+    }
+
+    #[test]
+    fn resolution_cycle_round_robins_eval_grid_per_fire() {
+        // A node whose resolution cycles [Half, Sixteenth] evaluates on the half grid
+        // until it fires, then advances to the sixteenth grid for the next fire, then
+        // wraps back to half. With an always-fire rule: fire at beat 2.0 (half), then
+        // the grid realigns and the next fire lands at beat 2.25 (a sixteenth later),
+        // then wraps back to half so the following boundary is beat 4.0 (out of range).
+        let mut n0 = node(Timebase::Half);
+        n0.resolution_cycle = vec![Timebase::Half, Timebase::Sixteenth];
+        let nodes = vec![n0];
+        let edges = vec![GraphEdge::new(0, 0, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+
+        let mut out = Vec::new();
+        runtime.process_block(
+            0.0,
+            3.0,
+            0,
+            48_000.0,
+            0,
+            |_| NodeFire {
+                fired: true,
+                ..NodeFire::default()
+            },
+            &mut out,
+        );
+
+        // Two fires within (0, 3.0]: beat 2.0 on the half grid, beat 2.25 on the sixteenth.
+        let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
+        assert_eq!(samples, vec![96_000, 108_000]);
     }
 }

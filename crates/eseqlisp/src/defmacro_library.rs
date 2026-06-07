@@ -185,16 +185,14 @@ impl DefmacroLibrary {
             .iter()
             .map(|package| format_expression(&package.macro_expr))
             .collect::<Vec<_>>();
-        let user_forms = exprs
-            .iter()
-            .filter(|expr| !matches!(parse_use_defmacro(expr), Ok(Some(_))))
-            .map(format_expression)
-            .collect::<Vec<_>>();
-        let source = imported_defs
-            .into_iter()
-            .chain(user_forms)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let user_source = remove_top_level_use_defmacro_forms(source);
+        let source = if imported_defs.is_empty() {
+            user_source
+        } else if user_source.trim().is_empty() {
+            imported_defs.join("\n")
+        } else {
+            format!("{}\n{}", imported_defs.join("\n"), user_source)
+        };
 
         Ok(MaterializedSource {
             source,
@@ -564,6 +562,172 @@ fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     })
 }
 
+fn remove_top_level_use_defmacro_forms(source: &str) -> String {
+    let spans = top_level_use_defmacro_spans(source);
+    if spans.is_empty() {
+        return source.to_string();
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end) in spans {
+        out.push_str(&source[cursor..start]);
+        cursor = end;
+    }
+    out.push_str(&source[cursor..]);
+    trim_repeated_blank_lines(&out)
+}
+
+fn top_level_use_defmacro_spans(source: &str) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut spans = Vec::new();
+    let mut idx = 0;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_comment {
+            if byte == b'\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b';' => {
+                in_comment = true;
+                idx += 1;
+            }
+            b'"' => {
+                in_string = true;
+                idx += 1;
+            }
+            b'(' if depth == 0 => {
+                let start = idx;
+                if let Some(end) = matching_top_level_form_end(source, start) {
+                    if form_is_use_defmacro(&source[start..end]) {
+                        spans.push(expand_removed_form_span(source, start, end));
+                    }
+                    idx = end;
+                } else {
+                    idx += 1;
+                }
+            }
+            b'(' => {
+                depth += 1;
+                idx += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                idx += 1;
+            }
+            _ => idx += 1,
+        }
+    }
+    spans
+}
+
+fn matching_top_level_form_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut idx = start;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_comment {
+            if byte == b'\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b';' => in_comment = true,
+            b'"' => in_string = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx + 1);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn form_is_use_defmacro(source: &str) -> bool {
+    parse_exprs(source, None)
+        .ok()
+        .and_then(|exprs| exprs.into_iter().next())
+        .and_then(|expr| parse_use_defmacro(&expr).ok().flatten())
+        .is_some()
+}
+
+fn expand_removed_form_span(source: &str, start: usize, end: usize) -> (usize, usize) {
+    let bytes = source.as_bytes();
+    let mut remove_end = end;
+    while remove_end < bytes.len() && matches!(bytes[remove_end], b' ' | b'\t' | b'\r') {
+        remove_end += 1;
+    }
+    if remove_end < bytes.len() && bytes[remove_end] == b'\n' {
+        remove_end += 1;
+    }
+    let mut remove_start = start;
+    while remove_start > 0 && matches!(bytes[remove_start - 1], b' ' | b'\t') {
+        remove_start -= 1;
+    }
+    (remove_start, remove_end)
+}
+
+fn trim_repeated_blank_lines(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut blank_count = 0usize;
+    for line in source.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 1 {
+                out.push('\n');
+            }
+        } else {
+            blank_count = 0;
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !source.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 pub fn library_macro_layout_file_name() -> &'static str {
     MACRO_LAYOUT_FILE
 }
@@ -604,6 +768,20 @@ mod tests {
             materialized.source,
             "(defmacro gain2 (x) (* x 2.0))\n(def y (gain2 x))"
         );
+    }
+
+    #[test]
+    fn materialization_preserves_user_source_number_text() {
+        let root = tmp_root("preserve-number-text");
+        write_package(&root, "gain2", "(defmacro gain2 (x) (* x 2))");
+        let library = DefmacroLibrary::load(&root).unwrap();
+        let source =
+            "(use-defmacro gain2)\n(def mod1 (in 6 @name mod1 @modulator 1))\n(def y (gain2 mod1))";
+        let materialized = library.materialize_source(source).unwrap();
+
+        assert!(materialized.source.contains("@modulator 1)"));
+        assert!(!materialized.source.contains("@modulator 1.0)"));
+        assert!(!materialized.source.contains("use-defmacro"));
     }
 
     #[test]

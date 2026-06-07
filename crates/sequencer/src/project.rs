@@ -1453,7 +1453,7 @@ mod tests {
                     node_intrinsics: vec![crate::graph::ProjectGraphNodeIntrinsicOverride {
                         group: "nrn".to_string(),
                         instance: 1,
-                        resolution: Some(Timebase::Eighth as u8),
+                        resolution: Some(vec![Timebase::Eighth as u8]),
                         delay_steps: Some(3),
                         quantize: Some(crate::graph::ProjectGraphQuantizeOverride::Off),
                         route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),

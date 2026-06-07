@@ -1709,6 +1709,16 @@ impl GeneratedFormInsertion {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PendingGeneratedForm {
+    scope: SourceScopeId,
+    insertion: GeneratedFormInsertion,
+    dependency_depth: usize,
+    order: usize,
+    defined_names: Vec<String>,
+    expr: Expression,
+}
+
 impl GeneratedBindings {
     fn insert(&mut self, view_key: &str, node_id: &str, name: String) {
         self.insert_output(view_key, node_id, 0, name);
@@ -1847,13 +1857,7 @@ fn apply_generated_binding_writeback(
     let mut generated = GeneratedBindings::default();
     let mut allocator = GeneratedNameAllocator::new(document);
 
-    let mut pending_forms: Vec<(
-        SourceScopeId,
-        GeneratedFormInsertion,
-        usize,
-        usize,
-        Expression,
-    )> = Vec::new();
+    let mut pending_forms: Vec<PendingGeneratedForm> = Vec::new();
     let mut pending_consumer_rewrites = Vec::new();
     let mut next_generated_def_order = 0usize;
     for view_key in writeback_views(root_patch, interaction_state) {
@@ -1896,7 +1900,7 @@ fn apply_generated_binding_writeback(
                     name,
                 }
             })?;
-            generated.insert(&view_key, &edit.id, name);
+            generated.insert(&view_key, &edit.id, name.clone());
             materialized_nodes.insert(edit.id.clone());
             pending_consumer_rewrites.push((view_key.clone(), (*edit).clone()));
             let insertion_index = generated_def_insertion_index(
@@ -1909,13 +1913,14 @@ fn apply_generated_binding_writeback(
                 edit,
                 &generated_expr,
             )?;
-            pending_forms.push((
-                scope.clone(),
-                insertion_index,
-                0,
-                next_generated_def_order,
-                generated_expr,
-            ));
+            pending_forms.push(PendingGeneratedForm {
+                scope: scope.clone(),
+                insertion: insertion_index,
+                dependency_depth: 0,
+                order: next_generated_def_order,
+                defined_names: vec![name],
+                expr: generated_expr,
+            });
             next_generated_def_order += 1;
         }
         loop {
@@ -1986,13 +1991,14 @@ fn apply_generated_binding_writeback(
             )?;
             let dependency_depth =
                 generated_binding_dependency_depth(interaction_state, &view_key, &edit.id);
-            pending_forms.push((
-                scope.clone(),
-                insertion_index,
+            pending_forms.push(PendingGeneratedForm {
+                scope: scope.clone(),
+                insertion: insertion_index,
                 dependency_depth,
-                next_generated_def_order,
-                generated_def_expression(names, generated_expr),
-            ));
+                order: next_generated_def_order,
+                defined_names: names.clone(),
+                expr: generated_def_expression(names, generated_expr),
+            });
             next_generated_def_order += 1;
             pending_consumer_rewrites.push((view_key.clone(), edit.clone()));
         }
@@ -2005,6 +2011,17 @@ fn apply_generated_binding_writeback(
         )?;
     }
 
+    pending_consumer_rewrites.sort_by(|(view_a, edit_a), (view_b, edit_b)| {
+        generated_consumer_rewrite_source_depth(root_patch, interaction_state, view_b, &edit_b.id)
+            .cmp(&generated_consumer_rewrite_source_depth(
+                root_patch,
+                interaction_state,
+                view_a,
+                &edit_a.id,
+            ))
+            .then(view_a.cmp(view_b))
+            .then(edit_a.id.cmp(&edit_b.id))
+    });
     for (view_key, edit) in pending_consumer_rewrites {
         rewrite_created_value_consumers(
             document,
@@ -2016,20 +2033,139 @@ fn apply_generated_binding_writeback(
         )?;
     }
 
-    pending_forms.sort_by(
-        |(scope_a, insertion_a, depth_a, order_a, _),
-         (scope_b, insertion_b, depth_b, order_b, _)| {
-            view_key_for_scope(scope_b)
-                .cmp(&view_key_for_scope(scope_a))
-                .then(insertion_b.sort_index().cmp(&insertion_a.sort_index()))
-                .then(depth_a.cmp(depth_b))
-                .then(order_b.cmp(order_a))
-        },
-    );
-    for (scope, insertion, _, _, expr) in pending_forms {
-        document.insert_generated_form(&scope, &insertion, expr)?;
+    sort_pending_generated_forms(&mut pending_forms);
+    for form in pending_forms {
+        document.insert_generated_form(&form.scope, &form.insertion, form.expr)?;
     }
     Ok(generated)
+}
+
+fn sort_pending_generated_forms(forms: &mut [PendingGeneratedForm]) {
+    let generated_name_to_order = forms
+        .iter()
+        .flat_map(|form| {
+            form.defined_names
+                .iter()
+                .map(|name| (name.clone(), form.order))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut memo = HashMap::new();
+    let dependency_rank_by_order = forms
+        .iter()
+        .map(|form| {
+            (
+                form.order,
+                pending_generated_dependency_rank(
+                    form.order,
+                    forms,
+                    &generated_name_to_order,
+                    &mut memo,
+                    &mut HashSet::new(),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    forms.sort_by(|a, b| {
+        view_key_for_scope(&b.scope)
+            .cmp(&view_key_for_scope(&a.scope))
+            .then(b.insertion.sort_index().cmp(&a.insertion.sort_index()))
+            .then(
+                dependency_rank_by_order
+                    .get(&a.order)
+                    .copied()
+                    .unwrap_or(0)
+                    .cmp(&dependency_rank_by_order.get(&b.order).copied().unwrap_or(0)),
+            )
+            .then(a.dependency_depth.cmp(&b.dependency_depth))
+            .then(b.order.cmp(&a.order))
+    });
+}
+
+fn pending_generated_dependency_rank(
+    order: usize,
+    forms: &[PendingGeneratedForm],
+    generated_name_to_order: &HashMap<String, usize>,
+    memo: &mut HashMap<usize, usize>,
+    visiting: &mut HashSet<usize>,
+) -> usize {
+    if let Some(rank) = memo.get(&order) {
+        return *rank;
+    }
+    if !visiting.insert(order) {
+        return 0;
+    }
+    let Some(form) = forms.iter().find(|form| form.order == order) else {
+        visiting.remove(&order);
+        return 0;
+    };
+    let mut dependencies = HashSet::new();
+    collect_generated_symbol_dependencies(&form.expr, generated_name_to_order, &mut dependencies);
+    dependencies.remove(&order);
+    let rank = dependencies
+        .into_iter()
+        .map(|dependency| {
+            1 + pending_generated_dependency_rank(
+                dependency,
+                forms,
+                generated_name_to_order,
+                memo,
+                visiting,
+            )
+        })
+        .max()
+        .unwrap_or(0);
+    visiting.remove(&order);
+    memo.insert(order, rank);
+    rank
+}
+
+fn collect_generated_symbol_dependencies(
+    expr: &Expression,
+    generated_name_to_order: &HashMap<String, usize>,
+    out: &mut HashSet<usize>,
+) {
+    match expr {
+        Expression::Symbol(symbol) => {
+            if let Some(order) = generated_name_to_order.get(symbol) {
+                out.insert(*order);
+            }
+        }
+        Expression::List(items) | Expression::QuoteList(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                if matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
+                    || matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
+                {
+                    continue;
+                }
+                collect_generated_symbol_dependencies(item, generated_name_to_order, out);
+            }
+        }
+        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+            collect_generated_symbol_dependencies(inner, generated_name_to_order, out);
+        }
+        _ => {}
+    }
+}
+
+fn generated_consumer_rewrite_source_depth(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> usize {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == node_id)
+        .filter_map(|connection| {
+            patch_for_view(root_patch, view_key)
+                .and_then(|patch| patch_node(patch, &connection.to.node_id))
+                .and_then(source_owner_location_for_node)
+                .map(|(_, depth)| depth)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn materialized_created_node_binding(
@@ -2745,7 +2881,185 @@ fn value_reference_expr(
             reason: "generated binding source must be source-backed or generated".to_string(),
         });
     };
-    node_reference_expr(document, node, view_key, from.output_index)
+    node_reference_expr_with_pending_source_input_rewrites(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        history_bindings,
+        node,
+        view_key,
+        from.output_index,
+    )
+}
+
+fn node_reference_expr_with_pending_source_input_rewrites(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    node: &PatchNode,
+    view_key: &str,
+    output_index: usize,
+) -> Result<Expression, WriteBackError> {
+    let mut expr =
+        node_reference_expr(document, node, view_key, output_index).or_else(|error| {
+            source_node_original_expression(document, node, output_index).ok_or(error)
+        })?;
+    if output_index != 0 || !source_node_accepts_positional_input_rewrites(node) {
+        return Ok(expr);
+    }
+    let Expression::List(items) = &mut expr else {
+        return Ok(expr);
+    };
+    for (input_index, value) in pending_source_input_rewrites_for_node(
+        document,
+        root_patch,
+        interaction_state,
+        generated,
+        history_bindings,
+        view_key,
+        &node.id,
+    )? {
+        replace_or_insert_positional_arg(items, input_index, value);
+    }
+    Ok(expr)
+}
+
+fn source_node_original_expression(
+    document: &SourceDocument,
+    node: &PatchNode,
+    output_index: usize,
+) -> Option<Expression> {
+    if output_index != 0 {
+        return None;
+    }
+    let source = node.source.as_ref()?;
+    match &source.owner {
+        SourceOwner::NestedExpr { .. } | SourceOwner::TopLevelForm { .. } => source
+            .expr
+            .as_ref()
+            .and_then(|expr| document.original_expr(expr))
+            .cloned(),
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Symbol(name),
+            ..
+        } => Some(Expression::Symbol(name.clone())),
+        _ => None,
+    }
+}
+
+fn source_node_accepts_positional_input_rewrites(node: &PatchNode) -> bool {
+    node.source
+        .as_ref()
+        .and_then(|source| source.call_shape.as_ref())
+        .is_some()
+}
+
+fn pending_source_input_rewrites_for_node(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    history_bindings: &HistoryBindings,
+    view_key: &str,
+    node_id: &str,
+) -> Result<Vec<(usize, Expression)>, WriteBackError> {
+    let mut rewrites = Vec::new();
+    let mut created_connections = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| {
+            connection.view_key == view_key
+                && matches!(connection.origin, PatcherConnectionOrigin::Created { .. })
+                && connection.to.node_id == node_id
+        })
+        .collect::<Vec<_>>();
+    created_connections.sort_by(|a, b| a.id.cmp(&b.id));
+    for connection in created_connections {
+        if connection_edit_touches_history(root_patch, interaction_state, connection)
+            || connection_edit_touches_created_out(interaction_state, connection)
+        {
+            continue;
+        }
+        let value = value_reference_expr(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            view_key,
+            &connection.from,
+        )?;
+        rewrites.push((connection.to.input_index, value));
+    }
+
+    let mut source_connections = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| {
+            connection.view_key == view_key
+                && matches!(connection.origin, PatcherConnectionOrigin::Source { .. })
+                && connection.to.node_id == node_id
+                && !source_connection_edit_is_layout_only(root_patch, connection)
+        })
+        .collect::<Vec<_>>();
+    source_connections.sort_by(|a, b| a.id.cmp(&b.id));
+    for connection in source_connections {
+        let value = value_reference_expr(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            history_bindings,
+            view_key,
+            &connection.from,
+        )?;
+        rewrites.push((connection.to.input_index, value));
+    }
+
+    let deleted = interaction_state
+        .edit_state
+        .deleted_connections
+        .iter()
+        .map(|key| split_scoped_key(key))
+        .filter(|(deleted_view_key, _)| deleted_view_key == view_key)
+        .collect::<Vec<_>>();
+    for (_, connection_id) in deleted {
+        if deleted_connection_has_history_replacement(
+            root_patch,
+            interaction_state,
+            view_key,
+            &connection_id,
+        ) || deleted_connection_has_created_value_replacement(
+            root_patch,
+            interaction_state,
+            view_key,
+            &connection_id,
+        ) || deleted_connection_has_created_connection_replacement(
+            root_patch,
+            interaction_state,
+            view_key,
+            &connection_id,
+        ) {
+            continue;
+        }
+        let Some(connection) = source_connection(root_patch, view_key, &connection_id) else {
+            continue;
+        };
+        if connection.to_node == node_id {
+            rewrites.push((
+                connection.to_input,
+                Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
+            ));
+        }
+    }
+
+    rewrites.sort_by_key(|(input_index, _)| *input_index);
+    Ok(rewrites)
 }
 
 fn node_reference_expr(
@@ -3742,6 +4056,16 @@ fn apply_cable_writeback(
                 connection_id: connection.id.clone(),
             });
         };
+        if source_node_call_path_was_replaced_by_created_rewrite(
+            document,
+            root_patch,
+            interaction_state,
+            generated,
+            &connection.view_key,
+            dest,
+        ) {
+            continue;
+        }
         // Apply the edit to the destination node's source-owned call shape.
         // The helper preserves semantic input indexes and inserts sentinel
         // values for any missing positional gaps before attributes.
@@ -3761,6 +4085,109 @@ fn apply_cable_writeback(
         )?;
     }
     Ok(())
+}
+
+fn source_node_call_path_was_replaced_by_created_rewrite(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    node: &PatchNode,
+) -> bool {
+    let Some(call_shape) = node
+        .source
+        .as_ref()
+        .and_then(|source| source.call_shape.as_ref())
+    else {
+        return false;
+    };
+    if matches!(document.expr(&call_shape.call), Some(Expression::List(_))) {
+        return false;
+    }
+    source_node_feeds_generated_binding(
+        root_patch,
+        interaction_state,
+        generated,
+        view_key,
+        &node.id,
+    ) || source_node_feeds_created_value_rewrite(root_patch, interaction_state, view_key, &node.id)
+}
+
+fn source_node_feeds_generated_binding(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    let source_connections = patch_for_view(root_patch, view_key)
+        .into_iter()
+        .flat_map(|patch| patch.connections.iter())
+        .filter(|connection| connection.from_node == node_id)
+        .filter(|connection| {
+            !interaction_state
+                .edit_state
+                .deleted_connections
+                .contains(&connection_edit_key(
+                    view_key,
+                    &source_connection_id(connection),
+                ))
+        })
+        .any(|connection| generated.get(view_key, &connection.to_node).is_some());
+    let created_connections = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key)
+        .filter(|connection| connection.from.node_id == node_id)
+        .any(|connection| generated.get(view_key, &connection.to.node_id).is_some());
+    source_connections || created_connections
+}
+
+fn source_node_feeds_created_value_rewrite(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key)
+        .filter(|connection| connection.from.node_id == node_id)
+        .filter(|connection| {
+            created_value_node(interaction_state, view_key, &connection.to.node_id).is_some()
+        })
+        .any(|connection| {
+            created_value_has_source_backed_consumer(
+                root_patch,
+                interaction_state,
+                view_key,
+                &connection.to.node_id,
+            )
+        })
+}
+
+fn created_value_has_source_backed_consumer(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == node_id)
+        .any(|connection| {
+            connection_edit_touches_created_out(interaction_state, connection)
+                || patch_for_view(root_patch, view_key)
+                    .and_then(|patch| patch_node(patch, &connection.to.node_id))
+                    .and_then(|node| node.source.as_ref())
+                    .is_some()
+        })
 }
 
 fn apply_source_connection_edit_writeback(
@@ -5107,6 +5534,8 @@ fn parse_single_expression(source: &str) -> Result<Expression, String> {
 struct SourceDocument {
     forms: Vec<DocumentForm>,
     macros: HashMap<String, MacroDocument>,
+    original_forms: Vec<DocumentForm>,
+    original_macros: HashMap<String, MacroDocument>,
     external_macros: HashSet<String>,
     virtual_modulatable_params: HashSet<(SourceScopeId, String)>,
 }
@@ -5162,6 +5591,8 @@ impl SourceDocument {
             }
         }
         Ok(Self {
+            original_forms: forms.clone(),
+            original_macros: macros.clone(),
             forms,
             macros,
             external_macros: HashSet::new(),
@@ -5175,6 +5606,16 @@ impl SourceDocument {
 
     fn expr(&self, expr_id: &SourceExprId) -> Option<&Expression> {
         let form = self.form_expr(&expr_id.form_id.scope, expr_id.form_id.index)?;
+        expr_at_path(form, &expr_id.path.0)
+    }
+
+    fn original_expr(&self, expr_id: &SourceExprId) -> Option<&Expression> {
+        let form = Self::form_expr_in(
+            &self.original_forms,
+            &self.original_macros,
+            &expr_id.form_id.scope,
+            expr_id.form_id.index,
+        )?;
         expr_at_path(form, &expr_id.path.0)
     }
 
@@ -5513,9 +5954,17 @@ impl SourceDocument {
     }
 
     fn form_expr(&self, scope: &SourceScopeId, index: usize) -> Option<&Expression> {
+        Self::form_expr_in(&self.forms, &self.macros, scope, index)
+    }
+
+    fn form_expr_in<'a>(
+        forms: &'a [DocumentForm],
+        macros: &'a HashMap<String, MacroDocument>,
+        scope: &SourceScopeId,
+        index: usize,
+    ) -> Option<&'a Expression> {
         match scope {
-            SourceScopeId::Root => match &self
-                .forms
+            SourceScopeId::Root => match &forms
                 .iter()
                 .find(|form| form.original_index == Some(index))?
                 .form
@@ -5523,8 +5972,7 @@ impl SourceDocument {
                 SourceForm::Expr(expr) => Some(expr),
                 SourceForm::Macro(_) => None,
             },
-            SourceScopeId::Macro { name } => self
-                .macros
+            SourceScopeId::Macro { name } => macros
                 .get(name)?
                 .body
                 .iter()

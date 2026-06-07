@@ -18,7 +18,7 @@ mod writeback;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -1352,6 +1352,192 @@ fn parse_patch_source_for_props(
     }
 }
 
+fn interaction_state_for_only_view(
+    state: &state::PatcherInteractionState,
+    view_key: &str,
+) -> state::PatcherInteractionState {
+    let mut filtered = state.clone();
+    filtered
+        .edit_state
+        .nodes
+        .retain(|_, edit| edit.view_key == view_key);
+    filtered
+        .edit_state
+        .deleted_nodes
+        .retain(|key| key.starts_with(&format!("{view_key}::")));
+    filtered
+        .edit_state
+        .connections
+        .retain(|_, edit| edit.view_key == view_key);
+    filtered
+        .edit_state
+        .deleted_connections
+        .retain(|key| key.starts_with(&format!("{view_key}::")));
+    filtered
+        .edit_state
+        .input_presentations
+        .retain(|_, edit| edit.view_key == view_key);
+    filtered.edit_state.created_macros.clear();
+    filtered.text_edit = filtered
+        .text_edit
+        .take()
+        .filter(|_| active_patcher_view_key(state) == view_key);
+    filtered.active_macro = view_key.strip_prefix("macro:").map(str::to_string);
+    filtered
+}
+
+fn interaction_state_without_library_macro_views(
+    state: &state::PatcherInteractionState,
+    root_patch: &Patch,
+) -> state::PatcherInteractionState {
+    let library_views = root_patch
+        .macros
+        .iter()
+        .filter(|macro_patch| matches!(macro_patch.origin, MacroOrigin::Library { .. }))
+        .map(|macro_patch| format!("macro:{}", macro_patch.name))
+        .collect::<std::collections::HashSet<_>>();
+    if library_views.is_empty() {
+        return state.clone();
+    }
+    let mut filtered = state.clone();
+    filtered
+        .edit_state
+        .nodes
+        .retain(|_, edit| !library_views.contains(&edit.view_key));
+    filtered.edit_state.deleted_nodes.retain(|key| {
+        !key.split_once("::")
+            .is_some_and(|(view, _)| library_views.contains(view))
+    });
+    filtered
+        .edit_state
+        .connections
+        .retain(|_, edit| !library_views.contains(&edit.view_key));
+    filtered.edit_state.deleted_connections.retain(|key| {
+        !key.split_once("::")
+            .is_some_and(|(view, _)| library_views.contains(view))
+    });
+    filtered
+        .edit_state
+        .input_presentations
+        .retain(|_, edit| !library_views.contains(&edit.view_key));
+    if library_views.contains(&active_patcher_view_key(state)) {
+        filtered.active_macro = None;
+        filtered.text_edit = None;
+    }
+    filtered
+}
+
+fn persist_library_macro_edits(
+    root_patch: &Patch,
+    intent: PatcherIntent,
+    state: &state::PatcherInteractionState,
+    library: &crate::defmacro_library::DefmacroLibrary,
+) -> Result<(), String> {
+    for macro_patch in &root_patch.macros {
+        let MacroOrigin::Library {
+            source_path,
+            layout_path,
+        } = &macro_patch.origin
+        else {
+            continue;
+        };
+        let view_key = format!("macro:{}", macro_patch.name);
+        let has_edits = state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.view_key == view_key)
+            || state
+                .edit_state
+                .connections
+                .values()
+                .any(|edit| edit.view_key == view_key)
+            || state
+                .edit_state
+                .deleted_nodes
+                .iter()
+                .any(|key| key.starts_with(&format!("{view_key}::")))
+            || state
+                .edit_state
+                .deleted_connections
+                .iter()
+                .any(|key| key.starts_with(&format!("{view_key}::")))
+            || state
+                .edit_state
+                .input_presentations
+                .values()
+                .any(|edit| edit.view_key == view_key);
+        if !has_edits {
+            continue;
+        }
+        let source_path = PathBuf::from(source_path);
+        let source = std::fs::read_to_string(&source_path)
+            .map_err(|error| format!("failed to read '{}': {error}", source_path.display()))?;
+        let library_state = interaction_state_for_only_view(state, &view_key);
+        let previous_patch = parse_patch_source_for_props_like_library_source(
+            &source,
+            intent,
+            library,
+            &macro_patch.name,
+        )?;
+        let emitted = writeback::emit_patch_writeback_result_with_library(
+            &source,
+            intent,
+            &library_state,
+            library,
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        let mut emitted_patch = parse_patch_source_for_props_like_library_source(
+            &emitted.source,
+            intent,
+            library,
+            &macro_patch.name,
+        )?;
+        let layout = sidecar::emitted_layout_json_with_node_map(
+            &mut emitted_patch,
+            &previous_patch,
+            &library_state,
+            &emitted.generated_node_ids,
+        )?;
+        write_atomic_text(&source_path, &emitted.source)?;
+        write_atomic_text(&PathBuf::from(layout_path), &layout)?;
+    }
+    Ok(())
+}
+
+fn parse_patch_source_for_props_like_library_source(
+    source: &str,
+    intent: PatcherIntent,
+    library: &crate::defmacro_library::DefmacroLibrary,
+    macro_name: &str,
+) -> Result<Patch, String> {
+    let mut patch = parse_patch_source_with_library(source, intent, library)?;
+    patch
+        .macros
+        .retain(|macro_patch| macro_patch.name == macro_name);
+    Ok(patch)
+}
+
+fn write_atomic_text(path: &Path, contents: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create '{}': {error}", parent.display()))?;
+    }
+    let tmp_path = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("patcher-write"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp_path, contents)
+        .map_err(|error| format!("failed to write '{}': {error}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("failed to replace '{}': {error}", path.display())
+    })
+}
+
 fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
     let intent = patcher_intent_from_props(&node.props);
@@ -1402,10 +1588,29 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
         }
     };
 
-    let writeback_result = if let Some(library) = defmacro_library_for_props(&node.props) {
-        writeback::emit_patch_writeback_result_with_library(&source, intent, &state, &library)
+    let library = defmacro_library_for_props(&node.props);
+    if let Some(library) = library.as_ref() {
+        if let Err(error) = persist_library_macro_edits(&root_patch, intent, &state, library) {
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                (
+                    "diagnostic",
+                    Value::String(format!("failed to persist library macro edits: {error}")),
+                ),
+            ]);
+        }
+    }
+    let root_state = if library.is_some() {
+        interaction_state_without_library_macro_views(&state, &root_patch)
     } else {
-        emit_patch_writeback_result(&source, intent, &state)
+        state.clone()
+    };
+    let library = defmacro_library_for_props(&node.props);
+    let writeback_result = if let Some(library) = library.as_ref() {
+        writeback::emit_patch_writeback_result_with_library(&source, intent, &root_state, library)
+    } else {
+        emit_patch_writeback_result(&source, intent, &root_state)
     };
 
     match writeback_result {
@@ -1414,7 +1619,7 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
                 Ok(mut emitted_patch) => match sidecar::emitted_layout_json_with_node_map(
                     &mut emitted_patch,
                     &root_patch,
-                    &state,
+                    &root_state,
                     &result.generated_node_ids,
                 ) {
                     Ok(layout) => layout,

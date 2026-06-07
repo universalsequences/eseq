@@ -30,11 +30,8 @@ pub fn parse_patch_source_with_library(
                 outputs: package.outputs.clone(),
             });
     }
-    let resolved = library
-        .resolve_for_source(source)
-        .map_err(|error| error.to_string())?;
     let mut patch = Projector::new(macros.clone(), intent).project(&exprs);
-    for package in resolved.packages {
+    for package in library.packages().values() {
         if patch
             .macros
             .iter()

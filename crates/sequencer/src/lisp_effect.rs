@@ -10797,7 +10797,7 @@ fn neural_neuron_to_value(idx: usize, neuron: &ProjectNeuron) -> EValue {
 
 #[derive(Default)]
 struct GraphNodeEdit {
-    resolution: Option<u8>,
+    resolution: Option<Vec<u8>>,
     delay_steps: Option<u32>,
     quantize: Option<crate::graph::ProjectGraphQuantizeOverride>,
     route: Option<crate::graph::ProjectGraphRouteOverride>,
@@ -11089,11 +11089,30 @@ fn resolved_graph_node_value(
         .ok_or_else(|| "graph-node-value node index out of range".to_string())?;
     match field {
         "resolution" | "res" => Ok(graph_timebase_value(node.resolution)),
+        // Round-robin cycle serialized as a space-separated mini-notation string, e.g.
+        // "16 16 16 16 16 4" — the canonical text form the text-input widget round-trips.
+        "resolution-cycle" | "res-cycle" => Ok(EValue::String(
+            node.resolution_cycle
+                .iter()
+                .map(|tb| tb.label().to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )),
         "delay" | "delay-steps" => Ok(EValue::Number(node.delay_steps as f64)),
         "quantize" | "q" => Ok(node
             .quantize
             .map(graph_timebase_value)
             .unwrap_or_else(|| EValue::String("off".to_string()))),
+        "quantize-cycle" | "q-cycle" => Ok(EValue::String(
+            node.quantize_cycle
+                .iter()
+                .map(|slot| match slot {
+                    Some(tb) => tb.label().to_string(),
+                    None => "off".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        )),
         "route" => Ok(graph_route_value(node.route)),
         "seed-from" => Ok(graph_seed_from_value(node.seed_track_mask)),
         other => Err(format!("graph-node-value unknown field :{other}")),
@@ -11337,16 +11356,60 @@ fn parse_graph_seed_from(value: &EValue) -> Result<crate::graph::ProjectGraphSee
     }
 }
 
+/// Is this token an "off"/"none" marker rather than a timebase?
+fn graph_timebase_token_is_off(value: &EValue) -> bool {
+    matches!(
+        graph_keyword(value).as_deref(),
+        Some("off") | Some("none") | Some("nil") | Some("false")
+    )
+}
+
+/// Split a cycle field into its individual timebase tokens. Accepts a space-separated
+/// string ("16 16 16 16 16 4" — the text-input mini-notation), a list of tokens, or a
+/// single value (a length-1 cycle). This is the one place the cycle grammar lives, so
+/// the text-input widget and any future text-buffer surface share it.
+fn graph_cycle_tokens(value: &EValue) -> Vec<EValue> {
+    match value {
+        EValue::String(text) => text
+            .split_whitespace()
+            .map(|token| EValue::String(token.to_string()))
+            .collect(),
+        EValue::List(_) => graph_list_items(value).unwrap_or_default(),
+        other => vec![other.clone()],
+    }
+}
+
+/// Parse a resolution cycle into timebase indices. Unparseable tokens are dropped (so a
+/// half-typed text field doesn't nuke the override); an empty result yields `None` so
+/// the caller can leave the field inheriting the prototype.
+fn parse_graph_resolution_cycle(value: &EValue) -> Option<Vec<u8>> {
+    let indices: Vec<u8> = graph_cycle_tokens(value)
+        .iter()
+        .filter_map(|token| graph_timebase(token).ok().map(|tb| tb as u8))
+        .collect();
+    if indices.is_empty() {
+        None
+    } else {
+        Some(indices)
+    }
+}
+
 fn parse_graph_quantize_override(
     value: &EValue,
 ) -> Result<crate::graph::ProjectGraphQuantizeOverride, String> {
-    match graph_keyword(value).as_deref() {
-        Some("off") | Some("none") | Some("nil") | Some("false") => {
-            Ok(crate::graph::ProjectGraphQuantizeOverride::Off)
-        }
-        _ => Ok(crate::graph::ProjectGraphQuantizeOverride::Timebase(
-            graph_timebase(value)? as u8,
-        )),
+    // Per-slot off within a cycle isn't representable in v1; "off" tokens are dropped and
+    // a field that is entirely off (or empty) collapses to `Off`.
+    let indices: Vec<u8> = graph_cycle_tokens(value)
+        .iter()
+        .filter(|token| !graph_timebase_token_is_off(token))
+        .filter_map(|token| graph_timebase(token).ok().map(|tb| tb as u8))
+        .collect();
+    if indices.is_empty() {
+        Ok(crate::graph::ProjectGraphQuantizeOverride::Off)
+    } else {
+        Ok(crate::graph::ProjectGraphQuantizeOverride::Timebase(
+            indices,
+        ))
     }
 }
 
@@ -11361,7 +11424,7 @@ fn parse_graph_node_edit(args: &[EValue]) -> Result<GraphNodeEdit, String> {
             .get(idx)
             .ok_or_else(|| format!("graph-node :{key} expects a value"))?;
         match key.as_str() {
-            "resolution" | "res" => edit.resolution = Some(graph_timebase(value)? as u8),
+            "resolution" | "res" => edit.resolution = parse_graph_resolution_cycle(value),
             "delay" | "delay-steps" => edit.delay_steps = Some(parse_u32_value(value, "delay")?),
             "quantize" | "q" => edit.quantize = Some(parse_graph_quantize_override(value)?),
             "route" => edit.route = Some(parse_graph_route_override(value)?),
@@ -14024,7 +14087,7 @@ mod tests {
         assert!(
             graph.node_intrinsics.iter().any(|node| {
                 node.instance == 3
-                    && node.resolution == Some(crate::sequencer::Timebase::Eighth as u8)
+                    && node.resolution == Some(vec![crate::sequencer::Timebase::Eighth as u8])
             }),
             "resolution dropdown should write an intrinsic override"
         );
@@ -14690,6 +14753,172 @@ mod tests {
                     && node.seed_from == Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0]))
             }),
             "explicit init should seed node 0 from track 0"
+        );
+    }
+
+    #[test]
+    fn graph_16_cycle_demo_round_trips_resolution_and_quantize_cycles() {
+        let state = Arc::new(SequencerState::new(
+            16,
+            (0..16).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+            ],
+            true,
+        );
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str(
+                r#"
+                (defstate seq-registered-step-tabs '())
+                (def seq-register-step-sequencer-tab (label buffer)
+                  (set! seq-registered-step-tabs
+                    (append seq-registered-step-tabs (list (list label buffer)))))
+                "#,
+            )
+            .expect("install sequencer tab registration test stub");
+
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/graph-neural-16-cycle-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read graph 16 cycle demo script");
+        runtime
+            .eval_str(&source)
+            .expect("evaluate graph 16 cycle demo");
+
+        // The panel must render (exercises the text-input + g16c-sync-cycles body): lay it
+        // out and confirm a resolution + quantize cycle text field per node.
+        fn collect_widgets<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == widget_type {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_widgets(child, widget_type, out);
+            }
+        }
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+        let tree = runtime
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("cycle demo should publish a widget tree");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((44.0, 56.0)))
+            .expect("cycle demo widget tree should lay out");
+        let mut text_inputs = Vec::new();
+        collect_widgets(&layout, "text-input", &mut text_inputs);
+        assert_eq!(
+            text_inputs.len(),
+            16 * 2,
+            "expected a resolution + quantize cycle text field per node"
+        );
+        for idx in 0..16 {
+            for key in [
+                format!("graph-16c-resolution-{idx}"),
+                format!("graph-16c-quantize-{idx}"),
+            ] {
+                let widget = find_by_stable_key(&layout, &key)
+                    .unwrap_or_else(|| panic!("missing cycle field {key}"));
+                assert!(widget.rect.width > 0.0 && widget.rect.height > 0.0);
+            }
+        }
+
+        // Loading must not write overrides (matches the other demos).
+        assert!(
+            state.current_graph_overrides().is_empty(),
+            "loading the cycle demo must not write pattern overrides"
+        );
+
+        // Explicit init writes the showcase cycles onto nodes 0 and 1.
+        runtime
+            .eval_str("(script-init-fn)")
+            .expect("initialize cycle demo defaults");
+
+        let read_cycle = |runtime: &mut Runtime, node: usize, field: &str| {
+            runtime
+                .eval_str(&format!("(graph-node-value g16c-name {node} {field})"))
+                .expect("read cycle")
+        };
+        assert_eq!(
+            read_cycle(&mut runtime, 0, ":resolution-cycle"),
+            Some(Value::String("16 16 16 16 16 4".to_string())),
+            "node 0 should round-trip the showcase resolution cycle"
+        );
+        assert_eq!(
+            read_cycle(&mut runtime, 1, ":resolution-cycle"),
+            Some(Value::String("16 8 16".to_string())),
+            "node 1 should round-trip its 3-slot lurch cycle"
+        );
+
+        // The stored override is a list of timebase indices (16->Sixteenth=4, 4->Quarter=2).
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-16-cycle-demo")
+            .expect("cycle demo graph overrides");
+        let node0 = graph
+            .node_intrinsics
+            .iter()
+            .find(|node| node.instance == 0)
+            .expect("node 0 intrinsic override");
+        assert_eq!(
+            node0.resolution,
+            Some(vec![4, 4, 4, 4, 4, 2]),
+            "resolution override should store the full cycle as timebase indices"
+        );
+
+        // The UI edit path (g16c-edit-cycle -> graph-node string parse) is lenient: extra
+        // whitespace collapses and unparseable tokens drop, then it re-serializes canonically.
+        runtime
+            .eval_str(r#"(g16c-edit-cycle 2 :resolution "16  4 garbage 8")"#)
+            .expect("edit node 2 resolution cycle");
+        assert_eq!(
+            read_cycle(&mut runtime, 2, ":resolution-cycle"),
+            Some(Value::String("16 4 8".to_string())),
+            "lenient parse drops junk tokens and collapses whitespace"
+        );
+
+        // Quantize accepts a cycle too; a whole-field "off" collapses to a single off slot.
+        runtime
+            .eval_str(r#"(g16c-edit-cycle 4 :quantize "16 8 16")"#)
+            .expect("edit node 4 quantize cycle");
+        assert_eq!(
+            read_cycle(&mut runtime, 4, ":quantize-cycle"),
+            Some(Value::String("16 8 16".to_string())),
+            "quantize cycle should round-trip"
+        );
+        runtime
+            .eval_str(r#"(g16c-edit-cycle 4 :quantize "off")"#)
+            .expect("clear node 4 quantize cycle");
+        assert_eq!(
+            read_cycle(&mut runtime, 4, ":quantize-cycle"),
+            Some(Value::String("off".to_string())),
+            "a whole-field off collapses to a single off slot"
         );
     }
 

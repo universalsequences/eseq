@@ -62,9 +62,16 @@ fn parse_patch_source_with_library_projects_imported_macro_instance() {
     )
     .unwrap();
 
-    assert!(patch.macros.iter().any(|macro_patch| {
-        macro_patch.name == "shape" && matches!(macro_patch.origin, MacroOrigin::Library { .. })
-    }));
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "shape")
+        .expect("library macro patch");
+    assert!(matches!(macro_patch.origin, MacroOrigin::Library { .. }));
+    assert!(
+        !macro_patch.patch.nodes.is_empty(),
+        "library macro should project to an enterable macro view"
+    );
     assert!(
         patch
             .nodes
@@ -96,6 +103,57 @@ fn writeback_with_library_adds_import_for_used_library_macro() {
     .source;
 
     assert!(emitted.contains("(use-defmacro shape)"));
+}
+
+#[test]
+fn library_macro_view_edit_persists_to_library_source_not_root_source() {
+    let library = temp_defmacro_library("view-edit", &[("shape", "(defmacro shape (x) (* x 2))")]);
+    let source = "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)";
+    let root_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    let package = library.package("shape").unwrap();
+    let mut state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    let macro_patch = active_patcher_patch(&root_patch, &state);
+    let return_node = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "return")
+        .expect("library macro should expose a return node");
+    set_node_edit_position(
+        &mut state,
+        "macro:shape",
+        return_node,
+        (12.0, 34.0),
+        node_display_label(return_node),
+    );
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:shape", &return_node.id))
+        .unwrap()
+        .text = "* 3".to_string();
+
+    persist_library_macro_edits(&root_patch, PatcherIntent::Instrument, &state, &library).unwrap();
+
+    let library_source = fs::read_to_string(&package.source_path).unwrap();
+    assert_eq!(library_source, "(defmacro shape (x) (* x 3.0))");
+    let layout: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&package.layout_path).unwrap()).unwrap();
+    assert_eq!(layout["macros"]["shape"]["nodes"]["return"]["x"], 12.0);
+    assert_eq!(layout["macros"]["shape"]["nodes"]["return"]["y"], 34.0);
+    let root_state = interaction_state_without_library_macro_views(&state, &root_patch);
+    let root_source = emit_patch_writeback_result_with_library(
+        source,
+        PatcherIntent::Instrument,
+        &root_state,
+        &library,
+    )
+    .unwrap()
+    .source;
+    assert_eq!(root_source, source);
 }
 
 #[test]
@@ -5654,6 +5712,74 @@ fn writeback_generated_binding_can_wrap_nested_output_expression() {
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
         "(def sig (in 1))\n(def mul1 (* (phasor sig) 1.0))\n(out mul1 1)"
     );
+}
+
+#[test]
+fn writeback_generated_binding_wraps_nested_expression_after_nested_input_rewire() {
+    let source = "\
+(defmacro gain2 (x) (* x 2))
+(def phase (phasor 440))
+(def env (in 1))
+(out (* phase env) 1)";
+    let patch = parse(source);
+    let phase = patch.nodes.iter().find(|node| node.id == "phase").unwrap();
+    let multiply = patch.nodes.iter().find(|node| node.op == "*").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let phase_to_multiply = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == phase.id && connection.to_node == multiply.id)
+        .unwrap();
+    let multiply_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == multiply.id && connection.to_node == out.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(phase_to_multiply),
+        ));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(multiply_to_out),
+        ));
+
+    let gain = allocate_created_text_node(&mut state, "root", "gain2");
+    connect_output_to_input(&mut state, "root", &multiply.id, &gain, 0);
+    connect_output_to_input(&mut state, "root", &gain, &out.id, 0);
+    let scale = allocate_created_text_node(&mut state, "root", "* twopi");
+    let cos = allocate_created_text_node(&mut state, "root", "cos");
+    connect_output_to_input(&mut state, "root", &phase.id, &scale, 0);
+    connect_output_to_input(&mut state, "root", &scale, &cos, 0);
+    connect_output_to_input(&mut state, "root", &cos, &multiply.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(def gain21 (gain2 (* cos1 env)))"),
+        "generated macro binding should wrap the rewired nested expression:\n{emitted}"
+    );
+    assert!(
+        emitted.find("(def cos1 ").unwrap() < emitted.find("(def gain21 ").unwrap(),
+        "generated dependency should be emitted before its consumer:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(out gain21 1)"),
+        "out should consume the generated macro binding:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
 }
 
 #[test]
