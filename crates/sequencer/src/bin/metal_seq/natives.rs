@@ -326,6 +326,7 @@ pub(crate) fn init_runtime(
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
                 ("delete-target-version", Value::Number(0.0)),
+                ("selected-mod-routes", Value::List(vec![])),
                 (
                     "current-pattern",
                     Value::Number(state.current_scene_index() as f64),
@@ -753,6 +754,33 @@ pub(crate) fn init_runtime(
                     Box::leak(mixer_track_delete_target_field(idx).into_boxed_str()),
                     Value::Bool(false),
                 ));
+                for cell in state.track_pattern_cells(idx) {
+                    let pattern_id = cell.pattern_id.0;
+                    fields.push((
+                        Box::leak(
+                            track_pattern_cell_active_field(idx, pattern_id).into_boxed_str(),
+                        ),
+                        Value::Bool(cell.active_effective),
+                    ));
+                    fields.push((
+                        Box::leak(
+                            track_pattern_cell_assigned_field(idx, pattern_id).into_boxed_str(),
+                        ),
+                        Value::Bool(cell.assigned_to_current_scene),
+                    ));
+                    fields.push((
+                        Box::leak(
+                            track_pattern_cell_override_field(idx, pattern_id).into_boxed_str(),
+                        ),
+                        Value::Bool(cell.overridden),
+                    ));
+                    fields.push((
+                        Box::leak(
+                            track_pattern_cell_selected_field(idx, pattern_id).into_boxed_str(),
+                        ),
+                        Value::Bool(false),
+                    ));
+                }
                 fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),

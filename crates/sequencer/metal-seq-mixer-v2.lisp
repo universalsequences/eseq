@@ -25,10 +25,17 @@
 (def mixer-v2-track-delete-target-binding (i)
   (bind-seq (str "mixer-track-delete-target-" i)))
 
-(def mixer-v2-track-pattern-delete-target? (track pattern-id)
-  (do
-    SEQ.delete-target-version
-    (seq-delete-target? :track-pattern (dict :track track :pattern-id pattern-id))))
+(def mixer-v2-track-pattern-cell-active-binding (track pattern-id)
+  (bind-seq (str "track-pattern-cell-active-" track "-" pattern-id)))
+
+(def mixer-v2-track-pattern-cell-assigned-binding (track pattern-id)
+  (bind-seq (str "track-pattern-cell-assigned-" track "-" pattern-id)))
+
+(def mixer-v2-track-pattern-cell-override-binding (track pattern-id)
+  (bind-seq (str "track-pattern-cell-override-" track "-" pattern-id)))
+
+(def mixer-v2-track-pattern-cell-selected-binding (track pattern-id)
+  (bind-seq (str "track-pattern-cell-selected-" track "-" pattern-id)))
 
 (def mixer-v2-track-color (i)
   (if (< i (len SEQ.track-colors))
@@ -157,11 +164,6 @@
 (def mixer-v2-clear-delete-target ()
   (seq-clear-delete-target))
 
-(def mixer-v2-delete-target-mod-route? (source dest input)
-  (do
-    SEQ.delete-target-version
-    (seq-delete-target? :mod-route (dict :source source :dest dest :input input))))
-
 (def mixer-v2-mod-route-exists-at (source dest input idx)
   (if (>= idx (len SEQ.mod-routes))
     false
@@ -195,15 +197,13 @@
     (seq-set-delete-target :mod-route (dict :source source :dest dest :input input))
     (status (str "Selected mod route: track " (+ source 1) " out -> track " (+ dest 1) " Ext" (+ input 1)))))
 
-(def mixer-v2-selected-mod-route? (source dest input)
-  (mixer-v2-delete-target-mod-route? source dest input))
-
 (def mixer-v2-selected-mod-sources-at (dest input idx acc)
-  (if (>= idx (len SEQ.mod-routes))
+  (if (>= idx (len SEQ.selected-mod-routes))
     acc
-    (let ((route (nth SEQ.mod-routes idx)))
+    (let ((route (nth SEQ.selected-mod-routes idx)))
       (mixer-v2-selected-mod-sources-at dest input (+ idx 1)
-        (if (mixer-v2-selected-mod-route? (get route :source) dest input)
+        (if (and (= (get route :dest) dest)
+              (= (get route :input) input))
           (append acc (list (get route :source)))
           acc)))))
 
@@ -267,6 +267,7 @@
   :width 0.88 :height 0.38
   :paint-margin 0.04
   :state (active assigned override selected track-r track-g track-b)
+  :bindable (active assigned override selected track-r track-g track-b)
   :shader
   (let ((track-col (rgba track-r track-g track-b 1.0))
         (outer (if (= selected 1)
@@ -315,20 +316,21 @@
     (box :width :fill :height 3.02 :align :top :bg :black :background-color :buffer-bg
       (grid :cols 8 :col-width 1.50 :row-height 0.75 :align :center
         (each cells |cell cell-idx|
+          (let ((pattern-id (get cell :id)))
           (box
-            :key (str "mixer-v2-track-pattern-cell-" track "-" (get cell :id))
+            :key (str "mixer-v2-track-pattern-cell-" track "-" pattern-id)
             :width 1.50 :height 0.75
             :padding 0
             :bg :transparent
             :background "track-pattern-cell-bg"
-            :active (get cell :active)
-            :assigned (get cell :assigned)
-            :override (get cell :override)
-            :selected (mixer-v2-track-pattern-delete-target? track (get cell :id))
+            :active (mixer-v2-track-pattern-cell-active-binding track pattern-id)
+            :assigned (mixer-v2-track-pattern-cell-assigned-binding track pattern-id)
+            :override (mixer-v2-track-pattern-cell-override-binding track pattern-id)
+            :selected (mixer-v2-track-pattern-cell-selected-binding track pattern-id)
             :track-r (mixer-v2-track-color-r track false)
             :track-g (mixer-v2-track-color-g track false)
             :track-b (mixer-v2-track-color-b track false)
-            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell))))))))
+            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell)))))))))
 
 (def mixer-v2-mod-output-style
   (ui/style

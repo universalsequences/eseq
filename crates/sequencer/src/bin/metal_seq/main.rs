@@ -1943,9 +1943,10 @@ fn apply_ui_invalidations(
                         Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
                     )
                     .effects_dirty;
-                sync_mixer_track_delete_target_binding_fields(
+                sync_mixer_delete_target_binding_fields(
                     rt,
                     app.tracks.len(),
+                    &state,
                     active_delete_target.lock().unwrap().as_ref(),
                 );
             }
@@ -3438,9 +3439,10 @@ mod tests {
             sync_bus_peak_fields(rt, &cached_bus_peak_levels);
             sync_modulator_phase_fields(rt, &cached_modulator_phases);
             sync_modulator_level_fields(rt, &cached_modulator_levels);
-            sync_mixer_track_delete_target_binding_fields(
+            sync_mixer_delete_target_binding_fields(
                 rt,
                 app.tracks.len(),
+                &state,
                 active_delete_target.lock().unwrap().as_ref(),
             );
             rt.set_reactive(
@@ -3552,9 +3554,10 @@ mod tests {
                 "bus-effects",
                 build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
             );
-            sync_mixer_track_delete_target_binding_fields(
+            sync_mixer_delete_target_binding_fields(
                 rt,
                 app.tracks.len(),
+                &state,
                 active_delete_target.lock().unwrap().as_ref(),
             );
             rt.set_reactive(
@@ -3656,6 +3659,521 @@ mod tests {
         assert!(
             trace.widget_tree_flushes > 0,
             "track switch should report widget tree work"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
+    fn project_92_scene_switch_reports_layout_work() {
+        std::thread::Builder::new()
+            .name("project-92-scene-switch-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(project_92_scene_switch_reports_layout_work_impl)
+            .expect("spawn project 92 scene switch probe")
+            .join()
+            .expect("project 92 scene switch probe should pass");
+    }
+
+    fn project_92_scene_switch_reports_layout_work_impl() {
+        use super::*;
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        fn duration_ms(duration: Duration) -> f64 {
+            duration.as_secs_f64() * 1000.0
+        }
+
+        let _dir = SequencerDirGuard::enter();
+        assert!(
+            Path::new("projects/92.json").exists(),
+            "project 92 must be available at crates/sequencer/projects/92.json"
+        );
+
+        let eng = engine::init_headless_engine(44_100, 2).expect("initialize headless app graph");
+        let lg_raw = eng.lg_ptr.0;
+        let state = eng.state.clone();
+        let lg_ptr = eng.lg_ptr;
+        let sample_rate = eng.sample_rate;
+        let _engine_guard = TestEngineGuard { lg_raw };
+        let _audio_pump = HeadlessAudioPump::start(lg_ptr, eng.channels as usize);
+        let master_recorder = eng.master_recorder.clone();
+        let mut app = ui::App::new(
+            state.clone(),
+            lg_ptr,
+            sample_rate,
+            eng.buses,
+            eng.master_recorder,
+            eng.keyboard_tx,
+        );
+
+        let mut track_names = Vec::<String>::new();
+        let track_pan_ids = Arc::new(Mutex::new(Vec::<i32>::new()));
+        let track_collapsed = Arc::new(Mutex::new(app.track_collapsed.clone()));
+        let bus_state = Arc::new(Mutex::new(app.buses.clone()));
+        let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons =
+            Arc::new(Mutex::new(BTreeSet::new()));
+        let piano_roll_selection = Arc::new(Mutex::new(HashSet::<u64>::new()));
+        let piano_roll_move_state = Arc::new(Mutex::new(None));
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let fx_epoch = Arc::new(AtomicUsize::new(0));
+        let ui_invalidations = Arc::new(UiInvalidationQueue::new());
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        let recording = Arc::new(AtomicBool::new(false));
+        let master_recording = Arc::new(AtomicBool::new(false));
+        let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let active_delete_target = Arc::new(Mutex::new(None));
+        let active_delete_target_version = Arc::new(AtomicUsize::new(0));
+        let auto_follow_override_until = Arc::new(Mutex::new(None));
+
+        let RuntimeInit {
+            runtime,
+            accumulator_names,
+            midi_fx_names: _,
+            sample_browser: _,
+        } = init_runtime(
+            &app,
+            state.clone(),
+            &track_names,
+            track_pan_ids.clone(),
+            track_collapsed.clone(),
+            bus_state.clone(),
+            bus_node_ids.clone(),
+            current_track.clone(),
+            selected_steps.clone(),
+            piano_roll_selection.clone(),
+            piano_roll_move_state,
+            recording.clone(),
+            master_recording.clone(),
+            master_recorder.clone(),
+            record_armed.clone(),
+            ui_epoch.clone(),
+            fx_epoch.clone(),
+            ui_invalidations.clone(),
+            expanded_step_projection.clone(),
+            selected_neural_neurons.clone(),
+            active_delete_target.clone(),
+            active_delete_target_version.clone(),
+            auto_follow_override_until.clone(),
+            lg_raw,
+        );
+
+        let mut editor = Editor::new(
+            runtime,
+            eseqlisp::EditorConfig {
+                vim_mode: true,
+                ..eseqlisp::EditorConfig::default()
+            },
+        );
+        reload_custom_instrument_ui(&mut editor);
+        let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
+        let grid_source = editor.active_buffer().text();
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(std::path::PathBuf::from("metal-seq-grid.lisp")),
+            &grid_source,
+            overlays,
+        );
+        assert!(
+            report.success,
+            "failed to load grid UI: {}",
+            report.failure_message()
+        );
+        editor.process_lisp_reload_report(report);
+        editor.refresh_runtime_side_effects();
+        reload_custom_instrument_ui(&mut editor);
+        editor.set_layout_viewport(180, 70);
+        editor.update_tile_rects(180, 70);
+        let _ = editor.drain_host_commands();
+
+        app.queue_project_load_named("92")
+            .expect("queue project 92 load");
+        for _ in 0..512 {
+            if !app.has_pending_project_load() {
+                break;
+            }
+            app.advance_pending_project_load()
+                .expect("advance project 92 load");
+        }
+        assert!(
+            !app.has_pending_project_load(),
+            "project 92 load did not finish"
+        );
+        assert!(
+            app.state.scene_count() >= 2,
+            "project 92 should have multiple scenes"
+        );
+
+        current_track.store(0, Ordering::Relaxed);
+        *track_pan_ids.lock().unwrap() = app
+            .graph
+            .track_node_ids
+            .iter()
+            .map(|ids| ids.pan_id)
+            .collect();
+        *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+        *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
+        sync_shared_track_collapsed(&track_collapsed, &app);
+        push_project_scratch_to_named_buffer(&mut editor, &app);
+        if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
+            editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
+        }
+
+        let cached_track_peak_levels = vec![0.0; app.tracks.len()];
+        let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+        let (cached_modulator_phases, cached_modulator_levels) =
+            read_modulator_display_values(app.graph.lg, &app);
+
+        {
+            let rt = editor.runtime_mut();
+            sync_project_state(rt, &app);
+            sync_track_topology_state(
+                rt,
+                &app,
+                &state,
+                &mut track_names,
+                0,
+                &selected_steps,
+                &piano_roll_selection,
+                &accumulator_names,
+                &record_armed,
+                &cached_track_peak_levels,
+            );
+            rt.set_reactive(
+                "SEQ",
+                "selected-steps",
+                build_selection_value(&selected_steps),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "bus-effects",
+                build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
+            );
+            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+            sync_modulator_phase_fields(rt, &cached_modulator_phases);
+            sync_modulator_level_fields(rt, &cached_modulator_levels);
+            sync_mixer_delete_target_binding_fields(
+                rt,
+                app.tracks.len(),
+                &state,
+                active_delete_target.lock().unwrap().as_ref(),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "delete-target-version",
+                Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
+            );
+            rt.run_reactive_cycle();
+        }
+        editor.refresh_runtime_side_effects();
+        refresh_visible_track_topology_layouts(&mut editor);
+        editor.update_tile_rects(180, 70);
+        let _ = editor.drain_host_commands();
+
+        let before_revisions = visible_layout_revisions(&editor);
+        let start_pattern = app.state.current_scene_index();
+        let target_pattern = (start_pattern + 1) % app.state.scene_count();
+        let ct = current_track.load(Ordering::Relaxed);
+        let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+
+        let measured = Instant::now();
+        let switch_bus_elapsed;
+        let state_switch_elapsed;
+        let state_switch_profile;
+        let apply_samples_elapsed;
+        let restored_defaults_elapsed;
+        let sync_names_pattern_elapsed;
+        let sync_current_steps_elapsed;
+        let sync_sequencer_elapsed;
+        let sync_sequencer_profile;
+        let sync_step_params_elapsed;
+        let sync_mixer_elapsed;
+        let sync_fx_lists_elapsed;
+        let mut sync_effects_elapsed = Duration::ZERO;
+        let mut sync_midi_effects_elapsed = Duration::ZERO;
+        let mut sync_instrument_panel_elapsed = Duration::ZERO;
+        let mut sync_accumulators_elapsed = Duration::ZERO;
+        let sync_track_params_elapsed;
+        let sync_fx_bindings_elapsed;
+        let sync_plocks_sidebar_elapsed;
+        let reactive_elapsed;
+        let side_effects_elapsed;
+        let mut mixer_refresh_elapsed = Duration::ZERO;
+
+        let started = Instant::now();
+        app.switch_bus_pattern(target_pattern);
+        switch_bus_elapsed = started.elapsed();
+
+        let started = Instant::now();
+        let switched = app.state.switch_pattern_profiled(
+            target_pattern,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        state_switch_elapsed = started.elapsed();
+        let switched = switched.expect("project 92 scene switch should change sample ids");
+        state_switch_profile = switched.profile;
+        let sample_ids = switched.sample_ids;
+
+        let started = Instant::now();
+        app.graph_controller().apply_sample_ids(&sample_ids);
+        app.graph_controller().sync_current_pattern_mod_routes();
+        apply_samples_elapsed = started.elapsed();
+
+        let started = Instant::now();
+        app.push_all_restored_defaults();
+        restored_defaults_elapsed = started.elapsed();
+
+        {
+            let rt = editor.runtime_mut();
+            let started = Instant::now();
+            sync_shared_track_collapsed(&track_collapsed, &app);
+            sync_track_name_state(rt, &mut track_names, &app);
+            sync_pattern_state(rt, &state);
+            sync_names_pattern_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+            sync_current_steps_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            sync_sequencer_profile =
+                sync_all_track_sequencer_state_profiled(rt, &state, &app, ct, &selected_steps);
+            sync_sequencer_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            sync_step_param_lists(rt, &state, ct);
+            sync_step_params_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            sync_track_mixer_state(rt, &app, &state);
+            sync_bus_mixer_state(rt, &app);
+            sync_track_peak_fields(rt, &cached_track_peak_levels);
+            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+            sync_mixer_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            if fx_visible {
+                let sub_started = Instant::now();
+                rt.set_reactive(
+                    "SEQ",
+                    "effects",
+                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                );
+                sync_effects_elapsed = sub_started.elapsed();
+
+                let sub_started = Instant::now();
+                rt.set_reactive(
+                    "SEQ",
+                    "midi-effects",
+                    build_midi_effects_value(&state, ct, &selected_steps),
+                );
+                sync_midi_effects_elapsed = sub_started.elapsed();
+
+                let sub_started = Instant::now();
+                rt.set_reactive(
+                    "SEQ",
+                    "instrument-panel",
+                    build_instrument_panel_value(&app, ct, &selected_steps),
+                );
+                sync_instrument_panel_elapsed = sub_started.elapsed();
+
+                let sub_started = Instant::now();
+                *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                sync_accumulators_elapsed = sub_started.elapsed();
+            } else {
+                fx_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+            sync_fx_lists_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
+            sync_track_params_with_neural_selection(
+                rt,
+                &app,
+                &state,
+                ct,
+                &selected_steps,
+                Some(&selected_neural_snapshot),
+            );
+            sync_track_params_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            sync_fx_param_binding_fields_with_neural_selection(
+                rt,
+                &app,
+                &state,
+                ct,
+                &selected_steps,
+                Some(&selected_neural_snapshot),
+            );
+            sync_fx_bindings_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            rt.set_reactive(
+                "SEQ",
+                "step-has-plocks",
+                build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+            );
+            sync_sidebar_browser(rt, &app, ct);
+            sync_plocks_sidebar_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            rt.run_reactive_cycle();
+            reactive_elapsed = started.elapsed();
+        }
+
+        let started = Instant::now();
+        editor.refresh_runtime_side_effects();
+        side_effects_elapsed = started.elapsed();
+
+        if editor_has_visible_buffer(&editor, "*mixer*") {
+            let started = Instant::now();
+            editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+            mixer_refresh_elapsed = started.elapsed();
+        }
+        let elapsed = measured.elapsed();
+
+        let after_revisions = visible_layout_revisions(&editor);
+        let changed_buffers = changed_layout_buffers(&before_revisions, &after_revisions);
+        let trace = editor
+            .runtime()
+            .last_ui_invalidation_trace()
+            .expect("scene switch should produce an invalidation trace");
+        let mut reactive_hot = trace.reactive_exec_timings.clone();
+        reactive_hot.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let reactive_hot = reactive_hot
+            .into_iter()
+            .take(6)
+            .map(|(label, elapsed)| (label, duration_ms(elapsed)))
+            .collect::<Vec<_>>();
+        let mut relayout_timings = Vec::<(String, String, f64)>::new();
+        if trace.relayout_duration > Duration::ZERO {
+            relayout_timings.push((
+                editor.active_buffer().name.clone(),
+                format!(
+                    "active-{}",
+                    trace.relayout_mode.as_deref().unwrap_or("unknown")
+                ),
+                duration_ms(trace.relayout_duration),
+            ));
+        }
+        relayout_timings.extend(editor.last_layout_refresh_timings().iter().map(|timing| {
+            (
+                timing.buffer_name.clone(),
+                format!(
+                    "inactive-{}-tile-{}",
+                    timing.mode,
+                    timing
+                        .tile_id
+                        .map(|tile_id| tile_id.to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                ),
+                duration_ms(timing.elapsed),
+            )
+        }));
+        relayout_timings.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let worst_relayout = relayout_timings.first().cloned();
+
+        eprintln!(
+            "[project-92-scene-switch] from={} to={} elapsed_ms={:.3} switch_bus_ms={:.3} state_switch_ms={:.3} apply_samples_ms={:.3} defaults_ms={:.3} names_pattern_ms={:.3} current_steps_ms={:.3} sequencer_bindings_ms={:.3} step_params_ms={:.3} mixer_ms={:.3} fx_lists_ms={:.3} effects_ms={:.3} midi_effects_ms={:.3} instrument_panel_ms={:.3} accumulators_ms={:.3} track_params_ms={:.3} fx_bindings_ms={:.3} plocks_sidebar_ms={:.3} reactive_ms={:.3} side_effects_ms={:.3} mixer_refresh_ms={:.3} changed_layout_buffers={:?} relayout_timings={:?} worst_relayout={:?} dirty_fields={} affected_buffers={:?} widget_tree_flushes={} full_reruns={} subtree_reruns={} relayout_mode={:?} relayout_ms={:.3} relayout_failure={:?}",
+            start_pattern,
+            target_pattern,
+            duration_ms(elapsed),
+            duration_ms(switch_bus_elapsed),
+            duration_ms(state_switch_elapsed),
+            duration_ms(apply_samples_elapsed),
+            duration_ms(restored_defaults_elapsed),
+            duration_ms(sync_names_pattern_elapsed),
+            duration_ms(sync_current_steps_elapsed),
+            duration_ms(sync_sequencer_elapsed),
+            duration_ms(sync_step_params_elapsed),
+            duration_ms(sync_mixer_elapsed),
+            duration_ms(sync_fx_lists_elapsed),
+            duration_ms(sync_effects_elapsed),
+            duration_ms(sync_midi_effects_elapsed),
+            duration_ms(sync_instrument_panel_elapsed),
+            duration_ms(sync_accumulators_elapsed),
+            duration_ms(sync_track_params_elapsed),
+            duration_ms(sync_fx_bindings_elapsed),
+            duration_ms(sync_plocks_sidebar_elapsed),
+            duration_ms(reactive_elapsed),
+            duration_ms(side_effects_elapsed),
+            duration_ms(mixer_refresh_elapsed),
+            changed_buffers,
+            relayout_timings,
+            worst_relayout,
+            trace.dirty_fields.len(),
+            trace.affected_buffers,
+            trace.widget_tree_flushes,
+            trace.full_buffer_reruns,
+            trace.subtree_reruns,
+            trace.relayout_mode,
+            duration_ms(trace.relayout_duration),
+            trace.relayout_failure_reason,
+        );
+
+        eprintln!(
+            "[project-92-scene-switch-detail] state_total_ms={:.3} state_capture_ms={:.3} state_lock_wait_ms={:.3} state_save_current_ms={:.3} state_launch_data_ms={:.3} state_restore_tracks_ms={:.3} state_collect_samples_ms={:.3} state_update_atoms_ms={:.3} state_mod_resync_ms={:.3} state_publish_snapshot_ms={:.3} seq_total_ms={:.3} seq_track_steps_ms={:.3} seq_track_num_steps_ms={:.3} seq_track_timebases_ms={:.3} seq_track_duration_spans_ms={:.3} seq_track_step_has_plocks_ms={:.3} seq_track_playheads_ms={:.3} seq_track_velocities_ms={:.3} seq_track_durations_ms={:.3} seq_track_auxas_ms={:.3} seq_track_transposes_ms={:.3} seq_track_pans_ms={:.3} seq_track_syncs_ms={:.3} seq_track_delays_ms={:.3} seq_step_bindings_ms={:.3} seq_playhead_fields_ms={:.3} step_active_ms={:.3} step_duration_ms={:.3} step_plocked_ms={:.3} step_selected_ms={:.3} step_slider_ms={:.3} step_haptic_ms={:.3} step_active_sets={:?} step_duration_sets={:?} step_plocked_sets={:?} step_selected_sets={:?} step_slider_sets={:?} step_haptic_sets={:?} reactive_apply_ms={:.3} reactive_flush_ms={:.3} reactive_cycle_trace_ms={:.3} reactive_hot={:?}",
+            duration_ms(state_switch_profile.total),
+            duration_ms(state_switch_profile.capture_current_snapshot),
+            duration_ms(state_switch_profile.scene_lock_wait),
+            duration_ms(state_switch_profile.save_current_snapshot),
+            duration_ms(state_switch_profile.launch_scene_data),
+            duration_ms(state_switch_profile.restore_tracks),
+            duration_ms(state_switch_profile.collect_sample_ids),
+            duration_ms(state_switch_profile.update_pattern_atoms),
+            duration_ms(state_switch_profile.schedule_mod_resync),
+            duration_ms(state_switch_profile.publish_scheduler_snapshot),
+            duration_ms(sync_sequencer_profile.elapsed),
+            duration_ms(sync_sequencer_profile.track_steps),
+            duration_ms(sync_sequencer_profile.track_num_steps),
+            duration_ms(sync_sequencer_profile.track_timebases),
+            duration_ms(sync_sequencer_profile.track_duration_spans),
+            duration_ms(sync_sequencer_profile.track_step_has_plocks),
+            duration_ms(sync_sequencer_profile.track_playheads),
+            duration_ms(sync_sequencer_profile.track_velocities),
+            duration_ms(sync_sequencer_profile.track_durations),
+            duration_ms(sync_sequencer_profile.track_auxas),
+            duration_ms(sync_sequencer_profile.track_transposes),
+            duration_ms(sync_sequencer_profile.track_pans),
+            duration_ms(sync_sequencer_profile.track_syncs),
+            duration_ms(sync_sequencer_profile.track_delays),
+            duration_ms(sync_sequencer_profile.step_bindings.elapsed),
+            duration_ms(sync_sequencer_profile.playhead_fields),
+            duration_ms(sync_sequencer_profile.step_bindings.active_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.duration_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.plocked_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.selected_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.slider_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.haptic_elapsed),
+            sync_sequencer_profile.step_bindings.active_sets,
+            sync_sequencer_profile.step_bindings.duration_sets,
+            sync_sequencer_profile.step_bindings.plocked_sets,
+            sync_sequencer_profile.step_bindings.selected_sets,
+            sync_sequencer_profile.step_bindings.slider_sets,
+            sync_sequencer_profile.step_bindings.haptic_sets,
+            duration_ms(trace.reactive_apply_duration),
+            duration_ms(trace.reactive_flush_duration),
+            duration_ms(trace.reactive_cycle_duration),
+            reactive_hot,
+        );
+
+        assert_eq!(
+            app.state.current_scene_index(),
+            target_pattern,
+            "scene switch should update the current project scene"
+        );
+        assert!(
+            trace.widget_tree_flushes > 0,
+            "scene switch should report widget tree work"
         );
     }
 }
@@ -13110,9 +13628,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "delete-target-version",
                     Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
                 );
-                sync_mixer_track_delete_target_binding_fields(
+                sync_mixer_delete_target_binding_fields(
                     rt,
                     app.tracks.len(),
+                    &state,
                     active_delete_target.lock().unwrap().as_ref(),
                 );
                 let armed = record_armed.lock().unwrap();

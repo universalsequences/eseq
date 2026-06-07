@@ -8,7 +8,7 @@ use super::data::{
     CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution, Timebase,
     TrackParamsSnapshot, MAX_STEPS, NUM_PARAMS,
 };
-use super::state::SequencerState;
+use super::state::{SequencerState, TrackPatternData};
 
 #[derive(Clone, Debug)]
 pub struct SequencerTransportSnapshot {
@@ -198,4 +198,99 @@ impl SequencerSnapshot {
             graph_overrides,
         }
     }
+
+    pub fn capture_from_track_pattern_data(
+        state: &SequencerState,
+        tracks: &[TrackPatternData],
+        mod_connections: Vec<ModConnection>,
+        neural_networks: Vec<ProjectNeuralNetwork>,
+        graph_overrides: Vec<ProjectGraphOverrides>,
+    ) -> Self {
+        let num_tracks = tracks.len();
+        let transport = SequencerTransportSnapshot {
+            bpm: state.transport.bpm.load(Ordering::Relaxed),
+            playing: state.transport.playing.load(Ordering::Relaxed),
+            current_pattern: state.current_scene_index(),
+            pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
+            topology_epoch: state.transport.topology_epoch.load(Ordering::Relaxed),
+            num_tracks,
+        };
+        let tracks = tracks
+            .iter()
+            .enumerate()
+            .map(|(track_idx, data)| track_snapshot_from_pattern_data(track_idx, data, false))
+            .collect();
+
+        Self {
+            transport,
+            tracks,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+        }
+    }
+}
+
+fn track_snapshot_from_pattern_data(
+    _track_idx: usize,
+    data: &TrackPatternData,
+    scene_silenced: bool,
+) -> SequencerTrackSnapshot {
+    let engine_id = data.track_sound_state.engine_id;
+    let steps = (0..MAX_STEPS)
+        .map(|step_idx| {
+            let params = data
+                .step_data
+                .get(step_idx)
+                .copied()
+                .unwrap_or([0.0; NUM_PARAMS]);
+            SequencerStepSnapshot {
+                active: track_pattern_bit(data.track_bits, step_idx),
+                neural_reset: track_pattern_bit(data.neural_reset_bits, step_idx),
+                params,
+                chord: data
+                    .chord_snapshot
+                    .steps
+                    .get(step_idx)
+                    .cloned()
+                    .unwrap_or_default(),
+                chord_durations: data
+                    .chord_snapshot
+                    .durations
+                    .get(step_idx)
+                    .cloned()
+                    .unwrap_or_default(),
+                chord_delays: data
+                    .chord_snapshot
+                    .delays
+                    .get(step_idx)
+                    .cloned()
+                    .unwrap_or_default(),
+                timebase_override: data.timebase_plock_snapshot[step_idx].map(Timebase::from_index),
+                swing_override: data.swing_plock_snapshot[step_idx].map(f32::from_bits),
+                swing_resolution_override: data.swing_resolution_plock_snapshot[step_idx]
+                    .map(SwingResolution::from_index),
+            }
+        })
+        .collect();
+
+    SequencerTrackSnapshot {
+        params: data.track_params.clone(),
+        scene_silenced,
+        instrument_type: data.instrument_type,
+        instrument_run_mode: data.instrument_run_mode,
+        instrument_base_note_offset: data.instrument_base_note_offset,
+        engine_id,
+        effect_slots: data.effect_slots.clone(),
+        midi_fx_slots: data.midi_fx_slots.clone(),
+        instrument_slot: data.instrument_slot.clone(),
+        steps,
+    }
+}
+
+fn track_pattern_bit(bits: [u64; super::data::TRACK_PATTERN_WORDS], step: usize) -> bool {
+    let word = step / 64;
+    let bit = step % 64;
+    bits.get(word)
+        .is_some_and(|word_bits| (word_bits & (1u64 << bit)) != 0)
 }

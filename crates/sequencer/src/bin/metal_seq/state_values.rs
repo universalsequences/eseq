@@ -1,6 +1,8 @@
 use super::*;
+use eseqlisp::runtime::ReactiveSetResult;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 fn sampler_modulation_depth_display_range(
     depth_desc: &sequencer::effects::ParamDescriptor,
@@ -49,19 +51,73 @@ pub(crate) fn build_all_track_steps_value(state: &Arc<SequencerState>, app: &ui:
     Value::List(tracks)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ReactiveSetStats {
+    pub calls: usize,
+    pub effects_dirty: usize,
+    pub widgets_dirty: usize,
+}
+
+impl ReactiveSetStats {
+    fn note(&mut self, result: ReactiveSetResult) {
+        self.calls += 1;
+        if result.effects_dirty {
+            self.effects_dirty += 1;
+        }
+        if result.widgets_dirty {
+            self.widgets_dirty += 1;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AllTrackStepBindingSyncProfile {
+    pub elapsed: Duration,
+    pub active_elapsed: Duration,
+    pub duration_elapsed: Duration,
+    pub plocked_elapsed: Duration,
+    pub selected_elapsed: Duration,
+    pub slider_elapsed: Duration,
+    pub haptic_elapsed: Duration,
+    pub active_sets: ReactiveSetStats,
+    pub duration_sets: ReactiveSetStats,
+    pub plocked_sets: ReactiveSetStats,
+    pub selected_sets: ReactiveSetStats,
+    pub slider_sets: ReactiveSetStats,
+    pub haptic_sets: ReactiveSetStats,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AllTrackSequencerSyncProfile {
+    pub elapsed: Duration,
+    pub track_steps: Duration,
+    pub track_num_steps: Duration,
+    pub track_timebases: Duration,
+    pub track_duration_spans: Duration,
+    pub track_step_has_plocks: Duration,
+    pub track_playheads: Duration,
+    pub track_velocities: Duration,
+    pub track_durations: Duration,
+    pub track_auxas: Duration,
+    pub track_transposes: Duration,
+    pub track_pans: Duration,
+    pub track_syncs: Duration,
+    pub track_delays: Duration,
+    pub step_bindings: AllTrackStepBindingSyncProfile,
+    pub playhead_fields: Duration,
+}
+
 pub(crate) fn build_track_pattern_cells_value(
     state: &Arc<SequencerState>,
     track_count: usize,
 ) -> Value {
     list_value((0..track_count).map(|track| {
-        list_value(state.track_pattern_cells(track).into_iter().map(|cell| {
-            map_value([
-                ("id", Value::Number(cell.pattern_id.0 as f64)),
-                ("assigned", Value::Bool(cell.assigned_to_current_scene)),
-                ("active", Value::Bool(cell.active_effective)),
-                ("override", Value::Bool(cell.overridden)),
-            ])
-        }))
+        list_value(
+            state
+                .track_pattern_cells(track)
+                .into_iter()
+                .map(|cell| map_value([("id", Value::Number(cell.pattern_id.0 as f64))])),
+        )
     }))
 }
 
@@ -190,9 +246,94 @@ pub(crate) fn mixer_track_delete_target_field(track: usize) -> String {
     format!("mixer-track-delete-target-{track}")
 }
 
-pub(crate) fn sync_mixer_track_delete_target_binding_fields(
+pub(crate) fn track_pattern_cell_active_field(track: usize, pattern_id: u64) -> String {
+    format!("track-pattern-cell-active-{track}-{pattern_id}")
+}
+
+pub(crate) fn track_pattern_cell_assigned_field(track: usize, pattern_id: u64) -> String {
+    format!("track-pattern-cell-assigned-{track}-{pattern_id}")
+}
+
+pub(crate) fn track_pattern_cell_override_field(track: usize, pattern_id: u64) -> String {
+    format!("track-pattern-cell-override-{track}-{pattern_id}")
+}
+
+pub(crate) fn track_pattern_cell_selected_field(track: usize, pattern_id: u64) -> String {
+    format!("track-pattern-cell-selected-{track}-{pattern_id}")
+}
+
+pub(crate) fn selected_mod_routes_value(
+    active_delete_target: Option<&ActiveDeleteTarget>,
+) -> Value {
+    match active_delete_target {
+        Some(ActiveDeleteTarget::ModRoute {
+            source,
+            dest,
+            input,
+        }) => list_value([map_value([
+            ("source", Value::Number(*source as f64)),
+            ("dest", Value::Number(*dest as f64)),
+            ("input", Value::Number(*input as f64)),
+        ])]),
+        _ => list_value(Vec::<Value>::new()),
+    }
+}
+
+pub(crate) fn sync_track_pattern_cell_state_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track_count: usize,
+) {
+    for track in 0..track_count {
+        for cell in state.track_pattern_cells(track) {
+            let pattern_id = cell.pattern_id.0;
+            rt.set_reactive(
+                "SEQ",
+                &track_pattern_cell_active_field(track, pattern_id),
+                Value::Bool(cell.active_effective),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &track_pattern_cell_assigned_field(track, pattern_id),
+                Value::Bool(cell.assigned_to_current_scene),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &track_pattern_cell_override_field(track, pattern_id),
+                Value::Bool(cell.overridden),
+            );
+        }
+    }
+}
+
+pub(crate) fn sync_track_pattern_cell_selected_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track_count: usize,
+    active_delete_target: Option<&ActiveDeleteTarget>,
+) {
+    for track in 0..track_count {
+        for cell in state.track_pattern_cells(track) {
+            let pattern_id = cell.pattern_id.0;
+            rt.set_reactive(
+                "SEQ",
+                &track_pattern_cell_selected_field(track, pattern_id),
+                Value::Bool(matches!(
+                    active_delete_target,
+                    Some(ActiveDeleteTarget::TrackPattern {
+                        track: selected_track,
+                        pattern_id: selected_pattern_id,
+                    }) if *selected_track == track && selected_pattern_id.0 == pattern_id
+                )),
+            );
+        }
+    }
+}
+
+pub(crate) fn sync_mixer_delete_target_binding_fields(
     rt: &mut Runtime,
     track_count: usize,
+    state: &Arc<SequencerState>,
     active_delete_target: Option<&ActiveDeleteTarget>,
 ) {
     for track in 0..track_count {
@@ -205,6 +346,12 @@ pub(crate) fn sync_mixer_track_delete_target_binding_fields(
             )),
         );
     }
+    sync_track_pattern_cell_selected_fields(rt, state, track_count, active_delete_target);
+    rt.set_reactive(
+        "SEQ",
+        "selected-mod-routes",
+        selected_mod_routes_value(active_delete_target),
+    );
 }
 
 pub(crate) fn sync_track_selection_binding_fields(
@@ -561,6 +708,44 @@ pub(crate) fn sync_all_track_step_binding_fields(
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
+    sync_all_track_step_binding_fields_inner(
+        rt,
+        state,
+        app,
+        current_track_idx,
+        selected_steps,
+        None,
+    );
+}
+
+pub(crate) fn sync_all_track_step_binding_fields_profiled(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> AllTrackStepBindingSyncProfile {
+    let mut profile = AllTrackStepBindingSyncProfile::default();
+    sync_all_track_step_binding_fields_inner(
+        rt,
+        state,
+        app,
+        current_track_idx,
+        selected_steps,
+        Some(&mut profile),
+    );
+    profile
+}
+
+fn sync_all_track_step_binding_fields_inner(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    mut profile: Option<&mut AllTrackStepBindingSyncProfile>,
+) {
+    let total_started = profile.as_ref().map(|_| Instant::now());
     let selected = selected_steps.lock().unwrap();
     for track in 0..app.tracks.len() {
         let num_steps = state.pattern.track_params[track]
@@ -568,17 +753,30 @@ pub(crate) fn sync_all_track_step_binding_fields(
             .min(MAX_STEPS);
         for step in 0..MAX_STEPS {
             let visible = step < num_steps;
-            rt.set_reactive(
+            let started = profile.as_ref().map(|_| Instant::now());
+            let result = rt.set_reactive(
                 "SEQ",
                 &track_step_active_field(track, step),
                 Value::Bool(visible && state.pattern.patterns[track].is_active(step)),
             );
-            rt.set_reactive(
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.active_elapsed += started.expect("profile timer").elapsed();
+                profile.active_sets.note(result);
+            }
+
+            let started = profile.as_ref().map(|_| Instant::now());
+            let result = rt.set_reactive(
                 "SEQ",
                 &track_step_duration_field(track, step),
                 Value::Bool(visible && track_step_duration_covered(state, track, step)),
             );
-            rt.set_reactive(
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.duration_elapsed += started.expect("profile timer").elapsed();
+                profile.duration_sets.note(result);
+            }
+
+            let started = profile.as_ref().map(|_| Instant::now());
+            let result = rt.set_reactive(
                 "SEQ",
                 &track_step_plocked_field(track, step),
                 Value::Bool(
@@ -586,30 +784,29 @@ pub(crate) fn sync_all_track_step_binding_fields(
                         && track_step_has_plock(state, track, &app.graph.effect_descriptors, step),
                 ),
             );
-            rt.set_reactive(
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.plocked_elapsed += started.expect("profile timer").elapsed();
+                profile.plocked_sets.note(result);
+            }
+
+            let started = profile.as_ref().map(|_| Instant::now());
+            let result = rt.set_reactive(
                 "SEQ",
                 &track_step_selected_field(track, step),
                 Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
             );
-            for mode in 0..7 {
-                let param = expanded_step_param_for_mode(mode);
-                let value = if visible {
-                    state.pattern.step_data[track].get(step, param)
-                } else {
-                    0.0
-                };
-                rt.set_reactive(
-                    "SEQ",
-                    &track_step_param_slider_field(track, mode, step),
-                    Value::Number(expanded_step_param_slider_value(param, value) as f64),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    &track_step_param_haptic_field(track, mode, step),
-                    Value::Number(value as f64),
-                );
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.selected_elapsed += started.expect("profile timer").elapsed();
+                profile.selected_sets.note(result);
             }
+
+            // Expanded-step param controls use the seqv-slot-param-* projection fields.
+            // The legacy seq-track-step-param-* fields are intentionally not synced here;
+            // no current Lisp UI binds to them, and writing them dominates scene switches.
         }
+    }
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.elapsed = total_started.expect("profile timer").elapsed();
     }
 }
 
@@ -1386,73 +1583,185 @@ pub(crate) fn sync_all_track_sequencer_state(
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
+    sync_all_track_sequencer_state_inner(rt, state, app, current_track_idx, selected_steps, None);
+}
+
+pub(crate) fn sync_all_track_sequencer_state_profiled(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> AllTrackSequencerSyncProfile {
+    let mut profile = AllTrackSequencerSyncProfile::default();
+    sync_all_track_sequencer_state_inner(
+        rt,
+        state,
+        app,
+        current_track_idx,
+        selected_steps,
+        Some(&mut profile),
+    );
+    profile
+}
+
+fn sync_all_track_sequencer_state_inner(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    mut profile: Option<&mut AllTrackSequencerSyncProfile>,
+) {
+    let total_started = profile.as_ref().map(|_| Instant::now());
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-steps",
         build_all_track_steps_value(state, app),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_steps = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-num-steps",
         build_all_track_num_steps_value(state, app),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_num_steps = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-timebases",
         build_all_track_timebase_labels_value(state, app, current_track_idx, selected_steps),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_timebases = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-duration-spans",
         build_all_track_duration_spans_value(state, app),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_duration_spans = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-step-has-plocks",
         build_all_track_step_has_plocks(state, app),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_step_has_plocks = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-playheads",
         build_all_track_playheads_value(state, app),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_playheads = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-velocities",
         build_all_track_param_lists_value(state, app, StepParam::Velocity),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_velocities = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-durations",
         build_all_track_param_lists_value(state, app, StepParam::Duration),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_durations = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-auxas",
         build_all_track_param_lists_value(state, app, StepParam::AuxA),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_auxas = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-transposes",
         build_all_track_param_lists_value(state, app, StepParam::Transpose),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_transposes = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-pans",
         build_all_track_param_lists_value(state, app, StepParam::Pan),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_pans = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-syncs",
         build_all_track_param_lists_value(state, app, StepParam::Sync),
     );
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_syncs = started.expect("profile timer").elapsed();
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     rt.set_reactive(
         "SEQ",
         "track-delays",
         build_all_track_param_lists_value(state, app, StepParam::Delay),
     );
-    sync_all_track_step_binding_fields(rt, state, app, current_track_idx, selected_steps);
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.track_delays = started.expect("profile timer").elapsed();
+    }
+
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.step_bindings = sync_all_track_step_binding_fields_profiled(
+            rt,
+            state,
+            app,
+            current_track_idx,
+            selected_steps,
+        );
+    } else {
+        sync_all_track_step_binding_fields(rt, state, app, current_track_idx, selected_steps);
+    }
+
+    let started = profile.as_ref().map(|_| Instant::now());
     sync_all_track_playhead_fields(rt, state, app);
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.playhead_fields = started.expect("profile timer").elapsed();
+        profile.elapsed = total_started.expect("profile timer").elapsed();
+    }
 }
 
 /// Build a Lisp Value::List of floats for a given step param on a given track.
@@ -1992,6 +2301,7 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
         "track-pattern-cells",
         build_track_pattern_cells_value(state, app.tracks.len()),
     );
+    sync_track_pattern_cell_state_fields(rt, state, app.tracks.len());
     rt.set_reactive(
         "SEQ",
         "track-instrument-types",
@@ -2768,6 +3078,7 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "track-pattern-cells",
         build_track_pattern_cells_value(state, state.active_track_count()),
     );
+    sync_track_pattern_cell_state_fields(rt, state, state.active_track_count());
     rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
     rt.set_reactive(
         "SEQ",
@@ -9275,16 +9586,43 @@ mod tests {
 
     fn test_track_pattern_cell(
         id: f64,
+        _assigned: bool,
+        _active: bool,
+        _override_active: bool,
+    ) -> Value {
+        map_value([("id", Value::Number(id))])
+    }
+
+    fn set_test_track_pattern_cell_bindings(
+        editor: &mut eseqlisp::Editor,
+        track: usize,
+        pattern_id: u64,
         assigned: bool,
         active: bool,
         override_active: bool,
-    ) -> Value {
-        map_value([
-            ("id", Value::Number(id)),
-            ("assigned", Value::Bool(assigned)),
-            ("active", Value::Bool(active)),
-            ("override", Value::Bool(override_active)),
-        ])
+        selected: bool,
+    ) {
+        let rt = editor.runtime_mut();
+        rt.set_reactive(
+            "SEQ",
+            &track_pattern_cell_assigned_field(track, pattern_id),
+            Value::Bool(assigned),
+        );
+        rt.set_reactive(
+            "SEQ",
+            &track_pattern_cell_active_field(track, pattern_id),
+            Value::Bool(active),
+        );
+        rt.set_reactive(
+            "SEQ",
+            &track_pattern_cell_override_field(track, pattern_id),
+            Value::Bool(override_active),
+        );
+        rt.set_reactive(
+            "SEQ",
+            &track_pattern_cell_selected_field(track, pattern_id),
+            Value::Bool(selected),
+        );
     }
 
     #[test]
@@ -9307,16 +9645,9 @@ mod tests {
             Some(Value::Number(1.0))
         );
         assert_eq!(
-            cell.get("assigned").map(|value| value.borrow().clone()),
-            Some(Value::Bool(true))
-        );
-        assert_eq!(
-            cell.get("active").map(|value| value.borrow().clone()),
-            Some(Value::Bool(true))
-        );
-        assert_eq!(
-            cell.get("override").map(|value| value.borrow().clone()),
-            Some(Value::Bool(false))
+            cell.len(),
+            1,
+            "track pattern cell topology should only include stable identity"
         );
     }
 
@@ -12282,6 +12613,231 @@ mod tests {
         editor
     }
 
+    fn mixer_v2_perf_cells(track_count: usize, cell_count: usize) -> Value {
+        test_list(
+            (0..track_count)
+                .map(|track| {
+                    test_list(
+                        (0..cell_count)
+                            .map(|cell| {
+                                let pattern_id = (track * 100 + cell + 1) as f64;
+                                test_track_pattern_cell(pattern_id, true, false, false)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn apply_mixer_v2_perf_pattern(
+        editor: &mut eseqlisp::Editor,
+        track_count: usize,
+        cell_count: usize,
+        generation: usize,
+    ) {
+        for track in 0..track_count {
+            for cell in 0..cell_count {
+                set_test_track_pattern_cell_bindings(
+                    editor,
+                    track,
+                    (track * 100 + cell + 1) as u64,
+                    true,
+                    cell == generation % cell_count,
+                    cell == (generation + track) % cell_count,
+                    false,
+                );
+            }
+        }
+    }
+
+    fn apply_mixer_v2_perf_scene_switch(
+        editor: &mut eseqlisp::Editor,
+        track_count: usize,
+        cell_count: usize,
+        generation: usize,
+    ) {
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "current-pattern",
+            Value::Number((generation % cell_count) as f64),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-patterns", Value::Number(cell_count as f64));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-pattern-cells",
+            mixer_v2_perf_cells(track_count, cell_count),
+        );
+        apply_mixer_v2_perf_pattern(editor, track_count, cell_count, generation);
+    }
+
+    fn mixer_v2_perf_editor(track_count: usize, cell_count: usize) -> eseqlisp::Editor {
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        let names = (0..track_count)
+            .map(|track| format!("perf-track-{track:02}"))
+            .collect::<Vec<_>>();
+        let outputs = (0..track_count)
+            .map(|_| Value::String("main".to_string()))
+            .collect::<Vec<_>>();
+        let bus_sends = (0..track_count)
+            .map(|_| {
+                test_list(vec![
+                    test_track_bus_send(1, "Bus A", 0.0),
+                    test_track_bus_send(2, "Bus B", 0.0),
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        editor.set_layout_viewport(160, 34);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("track-names", test_owned_string_list(&names)),
+                ("track-colors", test_multi_track_colors(track_count)),
+                (
+                    "track-collapsed",
+                    test_repeated_bool_list(false, track_count),
+                ),
+                (
+                    "track-pattern-cells",
+                    mixer_v2_perf_cells(track_count, cell_count),
+                ),
+                ("num-tracks", Value::Number(track_count as f64)),
+                ("current-track", Value::Number(0.0)),
+                ("delete-target-version", Value::Number(0.0)),
+                ("record-armed", test_repeated_bool_list(false, track_count)),
+                ("track-mutes", test_repeated_bool_list(false, track_count)),
+                ("track-solos", test_repeated_bool_list(false, track_count)),
+                (
+                    "track-muted-by-solo",
+                    test_repeated_bool_list(false, track_count),
+                ),
+                (
+                    "track-instrument-types",
+                    test_list(
+                        (0..track_count)
+                            .map(|_| Value::String("instrument".to_string()))
+                            .collect(),
+                    ),
+                ),
+                (
+                    "track-mod-output-available",
+                    test_repeated_bool_list(true, track_count),
+                ),
+                ("mod-routes", test_list(vec![])),
+                ("selected-mod-routes", test_list(vec![])),
+                ("track-volumes", test_repeated_number_list(1.0, track_count)),
+                (
+                    "track-mixer-pans",
+                    test_repeated_number_list(0.0, track_count),
+                ),
+                ("track-outputs", test_list(outputs)),
+                (
+                    "track-output-options",
+                    test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
+                ),
+                ("track-bus-sends", test_list(bus_sends)),
+                ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
+                ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
+                ("bus-mutes", test_bool_list(&[false, false, false])),
+                ("bus-solos", test_bool_list(&[false, false, false])),
+                ("master-peak-l", Value::Number(0.0)),
+                ("master-peak-r", Value::Number(0.0)),
+                ("bus-peak-0", Value::Number(0.0)),
+                ("bus-peak-1", Value::Number(0.0)),
+                ("bus-peak-2", Value::Number(0.0)),
+            ],
+            true,
+        );
+
+        for track in 0..track_count {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &track_selected_field(track),
+                Value::Bool(track == 0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &mixer_track_delete_target_field(track),
+                Value::Bool(false),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &format!("track-peak-{track}"),
+                Value::Number(0.0),
+            );
+            for bus in 1..=2 {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    &format!("track-{track}-bus-{bus}-send"),
+                    Value::Number(0.0),
+                );
+            }
+            for cell in 0..cell_count {
+                set_test_track_pattern_cell_bindings(
+                    &mut editor,
+                    track,
+                    (track * 100 + cell + 1) as u64,
+                    true,
+                    cell == 0,
+                    cell == track % cell_count,
+                    false,
+                );
+            }
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
+            )
+            .expect("install test slider material macro");
+        editor
+            .runtime_mut()
+            .eval_str("(defstate selected-bus -1)")
+            .expect("install shared mixer selection state");
+        register_test_delete_target_natives(&mut editor, track_count);
+        let src = std::fs::read_to_string("metal-seq-mixer-v2.lisp").expect("read mixer lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&src)
+            .expect("load mixer lisp");
+        editor.refresh_runtime_side_effects();
+        let mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer lisp should create the *mixer* buffer")
+            .id;
+        editor.set_active_buffer(mixer_id);
+        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        editor.set_layout_viewport(160, 34);
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("mixer perf fixture layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&layout, "mixer-v2-track-pattern-cell-"),
+            track_count * cell_count,
+            "mixer perf fixture should render every track pattern cell"
+        );
+        editor
+    }
+
     #[test]
     fn metal_seq_cmd_a_global_binding_selects_steps_outside_piano_roll() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -13696,6 +14252,7 @@ mod tests {
                     test_repeated_bool_list(false, 3),
                 ),
                 ("mod-routes", test_list(vec![])),
+                ("selected-mod-routes", test_list(vec![])),
                 ("track-volumes", test_number_list(&[1.0, 1.0, 1.0])),
                 ("track-mixer-pans", test_number_list(&[0.0, 0.0, 0.0])),
                 ("track-outputs", test_string_list(&["main", "main", "main"])),
@@ -15212,6 +15769,83 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_mixer_v2_pattern_cell_state_updates_existing_bindings() {
+        let track_count = 10;
+        let cell_count = 8;
+        let mut editor = mixer_v2_perf_editor(track_count, cell_count);
+
+        let initial_layout = editor
+            .widget_layout()
+            .expect("initial mixer layout should build");
+        let mut pattern_widget_ids = std::collections::HashSet::new();
+        for track in 0..track_count {
+            for cell in 0..cell_count {
+                let pattern_id = track * 100 + cell + 1;
+                let key = format!("mixer-v2-track-pattern-cell-{track}-{pattern_id}");
+                pattern_widget_ids.insert(
+                    find_layout_node_by_stable_key(&initial_layout, &key)
+                        .unwrap_or_else(|| panic!("missing mixer pattern cell {key}"))
+                        .widget_id,
+                );
+            }
+        }
+        let initial_cell =
+            find_layout_node_by_stable_key(&initial_layout, "mixer-v2-track-pattern-cell-0-1")
+                .expect("initial active pattern cell");
+        assert_eq!(
+            layout_prop_bool(initial_cell, "active"),
+            Some(true),
+            "fixture generation 0 should render track 0 pattern 1 active"
+        );
+
+        let _ = editor.take_dirty_widget_ids();
+        apply_mixer_v2_perf_pattern(&mut editor, track_count, cell_count, 1);
+        let dirty_widgets = editor.take_dirty_widget_ids();
+        assert!(
+            !dirty_widgets.is_empty(),
+            "pattern-cell binding updates should dirty concrete widgets"
+        );
+        assert!(
+            dirty_widgets
+                .iter()
+                .all(|widget_id| pattern_widget_ids.contains(widget_id)),
+            "pattern-cell binding updates should dirty only pattern-cell widgets: {dirty_widgets:?}"
+        );
+
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        if let Some(trace) = editor.runtime().last_ui_invalidation_trace() {
+            assert!(
+                !trace
+                    .affected_buffers
+                    .iter()
+                    .any(|buffer| buffer == "*mixer*"),
+                "pattern-cell binding updates should not rerun the mixer tree: {trace:?}"
+            );
+        }
+
+        let switched_layout = editor
+            .widget_layout()
+            .expect("switched mixer layout should still build");
+        let switched_old_cell =
+            find_layout_node_by_stable_key(&switched_layout, "mixer-v2-track-pattern-cell-0-1")
+                .expect("old active pattern cell");
+        let switched_new_cell =
+            find_layout_node_by_stable_key(&switched_layout, "mixer-v2-track-pattern-cell-0-2")
+                .expect("new active pattern cell");
+        assert_eq!(
+            layout_prop_bool(switched_old_cell, "active"),
+            Some(false),
+            "track 0 pattern 1 active binding should reflect the switched pattern"
+        );
+        assert_eq!(
+            layout_prop_bool(switched_new_cell, "active"),
+            Some(true),
+            "track 0 pattern 2 active binding should reflect the switched pattern"
+        );
+    }
+
+    #[test]
     #[ignore = "performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_sequencer_pattern_switch_perf_10_tracks_variable_lengths() {
         #[derive(Clone, Copy)]
@@ -15335,6 +15969,288 @@ mod tests {
                 .map(|sample| sample.total_ms)
                 .collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    fn metal_seq_mixer_v2_track_pattern_grid_switch_perf_10_tracks_8_cells() {
+        #[derive(Clone)]
+        struct Sample {
+            update_ms: f64,
+            reactive_ms: f64,
+            side_effects_ms: f64,
+            frame_ms: f64,
+            total_ms: f64,
+            trace: Option<eseqlisp::runtime::UiInvalidationTrace>,
+            layout_timings: Vec<eseqlisp::editor::LayoutRefreshTiming>,
+        }
+
+        fn percentile(sorted: &[f64], pct: f64) -> f64 {
+            let index = ((sorted.len().saturating_sub(1) as f64) * pct).round() as usize;
+            sorted[index.min(sorted.len().saturating_sub(1))]
+        }
+
+        fn summarize(label: &str, values: &[f64]) {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let min = sorted.first().copied().unwrap_or(0.0);
+            let median = percentile(&sorted, 0.50);
+            let p95 = percentile(&sorted, 0.95);
+            let max = sorted.last().copied().unwrap_or(0.0);
+            println!(
+                "{label:>12}: min={min:7.3}ms median={median:7.3}ms p95={p95:7.3}ms max={max:7.3}ms"
+            );
+        }
+
+        let track_count = 10;
+        let cell_count = 8;
+        let warmup_iterations = 3;
+        let measured_iterations = 10;
+        let mut editor = mixer_v2_perf_editor(track_count, cell_count);
+
+        let mut samples = Vec::with_capacity(measured_iterations);
+        for generation in 1..=(warmup_iterations + measured_iterations) {
+            let total_start = std::time::Instant::now();
+
+            let update_start = std::time::Instant::now();
+            apply_mixer_v2_perf_pattern(&mut editor, track_count, cell_count, generation);
+            let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+
+            let reactive_start = std::time::Instant::now();
+            editor.runtime_mut().run_reactive_cycle();
+            let reactive_ms = reactive_start.elapsed().as_secs_f64() * 1000.0;
+
+            let side_effects_start = std::time::Instant::now();
+            editor.refresh_runtime_side_effects();
+            let side_effects_ms = side_effects_start.elapsed().as_secs_f64() * 1000.0;
+            if let Some(status) = editor.runtime_mut().take_status_message() {
+                panic!("mixer pattern grid switch perf status: {status}");
+            }
+
+            let frame_start = std::time::Instant::now();
+            let frame = eseqlisp::frame::build_render_frame(&mut editor, 160, 34);
+            let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+            let layout = frame
+                .widget_layout
+                .as_ref()
+                .expect("mixer pattern grid switch layout should build");
+            assert_eq!(
+                count_stable_key_prefix(layout, "mixer-v2-track-pattern-cell-"),
+                track_count * cell_count,
+                "pattern switch should keep every mixer pattern cell rendered"
+            );
+
+            let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+            if generation > warmup_iterations {
+                samples.push(Sample {
+                    update_ms,
+                    reactive_ms,
+                    side_effects_ms,
+                    frame_ms,
+                    total_ms,
+                    trace: editor.runtime().last_ui_invalidation_trace(),
+                    layout_timings: editor.last_layout_refresh_timings().to_vec(),
+                });
+            }
+        }
+
+        println!(
+            "mixer v2 pattern grid switch perf: {track_count} tracks, {cell_count} cells/track, {} measured iterations after {} warmups",
+            measured_iterations, warmup_iterations
+        );
+        summarize(
+            "update",
+            &samples
+                .iter()
+                .map(|sample| sample.update_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "reactive",
+            &samples
+                .iter()
+                .map(|sample| sample.reactive_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "side-effects",
+            &samples
+                .iter()
+                .map(|sample| sample.side_effects_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "frame",
+            &samples
+                .iter()
+                .map(|sample| sample.frame_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "total",
+            &samples
+                .iter()
+                .map(|sample| sample.total_ms)
+                .collect::<Vec<_>>(),
+        );
+
+        for (idx, sample) in samples.iter().enumerate() {
+            if let Some(trace) = sample.trace.as_ref() {
+                println!(
+                    "sample {idx:02}: dirty={:?} affected={:?} flushes={} full_reruns={} subtree_reruns={} relayout={:?} relayout_ms={:.3} failure={:?} layout_timings={:?}",
+                    trace.dirty_fields,
+                    trace.affected_buffers,
+                    trace.widget_tree_flushes,
+                    trace.full_buffer_reruns,
+                    trace.subtree_reruns,
+                    trace.relayout_mode,
+                    trace.relayout_duration.as_secs_f64() * 1000.0,
+                    trace.relayout_failure_reason,
+                    sample.layout_timings,
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    fn metal_seq_mixer_v2_scene_switch_perf_10_tracks_8_cells() {
+        #[derive(Clone)]
+        struct Sample {
+            update_ms: f64,
+            reactive_ms: f64,
+            side_effects_ms: f64,
+            frame_ms: f64,
+            total_ms: f64,
+            trace: Option<eseqlisp::runtime::UiInvalidationTrace>,
+            layout_timings: Vec<eseqlisp::editor::LayoutRefreshTiming>,
+        }
+
+        fn percentile(sorted: &[f64], pct: f64) -> f64 {
+            let index = ((sorted.len().saturating_sub(1) as f64) * pct).round() as usize;
+            sorted[index.min(sorted.len().saturating_sub(1))]
+        }
+
+        fn summarize(label: &str, values: &[f64]) {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let min = sorted.first().copied().unwrap_or(0.0);
+            let median = percentile(&sorted, 0.50);
+            let p95 = percentile(&sorted, 0.95);
+            let max = sorted.last().copied().unwrap_or(0.0);
+            println!(
+                "{label:>12}: min={min:7.3}ms median={median:7.3}ms p95={p95:7.3}ms max={max:7.3}ms"
+            );
+        }
+
+        let track_count = 10;
+        let cell_count = 8;
+        let warmup_iterations = 3;
+        let measured_iterations = 10;
+        let mut editor = mixer_v2_perf_editor(track_count, cell_count);
+
+        let mut samples = Vec::with_capacity(measured_iterations);
+        for generation in 1..=(warmup_iterations + measured_iterations) {
+            let total_start = std::time::Instant::now();
+
+            let update_start = std::time::Instant::now();
+            apply_mixer_v2_perf_scene_switch(&mut editor, track_count, cell_count, generation);
+            let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+
+            let reactive_start = std::time::Instant::now();
+            editor.runtime_mut().run_reactive_cycle();
+            let reactive_ms = reactive_start.elapsed().as_secs_f64() * 1000.0;
+
+            let side_effects_start = std::time::Instant::now();
+            editor.refresh_runtime_side_effects();
+            let side_effects_ms = side_effects_start.elapsed().as_secs_f64() * 1000.0;
+            if let Some(status) = editor.runtime_mut().take_status_message() {
+                panic!("mixer scene switch perf status: {status}");
+            }
+
+            let frame_start = std::time::Instant::now();
+            let frame = eseqlisp::frame::build_render_frame(&mut editor, 160, 34);
+            let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+            let layout = frame
+                .widget_layout
+                .as_ref()
+                .expect("mixer scene switch layout should build");
+            assert_eq!(
+                count_stable_key_prefix(layout, "mixer-v2-track-pattern-cell-"),
+                track_count * cell_count,
+                "scene switch should keep every mixer pattern cell rendered"
+            );
+
+            let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+            if generation > warmup_iterations {
+                samples.push(Sample {
+                    update_ms,
+                    reactive_ms,
+                    side_effects_ms,
+                    frame_ms,
+                    total_ms,
+                    trace: editor.runtime().last_ui_invalidation_trace(),
+                    layout_timings: editor.last_layout_refresh_timings().to_vec(),
+                });
+            }
+        }
+
+        println!(
+            "mixer v2 scene switch perf: {track_count} tracks, {cell_count} cells/track, {} measured iterations after {} warmups",
+            measured_iterations, warmup_iterations
+        );
+        summarize(
+            "update",
+            &samples
+                .iter()
+                .map(|sample| sample.update_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "reactive",
+            &samples
+                .iter()
+                .map(|sample| sample.reactive_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "side-effects",
+            &samples
+                .iter()
+                .map(|sample| sample.side_effects_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "frame",
+            &samples
+                .iter()
+                .map(|sample| sample.frame_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "total",
+            &samples
+                .iter()
+                .map(|sample| sample.total_ms)
+                .collect::<Vec<_>>(),
+        );
+
+        for (idx, sample) in samples.iter().enumerate() {
+            if let Some(trace) = sample.trace.as_ref() {
+                println!(
+                    "sample {idx:02}: dirty={:?} affected={:?} flushes={} full_reruns={} subtree_reruns={} relayout={:?} relayout_ms={:.3} failure={:?} layout_timings={:?}",
+                    trace.dirty_fields,
+                    trace.affected_buffers,
+                    trace.widget_tree_flushes,
+                    trace.full_buffer_reruns,
+                    trace.subtree_reruns,
+                    trace.relayout_mode,
+                    trace.relayout_duration.as_secs_f64() * 1000.0,
+                    trace.relayout_failure_reason,
+                    sample.layout_timings,
+                );
+            }
+        }
     }
 
     #[test]
@@ -15482,6 +16398,7 @@ mod tests {
                         map
                     })]),
                 ),
+                ("selected-mod-routes", test_list(vec![])),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
                 ("track-mixer-pans", test_list(vec![Value::Number(0.0)])),
                 (
@@ -22143,6 +23060,7 @@ mod tests {
                         map
                     })]),
                 ),
+                ("selected-mod-routes", test_list(vec![])),
                 (
                     "track-volumes",
                     test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
@@ -22239,6 +23157,10 @@ mod tests {
             .eval_str("(defstate selected-bus -1)")
             .expect("install shared mixer selection state");
         register_test_delete_target_natives(&mut editor, 2);
+        set_test_track_pattern_cell_bindings(&mut editor, 0, 1, true, true, false, false);
+        set_test_track_pattern_cell_bindings(&mut editor, 0, 2, false, false, false, false);
+        set_test_track_pattern_cell_bindings(&mut editor, 1, 3, true, false, true, false);
+        set_test_track_pattern_cell_bindings(&mut editor, 1, 4, false, true, true, false);
 
         for name in [
             "seq-toggle-record-arm",
@@ -22632,6 +23554,16 @@ mod tests {
             "track pattern cell should have a finite visible rect: {:?}",
             pattern_cell.rect
         );
+        assert_eq!(
+            layout_prop_bool(pattern_cell, "active"),
+            Some(true),
+            "track pattern cell should use the bound active state"
+        );
+        assert_eq!(
+            layout_prop_bool(pattern_cell, "override"),
+            Some(true),
+            "track pattern cell should use the bound override state"
+        );
         editor
             .runtime_mut()
             .eval_str("(mixer-v2-launch-track-pattern 1 (nth (mixer-v2-track-pattern-cells 1) 1))")
@@ -22661,10 +23593,11 @@ mod tests {
             }
             other => panic!("expected set-scene-cell host command, got {other:?}"),
         }
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "delete-target-version", Value::Number(1.0));
-        editor.runtime_mut().run_reactive_cycle();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_pattern_cell_selected_field(1, 4),
+            Value::Bool(true),
+        );
         editor.refresh_runtime_side_effects();
         let layout_with_focused_pattern = editor
             .runtime_mut()
@@ -22677,8 +23610,8 @@ mod tests {
         )
         .expect("focused track pattern cell");
         assert_eq!(
-            focused_pattern_cell.props.get("selected"),
-            Some(&Value::Bool(true)),
+            layout_prop_bool(focused_pattern_cell, "selected"),
+            Some(true),
             "clicked track pattern should show keyboard focus immediately"
         );
         assert!(
@@ -22740,10 +23673,11 @@ mod tests {
             .eval_str("(mixer-v2-select-track 0)")
             .expect("select track before clicking track control");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
-        editor.runtime_mut().run_reactive_cycle();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &track_pattern_cell_selected_field(1, 4),
+            Value::Bool(false),
+        );
         editor.refresh_runtime_side_effects();
         let layout_after_track_select = editor
             .runtime_mut()
@@ -22756,8 +23690,8 @@ mod tests {
         )
         .expect("previously focused track pattern cell");
         assert_eq!(
-            unfocused_pattern_cell.props.get("selected"),
-            Some(&Value::Bool(false)),
+            layout_prop_bool(unfocused_pattern_cell, "selected"),
+            Some(false),
             "selecting a different track target should clear the track-pattern focus border"
         );
         editor

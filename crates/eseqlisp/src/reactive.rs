@@ -119,6 +119,8 @@ struct Namespace {
 
 #[derive(Debug, Default)]
 pub struct ReactiveSetOutcome {
+    pub registered: bool,
+    pub changed: bool,
     pub effect_dirty: bool,
     pub widget_ids: Vec<u64>,
 }
@@ -171,7 +173,10 @@ impl ReactiveRegistry {
         let changed_indices = changed_numeric_indices(previous, &value);
         let unchanged = previous.is_some_and(|current| *current == value);
         if unchanged {
-            return ReactiveSetOutcome::default();
+            return ReactiveSetOutcome {
+                registered: true,
+                ..ReactiveSetOutcome::default()
+            };
         }
 
         let key = ReactiveBindingKey::field(namespace, field);
@@ -216,6 +221,8 @@ impl ReactiveRegistry {
         widgets.sort_unstable();
         widgets.dedup();
         ReactiveSetOutcome {
+            registered: true,
+            changed: true,
             effect_dirty: enqueue_effect_dirty,
             widget_ids: widgets,
         }
@@ -244,7 +251,10 @@ impl ReactiveRegistry {
             .as_ref()
             .is_some_and(|previous| *previous == value)
         {
-            return ReactiveSetOutcome::default();
+            return ReactiveSetOutcome {
+                registered: true,
+                ..ReactiveSetOutcome::default()
+            };
         }
 
         if let Some(number) = numeric_value(&value) {
@@ -327,6 +337,8 @@ impl ReactiveRegistry {
         widgets.sort_unstable();
         widgets.dedup();
         ReactiveSetOutcome {
+            registered: true,
+            changed: true,
             effect_dirty: enqueue_effect_dirty,
             widget_ids: widgets,
         }

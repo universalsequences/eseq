@@ -76,6 +76,10 @@ pub struct UiInvalidationTrace {
     pub reevaluated_subtree_roots: usize,
     pub pending_subtree_patch_count: usize,
     pub subtree_failure_reason: Option<String>,
+    pub reactive_apply_duration: Duration,
+    pub reactive_flush_duration: Duration,
+    pub reactive_cycle_duration: Duration,
+    pub reactive_exec_timings: Vec<(String, Duration)>,
     pub relayout_mode: Option<String>,
     pub relayout_duration: Duration,
     pub relayout_failure_reason: Option<String>,
@@ -83,6 +87,7 @@ pub struct UiInvalidationTrace {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReactiveSetResult {
+    pub changed: bool,
     pub effects_dirty: bool,
     pub widgets_dirty: bool,
 }
@@ -348,7 +353,7 @@ fn format_ui_invalidation_trace(
     let relayout_failure = trace.relayout_failure_reason.as_deref().unwrap_or("-");
     let subtree_failure = trace.subtree_failure_reason.as_deref().unwrap_or("-");
     format!(
-        "[ui-trace] dirty=[{dirty_fields}] affected=[{affected_buffers}] targets=a{} i{} flushes={} pending={} reruns=full:{} sub:{} roots:{} patches:{} subtree-fail={} relayout={} relayout_ms={:.3} fail={} hot=[{}]",
+        "[ui-trace] dirty=[{dirty_fields}] affected=[{affected_buffers}] targets=a{} i{} flushes={} pending={} reruns=full:{} sub:{} roots:{} patches:{} apply_ms={:.3} flush_ms={:.3} total_ms={:.3} subtree-fail={} relayout={} relayout_ms={:.3} fail={} hot=[{}]",
         trace.active_buffer_targets,
         trace.inactive_buffer_targets,
         trace.widget_tree_flushes,
@@ -357,6 +362,9 @@ fn format_ui_invalidation_trace(
         trace.subtree_reruns,
         trace.reevaluated_subtree_roots,
         trace.pending_subtree_patch_count,
+        trace.reactive_apply_duration.as_secs_f64() * 1000.0,
+        trace.reactive_flush_duration.as_secs_f64() * 1000.0,
+        trace.reactive_cycle_duration.as_secs_f64() * 1000.0,
         subtree_failure,
         relayout_mode,
         trace.relayout_duration.as_secs_f64() * 1000.0,
@@ -1983,11 +1991,14 @@ impl Runtime {
         };
         let next_for_trace = trace.then(|| value.clone());
         let enqueue_effect_dirty = self.vm.has_reactive_subscribers(namespace, field);
-        self.vm
-            .update_reactive_global(namespace, field, value.clone());
+        let value_for_vm = value.clone();
         let outcome = self
             .reactive_registry
             .set(namespace, field, value, enqueue_effect_dirty);
+        if outcome.changed || !outcome.registered {
+            self.vm
+                .update_reactive_global(namespace, field, value_for_vm);
+        }
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
         if trace {
@@ -2023,6 +2034,7 @@ impl Runtime {
             self.sync_theme_from_registry();
         }
         ReactiveSetResult {
+            changed: outcome.changed || !outcome.registered,
             effects_dirty: outcome.effect_dirty,
             widgets_dirty,
         }
@@ -2044,8 +2056,10 @@ impl Runtime {
             value,
             enqueue_effect_dirty,
         );
-        self.vm
-            .update_reactive_global_list_index(namespace, field, index, value_for_vm);
+        if outcome.changed || !outcome.registered {
+            self.vm
+                .update_reactive_global_list_index(namespace, field, index, value_for_vm);
+        }
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
         for widget_id in widget_ids {
@@ -2054,6 +2068,7 @@ impl Runtime {
             }
         }
         ReactiveSetResult {
+            changed: outcome.changed || !outcome.registered,
             effects_dirty: outcome.effect_dirty,
             widgets_dirty,
         }
@@ -2204,10 +2219,16 @@ impl Runtime {
                 }
                 self.last_ui_invalidation_trace = Some(UiInvalidationTrace {
                     dirty_fields,
+                    reactive_apply_duration: apply_elapsed,
+                    reactive_exec_timings: exec_timings
+                        .iter()
+                        .map(|timing| (timing.profile_label(), timing.elapsed))
+                        .collect(),
                     ..UiInvalidationTrace::default()
                 });
                 let flush_started = Instant::now();
                 let flush_stats = self.flush_widget_trees();
+                let flush_elapsed = flush_started.elapsed();
                 if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                     trace.affected_buffers = flush_stats.affected_buffers.clone();
                     trace.active_buffer_targets = flush_stats.active_buffer_targets;
@@ -2218,6 +2239,8 @@ impl Runtime {
                     trace.subtree_reruns = flush_stats.subtree_reruns;
                     trace.reevaluated_subtree_roots = flush_stats.reevaluated_subtree_roots;
                     trace.pending_subtree_patch_count = flush_stats.pending_subtree_patch_count;
+                    trace.reactive_flush_duration = flush_elapsed;
+                    trace.reactive_cycle_duration = total_started.elapsed();
                 }
                 if std::env::var_os("ESEQLISP_TRACE_UI").is_some()
                     && let Some(trace) = self.last_ui_invalidation_trace.as_ref()
@@ -2227,7 +2250,7 @@ impl Runtime {
                 self.perf_stats.note_reactive_cycle(
                     dirty_len,
                     apply_elapsed,
-                    flush_started.elapsed(),
+                    flush_elapsed,
                     total_started.elapsed(),
                     exec_timings,
                     &flush_stats,
