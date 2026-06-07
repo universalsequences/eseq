@@ -14,8 +14,12 @@ use super::model::{
 use super::project::dgenlisp_operator_names;
 use super::render::*;
 use super::state::*;
-use super::writeback::{WriteBackError, emit_patch_writeback, emit_patch_writeback_result};
+use super::writeback::{
+    WriteBackError, emit_patch_writeback, emit_patch_writeback_result,
+    emit_patch_writeback_result_with_library,
+};
 use super::*;
+use crate::defmacro_library::DefmacroLibrary;
 use crate::editor::{Editor, EditorConfig};
 use crate::layout::{LayoutNode, MeasureCtx, Rect, TextMeasurer};
 use crate::runtime::Runtime;
@@ -28,6 +32,70 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn parse(source: &str) -> Patch {
     parse_patch_source(source, PatcherIntent::Instrument).unwrap()
+}
+
+fn temp_defmacro_library(name: &str, packages: &[(&str, &str)]) -> DefmacroLibrary {
+    let root = std::env::temp_dir().join(format!(
+        "eseq-patcher-defmacro-library-{name}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    for (package, source) in packages {
+        let dir = root.join(package);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("macro.lisp"), source).unwrap();
+    }
+    DefmacroLibrary::load(root).unwrap()
+}
+
+#[test]
+fn parse_patch_source_with_library_projects_imported_macro_instance() {
+    let library = temp_defmacro_library("project", &[("shape", "(defmacro shape (x) (* x 2))")]);
+    let patch = parse_patch_source_with_library(
+        "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)",
+        PatcherIntent::Instrument,
+        &library,
+    )
+    .unwrap();
+
+    assert!(patch.macros.iter().any(|macro_patch| {
+        macro_patch.name == "shape" && matches!(macro_patch.origin, MacroOrigin::Library { .. })
+    }));
+    assert!(
+        patch
+            .nodes
+            .iter()
+            .any(|node| node.op == "shape" && node.kind == NodeKind::MacroInstance)
+    );
+    assert!(patch.diagnostics.is_empty());
+}
+
+#[test]
+fn writeback_with_library_adds_import_for_used_library_macro() {
+    let library = temp_defmacro_library("writeback", &[("shape", "(defmacro shape (x) (* x 2))")]);
+    let mut state = PatcherInteractionState::default();
+    let created = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &created))
+        .unwrap()
+        .text = "shape".to_string();
+    let source = "(def input (in 1))\n(out input 1)";
+    let emitted = emit_patch_writeback_result_with_library(
+        source,
+        PatcherIntent::Instrument,
+        &state,
+        &library,
+    )
+    .unwrap()
+    .source;
+
+    assert!(emitted.contains("(use-defmacro shape)"));
 }
 
 #[test]

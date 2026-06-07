@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::defmacro_library::{DefmacroLibrary, parse_use_defmacro};
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::display::{node_display_input_slots, node_display_label};
-use super::lisp::{node_kind_for_op, parse_patch_source, positional_args, symbol_at};
+use super::lisp::{
+    node_kind_for_op, parse_patch_source, parse_patch_source_with_library, positional_args,
+    symbol_at,
+};
 use super::model::{
     ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
     OutputPortRef, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId,
@@ -121,9 +125,39 @@ pub(super) fn emit_patch_writeback_result(
     intent: PatcherIntent,
     interaction_state: &PatcherInteractionState,
 ) -> Result<PatchWritebackResult, WriteBackError> {
-    let mut document = SourceDocument::parse(source)?;
-    register_created_modulatable_params(&mut document, interaction_state);
     let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
+    emit_patch_writeback_result_for_root_patch(source, intent, interaction_state, root_patch, None)
+}
+
+pub(super) fn emit_patch_writeback_result_with_library(
+    source: &str,
+    intent: PatcherIntent,
+    interaction_state: &PatcherInteractionState,
+    library: &DefmacroLibrary,
+) -> Result<PatchWritebackResult, WriteBackError> {
+    let root_patch =
+        parse_patch_source_with_library(source, intent, library).map_err(WriteBackError::Parse)?;
+    emit_patch_writeback_result_for_root_patch(
+        source,
+        intent,
+        interaction_state,
+        root_patch,
+        Some(library),
+    )
+}
+
+fn emit_patch_writeback_result_for_root_patch(
+    source: &str,
+    intent: PatcherIntent,
+    interaction_state: &PatcherInteractionState,
+    root_patch: Patch,
+    library: Option<&DefmacroLibrary>,
+) -> Result<PatchWritebackResult, WriteBackError> {
+    let mut document = SourceDocument::parse(source)?;
+    if let Some(library) = library {
+        document.register_external_macros(library.packages().keys().cloned());
+    }
+    register_created_modulatable_params(&mut document, interaction_state);
     apply_created_macro_writeback(&mut document, &root_patch, interaction_state)?;
     let effective_root_patch = patch_with_created_macros(root_patch.clone(), interaction_state);
     apply_created_macro_parameter_writeback(&mut document, interaction_state)?;
@@ -269,6 +303,9 @@ pub(super) fn emit_patch_writeback_result(
     let macro_prune_candidates =
         macro_prune_candidate_names(&effective_root_patch, interaction_state);
     document.remove_unreferenced_candidate_macros(&macro_prune_candidates);
+    if let Some(library) = library {
+        document.add_imports_for_used_library_macros(&effective_root_patch, library);
+    }
 
     let mut generated_node_ids = generated.node_id_map();
     generated_node_ids.extend(history_bindings.node_id_map());
@@ -1273,6 +1310,37 @@ fn patch_for_view<'a>(root_patch: &'a Patch, view_key: &str) -> Option<&'a Patch
         .iter()
         .find(|macro_patch| macro_patch.name == macro_name)
         .map(|macro_patch| &macro_patch.patch)
+}
+
+fn used_macro_instance_names(root_patch: &Patch) -> HashSet<String> {
+    let mut names = root_patch
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::MacroInstance)
+        .map(|node| node.op.clone())
+        .collect::<HashSet<_>>();
+    for macro_patch in &root_patch.macros {
+        names.extend(used_macro_instance_names(&macro_patch.patch));
+    }
+    names
+}
+
+fn collect_library_macro_calls(
+    expr: &Expression,
+    library: &DefmacroLibrary,
+    names: &mut HashSet<String>,
+) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    if let Some(op) = symbol_at(items, 0)
+        && library.package(op).is_some()
+    {
+        names.insert(op.to_string());
+    }
+    for item in items {
+        collect_library_macro_calls(item, library, names);
+    }
 }
 
 fn patch_node<'a>(patch: &'a Patch, node_id: &str) -> Option<&'a PatchNode> {
@@ -5039,6 +5107,7 @@ fn parse_single_expression(source: &str) -> Result<Expression, String> {
 struct SourceDocument {
     forms: Vec<DocumentForm>,
     macros: HashMap<String, MacroDocument>,
+    external_macros: HashSet<String>,
     virtual_modulatable_params: HashSet<(SourceScopeId, String)>,
 }
 
@@ -5095,8 +5164,13 @@ impl SourceDocument {
         Ok(Self {
             forms,
             macros,
+            external_macros: HashSet::new(),
             virtual_modulatable_params: HashSet::new(),
         })
+    }
+
+    fn register_external_macros(&mut self, names: impl IntoIterator<Item = String>) {
+        self.external_macros.extend(names);
     }
 
     fn expr(&self, expr_id: &SourceExprId) -> Option<&Expression> {
@@ -5643,6 +5717,72 @@ impl SourceDocument {
             .filter_map(|form| self.emit_form(form))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn add_imports_for_used_library_macros(
+        &mut self,
+        root_patch: &Patch,
+        library: &DefmacroLibrary,
+    ) {
+        let local_macros = self.macros.keys().cloned().collect::<HashSet<_>>();
+        let existing_imports = self.imported_macro_names();
+        let mut needed = used_macro_instance_names(root_patch)
+            .into_iter()
+            .chain(self.library_macro_call_names(library))
+            .filter(|name| library.package(name).is_some())
+            .filter(|name| !local_macros.contains(name))
+            .filter(|name| !existing_imports.contains(name))
+            .collect::<Vec<_>>();
+        needed.sort();
+        for name in needed.into_iter().rev() {
+            self.forms.insert(
+                self.import_insert_position(),
+                DocumentForm {
+                    original_index: None,
+                    form: SourceForm::Expr(Expression::List(vec![
+                        Expression::Symbol("use-defmacro".to_string()),
+                        Expression::Symbol(name),
+                    ])),
+                },
+            );
+        }
+    }
+
+    fn imported_macro_names(&self) -> HashSet<String> {
+        self.forms
+            .iter()
+            .filter_map(|form| match &form.form {
+                SourceForm::Expr(expr) => parse_use_defmacro(expr).ok().flatten(),
+                SourceForm::Macro(_) => None,
+            })
+            .collect()
+    }
+
+    fn import_insert_position(&self) -> usize {
+        self.forms
+            .iter()
+            .position(|form| match &form.form {
+                SourceForm::Expr(expr) => parse_use_defmacro(expr).ok().flatten().is_none(),
+                SourceForm::Macro(_) => true,
+            })
+            .unwrap_or(self.forms.len())
+    }
+
+    fn library_macro_call_names(&self, library: &DefmacroLibrary) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for form in &self.forms {
+            match &form.form {
+                SourceForm::Expr(expr) => collect_library_macro_calls(expr, library, &mut names),
+                SourceForm::Macro(name) => {
+                    if let Some(macro_doc) = self.macros.get(name) {
+                        for form in &macro_doc.body {
+                            collect_library_macro_calls(&form.expr, library, &mut names);
+                        }
+                    }
+                }
+            }
+        }
+        names
     }
 
     fn emit_form(&self, form: &DocumentForm) -> Option<String> {
@@ -6377,11 +6517,13 @@ impl SourceDocument {
                 | "param"
                 | "in"
                 | "out"
+                | "use-defmacro"
                 | "make-history"
                 | "read-history"
                 | "write-history"
         ) || dgenlisp_operator_names().contains(operator)
             || self.macros.contains_key(operator)
+            || self.external_macros.contains(operator)
     }
 }
 

@@ -23,12 +23,12 @@ use std::rc::Rc;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
-pub use lisp::parse_patch_source;
+pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CableSegmentInfo,
-    CallSourceShape, ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch,
-    NodeKind, NodeSource, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue,
-    SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
+    CallSourceShape, ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroOrigin,
+    MacroPatch, NodeKind, NodeSource, Patch, PatchConnection, PatchNode, PatcherIntent,
+    SourceArgValue, SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
 };
 
 pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Result<String, String> {
@@ -1322,6 +1322,36 @@ fn patcher_layout_payload(node: &LayoutNode) -> Value {
     }
 }
 
+fn defmacro_library_for_props(
+    props: &HashMap<String, Value>,
+) -> Option<crate::defmacro_library::DefmacroLibrary> {
+    let root = prop_str(props, "defmacro-library-root")
+        .map(PathBuf::from)
+        .or_else(crate::defmacro_library::default_library_root)?;
+    match crate::defmacro_library::DefmacroLibrary::load(&root) {
+        Ok(library) => Some(library),
+        Err(error) => {
+            eprintln!(
+                "failed to load defmacro library '{}': {error}",
+                root.display()
+            );
+            None
+        }
+    }
+}
+
+fn parse_patch_source_for_props(
+    source: &str,
+    intent: PatcherIntent,
+    props: &HashMap<String, Value>,
+) -> Result<Patch, String> {
+    if let Some(library) = defmacro_library_for_props(props) {
+        parse_patch_source_with_library(source, intent, &library)
+    } else {
+        parse_patch_source(source, intent)
+    }
+}
+
 fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
     let intent = patcher_intent_from_props(&node.props);
@@ -1372,9 +1402,15 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
         }
     };
 
-    match emit_patch_writeback_result(&source, intent, &state) {
+    let writeback_result = if let Some(library) = defmacro_library_for_props(&node.props) {
+        writeback::emit_patch_writeback_result_with_library(&source, intent, &state, &library)
+    } else {
+        emit_patch_writeback_result(&source, intent, &state)
+    };
+
+    match writeback_result {
         Ok(result) => {
-            let layout = match parse_patch_source(&result.source, intent) {
+            let layout = match parse_patch_source_for_props(&result.source, intent, &node.props) {
                 Ok(mut emitted_patch) => match sidecar::emitted_layout_json_with_node_map(
                     &mut emitted_patch,
                     &root_patch,
@@ -1490,9 +1526,31 @@ fn autocomplete_macros_for_state(
     state: &state::PatcherInteractionState,
     view_key: &str,
 ) -> Vec<MacroPatch> {
-    debug_patch_for_state(node, state, view_key)
+    let mut macros = debug_patch_for_state(node, state, view_key)
         .map(|patch| patch.macros)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(library) = defmacro_library_for_props(&node.props) {
+        let existing = macros
+            .iter()
+            .map(|macro_patch| macro_patch.name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for package in library.packages().values() {
+            if existing.contains(&package.name) {
+                continue;
+            }
+            macros.push(MacroPatch {
+                name: package.name.clone(),
+                params: package.params.clone(),
+                outputs: package.outputs.clone(),
+                patch: Patch::default(),
+                origin: MacroOrigin::Library {
+                    source_path: package.source_path.to_string_lossy().to_string(),
+                    layout_path: package.layout_path.to_string_lossy().to_string(),
+                },
+            });
+        }
+    }
+    macros
 }
 
 fn toggle_selected_cable_segmented(
@@ -1554,7 +1612,7 @@ pub(super) fn load_patch_from_props(
     let source = std::fs::read_to_string(&path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
     let intent = patcher_intent_from_props(props);
-    let mut patch = parse_patch_source(&source, intent)?;
+    let mut patch = parse_patch_source_for_props(&source, intent, props)?;
     sidecar::apply_or_materialize(&path, &mut patch)?;
     Ok((path, patch))
 }

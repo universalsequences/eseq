@@ -633,6 +633,7 @@ pub fn compile_lisp_with_asset_base(
     sample_rate: u32,
     asset_base: Option<&Path>,
 ) -> Result<String, String> {
+    let source = materialize_defmacro_imports(source)?;
     let dir = output_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
 
@@ -665,13 +666,18 @@ pub fn compile_lisp_with_asset_base(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let error = format!("{}{}", stderr, stdout);
-        log_dgenlisp_compile_failure("effect", &src_path, &error, source);
+        log_dgenlisp_compile_failure("effect", &src_path, &error, &source);
         return Err(error);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     log_dgenlisp_compile_manifest("effect", &src_path, &stdout);
     Ok(stdout)
+}
+
+fn materialize_defmacro_imports(source: &str) -> Result<String, String> {
+    eseqlisp::defmacro_library::materialize_with_default_library(source)
+        .map_err(|error| error.to_string())
 }
 
 // ── Parse manifest ──
@@ -2501,6 +2507,7 @@ pub fn compile_instrument_with_asset_base(
     sample_rate: u32,
     asset_base: Option<&Path>,
 ) -> Result<String, String> {
+    let source = materialize_defmacro_imports(source)?;
     let dir = output_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
 
@@ -2533,7 +2540,7 @@ pub fn compile_instrument_with_asset_base(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let error = format!("{}{}", stderr, stdout);
-        log_dgenlisp_compile_failure("instrument", &src_path, &error, source);
+        log_dgenlisp_compile_failure("instrument", &src_path, &error, &source);
         return Err(error);
     }
 

@@ -65,6 +65,7 @@ pub use ui::tui;
 // ── Root-level modules ───────────────────────────────────────────────────
 pub mod audio;
 pub mod buffer;
+pub mod defmacro_library;
 pub mod editor;
 pub mod host;
 pub mod hot_reload;

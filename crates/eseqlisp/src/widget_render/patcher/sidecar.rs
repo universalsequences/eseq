@@ -381,6 +381,7 @@ fn root_patch_with_interaction(
                 params: macro_patch.params,
                 outputs: macro_patch.outputs,
                 patch,
+                origin: macro_patch.origin,
             }
         })
         .collect();

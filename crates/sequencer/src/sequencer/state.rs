@@ -3616,9 +3616,10 @@ impl SequencerState {
             profile.update_pattern_atoms = started.elapsed();
 
             let metadata = scenes.current_scene_metadata();
-            let snapshot_source = launched.into_iter().collect::<Option<Vec<_>>>().map(
-                |tracks| (tracks, metadata.0, metadata.1, metadata.2),
-            );
+            let snapshot_source = launched
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .map(|tracks| (tracks, metadata.0, metadata.1, metadata.2));
 
             (sample_ids, snapshot_source)
         };

@@ -12,10 +12,10 @@ use super::lisp::{
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
-    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, InputPresentation, MacroPatch,
-    MacroSignature, NodeKind, NodeSource, OperatorPortShape, ParamNodeInfo, Patch, PatchConnection,
-    PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId, SourceOwner,
-    SourceScopeId, refresh_patch_inline_inputs,
+    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, InputPresentation, MacroOrigin,
+    MacroPatch, MacroSignature, NodeKind, NodeSource, OperatorPortShape, ParamNodeInfo, Patch,
+    PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId,
+    SourceOwner, SourceScopeId, refresh_patch_inline_inputs,
 };
 
 pub(super) struct Projector {
@@ -113,6 +113,7 @@ impl Projector {
             "def" => self.project_def(items, expr, source_expr),
             "defmacro" => self.project_defmacro(items, expr, source_expr),
             "param" => self.project_param(items, expr, source_expr),
+            "use-defmacro" => {}
             "make-history" => self.project_make_history(items, expr, source_expr),
             "write-history" => {
                 let _ = self.project_write_history(items, expr, source_expr);
@@ -408,6 +409,7 @@ impl Projector {
             params: param_names,
             outputs: outputs.clone(),
             patch,
+            origin: MacroOrigin::Local,
         });
         self.macro_signatures.insert(
             name.to_string(),
