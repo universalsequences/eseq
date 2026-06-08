@@ -23,9 +23,9 @@ use super::display::{node_display_label, preview};
 use super::geometry::{
     connection_cable_edit_points, connection_endpoints, node_resize_handle_centers,
     patch_content_size, patch_input_indices, patch_input_slot_counts, patch_node_rects,
-    patch_output_counts, patcher_back_button_rect, patcher_zoom, port_center, rect_from_points,
+    patch_output_counts, patcher_back_button_rect, patcher_macro_library_action_rect, patcher_zoom,
+    port_center, rect_from_points,
 };
-use super::load_patch_from_props;
 use super::metrics::{
     CABLE_HANDLE_RADIUS_PX, CODE_NODE_FONT_SIZE, NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX,
     NODE_FONT_SIZE, NODE_RESIZE_HANDLE_SIZE_CELLS, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX,
@@ -41,14 +41,16 @@ use super::project::OperatorPortDocumentation;
 use super::project::dgenlisp_operator_documentation;
 use super::state::{
     AgenticBubbleState, AgenticBubbleTarget, AlignmentGuide, AlignmentGuideKind,
-    PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState, PatcherPanState,
-    PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
-    get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
-    ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
-    set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
+    PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState,
+    PatcherMacroLibraryActionKind, PatcherPanState, PatcherTextEdit, PatcherZSlot,
+    active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
+    get_patcher_pan_state, max_node_z_index, node_z_index, ordered_patch_nodes,
+    patch_with_interaction_state, patcher_breadcrumb, patcher_state_key, set_patcher_pan_state,
+    source_connection_id, sync_patcher_z_order,
 };
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
+use super::{load_patch_from_props, macro_library_action_for_state};
 
 #[cfg(target_os = "macos")]
 const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 9.0;
@@ -157,6 +159,13 @@ pub(super) fn build_metal_primitives_for_patcher(
                 viewport,
                 &interaction_state,
             );
+            push_macro_library_action_button(
+                &mut chrome_overlay_prims,
+                &patch,
+                node.rect,
+                viewport,
+                &interaction_state,
+            );
             chrome_overlay_prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
                     row: node.rect.row + 0.7,
@@ -189,6 +198,21 @@ pub(super) fn build_metal_primitives_for_patcher(
                             "{} unsupported form(s) rendered as code islands",
                             patch.diagnostics.len()
                         ),
+                        font_size: 11.0,
+                        scale: 1.0,
+                        fg: theme::PATCHER_ERROR(),
+                        bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                    },
+                ));
+            }
+            if let Some(error) = interaction_state.macro_library_action_error.as_deref() {
+                chrome_overlay_prims.push(MetalPrimitive::ProportionalText(
+                    MetalProportionalTextPrimitive {
+                        row: node.rect.row + node.rect.height - 3.0,
+                        col: node.rect.col + 1.0,
+                        align_width: node.rect.width - 2.0,
+                        h_align: 0.0,
+                        text: error.to_string(),
                         font_size: 11.0,
                         scale: 1.0,
                         fg: theme::PATCHER_ERROR(),
@@ -571,6 +595,62 @@ fn push_back_button(
         viewport,
         interaction_state.hover_back_button,
     );
+}
+
+#[cfg(target_os = "macos")]
+fn push_macro_library_action_button(
+    prims: &mut Vec<MetalPrimitive>,
+    root_patch: &Patch,
+    rect: Rect,
+    viewport: WidgetViewport,
+    interaction_state: &PatcherInteractionState,
+) {
+    let Some(kind) = macro_library_action_for_state(root_patch, interaction_state) else {
+        return;
+    };
+    let button_rect = patcher_macro_library_action_rect(rect);
+    let hovered = interaction_state.hovered_macro_library_action == Some(kind);
+    let border = if hovered {
+        theme::PATCHER_BACK_BUTTON_HOVER_BORDER()
+    } else {
+        theme::PATCHER_BACK_BUTTON_BORDER()
+    };
+    let bg = if hovered {
+        theme::PATCHER_BACK_BUTTON_HOVER_BG()
+    } else {
+        theme::PATCHER_BACK_BUTTON_BG()
+    };
+    push_rounded_rect(prims, button_rect, border, viewport, 14.0, false);
+    push_rounded_rect(
+        prims,
+        Rect {
+            row: button_rect.row + 0.08,
+            col: button_rect.col + 0.08,
+            width: (button_rect.width - 0.16).max(0.0),
+            height: (button_rect.height - 0.16).max(0.0),
+        },
+        bg,
+        viewport,
+        12.0,
+        false,
+    );
+    let label = match kind {
+        PatcherMacroLibraryActionKind::SaveToLibrary => "Save to lib",
+        PatcherMacroLibraryActionKind::Fork => "Fork",
+    };
+    prims.push(MetalPrimitive::ProportionalText(
+        MetalProportionalTextPrimitive {
+            row: button_rect.row + 0.24,
+            col: button_rect.col + 0.55,
+            align_width: button_rect.width - 1.1,
+            h_align: 0.5,
+            text: label.to_string(),
+            font_size: 11.0,
+            scale: 1.0,
+            fg: theme::PATCHER_TEXT(),
+            bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+        },
+    ));
 }
 
 #[cfg(target_os = "macos")]

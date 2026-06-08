@@ -8,6 +8,7 @@ use super::model::{
     PatcherIntent,
 };
 use super::project::{Projector, dgenlisp_constant_names, dgenlisp_operator_port_shapes};
+use super::sidecar;
 
 pub fn parse_patch_source(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
     let exprs = parse_source_exprs(source)?;
@@ -93,7 +94,8 @@ fn project_library_macro_patch(
     intent: PatcherIntent,
 ) -> Result<MacroPatch, String> {
     let exprs = parse_source_exprs(&package.source)?;
-    let projected = Projector::new(macro_signatures.clone(), intent).project(&exprs);
+    let mut projected = Projector::new(macro_signatures.clone(), intent).project(&exprs);
+    sidecar::apply_layout_file(&package.layout_path, &mut projected)?;
     let mut macro_patch = projected
         .macros
         .into_iter()

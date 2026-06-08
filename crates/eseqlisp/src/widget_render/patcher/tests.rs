@@ -144,6 +144,21 @@ fn library_macro_view_edit_persists_to_library_source_not_root_source() {
         serde_json::from_str(&fs::read_to_string(&package.layout_path).unwrap()).unwrap();
     assert_eq!(layout["macros"]["shape"]["nodes"]["return"]["x"], 12.0);
     assert_eq!(layout["macros"]["shape"]["nodes"]["return"]["y"], 34.0);
+    let reloaded_library = DefmacroLibrary::load(library.root()).unwrap();
+    let reloaded_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &reloaded_library)
+            .unwrap();
+    let reloaded_return = reloaded_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "shape")
+        .unwrap()
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "return")
+        .unwrap();
+    assert_eq!(reloaded_return.position, (12.0, 34.0));
     let root_state = interaction_state_without_library_macro_views(&state, &root_patch);
     let root_source = emit_patch_writeback_result_with_library(
         source,
@@ -154,6 +169,143 @@ fn library_macro_view_edit_persists_to_library_source_not_root_source() {
     .unwrap()
     .source;
     assert_eq!(root_source, source);
+}
+
+#[test]
+fn save_local_macro_to_library_replaces_local_def_with_import() {
+    let library = temp_defmacro_library("save-action", &[]);
+    let path = temp_patcher_dsp_path("patcher-save-macro-to-library");
+    fs::write(
+        &path,
+        "(defmacro shape (x) (* x 2))\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)",
+    )
+    .unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+    let mut state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        pending_macro_library_action: Some(PatcherMacroLibraryAction {
+            kind: PatcherMacroLibraryActionKind::SaveToLibrary,
+            macro_name: "shape".to_string(),
+        }),
+        ..PatcherInteractionState::default()
+    };
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let macro_patch = active_patcher_patch(&root_patch, &state);
+    let return_node = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "return")
+        .unwrap();
+    set_node_edit_position(
+        &mut state,
+        "macro:shape",
+        return_node,
+        (19.0, 23.0),
+        node_display_label(return_node),
+    );
+    set_patcher_interaction_state(patcher_state_key(&node), state);
+
+    let (source, _layout) = persistence_payload_source_and_layout(&node, "save macro to library");
+
+    assert!(source.contains("(use-defmacro shape)"));
+    assert!(!source.contains("(defmacro shape"));
+    let package_dir = library.root().join("shape");
+    assert_eq!(
+        fs::read_to_string(package_dir.join("macro.lisp")).unwrap(),
+        "(defmacro shape (x) (* x 2.0))\n"
+    );
+    let package_layout: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(package_dir.join("macro.layout.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        package_layout["macros"]["shape"]["nodes"]["return"]["x"],
+        19.0
+    );
+    assert_eq!(
+        package_layout["macros"]["shape"]["nodes"]["return"]["y"],
+        23.0
+    );
+    assert!(package_dir.join("manifest.json").exists());
+}
+
+#[test]
+fn fork_library_macro_to_local_replaces_import_with_defmacro_and_copies_layout() {
+    let library =
+        temp_defmacro_library("fork-action", &[("shape", "(defmacro shape (x) (* x 4))")]);
+    let package = library.package("shape").unwrap();
+    fs::write(
+        &package.layout_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1,
+            "root": {},
+            "macros": {
+                "shape": {
+                    "nodes": {
+                        "return": { "x": 31.0, "y": 37.0 }
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let path = temp_patcher_dsp_path("patcher-fork-macro-to-local");
+    fs::write(
+        &path,
+        "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)",
+    )
+    .unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+    set_patcher_interaction_state(
+        patcher_state_key(&node),
+        PatcherInteractionState {
+            active_macro: Some("shape".to_string()),
+            pending_macro_library_action: Some(PatcherMacroLibraryAction {
+                kind: PatcherMacroLibraryActionKind::Fork,
+                macro_name: "shape".to_string(),
+            }),
+            ..PatcherInteractionState::default()
+        },
+    );
+
+    let (source, layout) = persistence_payload_source_and_layout(&node, "fork macro to local");
+
+    assert!(source.contains("(defmacro shape"));
+    assert!(source.contains("(* x 4.0)"));
+    assert!(!source.contains("(use-defmacro shape)"));
+    let layout: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    assert_eq!(layout["macros"]["shape"]["nodes"]["return"]["x"], 31.0);
+    assert_eq!(layout["macros"]["shape"]["nodes"]["return"]["y"], 37.0);
+}
+
+#[test]
+fn root_layout_sidecar_excludes_library_macro_scopes() {
+    let library = temp_defmacro_library(
+        "root-layout-excludes-library",
+        &[("shape", "(defmacro shape (x) (* x 2))")],
+    );
+    let source = "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)";
+    let patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    assert!(
+        patch
+            .macros
+            .iter()
+            .any(|macro_patch| matches!(macro_patch.origin, MacroOrigin::Library { .. }))
+    );
+
+    let layout = sidecar::current_layout_json(&patch, &PatcherInteractionState::default()).unwrap();
+    let layout: serde_json::Value = serde_json::from_str(&layout).unwrap();
+
+    assert!(layout["macros"].get("shape").is_none());
 }
 
 #[test]

@@ -114,6 +114,39 @@ pub(super) fn replace_macro_source(
     Ok(document.emit())
 }
 
+pub(super) fn extract_macro_source(
+    source: &str,
+    macro_name: &str,
+) -> Result<String, WriteBackError> {
+    let document = SourceDocument::parse(source)?;
+    document.emit_macro(macro_name)
+}
+
+pub(super) fn replace_macro_with_import(
+    source: &str,
+    macro_name: &str,
+) -> Result<String, WriteBackError> {
+    let mut document = SourceDocument::parse(source)?;
+    document.replace_macro_with_import(macro_name)?;
+    Ok(document.emit())
+}
+
+pub(super) fn replace_import_with_macro(
+    source: &str,
+    macro_name: &str,
+    macro_source: &str,
+) -> Result<String, WriteBackError> {
+    let mut document = SourceDocument::parse(source)?;
+    let expr =
+        parse_single_expression(macro_source).map_err(|reason| WriteBackError::InvalidEdit {
+            view_key: "root".to_string(),
+            node_id: String::new(),
+            reason,
+        })?;
+    document.replace_import_with_macro(macro_name, expr)?;
+    Ok(document.emit())
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct PatchWritebackResult {
     pub(super) source: String,
@@ -5530,6 +5563,13 @@ fn parse_single_expression(source: &str) -> Result<Expression, String> {
     }
 }
 
+fn use_defmacro_expr(name: &str) -> Expression {
+    Expression::List(vec![
+        Expression::Symbol("use-defmacro".to_string()),
+        Expression::Symbol(name.to_string()),
+    ])
+}
+
 #[derive(Debug, Clone)]
 struct SourceDocument {
     forms: Vec<DocumentForm>,
@@ -6588,6 +6628,96 @@ impl SourceDocument {
             },
         );
         self.macros.insert(macro_doc.name.clone(), macro_doc);
+        Ok(())
+    }
+
+    fn emit_macro(&self, name: &str) -> Result<String, WriteBackError> {
+        self.macros
+            .get(name)
+            .map(MacroDocument::emit)
+            .ok_or_else(|| WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("missing macro `{name}`"),
+            })
+    }
+
+    fn replace_macro_with_import(&mut self, name: &str) -> Result<(), WriteBackError> {
+        if !self.macros.contains_key(name) {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("missing local macro `{name}`"),
+            });
+        }
+        let mut replaced = false;
+        for form in &mut self.forms {
+            let SourceForm::Macro(form_name) = &form.form else {
+                continue;
+            };
+            if form_name == name {
+                form.form = SourceForm::Expr(use_defmacro_expr(name));
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("missing source form for local macro `{name}`"),
+            });
+        }
+        self.macros.remove(name);
+        Ok(())
+    }
+
+    fn replace_import_with_macro(
+        &mut self,
+        name: &str,
+        expr: Expression,
+    ) -> Result<(), WriteBackError> {
+        let Some(macro_doc) = MacroDocument::from_expr(&expr) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: "forked source did not parse as defmacro".to_string(),
+            });
+        };
+        if macro_doc.name != name {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!(
+                    "forked macro name `{}` does not match `{name}`",
+                    macro_doc.name
+                ),
+            });
+        }
+        if self.macros.contains_key(name) {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: "root".to_string(),
+                node_id: String::new(),
+                reason: format!("local macro `{name}` already exists"),
+            });
+        }
+        let import_position = self.forms.iter().position(|form| match &form.form {
+            SourceForm::Expr(expr) => parse_use_defmacro(expr)
+                .ok()
+                .flatten()
+                .is_some_and(|imported| imported == name),
+            SourceForm::Macro(_) => false,
+        });
+        let form = DocumentForm {
+            original_index: None,
+            form: SourceForm::Macro(name.to_string()),
+        };
+        if let Some(position) = import_position {
+            self.forms[position] = form;
+        } else {
+            self.forms.insert(self.import_insert_position(), form);
+        }
+        self.macros.insert(name.to_string(), macro_doc);
         Ok(())
     }
 

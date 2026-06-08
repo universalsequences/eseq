@@ -119,6 +119,9 @@ pub(super) struct PatcherInteractionState {
     pub(super) hovered_input_port: Option<InputPortRef>,
     pub(super) hovered_output_port: Option<OutputPortRef>,
     pub(super) hover_back_button: bool,
+    pub(super) hovered_macro_library_action: Option<PatcherMacroLibraryActionKind>,
+    pub(super) pending_macro_library_action: Option<PatcherMacroLibraryAction>,
+    pub(super) macro_library_action_error: Option<String>,
     pub(super) selected_cable: Option<String>,
     pub(super) edit_state: PatchEditState,
     pub(super) text_edit: Option<PatcherTextEdit>,
@@ -128,6 +131,18 @@ pub(super) struct PatcherInteractionState {
     pub(super) last_pointer_model_position: Option<(f32, f32)>,
     pub(super) active_macro: Option<String>,
     pub(super) drag: Option<PatcherDragState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PatcherMacroLibraryActionKind {
+    SaveToLibrary,
+    Fork,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PatcherMacroLibraryAction {
+    pub(super) kind: PatcherMacroLibraryActionKind,
+    pub(super) macro_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
