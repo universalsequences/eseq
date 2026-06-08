@@ -49,7 +49,7 @@ Do not recompute active inside the audio loop.
 
 ## Required Sequencer Changes
 
-Update manifest structs in `src/lisp_effect.rs`.
+Update manifest structs in `src/lisp_host.rs`.
 
 Current code still expects:
 
@@ -110,7 +110,7 @@ The DGenLisp runtime no longer has a source selector cell for the destination.
 
 ## Remove Host-Side Lane Expansion
 
-`src/lisp_effect.rs` currently has host-side additive modulation expansion around `expand_additive_host_mod_lanes`. That code was compensating for the old DGenLisp one-source/one-depth model by generating extra source/depth params and expanding `(mod p)` manually.
+`src/lisp_host.rs` currently has host-side additive modulation expansion around `expand_additive_host_mod_lanes`. That code was compensating for the old DGenLisp one-source/one-depth model by generating extra source/depth params and expanding `(mod p)` manually.
 
 With the new compiler, this should be removed or bypassed:
 

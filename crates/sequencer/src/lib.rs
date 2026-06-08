@@ -68,7 +68,7 @@ pub mod graph;
 #[allow(dead_code)]
 mod limiter;
 #[allow(dead_code)]
-pub mod lisp_effect;
+pub mod lisp_host;
 pub mod mixer_volume;
 pub mod neural;
 pub mod paths;

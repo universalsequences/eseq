@@ -654,8 +654,7 @@ fn validate_effect_artifact_sources(
         return Err(format!("dsp.lisp validation error:\n{error}"));
     }
 
-    let compile_result = match crate::lisp_effect::compile_and_load(dsp_source, store.sample_rate())
-    {
+    let compile_result = match crate::lisp_host::compile_and_load(dsp_source, store.sample_rate()) {
         Ok(result) => result,
         Err(error) => {
             log_failed_effect_sources(id, "dsp compile", &error, dsp_source, ui_source);
@@ -704,15 +703,15 @@ fn finalize_effect_artifact(
         .and_then(|snapshot| snapshot.state.effect_draft)
         .ok_or_else(|| "No draft effect artifact exists to finalize.".to_string())?;
     validate_effect_artifact_sources(store, id, &final_name, &draft.dsp_source, &draft.ui_source)?;
-    if crate::lisp_effect::effect_source_path(&final_name).exists()
-        || crate::lisp_effect::effect_ui_path(&final_name).exists()
+    if crate::lisp_host::effect_source_path(&final_name).exists()
+        || crate::lisp_host::effect_ui_path(&final_name).exists()
     {
         return Err(format!("Effect '{name}' already exists."));
     }
-    crate::lisp_effect::save_effect(&final_name, &draft.dsp_source)
+    crate::lisp_host::save_effect(&final_name, &draft.dsp_source)
         .map_err(|error| format!("Failed to save finalized effect dsp.lisp: {error}"))?;
-    if let Err(error) = crate::lisp_effect::save_effect_ui(&final_name, &draft.ui_source) {
-        let _ = std::fs::remove_file(crate::lisp_effect::effect_source_path(&final_name));
+    if let Err(error) = crate::lisp_host::save_effect_ui(&final_name, &draft.ui_source) {
+        let _ = std::fs::remove_file(crate::lisp_host::effect_source_path(&final_name));
         return Err(format!("Failed to save finalized effect ui.lisp: {error}"));
     }
     store
@@ -818,7 +817,7 @@ fn validate_instrument_artifact_sources(
     }
 
     let compile_result =
-        match crate::lisp_effect::compile_and_load_instrument(&dsp_source, store.sample_rate()) {
+        match crate::lisp_host::compile_and_load_instrument(&dsp_source, store.sample_rate()) {
             Ok(result) => result,
             Err(error) => {
                 log_failed_instrument_sources(id, "dsp compile", &error, &dsp_source, &ui_source);
@@ -940,7 +939,7 @@ fn run_instrument_pipeline(
         );
     }
 
-    let compile_result = match crate::lisp_effect::compile_and_load_instrument(
+    let compile_result = match crate::lisp_host::compile_and_load_instrument(
         &artifacts.dsp_source,
         store.sample_rate(),
     ) {

@@ -295,19 +295,19 @@ pub(crate) fn init_runtime(
     fx_epoch: Arc<AtomicUsize>,
     ui_invalidations: Arc<UiInvalidationQueue>,
     expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
-    selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons,
+    selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons,
     active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
     active_delete_target_version: Arc<AtomicUsize>,
     auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) -> RuntimeInit {
     let mut runtime = Runtime::new();
-    sequencer::lisp_effect::register_neural_authoring_natives_with_selection(
+    sequencer::lisp_host::register_neural_authoring_natives_with_selection(
         &mut runtime,
         Arc::clone(&state),
         Arc::clone(&selected_neural_neurons),
     );
-    sequencer::lisp_effect::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+    sequencer::lisp_host::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -335,7 +335,7 @@ pub(crate) fn init_runtime(
                 ("neural-networks", build_neural_networks_value(&state)),
                 (
                     "selected-neural-neurons",
-                    sequencer::lisp_effect::selected_neural_neurons_to_value(
+                    sequencer::lisp_host::selected_neural_neurons_to_value(
                         &selected_neural_neurons.lock().unwrap(),
                     ),
                 ),
@@ -2570,7 +2570,7 @@ pub(crate) fn init_runtime(
     let st_def_sequencer = state.clone();
     let ui_ep_def_sequencer = ui_epoch.clone();
     runtime.register_native("def-sequencer", move |args, _ctx| {
-        let published = sequencer::lisp_effect::published_sequencer_from_def_args(&args)?;
+        let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
         let name = published.name.clone();
         st_def_sequencer.publish_sequencer(published);
         ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
@@ -3078,7 +3078,7 @@ pub(crate) fn init_runtime(
     });
     runtime.register_native("seq-saved-instruments", move |_args, _ctx| {
         Ok(Value::List(
-            sequencer::lisp_effect::list_saved_instruments()
+            sequencer::lisp_host::list_saved_instruments()
                 .into_iter()
                 .map(|name| Rc::new(RefCell::new(Value::String(name))))
                 .collect(),

@@ -9,7 +9,7 @@
 //! This module owns **only** the timing/ordering/gather-scatter machinery and is
 //! deliberately lisp-agnostic: the per-node fire decision is a plain Rust closure
 //! (`update_fn`), so the engine is driven directly in unit tests and wired to the
-//! scheduler-side lisp VM in `lisp_effect.rs`/`scheduler.rs`. This mirrors how
+//! scheduler-side lisp VM in `lisp_host.rs`/`scheduler.rs`. This mirrors how
 //! [`crate::generator::GeneratorRuntime`] keeps the tick closure external.
 //!
 //! It is a generalization of the hardcoded neural sequencer (`neural.rs`): the
@@ -26,7 +26,7 @@
 //! (`dampening`, `seed_track_mask`, `reset_interval_beats`, `seed_on_reset`).
 
 use crate::generator::{default_resolved, GENERATOR_RESOLUTION_REF_STEPS};
-use crate::lisp_effect::EmittedAccumulatorEvent;
+use crate::lisp_host::EmittedAccumulatorEvent;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -1598,6 +1598,7 @@ impl GraphRuntime {
         if let Some(amount) = candidate.dampen_incoming {
             self.dampen_incoming(node_index, amount);
         }
+        let note = payload.note;
         self.clear_incoming_triggers(node_index);
         self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, false);
     }
@@ -1936,7 +1937,7 @@ pub fn seed_track_mask(tracks: &[usize]) -> u128 {
 //
 // The *manifest* is the parsed, still-symbolic form of a graph-mode `def-sequencer`
 // (shape + node prototype + edge sets + sequencer-level config). It is produced from
-// the published lisp body (see `lisp_effect::parse_graph_manifest`) and `materialize`d
+// the published lisp body (see `lisp_host::parse_graph_manifest`) and `materialize`d
 // into the SoA node field + edge set that drives [`GraphRuntime`]. Keeping it a plain
 // data type (no lisp dependency) lets it be built and tested directly.
 

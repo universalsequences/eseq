@@ -103,7 +103,7 @@ duration. **Step duration never compresses the pattern.**
 (not free-running across steps). Velocity state also resets per step trigger.
 This keeps Jaki feeling like a "burst per step", not a global generator. (If we
 later want sticky state, expose via `fx-state-get`/`fx-state-set` —
-`lisp_effect.rs:3517-3531`.)
+`lisp_host.rs:3517-3531`.)
 
 ## 6. Rust-Side API
 
@@ -162,8 +162,8 @@ since cycle-alternating values mean each cycle is a different event list. Size:
 
 ### 6.4 New Lisp native
 
-Register one native in `src/lisp_effect.rs` next to the existing `fx-*` family
-(see `lisp_effect.rs:3373-3513`):
+Register one native in `src/lisp_host.rs` next to the existing `fx-*` family
+(see `lisp_host.rs:3373-3513`):
 
 ```
 (fx-jaki-events pattern-string cycle-index)
@@ -177,7 +177,7 @@ keeps the wrapper trivial and lets us change unit mapping policy in Rust
 without touching effect code.
 
 The native reads the current fx context's `rate` param via the same mechanism
-as `fx-arp-count`/`fx-arp-emit` (see `lisp_effect.rs:3389-3409` and
+as `fx-arp-count`/`fx-arp-emit` (see `lisp_host.rs:3389-3409` and
 `eval_arp_count_current_event` / `eval_arp_emit_current_event`). If `rate` is
 not declared as a param, default to `:16`.
 
@@ -240,7 +240,7 @@ Two helpers needed in `midi-fx/_lib/dsp.lisp`:
 **String params.** `(midi-fx-param "pattern" :string "(. . -)")` is hypothetical
 — current `midi-fx-param` may not support string-typed params. Check
 `metal-seq-fx.lisp` and the `midi-fx-param` native registration in
-`src/lisp_effect.rs`. If unsupported, **add string param support first** —
+`src/lisp_host.rs`. If unsupported, **add string param support first** —
 without it, the effect is unusable. This is a prerequisite, called out in §10.
 
 ## 8. UI
@@ -285,9 +285,9 @@ Both must land before the effect is usable:
 
 1. **String-typed `midi-fx-param`.** Current params (see `arp/dsp.lisp`) are
    all numeric/enum. Need to extend the param-declaration native in
-   `src/lisp_effect.rs` and the param storage in the midi-fx state to carry
+   `src/lisp_host.rs` and the param storage in the midi-fx state to carry
    strings, plumb through `(fx-param "name")`. Touchpoints: `eval_midi_fx_param`
-   (`lisp_effect.rs:3446-3450`), midi-fx slot state, and the UI param picker.
+   (`lisp_host.rs:3446-3450`), midi-fx slot state, and the UI param picker.
 2. **UI text-input widget for params.** Pattern strings are edited
    character-by-character; the current numeric stepper UI doesn't work. Could
    defer by allowing pattern edits only from a config file or REPL initially,
@@ -298,7 +298,7 @@ Both must land before the effect is usable:
 1. **Rust port** — `src/jaki/` modules. Parser + evaluator + types. Unit
    tests ported from Swift. No effect wiring yet.
 2. **String params + `fx-jaki-events` native.** Prereq §10.1 plus new
-   native registered in `lisp_effect.rs`.
+   native registered in `lisp_host.rs`.
 3. **Lisp wrapper** — `midi-fx/jaki/dsp.lisp` + `_lib` helpers. Integration
    tests from §9.
 4. **UI** — text input widget; `midi-fx/jaki/ui.lisp`. Visualizer optional.

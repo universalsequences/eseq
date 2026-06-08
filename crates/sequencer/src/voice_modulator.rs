@@ -218,7 +218,7 @@ pub fn take_process_stats() -> VoiceModulatorProcessStats {
             (calls > 0 || rendered_calls > 0 || disabled_skips > 0).then(|| {
                 VoiceModulatorEngineProcessStats {
                     engine_id,
-                    enabled_voices: crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id),
+                    enabled_voices: crate::lisp_host::get_dgen_engine_enabled_voices(engine_id),
                     calls,
                     rendered_calls,
                     disabled_skips,
@@ -1206,7 +1206,7 @@ unsafe extern "C" fn voice_modulator_process(
 
     let custom_identity = custom_engine_identity(s);
     if let Some((engine_id, voice_idx)) = custom_identity {
-        let enabled = crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id);
+        let enabled = crate::lisp_host::get_dgen_engine_enabled_voices(engine_id);
         if voice_idx >= enabled {
             record_disabled_custom_skip(engine_id, nf);
             clear_outputs(out, nf);
@@ -1613,7 +1613,7 @@ mod tests {
     #[test]
     fn custom_engine_disabled_voice_outputs_zero_without_advancing_modulators() {
         let engine_id = 63;
-        crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, 1);
+        crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, 1);
         let mut state = init_custom_engine_state(engine_id, 3);
         let before_lfo_phase = state[slot_state_idx(0, IDX_LFO_PHASE)];
         let before_rand_phase = state[slot_state_idx(2, IDX_RAND_PHASE)];
@@ -1626,11 +1626,11 @@ mod tests {
         assert_eq!(state[slot_state_idx(0, IDX_LFO_PHASE)], before_lfo_phase);
         assert_eq!(state[slot_state_idx(2, IDX_RAND_PHASE)], before_rand_phase);
 
-        crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, 4);
+        crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, 4);
         let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
 
         assert!(outputs[0].iter().any(|value| *value > 0.0));
-        crate::lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
+        crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
     }
 
     #[test]

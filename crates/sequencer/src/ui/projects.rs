@@ -41,7 +41,7 @@ fn project_midi_fx_slot_into_synced_snapshot(
     slot: project::ProjectEffectSlot,
     fx_name: Option<&str>,
 ) -> crate::effects::EffectSlotSnapshot {
-    if let Some(desc) = fx_name.and_then(crate::lisp_effect::load_midi_fx_descriptor) {
+    if let Some(desc) = fx_name.and_then(crate::lisp_host::load_midi_fx_descriptor) {
         project_slot_into_synced_snapshot(slot, &desc, 0)
     } else {
         slot.into_snapshot_with_node_id(0)
@@ -188,7 +188,7 @@ fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
     }
     let legacy_descs = [&filter_desc, &delay_desc];
     let legacy_names = ["Filter", "Delay"];
-    let max_slots = crate::lisp_effect::MAX_CUSTOM_FX;
+    let max_slots = crate::lisp_host::MAX_CUSTOM_FX;
 
     for track_idx in 0..project.tracks.len() {
         let old_custom_len = project
@@ -405,7 +405,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
 
         if let Some(enabled_idx) = inserted_enabled {
             if !has_generated_mod_params {
-                if param.node_param_idx >= crate::lisp_effect::HEADER_SLOTS as u32
+                if param.node_param_idx >= crate::lisp_host::HEADER_SLOTS as u32
                     && param.node_param_idx < crate::voice_modulator::MOD_PARAM_BASE
                 {
                     if let Some(old_idx) = find_old_idx_by_node(param.node_param_idx - 1) {
@@ -2448,8 +2448,8 @@ mod tests {
             plocks,
             plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![
-                (crate::lisp_effect::HEADER_SLOTS - 1) as u32,
-                crate::lisp_effect::HEADER_SLOTS as u32,
+                (crate::lisp_host::HEADER_SLOTS - 1) as u32,
+                crate::lisp_host::HEADER_SLOTS as u32,
                 crate::voice_modulator::MOD_PARAM_BASE,
                 crate::voice_modulator::MOD_PARAM_BASE + 1,
             ],
@@ -2464,10 +2464,10 @@ mod tests {
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
             params: vec![
-                test_param("attack", 0.01, crate::lisp_effect::HEADER_SLOTS as u32),
-                test_param("tone", 0.02, crate::lisp_effect::HEADER_SLOTS as u32 + 1),
+                test_param("attack", 0.01, crate::lisp_host::HEADER_SLOTS as u32),
+                test_param("tone", 0.02, crate::lisp_host::HEADER_SLOTS as u32 + 1),
                 crate::effects::EffectDescriptor::enabled_param(
-                    crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                    crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
                     1.0,
                 ),
                 test_param("lfo rate", 0.03, crate::voice_modulator::MOD_PARAM_BASE),
@@ -2489,9 +2489,9 @@ mod tests {
         assert_eq!(
             restored.param_node_indices,
             vec![
-                crate::lisp_effect::HEADER_SLOTS as u32,
-                crate::lisp_effect::HEADER_SLOTS as u32 + 1,
-                crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                crate::lisp_host::HEADER_SLOTS as u32,
+                crate::lisp_host::HEADER_SLOTS as u32 + 1,
+                crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
                 crate::voice_modulator::MOD_PARAM_BASE,
                 crate::voice_modulator::MOD_PARAM_BASE + 1,
             ]
@@ -2509,8 +2509,8 @@ mod tests {
             plocks,
             plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![
-                crate::lisp_effect::HEADER_SLOTS as u32,
-                crate::lisp_effect::HEADER_SLOTS as u32 + 1,
+                crate::lisp_host::HEADER_SLOTS as u32,
+                crate::lisp_host::HEADER_SLOTS as u32 + 1,
                 crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE,
                 crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE + 1,
             ],
@@ -2525,8 +2525,8 @@ mod tests {
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
             params: vec![
-                test_param("attack", 0.01, crate::lisp_effect::HEADER_SLOTS as u32),
-                test_param("tone", 0.02, crate::lisp_effect::HEADER_SLOTS as u32 + 1),
+                test_param("attack", 0.01, crate::lisp_host::HEADER_SLOTS as u32),
+                test_param("tone", 0.02, crate::lisp_host::HEADER_SLOTS as u32 + 1),
                 test_param("mod 1 source", 1.0, crate::voice_modulator::MOD_PARAM_BASE),
                 test_param(
                     "mod 1 lfo rate",
@@ -2544,8 +2544,8 @@ mod tests {
         assert_eq!(
             restored.param_node_indices,
             vec![
-                crate::lisp_effect::HEADER_SLOTS as u32,
-                crate::lisp_effect::HEADER_SLOTS as u32 + 1,
+                crate::lisp_host::HEADER_SLOTS as u32,
+                crate::lisp_host::HEADER_SLOTS as u32 + 1,
                 crate::voice_modulator::MOD_PARAM_BASE,
                 crate::voice_modulator::MOD_PARAM_BASE + 1,
             ]

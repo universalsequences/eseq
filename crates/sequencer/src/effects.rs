@@ -712,7 +712,7 @@ mod tests {
                     default: 0.0,
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
-                    node_param_idx: crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                    node_param_idx: crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
@@ -732,7 +732,7 @@ mod tests {
     fn lisp_manifest_params_address_dgen_wrapper_state() {
         let desc = EffectDescriptor::from_lisp_manifest(
             "custom",
-            &[crate::lisp_effect::DGenParam {
+            &[crate::lisp_host::DGenParam {
                 name: "cutoff".to_string(),
                 cell_id: 12,
                 cell_span: 4,
@@ -751,7 +751,7 @@ mod tests {
 
         assert_eq!(
             desc.params[0].node_param_idx,
-            (crate::lisp_effect::HEADER_SLOTS + 12) as u32
+            (crate::lisp_host::HEADER_SLOTS + 12) as u32
         );
     }
 
@@ -760,7 +760,7 @@ mod tests {
         let desc = EffectDescriptor::from_lisp_manifest(
             "custom",
             &[
-                crate::lisp_effect::DGenParam {
+                crate::lisp_host::DGenParam {
                     name: "amp_attack".to_string(),
                     cell_id: 2,
                     cell_span: 1,
@@ -773,7 +773,7 @@ mod tests {
                     env: Some("amp_env".to_string()),
                     role: Some("attack".to_string()),
                 },
-                crate::lisp_effect::DGenParam {
+                crate::lisp_host::DGenParam {
                     name: "hidden_release".to_string(),
                     cell_id: 3,
                     cell_span: 1,
@@ -906,7 +906,7 @@ mod tests {
     #[test]
     fn default_full_chain_contains_only_empty_insert_slots() {
         let chain = EffectDescriptor::default_full_chain();
-        assert_eq!(chain.len(), crate::lisp_effect::MAX_CUSTOM_FX);
+        assert_eq!(chain.len(), crate::lisp_host::MAX_CUSTOM_FX);
         assert!(chain.iter().all(|desc| desc.name.is_empty()));
         assert!(chain.iter().all(|desc| desc.params.is_empty()));
     }
@@ -2791,7 +2791,7 @@ impl EffectDescriptor {
     /// Full default chain: MAX_CUSTOM_FX empty insert slots.
     pub fn default_full_chain() -> Vec<Self> {
         let mut chain = Self::default_chain();
-        for _ in 0..crate::lisp_effect::MAX_CUSTOM_FX {
+        for _ in 0..crate::lisp_host::MAX_CUSTOM_FX {
             chain.push(Self::empty_custom_slot());
         }
         chain
@@ -2812,7 +2812,7 @@ impl EffectDescriptor {
     /// Construct from a lisp effect manifest.
     pub fn from_lisp_manifest(
         name: &str,
-        params: &[crate::lisp_effect::DGenParam],
+        params: &[crate::lisp_host::DGenParam],
         input_channels: usize,
         output_channels: usize,
     ) -> Self {
@@ -2828,7 +2828,7 @@ impl EffectDescriptor {
                     unit: p.unit.clone(),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: (crate::lisp_effect::HEADER_SLOTS + p.cell_id) as u32,
+                node_param_idx: (crate::lisp_host::HEADER_SLOTS + p.cell_id) as u32,
                 node_param_span: p.cell_span as u32,
                 host_control: None,
                 ui_metadata: crate::effects::ParamUiMetadata::new(
@@ -2839,7 +2839,7 @@ impl EffectDescriptor {
             })
             .collect();
         descriptors.push(Self::enabled_param(
-            crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+            crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
             1.0,
         ));
         Self {

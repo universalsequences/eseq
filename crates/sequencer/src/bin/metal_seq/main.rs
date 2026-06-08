@@ -181,13 +181,13 @@ struct PendingInstrumentPreview {
     generation: u64,
     source: String,
     layout: Option<String>,
-    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
 struct PendingInstrumentCancelRestore {
     session: InstrumentEditSession,
     persisted_source: String,
-    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -262,7 +262,7 @@ struct PendingEffectPreview {
     generation: u64,
     source: String,
     layout: Option<String>,
-    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
 fn editor_macro_action_strings(
@@ -425,7 +425,7 @@ fn staged_library_macro_flush_status(macros: &[String]) -> Option<String> {
 
 struct PendingEffectCancelRestore {
     session: EffectEditSession,
-    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
 struct PendingAgenticBubble {
@@ -749,7 +749,7 @@ fn metal_agent_session_context(
     });
     let current_instrument_source = current_instrument_name
         .as_deref()
-        .and_then(|name| sequencer::lisp_effect::load_instrument_source(name).ok());
+        .and_then(|name| sequencer::lisp_host::load_instrument_source(name).ok());
     let current_instrument_preset_schema =
         metal_agent_instrument_preset_schema(app, track, current_instrument_name.as_deref());
 
@@ -776,10 +776,10 @@ fn metal_agent_session_context(
     });
     let current_effect_source = current_effect_name
         .as_deref()
-        .and_then(|name| sequencer::lisp_effect::load_effect_source(name).ok());
+        .and_then(|name| sequencer::lisp_host::load_effect_source(name).ok());
     let current_effect_ui_source = current_effect_name
         .as_deref()
-        .and_then(|name| sequencer::lisp_effect::load_effect_ui_source(name).ok());
+        .and_then(|name| sequencer::lisp_host::load_effect_ui_source(name).ok());
 
     AgentSessionContext {
         has_tracks: !app.tracks.is_empty(),
@@ -819,7 +819,7 @@ fn metal_agent_instrument_preset_schema(
     let instrument_name = instrument_name?;
     let desc = app.graph.instrument_descriptors.get(track)?;
     let slot = app.state.pattern.instrument_slots.get(track)?;
-    let existing_presets = sequencer::lisp_effect::load_instrument_presets(instrument_name)
+    let existing_presets = sequencer::lisp_host::load_instrument_presets(instrument_name)
         .map(|presets| presets.into_iter().map(|preset| preset.name).collect())
         .unwrap_or_default();
 
@@ -847,7 +847,7 @@ fn metal_agent_instrument_preset_schema(
 
     Some(AgentInstrumentPresetSchema {
         instrument_name: instrument_name.to_string(),
-        source_file: sequencer::lisp_effect::instrument_source_path(instrument_name)
+        source_file: sequencer::lisp_host::instrument_source_path(instrument_name)
             .ok()
             .map(|path| path.display().to_string()),
         base_note_offset: f32::from_bits(
@@ -1245,13 +1245,13 @@ fn neural_neuron_selected_field(pattern_idx: usize, network_id: u64, neuron_idx:
 fn sync_selected_neural_neuron_bindings(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
 ) -> bool {
     let mut dirty = rt
         .set_reactive(
             "SEQ",
             "selected-neural-neurons",
-            sequencer::lisp_effect::selected_neural_neurons_to_value(selection),
+            sequencer::lisp_host::selected_neural_neurons_to_value(selection),
         )
         .effects_dirty;
     let pattern_idx = state.current_scene_index();
@@ -1262,13 +1262,13 @@ fn sync_selected_neural_neuron_bindings(
                 .set_reactive(
                     "SEQ",
                     &neural_neuron_selected_field(pattern_idx, network.id, neuron_idx),
-                    Value::Bool(selection.contains(
-                        &sequencer::lisp_effect::SelectedNeuralNeuron {
+                    Value::Bool(
+                        selection.contains(&sequencer::lisp_host::SelectedNeuralNeuron {
                             pattern_idx,
                             network_id: network.id,
                             neuron_idx,
-                        },
-                    )),
+                        }),
+                    ),
                 )
                 .effects_dirty;
         }
@@ -1282,7 +1282,7 @@ fn sync_track_plocks_for_neural_selection(
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
 ) -> bool {
     rt.set_reactive(
         "SEQ",
@@ -1301,11 +1301,11 @@ fn sync_track_plocks_for_neural_selection(
 fn record_selected_neural_instrument_plock(
     editor: &mut Editor,
     state: &Arc<SequencerState>,
-    selected_neural_neurons: &sequencer::lisp_effect::SharedSelectedNeuralNeurons,
+    selected_neural_neurons: &sequencer::lisp_host::SharedSelectedNeuralNeurons,
     track: usize,
     param_idx: usize,
     value: f32,
-) -> (BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>, bool) {
+) -> (BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>, bool) {
     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
     let wrote_neural_plock = write_selected_neural_instrument_plock(
         editor,
@@ -1321,12 +1321,12 @@ fn record_selected_neural_instrument_plock(
 fn write_selected_neural_instrument_plock(
     editor: &mut Editor,
     state: &Arc<SequencerState>,
-    neural_selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    neural_selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     track: usize,
     param_idx: usize,
     value: f32,
 ) -> bool {
-    sequencer::lisp_effect::set_selected_neural_instrument_plocks(
+    sequencer::lisp_host::set_selected_neural_instrument_plocks(
         state,
         neural_selection,
         track,
@@ -1344,12 +1344,12 @@ fn write_selected_neural_instrument_plock(
 fn record_selected_neural_effect_plock(
     editor: &mut Editor,
     state: &Arc<SequencerState>,
-    selected_neural_neurons: &sequencer::lisp_effect::SharedSelectedNeuralNeurons,
+    selected_neural_neurons: &sequencer::lisp_host::SharedSelectedNeuralNeurons,
     track: usize,
     slot_idx: usize,
     param_idx: usize,
     value: f32,
-) -> (BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>, bool) {
+) -> (BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>, bool) {
     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
     let wrote_neural_plock = write_selected_neural_effect_plock(
         editor,
@@ -1366,13 +1366,13 @@ fn record_selected_neural_effect_plock(
 fn write_selected_neural_effect_plock(
     editor: &mut Editor,
     state: &Arc<SequencerState>,
-    neural_selection: &BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    neural_selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     track: usize,
     slot_idx: usize,
     param_idx: usize,
     value: f32,
 ) -> bool {
-    sequencer::lisp_effect::set_selected_neural_effect_plocks(
+    sequencer::lisp_host::set_selected_neural_effect_plocks(
         state,
         neural_selection,
         track,
@@ -1392,7 +1392,7 @@ struct InstrumentParamDisplaySync<'a> {
     app: &'a ui::App,
     state: &'a Arc<SequencerState>,
     selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
-    selection: &'a BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     track: usize,
     param_idx: usize,
     display_step: Option<usize>,
@@ -1439,7 +1439,7 @@ struct EffectParamDisplaySync<'a> {
     effect_descriptors: &'a [Vec<sequencer::effects::EffectDescriptor>],
     app: &'a ui::App,
     selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
-    selection: &'a BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     track: usize,
     slot_idx: usize,
     param_idx: usize,
@@ -1527,7 +1527,7 @@ struct UiInvalidationApplyCtx<'a> {
     bus_state: &'a Arc<Mutex<Vec<ui::BusChannelState>>>,
     current_track_idx: usize,
     selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
-    selected_neural_neurons: &'a BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    selected_neural_neurons: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     piano_roll_selection: &'a Arc<Mutex<HashSet<u64>>>,
     accumulator_names: &'a Arc<Mutex<Vec<String>>>,
     cached_track_peak_levels: &'a [f64],
@@ -2238,13 +2238,10 @@ fn ensure_agent_instrument_stub_track(
         return Ok(target.track_index);
     }
     if let Some(target) = snapshot.state.stub_instrument_target {
-        sequencer::lisp_effect::save_instrument(&target.instrument_name, AGENT_INSTRUMENT_STUB_DSP)
+        sequencer::lisp_host::save_instrument(&target.instrument_name, AGENT_INSTRUMENT_STUB_DSP)
             .map_err(|error| format!("Failed to refresh agent stub dsp.lisp: {error}"))?;
-        sequencer::lisp_effect::save_instrument_ui(
-            &target.instrument_name,
-            AGENT_INSTRUMENT_STUB_UI,
-        )
-        .map_err(|error| format!("Failed to refresh agent stub ui.lisp: {error}"))?;
+        sequencer::lisp_host::save_instrument_ui(&target.instrument_name, AGENT_INSTRUMENT_STUB_UI)
+            .map_err(|error| format!("Failed to refresh agent stub ui.lisp: {error}"))?;
         if target.track_index < app.tracks.len()
             && app.graph.track_instrument_types.get(target.track_index)
                 == Some(&sequencer::sequencer::InstrumentType::Custom)
@@ -2277,9 +2274,9 @@ fn ensure_agent_instrument_stub_track(
     }
 
     let inst_name = format!("agent-draft-{conv_id}/");
-    sequencer::lisp_effect::save_instrument(&inst_name, AGENT_INSTRUMENT_STUB_DSP)
+    sequencer::lisp_host::save_instrument(&inst_name, AGENT_INSTRUMENT_STUB_DSP)
         .map_err(|error| format!("Failed to save agent stub dsp.lisp: {error}"))?;
-    sequencer::lisp_effect::save_instrument_ui(&inst_name, AGENT_INSTRUMENT_STUB_UI)
+    sequencer::lisp_host::save_instrument_ui(&inst_name, AGENT_INSTRUMENT_STUB_UI)
         .map_err(|error| format!("Failed to save agent stub ui.lisp: {error}"))?;
 
     let idx = app
@@ -2357,9 +2354,9 @@ fn apply_agent_draft_to_owned_instrument(
         .map(|target| target.instrument_name.clone())
         .unwrap_or_else(|| format!("agent-draft-{conv_id}/"));
 
-    sequencer::lisp_effect::save_instrument(&inst_name, &draft.dsp_source)
+    sequencer::lisp_host::save_instrument(&inst_name, &draft.dsp_source)
         .map_err(|error| format!("Failed to save agent draft dsp.lisp: {error}"))?;
-    sequencer::lisp_effect::save_instrument_ui(&inst_name, &draft.ui_source)
+    sequencer::lisp_host::save_instrument_ui(&inst_name, &draft.ui_source)
         .map_err(|error| format!("Failed to save agent draft ui.lisp: {error}"))?;
 
     let (idx, created_track) = if let Some(target) = target {
@@ -2499,7 +2496,7 @@ fn apply_compiled_effect_edit_session(
     app: &mut ui::App,
     session: &EffectEditSession,
     name: &str,
-    result: sequencer::lisp_effect::CompileResult,
+    result: sequencer::lisp_host::CompileResult,
 ) -> Result<(), String> {
     match session.target {
         EffectEditTarget::Track { track, slot } => {
@@ -2583,11 +2580,11 @@ fn save_effect_with_ui_rollback(
     dsp_source: &str,
     ui_source: &str,
 ) -> Result<(), String> {
-    let previous_source = sequencer::lisp_effect::load_effect_source(name).ok();
-    let previous_ui = sequencer::lisp_effect::load_effect_ui_source(name).ok();
-    sequencer::lisp_effect::save_effect(name, dsp_source)
+    let previous_source = sequencer::lisp_host::load_effect_source(name).ok();
+    let previous_ui = sequencer::lisp_host::load_effect_ui_source(name).ok();
+    sequencer::lisp_host::save_effect(name, dsp_source)
         .map_err(|error| format!("Failed to save effect dsp.lisp: {error}"))?;
-    if let Err(error) = sequencer::lisp_effect::save_effect_ui(name, ui_source) {
+    if let Err(error) = sequencer::lisp_host::save_effect_ui(name, ui_source) {
         restore_effect_files(name, previous_source.as_deref(), previous_ui.as_deref());
         return Err(format!("Failed to save effect ui.lisp: {error}"));
     }
@@ -2597,18 +2594,18 @@ fn save_effect_with_ui_rollback(
 fn restore_effect_files(name: &str, source: Option<&str>, ui_source: Option<&str>) {
     match source {
         Some(source) => {
-            let _ = sequencer::lisp_effect::save_effect(name, source);
+            let _ = sequencer::lisp_host::save_effect(name, source);
         }
         None => {
-            let _ = std::fs::remove_file(sequencer::lisp_effect::effect_source_path(name));
+            let _ = std::fs::remove_file(sequencer::lisp_host::effect_source_path(name));
         }
     }
     match ui_source {
         Some(ui_source) => {
-            let _ = sequencer::lisp_effect::save_effect_ui(name, ui_source);
+            let _ = sequencer::lisp_host::save_effect_ui(name, ui_source);
         }
         None => {
-            let _ = std::fs::remove_file(sequencer::lisp_effect::effect_ui_path(name));
+            let _ = std::fs::remove_file(sequencer::lisp_host::effect_ui_path(name));
         }
     }
 }
@@ -2660,8 +2657,8 @@ fn apply_agent_draft_to_effect_slot(
         .map(|target| target.effect_name.clone())
         .unwrap_or_else(|| format!("agent-effect-draft-{conv_id}/"));
 
-    let previous_source = sequencer::lisp_effect::load_effect_source(&effect_name).ok();
-    let previous_ui = sequencer::lisp_effect::load_effect_ui_source(&effect_name).ok();
+    let previous_source = sequencer::lisp_host::load_effect_source(&effect_name).ok();
+    let previous_ui = sequencer::lisp_host::load_effect_ui_source(&effect_name).ok();
     save_effect_with_ui_rollback(&effect_name, &draft.dsp_source, &draft.ui_source)?;
     if let Err(error) = app.load_saved_effect_to_slot_sync(track_index, slot_index, &effect_name) {
         restore_effect_files(
@@ -2767,16 +2764,16 @@ fn finalize_agent_instrument(
         (draft.dsp_source, draft.ui_source)
     } else {
         (
-            sequencer::lisp_effect::load_instrument_source(&target.instrument_name)
+            sequencer::lisp_host::load_instrument_source(&target.instrument_name)
                 .map_err(|error| format!("Failed to read draft dsp.lisp: {error}"))?,
-            sequencer::lisp_effect::load_instrument_ui_source(&target.instrument_name)
+            sequencer::lisp_host::load_instrument_ui_source(&target.instrument_name)
                 .map_err(|error| format!("Failed to read draft ui.lisp: {error}"))?,
         )
     };
 
-    sequencer::lisp_effect::save_instrument(&final_name, &dsp_source)
+    sequencer::lisp_host::save_instrument(&final_name, &dsp_source)
         .map_err(|error| format!("Failed to save finalized dsp.lisp: {error}"))?;
-    if let Err(error) = sequencer::lisp_effect::save_instrument_ui(&final_name, &ui_source) {
+    if let Err(error) = sequencer::lisp_host::save_instrument_ui(&final_name, &ui_source) {
         let _ = std::fs::remove_dir_all(&final_dir);
         return Err(format!("Failed to save finalized ui.lisp: {error}"));
     }
@@ -2867,9 +2864,9 @@ fn finalize_agent_effect(
     let target = snapshot.state.accepted_effect_target;
     let (dsp_source, ui_source) = if let Some(target) = target.as_ref() {
         (
-            sequencer::lisp_effect::load_effect_source(&target.effect_name)
+            sequencer::lisp_host::load_effect_source(&target.effect_name)
                 .map_err(|error| format!("Failed to read draft effect dsp.lisp: {error}"))?,
-            sequencer::lisp_effect::load_effect_ui_source(&target.effect_name)
+            sequencer::lisp_host::load_effect_ui_source(&target.effect_name)
                 .map_err(|error| format!("Failed to read draft effect ui.lisp: {error}"))?,
         )
     } else {
@@ -3140,13 +3137,13 @@ mod tests {
 
     #[test]
     fn new_instrument_starter_compiles() {
-        sequencer::lisp_effect::compile_instrument(NEW_INSTRUMENT_STARTER_DSP, 44_100)
+        sequencer::lisp_host::compile_instrument(NEW_INSTRUMENT_STARTER_DSP, 44_100)
             .expect("starter instrument should compile");
     }
 
     #[test]
     fn new_effect_starter_compiles() {
-        sequencer::lisp_effect::compile_lisp(sequencer::lisp_effect::EFFECT_TEMPLATE, 44_100)
+        sequencer::lisp_host::compile_lisp(sequencer::lisp_host::EFFECT_TEMPLATE, 44_100)
             .expect("starter effect should compile");
     }
 
@@ -3456,7 +3453,7 @@ mod tests {
         let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
-        let selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons =
+        let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
             Arc::new(Mutex::new(BTreeSet::new()));
         let piano_roll_selection = Arc::new(Mutex::new(HashSet::<u64>::new()));
         let piano_roll_move_state = Arc::new(Mutex::new(None));
@@ -3873,7 +3870,7 @@ mod tests {
         let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
-        let selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons =
+        let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
             Arc::new(Mutex::new(BTreeSet::new()));
         let piano_roll_selection = Arc::new(Mutex::new(HashSet::<u64>::new()));
         let piano_roll_move_state = Arc::new(Mutex::new(None));
@@ -4374,7 +4371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_track = Arc::new(AtomicUsize::new(0));
     // Selected steps for p-locking
     let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
-    let selected_neural_neurons: sequencer::lisp_effect::SharedSelectedNeuralNeurons =
+    let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
         Arc::new(Mutex::new(BTreeSet::new()));
     let piano_roll_selection: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>> = Arc::new(Mutex::new(None));
@@ -5792,7 +5789,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         desc.default
                                     };
-                                    let current = sequencer::lisp_effect::selected_neural_instrument_plock_value(
+                                    let current = sequencer::lisp_host::selected_neural_instrument_plock_value(
                                         &state,
                                         &neural_selection,
                                         track,
@@ -6049,7 +6046,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let desc = chain
                                         .get(slot_idx)
                                         .and_then(|name| {
-                                            sequencer::lisp_effect::load_midi_fx_descriptor(name)
+                                            sequencer::lisp_host::load_midi_fx_descriptor(name)
                                         })
                                         .and_then(|desc| desc.params.get(param_idx).cloned());
                                     if let Some(desc) = desc {
@@ -6107,7 +6104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .get(slot_idx)
                                             .map(|slot| {
                                                 let default = slot.defaults.get(param_idx);
-                                                sequencer::lisp_effect::selected_neural_effect_plock_value(
+                                                sequencer::lisp_host::selected_neural_effect_plock_value(
                                                     &state,
                                                     &neural_selection,
                                                     track,
@@ -7708,7 +7705,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let desc = chain
                                     .get(slot_idx)
                                     .and_then(|name| {
-                                        sequencer::lisp_effect::load_midi_fx_descriptor(name)
+                                        sequencer::lisp_host::load_midi_fx_descriptor(name)
                                     })
                                     .and_then(|desc| desc.params.get(param_idx).cloned());
                                 let clamped = desc
@@ -7763,7 +7760,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let clamped = chain
                                     .get(slot_idx)
                                     .and_then(|name| {
-                                        sequencer::lisp_effect::load_midi_fx_descriptor(name)
+                                        sequencer::lisp_host::load_midi_fx_descriptor(name)
                                     })
                                     .and_then(|desc| desc.params.get(param_idx).cloned())
                                     .map(|p| value.clamp(p.min, p.max))
@@ -8001,7 +7998,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let clamped = chain
                                                     .get(slot_idx)
                                                     .and_then(|name| {
-                                                        sequencer::lisp_effect::load_midi_fx_descriptor(name)
+                                                        sequencer::lisp_host::load_midi_fx_descriptor(name)
                                                     })
                                                     .and_then(|desc| {
                                                         desc.params.get(param_idx).cloned()
@@ -8155,7 +8152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Some(selected_idx) = chain
                                                 .get(slot_idx)
                                                 .and_then(|name| {
-                                                    sequencer::lisp_effect::load_midi_fx_descriptor(
+                                                    sequencer::lisp_host::load_midi_fx_descriptor(
                                                         name,
                                                     )
                                                 })
@@ -8302,7 +8299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (network_id, neuron_idx, target_track, param_idx)
                                         {
-                                            match sequencer::lisp_effect::clear_neural_instrument_plock_by_network_id(
+                                            match sequencer::lisp_host::clear_neural_instrument_plock_by_network_id(
                                                 &state,
                                                 network_id,
                                                 neuron_idx,
@@ -8332,7 +8329,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             slot_idx,
                                             param_idx,
                                         ) {
-                                            match sequencer::lisp_effect::clear_neural_effect_plock_by_network_id(
+                                            match sequencer::lisp_host::clear_neural_effect_plock_by_network_id(
                                                 &state,
                                                 network_id,
                                                 neuron_idx,
@@ -10687,10 +10684,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         InstrumentEditMode::EditExisting { .. } => unreachable!(),
                                     };
-                                    if let Err(error) = sequencer::lisp_effect::save_instrument(
-                                        &final_name,
-                                        &source,
-                                    ) {
+                                    if let Err(error) =
+                                        sequencer::lisp_host::save_instrument(&final_name, &source)
+                                    {
                                         let _ = std::fs::remove_dir_all(&final_dir);
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(
@@ -10705,7 +10701,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         continue;
                                     }
                                     if let Err(error) =
-                                        sequencer::lisp_effect::save_instrument_run_mode(
+                                        sequencer::lisp_host::save_instrument_run_mode(
                                             &final_name,
                                             session.run_mode,
                                         )
@@ -10888,7 +10884,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Value::String(inst_name) = &*cell.borrow() {
                                     let inst_name = inst_name.clone();
                                     let file_path =
-                                        match sequencer::lisp_effect::instrument_source_path(
+                                        match sequencer::lisp_host::instrument_source_path(
                                             &inst_name,
                                         ) {
                                             Ok(path) => path,
@@ -10928,7 +10924,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     };
                                     let run_mode =
-                                        match sequencer::lisp_effect::load_instrument_run_mode(
+                                        match sequencer::lisp_host::load_instrument_run_mode(
                                             &inst_name,
                                         ) {
                                             Ok(run_mode) => run_mode,
@@ -11150,7 +11146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.read_buffer_text(&buf_name).unwrap_or_default();
 
                                     if let Err(e) =
-                                        sequencer::lisp_effect::save_instrument(&inst_name, &source)
+                                        sequencer::lisp_host::save_instrument(&inst_name, &source)
                                     {
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(
@@ -11405,7 +11401,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let (tx, rx) = std::sync::mpsc::channel();
                         std::thread::spawn(move || {
                             let result =
-                                sequencer::lisp_effect::compile_and_load_instrument_with_asset_base(
+                                sequencer::lisp_host::compile_and_load_instrument_with_asset_base(
                                     &compile_source,
                                     sample_rate,
                                     asset_base.as_deref(),
@@ -11559,7 +11555,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let asset_base = session.path.parent().map(|parent| parent.to_path_buf());
                         let (tx, rx) = std::sync::mpsc::channel();
                         std::thread::spawn(move || {
-                            let result = sequencer::lisp_effect::compile_and_load_with_asset_base(
+                            let result = sequencer::lisp_host::compile_and_load_with_asset_base(
                                 &compile_source,
                                 sample_rate,
                                 asset_base.as_deref(),
@@ -11675,7 +11671,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let file_path = temp_dir.join("dsp.lisp");
                         if let Err(error) =
-                            std::fs::write(&file_path, sequencer::lisp_effect::EFFECT_TEMPLATE)
+                            std::fs::write(&file_path, sequencer::lisp_host::EFFECT_TEMPLATE)
                         {
                             let _ = std::fs::remove_dir_all(&temp_dir);
                             editor.handle_host_event(HostEvent::Error(format!(
@@ -11683,8 +11679,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        match sequencer::lisp_effect::compile_and_load_with_asset_base(
-                            sequencer::lisp_effect::EFFECT_TEMPLATE,
+                        match sequencer::lisp_host::compile_and_load_with_asset_base(
+                            sequencer::lisp_host::EFFECT_TEMPLATE,
                             app.graph.sample_rate,
                             file_path.parent(),
                         )
@@ -11741,7 +11737,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             file_path,
                             buf_name.clone(),
                             EffectEditTarget::Track { track, slot },
-                            sequencer::lisp_effect::EFFECT_TEMPLATE.to_string(),
+                            sequencer::lisp_host::EFFECT_TEMPLATE.to_string(),
                             temp_dir,
                         ));
                         let rt = editor.runtime_mut();
@@ -11908,7 +11904,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                     let source = session.last_valid_source.clone();
                                     if let Err(e) =
-                                        sequencer::lisp_effect::save_effect(&final_name, &source)
+                                        sequencer::lisp_host::save_effect(&final_name, &source)
                                     {
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(
@@ -11921,7 +11917,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         continue;
                                     }
                                     let final_dsp =
-                                        sequencer::lisp_effect::effect_source_path(&final_name);
+                                        sequencer::lisp_host::effect_source_path(&final_name);
                                     if let Some(layout) = session.last_valid_layout.as_deref() {
                                         if let Err(e) =
                                             write_patcher_layout_sidecar(&final_dsp, layout)
@@ -12080,7 +12076,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             _ => None,
                                         });
                                     let file_path =
-                                        sequencer::lisp_effect::effect_source_path(&effect_name);
+                                        sequencer::lisp_host::effect_source_path(&effect_name);
                                     if !file_path.exists() {
                                         editor.handle_host_event(HostEvent::Error(format!(
                                             "Effect file not found: {}",
@@ -12321,7 +12317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         session.path.parent().map(|parent| parent.to_path_buf());
                                     let (tx, rx) = std::sync::mpsc::channel();
                                     std::thread::spawn(move || {
-                                        let result = sequencer::lisp_effect::compile_and_load_instrument_with_asset_base(
+                                        let result = sequencer::lisp_host::compile_and_load_instrument_with_asset_base(
                                             &source,
                                             sample_rate,
                                             asset_base.as_deref(),
@@ -12420,7 +12416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let (tx, rx) = std::sync::mpsc::channel();
                                     std::thread::spawn(move || {
                                         let result =
-                                            sequencer::lisp_effect::compile_and_load_with_asset_base(
+                                            sequencer::lisp_host::compile_and_load_with_asset_base(
                                                 &source,
                                                 sample_rate,
                                                 asset_base.as_deref(),

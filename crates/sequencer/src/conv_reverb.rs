@@ -432,7 +432,7 @@ pub fn clear_instance(node_id: i32) {
 
 impl StereoIrSlots {
     /// Pull the four IR tensor offsets out of a compiled manifest by name.
-    pub fn from_manifest(m: &crate::lisp_effect::DGenManifest) -> Option<Self> {
+    pub fn from_manifest(m: &crate::lisp_host::DGenManifest) -> Option<Self> {
         let find = |name: &str| {
             m.tensors
                 .iter()
@@ -460,7 +460,7 @@ pub unsafe fn apply_ir_to_node(
     slots: &StereoIrSlots,
     ir: &StereoIr,
 ) -> Result<(), String> {
-    use crate::lisp_effect::queue_tensor_write;
+    use crate::lisp_host::queue_tensor_write;
     let ok = queue_tensor_write(lg, node_id, slots.l_re, &ir.left.re)
         && queue_tensor_write(lg, node_id, slots.l_im, &ir.left.im)
         && queue_tensor_write(lg, node_id, slots.r_re, &ir.right.re)
@@ -502,9 +502,9 @@ mod tests {
             eprintln!("skipping: DGenLisp tool not found at {:?}", tool_path());
             return;
         }
-        let json = crate::lisp_effect::compile_lisp(dsp_source(), 44100)
+        let json = crate::lisp_host::compile_lisp(dsp_source(), 44100)
             .expect("compile bundled conv reverb DSP");
-        let manifest = crate::lisp_effect::parse_manifest(&json).expect("parse manifest");
+        let manifest = crate::lisp_host::parse_manifest(&json).expect("parse manifest");
         let slots = StereoIrSlots::from_manifest(&manifest)
             .expect("manifest should expose irL_re/irL_im/irR_re/irR_im");
         // All four offsets distinct.

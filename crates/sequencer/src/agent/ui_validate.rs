@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use eseqlisp::parser::{ASTParser, Expression, Parser};
 use eseqlisp::Runtime;
 
-use crate::lisp_effect::DGenManifest;
+use crate::lisp_host::DGenManifest;
 
 pub fn validate_instrument_ui_source(
     ui_source: &str,
@@ -560,7 +560,7 @@ fn ui_param_ref_name(expr: &Expression) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{validate_effect_ui_source, validate_instrument_ui_source};
-    use crate::lisp_effect::{DGenManifest, DGenParam};
+    use crate::lisp_host::{DGenManifest, DGenParam};
 
     fn manifest_with_params(names: &[&str]) -> DGenManifest {
         DGenManifest {

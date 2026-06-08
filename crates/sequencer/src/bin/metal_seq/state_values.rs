@@ -1151,7 +1151,7 @@ pub(crate) fn sync_instrument_param_value_field_with_neural_selection(
     param_idx: usize,
     display_step: Option<usize>,
     selected_neural_neurons: Option<
-        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) -> bool {
     if let Some((name, value)) = app
@@ -1163,7 +1163,7 @@ pub(crate) fn sync_instrument_param_value_field_with_neural_selection(
             app.state.pattern.instrument_slots.get(track).map(|slot| {
                 let stored = selected_neural_neurons
                     .and_then(|selection| {
-                        sequencer::lisp_effect::selected_neural_instrument_plock_value(
+                        sequencer::lisp_host::selected_neural_instrument_plock_value(
                             &app.state, selection, track, param_idx,
                         )
                     })
@@ -1283,7 +1283,7 @@ pub(crate) fn sync_track_effect_param_value_field_with_neural_selection(
     param_idx: usize,
     display_step: Option<usize>,
     selected_neural_neurons: Option<
-        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) -> bool {
     if let Some((name, value)) = descriptors
@@ -1299,7 +1299,7 @@ pub(crate) fn sync_track_effect_param_value_field_with_neural_selection(
                 .map(|slot| {
                     let stored = selected_neural_neurons
                         .and_then(|selection| {
-                            sequencer::lisp_effect::selected_neural_effect_plock_value(
+                            sequencer::lisp_host::selected_neural_effect_plock_value(
                                 state, selection, track, slot_idx, param_idx,
                             )
                         })
@@ -1330,7 +1330,7 @@ pub(crate) fn sync_midi_fx_param_value_field(
     let chain = state.pattern.track_params[track].midi_fx_chain();
     if let Some((name, value)) = chain
         .get(slot_idx)
-        .and_then(|fx_name| sequencer::lisp_effect::load_midi_fx_descriptor(fx_name))
+        .and_then(|fx_name| sequencer::lisp_host::load_midi_fx_descriptor(fx_name))
         .and_then(|desc| desc.params.get(param_idx).cloned())
         .and_then(|pdesc| {
             state
@@ -1402,7 +1402,7 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     selected_neural_neurons: Option<
-        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) -> bool {
     let mut needs_ui = false;
@@ -1448,7 +1448,7 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
             .iter()
             .enumerate()
         {
-            if let Some(desc) = sequencer::lisp_effect::load_midi_fx_descriptor(name) {
+            if let Some(desc) = sequencer::lisp_host::load_midi_fx_descriptor(name) {
                 for (param_idx, pdesc) in desc.params.iter().enumerate() {
                     if param_supports_value_binding(pdesc) {
                         needs_ui |= sync_midi_fx_param_value_field(
@@ -4277,7 +4277,7 @@ pub(crate) fn build_midi_effects_value(
     use sequencer::effects::{EffectDescriptor, ParamKind};
     use std::collections::HashMap;
 
-    let descriptors = sequencer::lisp_effect::load_midi_fx_descriptors();
+    let descriptors = sequencer::lisp_host::load_midi_fx_descriptors();
     let descriptor_for = |name: &str| -> Option<EffectDescriptor> {
         descriptors
             .iter()
@@ -5479,7 +5479,7 @@ pub(crate) fn build_selection_value_from_set(set: &HashSet<usize>) -> Value {
 
 /// Build list of available effect names from the effects/ directory.
 pub(crate) fn build_available_effects() -> Value {
-    let names = sequencer::lisp_effect::list_saved_effects();
+    let names = sequencer::lisp_host::list_saved_effects();
     let items: Vec<Rc<RefCell<Value>>> = names
         .into_iter()
         .map(|n| Rc::new(RefCell::new(Value::String(n))))
@@ -5501,7 +5501,7 @@ pub(crate) fn build_available_builtin_effects() -> Value {
 }
 
 pub(crate) fn build_available_midi_effects() -> Value {
-    let mut names: Vec<String> = sequencer::lisp_effect::load_midi_fx_descriptors()
+    let mut names: Vec<String> = sequencer::lisp_host::load_midi_fx_descriptors()
         .into_iter()
         .map(|desc| desc.name)
         .collect();
@@ -5514,7 +5514,7 @@ pub(crate) fn build_available_midi_effects() -> Value {
 }
 
 pub(crate) fn midi_fx_option_index(fx_name: &str, param_idx: usize, label: &str) -> Option<usize> {
-    sequencer::lisp_effect::load_midi_fx_descriptor(fx_name)
+    sequencer::lisp_host::load_midi_fx_descriptor(fx_name)
         .and_then(|desc| desc.params.get(param_idx).cloned())
         .and_then(|param| match param.kind {
             sequencer::effects::ParamKind::Enum { labels } => {
@@ -5718,7 +5718,7 @@ pub(crate) fn load_instrument_preset_into_track(
 ) -> Result<(), String> {
     let instrument_name = current_custom_instrument_name(app, track)
         .ok_or_else(|| "Current track is not a custom instrument".to_string())?;
-    let presets = sequencer::lisp_effect::load_instrument_presets(&instrument_name)
+    let presets = sequencer::lisp_host::load_instrument_presets(&instrument_name)
         .map_err(|e| e.to_string())?;
     let preset = presets
         .into_iter()
@@ -5901,7 +5901,7 @@ pub(crate) fn sync_track_params_with_neural_selection(
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
     selected_neural_neurons: Option<
-        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) {
     sync_track_params(rt, app, state, track, selected);
@@ -6067,7 +6067,7 @@ pub(crate) fn build_track_plocks_value_with_neural_selection(
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
     selected_neural_neurons: Option<
-        &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+        &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) -> Value {
     let Some(selection) = selected_neural_neurons else {
@@ -6086,7 +6086,7 @@ pub(crate) fn build_track_plocks_value_with_neural_selection(
 fn build_selected_neural_plocks_value(
     app: &ui::App,
     state: &Arc<SequencerState>,
-    selection: &std::collections::BTreeSet<sequencer::lisp_effect::SelectedNeuralNeuron>,
+    selection: &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
 ) -> Value {
     use sequencer::effects::ParamKind;
 
@@ -6316,7 +6316,7 @@ pub(crate) fn build_track_plocks_value(
         for (slot_idx, slot) in state.pattern.midi_fx_slots[track].iter().enumerate() {
             let Some(desc) = midi_chain
                 .get(slot_idx)
-                .and_then(|name| sequencer::lisp_effect::load_midi_fx_descriptor(name))
+                .and_then(|name| sequencer::lisp_host::load_midi_fx_descriptor(name))
             else {
                 continue;
             };
@@ -11302,7 +11302,7 @@ mod tests {
             })
             .unwrap();
         let selection =
-            std::collections::BTreeSet::from([sequencer::lisp_effect::SelectedNeuralNeuron {
+            std::collections::BTreeSet::from([sequencer::lisp_host::SelectedNeuralNeuron {
                 pattern_idx: 0,
                 network_id: 11,
                 neuron_idx: 0,
@@ -11358,7 +11358,7 @@ mod tests {
             .unwrap();
         let selected_steps = Arc::new(Mutex::new(HashSet::from([2])));
         let selection =
-            std::collections::BTreeSet::from([sequencer::lisp_effect::SelectedNeuralNeuron {
+            std::collections::BTreeSet::from([sequencer::lisp_host::SelectedNeuralNeuron {
                 pattern_idx: 0,
                 network_id: 11,
                 neuron_idx: 0,

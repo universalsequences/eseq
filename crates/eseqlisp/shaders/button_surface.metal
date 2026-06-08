@@ -56,7 +56,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     fill_lit += in.color_c.rgb * in.color_c.a * key_specular * edge_fade * 0.10;
     fill_lit = mix(fill_lit, in.color_d.rgb, in.color_d.a * (1.0 - key_diffuse) * 0.05);
 
-    float3 border_lit = in.color_b.rgb * (0.32 + 0.54 * key_diffuse + 0.26 * bounce_diffuse);
+    float3 border_lit = in.color_b.rgb * (0.02 + 0.54 * key_diffuse + 0.26 * bounce_diffuse);
     border_lit += in.color_c.rgb * in.color_c.a * (key_specular * 4.8 + bounce_specular * 2.25) * edge_fade;
     border_lit = mix(border_lit, in.color_d.rgb, in.color_d.a * (1.0 - max(key_diffuse, bounce_diffuse)) * 0.42);
 

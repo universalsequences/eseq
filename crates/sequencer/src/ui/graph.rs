@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use crate::effects::EffectDescriptor;
-use crate::lisp_effect::{self, DGenManifest, LoadedDGenLib};
+use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
     BusId, CustomInstrumentRunMode, InstrumentType, TrackOutput, EXT_MOD_INPUT_COUNT, MAX_TRACKS,
 };
@@ -173,7 +173,7 @@ fn normalized_host_input_name(name: &str) -> String {
 
 fn host_signal_output_for_input(
     manifest: &DGenManifest,
-    input: &lisp_effect::DGenInput,
+    input: &lisp_host::DGenInput,
 ) -> Option<i32> {
     let manifest_lacks_names = manifest
         .inputs
@@ -1177,7 +1177,7 @@ impl GraphController<'_> {
 
             bus.effect_descriptors = super::BusChannelState::default_effect_descriptors();
             bus.effect_slots = super::BusChannelState::default_effect_slots();
-            bus.custom_effect_names = vec![None; crate::lisp_effect::MAX_CUSTOM_FX];
+            bus.custom_effect_names = vec![None; crate::lisp_host::MAX_CUSTOM_FX];
         }
 
         self.app.publish_bus_gate_runtime();
@@ -1354,7 +1354,7 @@ impl GraphController<'_> {
 
     fn find_custom_slot_successor(&self, track: usize, offset: usize) -> i32 {
         let chain = &self.app.state.pattern.effect_chains[track];
-        for i in (offset + 1)..crate::lisp_effect::MAX_CUSTOM_FX {
+        for i in (offset + 1)..crate::lisp_host::MAX_CUSTOM_FX {
             let idx = crate::effects::BUILTIN_SLOT_COUNT + i;
             if idx < chain.len() {
                 let node_id = chain[idx].node_id.load(Ordering::Relaxed);
@@ -1393,7 +1393,7 @@ impl GraphController<'_> {
         offset: usize,
     ) -> (i32, usize) {
         let chain = &self.app.state.pattern.effect_chains[track];
-        for i in (offset + 1)..crate::lisp_effect::MAX_CUSTOM_FX {
+        for i in (offset + 1)..crate::lisp_host::MAX_CUSTOM_FX {
             let idx = crate::effects::BUILTIN_SLOT_COUNT + i;
             if idx < chain.len() {
                 let node_id = chain[idx].node_id.load(Ordering::Relaxed);
@@ -1487,13 +1487,13 @@ impl GraphController<'_> {
         {
             let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
             unsafe {
-                crate::lisp_effect::remove_effect_from_chain(
+                crate::lisp_host::remove_effect_from_chain(
                     self.app.graph.lg.0,
                     node_id as i32,
                     predecessor_id,
                     successor_id,
                 );
-                crate::lisp_effect::remove_effect_modulator(
+                crate::lisp_host::remove_effect_modulator(
                     self.app.graph.lg.0,
                     modulator_node_id as i32,
                 );
@@ -1713,7 +1713,7 @@ impl GraphController<'_> {
         }
 
         self.app.state.runtime.engine_voice_counts[engine_id].store(0, Ordering::Release);
-        lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
+        lisp_host::reset_dgen_engine_enabled_voices(engine_id);
         for voice in 0..MAX_VOICES {
             self.app.state.runtime.engine_voice_lids[engine_id][voice].store(0, Ordering::Release);
             self.app.state.runtime.engine_synth_node_ids[engine_id][voice]
@@ -2060,7 +2060,7 @@ impl GraphController<'_> {
         self.route_free_patch_idle_voice_to_track(engine_id, track)?;
         self.dispatch_instrument_defaults_to_engine_voice(track, engine_id, 0)?;
         self.push_free_patch_idle_gatepitch(engine_id)?;
-        lisp_effect::set_dgen_engine_enabled_voices(engine_id, 1);
+        lisp_host::set_dgen_engine_enabled_voices(engine_id, 1);
         Ok(())
     }
 
@@ -2610,18 +2610,18 @@ impl GraphController<'_> {
             }
 
             let slot_id = engine_id * MAX_VOICES + v;
-            lisp_effect::set_dgen_instrument_fn(slot_id, lib.process_fn);
-            lisp_effect::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
-            let init_msg = lisp_effect::build_init_message_for_voice(slot_id, manifest, v);
+            lisp_host::set_dgen_instrument_fn(slot_id, lib.process_fn);
+            lisp_host::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
+            let init_msg = lisp_host::build_init_message_for_voice(slot_id, manifest, v);
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
-            let state_size = lisp_effect::dgen_total_state_slots(manifest.total_memory_slots)
+            let state_size = lisp_host::dgen_total_state_slots(manifest.total_memory_slots)
                 * std::mem::size_of::<f32>();
 
             let synth_name = CString::new(format!("{}_engine_synth_{}", name, v)).unwrap();
             let synth_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
-                    lisp_effect::dgenlisp_instrument_vtable(),
+                    lisp_host::dgenlisp_instrument_vtable(),
                     state_size,
                     synth_name.as_ptr(),
                     manifest.n_inputs as i32,
@@ -2708,7 +2708,7 @@ impl GraphController<'_> {
         }
         self.app.state.runtime.engine_voice_counts[engine_id]
             .store(MAX_VOICES as u32, Ordering::Release);
-        lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
+        lisp_host::reset_dgen_engine_enabled_voices(engine_id);
         if let Some(engine) = &self.app.graph.engine_node_ids[engine_id] {
             for (v, &sid) in engine.synth_ids.iter().enumerate() {
                 self.app.state.runtime.engine_synth_node_ids[engine_id][v]
@@ -2979,7 +2979,7 @@ impl GraphController<'_> {
             return Err("Missing engine runtime".to_string());
         };
         self.silence_engine_routes(engine_id, &engine);
-        lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
+        lisp_host::reset_dgen_engine_enabled_voices(engine_id);
 
         let audio_output_channels = manifest_audio_output_channels(manifest);
         let mod_output_channels = manifest_mod_output_channels(manifest);
@@ -3047,17 +3047,17 @@ impl GraphController<'_> {
             }
 
             let slot_id = engine_id * MAX_VOICES + v;
-            lisp_effect::set_dgen_instrument_fn(slot_id, lib.process_fn);
-            lisp_effect::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
-            let init_msg = lisp_effect::build_init_message_for_voice(slot_id, manifest, v);
+            lisp_host::set_dgen_instrument_fn(slot_id, lib.process_fn);
+            lisp_host::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
+            let init_msg = lisp_host::build_init_message_for_voice(slot_id, manifest, v);
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
-            let state_size = lisp_effect::dgen_total_state_slots(manifest.total_memory_slots)
+            let state_size = lisp_host::dgen_total_state_slots(manifest.total_memory_slots)
                 * std::mem::size_of::<f32>();
             let synth_name = CString::new(format!("engine_{}_synth_{}", engine_id, v)).unwrap();
             let synth_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
-                    lisp_effect::dgenlisp_instrument_vtable(),
+                    lisp_host::dgenlisp_instrument_vtable(),
                     state_size,
                     synth_name.as_ptr(),
                     manifest.n_inputs as i32,
@@ -3499,7 +3499,7 @@ impl GraphController<'_> {
         manifest: &DGenManifest,
         preserve_runtime_values: bool,
     ) {
-        let inst_desc = lisp_effect::instrument_descriptor_from_manifest(name, manifest);
+        let inst_desc = lisp_host::instrument_descriptor_from_manifest(name, manifest);
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
         let (node_id, modulator_node_id) = self.instrument_slot_identity(track);
         if preserve_runtime_values {

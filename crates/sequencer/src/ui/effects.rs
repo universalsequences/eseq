@@ -9,7 +9,7 @@ use crate::effects::{
     EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
     BUILTIN_SLOT_COUNT,
 };
-use crate::lisp_effect::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
+use crate::lisp_host::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
 use crate::sequencer::{CustomInstrumentRunMode, InstrumentType};
 use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
@@ -55,10 +55,10 @@ fn instrument_display_name(name: &str) -> String {
 }
 
 impl App {
-    fn compile_saved_effect(&self, name: &str) -> Result<lisp_effect::CompileResult, String> {
-        let source_path = lisp_effect::effect_source_path(name);
+    fn compile_saved_effect(&self, name: &str) -> Result<lisp_host::CompileResult, String> {
+        let source_path = lisp_host::effect_source_path(name);
         let source = std::fs::read_to_string(&source_path).map_err(|e| e.to_string())?;
-        lisp_effect::compile_and_load_with_asset_base(
+        lisp_host::compile_and_load_with_asset_base(
             &source,
             self.graph.sample_rate,
             source_path.parent(),
@@ -79,7 +79,7 @@ impl App {
             .min(self.state.active_track_count().saturating_sub(1));
         let cursor_step = self.ui.cursor_step;
         self.sync_scratch_runtime_descriptors();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&self.state),
             self.graph.effect_descriptors.clone(),
             self.graph.instrument_descriptors.clone(),
@@ -87,7 +87,7 @@ impl App {
             cursor_step,
         );
         let scratch_source =
-            lisp_effect::midi_fx_library_source_with_user_source(&self.editor.scratch_buffer);
+            lisp_host::midi_fx_library_source_with_user_source(&self.editor.scratch_buffer);
         if !scratch_source.trim().is_empty() {
             runtime.eval(&scratch_source)?;
         }
@@ -139,9 +139,9 @@ impl App {
     }
 
     pub fn add_saved_instrument_track_sync(&mut self, name: &str) -> Result<usize, String> {
-        let source = lisp_effect::load_instrument_source(name).map_err(|e| e.to_string())?;
-        let run_mode = lisp_effect::load_instrument_run_mode(name).map_err(|e| e.to_string())?;
-        let asset_base = lisp_effect::instrument_source_path(name)
+        let source = lisp_host::load_instrument_source(name).map_err(|e| e.to_string())?;
+        let run_mode = lisp_host::load_instrument_run_mode(name).map_err(|e| e.to_string())?;
+        let asset_base = lisp_host::instrument_source_path(name)
             .ok()
             .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
 
@@ -150,8 +150,7 @@ impl App {
                 .manifest
                 .clone();
             let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-            let lib_ptr: *const lisp_effect::LoadedDGenLib =
-                &self.editor.instrument_libs[lib_index];
+            let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
             let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
                 self.register_dedicated_instrument_engine(name, &source, &manifest, lib_index)?
             } else {
@@ -163,7 +162,7 @@ impl App {
             };
         }
 
-        let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+        let result = lisp_host::compile_and_load_instrument_with_asset_base(
             &source,
             self.graph.sample_rate,
             asset_base.as_deref(),
@@ -173,7 +172,7 @@ impl App {
             .manifest
             .clone();
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-        let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
             self.register_dedicated_instrument_engine(name, &source, &manifest, lib_index)?
         } else {
@@ -191,7 +190,7 @@ impl App {
         source: &str,
         asset_base: Option<&std::path::Path>,
     ) -> Result<usize, String> {
-        let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+        let result = lisp_host::compile_and_load_instrument_with_asset_base(
             source,
             self.graph.sample_rate,
             asset_base,
@@ -201,7 +200,7 @@ impl App {
             .manifest
             .clone();
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-        let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         unsafe {
             self.graph_controller().add_custom_track(
                 name,
@@ -243,17 +242,17 @@ impl App {
                 "The current custom instrument track has no engine binding.".to_string()
             })?;
 
-        let asset_base = lisp_effect::instrument_source_path(name)
+        let asset_base = lisp_host::instrument_source_path(name)
             .ok()
             .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
-        let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+        let result = lisp_host::compile_and_load_instrument_with_asset_base(
             source,
             self.graph.sample_rate,
             asset_base.as_deref(),
         )?;
         let manifest = result.manifest.clone();
         let lib_index = self.push_instrument_lib(result.lib);
-        let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         unsafe {
             self.graph_controller()
                 .hot_reload_instrument(track, &manifest, &*lib_ptr)
@@ -308,10 +307,10 @@ impl App {
             );
         }
 
-        let asset_base = lisp_effect::instrument_source_path(name)
+        let asset_base = lisp_host::instrument_source_path(name)
             .ok()
             .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
-        let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+        let result = lisp_host::compile_and_load_instrument_with_asset_base(
             source,
             self.graph.sample_rate,
             asset_base.as_deref(),
@@ -324,7 +323,7 @@ impl App {
         engine_id: usize,
         name: &str,
         source: &str,
-        result: lisp_effect::CompileResult,
+        result: lisp_host::CompileResult,
     ) -> Result<(), String> {
         let track = self
             .graph
@@ -340,7 +339,7 @@ impl App {
 
         let manifest = result.manifest.clone();
         let lib_index = self.push_instrument_lib(result.lib);
-        let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         unsafe {
             self.graph_controller()
                 .hot_reload_instrument(track, &manifest, &*lib_ptr)
@@ -392,8 +391,8 @@ impl App {
         &mut self,
         name: &str,
         source: &str,
-        manifest: &lisp_effect::DGenManifest,
-        lib: lisp_effect::LoadedDGenLib,
+        manifest: &lisp_host::DGenManifest,
+        lib: lisp_host::LoadedDGenLib,
     ) -> usize {
         let lib_index = self.editor.instrument_libs.len();
         self.editor.instrument_libs.push(lib);
@@ -411,7 +410,7 @@ impl App {
         &mut self,
         name: &str,
         source: &str,
-        manifest: &lisp_effect::DGenManifest,
+        manifest: &lisp_host::DGenManifest,
         lib_index: usize,
     ) -> Result<usize, String> {
         if self.editor.engine_registry.engines.len() >= self.state.runtime.engine_voice_lids.len() {
@@ -430,7 +429,7 @@ impl App {
         Ok(self.editor.engine_registry.upsert(entry))
     }
 
-    fn push_instrument_lib(&mut self, lib: lisp_effect::LoadedDGenLib) -> usize {
+    fn push_instrument_lib(&mut self, lib: lisp_host::LoadedDGenLib) -> usize {
         let lib_index = self.editor.instrument_libs.len();
         self.editor.instrument_libs.push(lib);
         lib_index
@@ -444,7 +443,7 @@ impl App {
             .manifest
             .clone();
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-        let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         match unsafe {
             self.graph_controller().add_custom_track(
                 name,
@@ -500,7 +499,7 @@ impl App {
         let slot_idx = self
             .next_free_midi_fx_slot(track)
             .ok_or_else(|| "No free MIDI FX slots available".to_string())?;
-        let desc = lisp_effect::load_midi_fx_descriptor(name)
+        let desc = lisp_host::load_midi_fx_descriptor(name)
             .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
 
         let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
@@ -854,7 +853,7 @@ impl App {
         if track >= self.tracks.len() {
             return Err("Invalid track index".to_string());
         }
-        let desc = lisp_effect::load_midi_fx_descriptor(name)
+        let desc = lisp_host::load_midi_fx_descriptor(name)
             .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
         let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
         if chain.len() >= MAX_MIDI_FX_SLOTS {
@@ -1363,10 +1362,10 @@ impl App {
         let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
         unsafe {
             if let Some(old_id) = existing {
-                lisp_effect::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
+                lisp_host::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
             }
             if let Some(old_mod_id) = existing_modulator {
-                lisp_effect::remove_effect_modulator(self.graph.lg.0, old_mod_id);
+                lisp_host::remove_effect_modulator(self.graph.lg.0, old_mod_id);
             }
             self.connect_builtin_effect_chain(
                 pred,
@@ -1416,7 +1415,7 @@ impl App {
             return Err(format!("Unknown dgenlisp builtin '{name}'"));
         };
         let result =
-            lisp_effect::compile_and_load_with_asset_base(source, self.graph.sample_rate, None)?;
+            lisp_host::compile_and_load_with_asset_base(source, self.graph.sample_rate, None)?;
         // Capture IR tensor offsets before `result` is consumed by apply.
         let slots = crate::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
@@ -1558,7 +1557,7 @@ impl App {
         &self,
         track: usize,
         name: &str,
-        manifest: &lisp_effect::DGenManifest,
+        manifest: &lisp_host::DGenManifest,
     ) -> EffectDescriptor {
         let mut desc = EffectDescriptor::from_lisp_manifest(
             name,
@@ -1567,11 +1566,11 @@ impl App {
             manifest.n_outputs,
         );
 
-        lisp_effect::append_effect_host_modulation_controls(&mut desc, manifest);
+        lisp_host::append_effect_host_modulation_controls(&mut desc, manifest);
 
         let sidechain_labels = self.effect_sidechain_labels(track);
         desc.params.extend(
-            lisp_effect::effect_sidechain_inputs(manifest)
+            lisp_host::effect_sidechain_inputs(manifest)
                 .into_iter()
                 .map(|input| ParamDescriptor {
                     name: input.name,
@@ -1596,7 +1595,7 @@ impl App {
     fn build_bus_effect_descriptor(
         &self,
         name: &str,
-        manifest: &lisp_effect::DGenManifest,
+        manifest: &lisp_host::DGenManifest,
     ) -> EffectDescriptor {
         let mut desc = EffectDescriptor::from_lisp_manifest(
             name,
@@ -1604,11 +1603,11 @@ impl App {
             manifest.n_inputs,
             manifest.n_outputs,
         );
-        lisp_effect::append_effect_host_modulation_controls(&mut desc, manifest);
+        lisp_host::append_effect_host_modulation_controls(&mut desc, manifest);
 
         let sidechain_labels = self.bus_effect_sidechain_labels();
         desc.params.extend(
-            lisp_effect::effect_sidechain_inputs(manifest)
+            lisp_host::effect_sidechain_inputs(manifest)
                 .into_iter()
                 .map(|input| ParamDescriptor {
                     name: input.name,
@@ -1850,9 +1849,9 @@ impl App {
         &mut self,
         track: usize,
         slot_idx: usize,
-        node_ids: lisp_effect::EffectGraphNodeIds,
+        node_ids: lisp_host::EffectGraphNodeIds,
         name: &str,
-        manifest: &lisp_effect::DGenManifest,
+        manifest: &lisp_host::DGenManifest,
     ) {
         let old_desc = self.graph.effect_descriptors[track][slot_idx].clone();
         let preserve_by_param_name = old_desc.name == name
@@ -1934,7 +1933,7 @@ impl App {
         let mut repaired = 0;
         for (track, slot_idx, name) in targets {
             let result = self.compile_saved_effect(&name)?;
-            if lisp_effect::effect_sidechain_inputs(&result.manifest).is_empty() {
+            if lisp_host::effect_sidechain_inputs(&result.manifest).is_empty() {
                 continue;
             }
             self.apply_compiled_effect_to_slot_sync(result, &name, slot_idx, track)?;
@@ -1963,7 +1962,7 @@ impl App {
             existing,
         ) = self.resolve_custom_slot_wiring(track, slot_idx);
 
-        let result = lisp_effect::run_embedded_effect_editor_flow(
+        let result = lisp_host::run_embedded_effect_editor_flow(
             self.graph.sample_rate,
             Arc::clone(&self.state),
             track,
@@ -1978,7 +1977,7 @@ impl App {
             let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
             let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
             match unsafe {
-                lisp_effect::add_effect_to_chain_at(
+                lisp_host::add_effect_to_chain_at(
                     self.graph.lg.0,
                     slot_id,
                     &r.manifest,
@@ -2009,7 +2008,7 @@ impl App {
     }
 
     pub fn start_effect_compile(&mut self, name: &str, slot_idx: usize) {
-        let source_path = lisp_effect::effect_source_path(name);
+        let source_path = lisp_host::effect_source_path(name);
         let source = match std::fs::read_to_string(&source_path) {
             Ok(source) => source,
             Err(e) => {
@@ -2021,7 +2020,7 @@ impl App {
         let sample_rate = self.graph.sample_rate;
         let asset_base = source_path.parent().map(|path| path.to_path_buf());
         std::thread::spawn(move || {
-            let result = lisp_effect::compile_and_load_with_asset_base(
+            let result = lisp_host::compile_and_load_with_asset_base(
                 &source,
                 sample_rate,
                 asset_base.as_deref(),
@@ -2091,7 +2090,7 @@ impl App {
 
     pub fn apply_compiled_effect_to_slot_sync(
         &mut self,
-        result: lisp_effect::CompileResult,
+        result: lisp_host::CompileResult,
         name: &str,
         slot_idx: usize,
         track: usize,
@@ -2108,7 +2107,7 @@ impl App {
         let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
         let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
         let node_ids = unsafe {
-            lisp_effect::add_effect_to_chain_at(
+            lisp_host::add_effect_to_chain_at(
                 self.graph.lg.0,
                 slot_id,
                 &result.manifest,
@@ -2134,7 +2133,7 @@ impl App {
 
     pub fn apply_compiled_effect(
         &mut self,
-        result: lisp_effect::CompileResult,
+        result: lisp_host::CompileResult,
         name: &str,
         slot_idx: usize,
         track: usize,
@@ -2419,7 +2418,7 @@ impl App {
             return Err(format!("Unknown dgenlisp builtin '{name}'"));
         };
         let result =
-            lisp_effect::compile_and_load_with_asset_base(source, self.graph.sample_rate, None)?;
+            lisp_host::compile_and_load_with_asset_base(source, self.graph.sample_rate, None)?;
         let slots = crate::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
         self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)?;
         let node_id = self
@@ -2476,10 +2475,10 @@ impl App {
         };
         unsafe {
             if let Some(old_id) = existing {
-                lisp_effect::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
+                lisp_host::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
             }
             if let Some(old_mod_id) = existing_modulator {
-                lisp_effect::remove_effect_modulator(self.graph.lg.0, old_mod_id);
+                lisp_host::remove_effect_modulator(self.graph.lg.0, old_mod_id);
             }
             self.connect_builtin_effect_chain(
                 pred,
@@ -2521,7 +2520,7 @@ impl App {
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
-        if bus_idx >= lisp_effect::MAX_BUS_FX_CHAINS {
+        if bus_idx >= lisp_host::MAX_BUS_FX_CHAINS {
             return Err(format!(
                 "Bus {} is outside the current bus FX registry limit",
                 bus_idx + 1
@@ -2536,9 +2535,9 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
         name: &str,
-        result: lisp_effect::CompileResult,
+        result: lisp_host::CompileResult,
     ) -> Result<(), String> {
-        if bus_idx >= lisp_effect::MAX_BUS_FX_CHAINS {
+        if bus_idx >= lisp_host::MAX_BUS_FX_CHAINS {
             return Err(format!(
                 "Bus {} is outside the current bus FX registry limit",
                 bus_idx + 1
@@ -2553,7 +2552,7 @@ impl App {
             .map(|slot| slot.modulator_node_id as i32)
             .filter(|node_id| *node_id > 0);
         let node_ids = unsafe {
-            lisp_effect::add_effect_to_chain_at(
+            lisp_host::add_effect_to_chain_at(
                 self.graph.lg.0,
                 slot_id,
                 &result.manifest,
@@ -2620,8 +2619,8 @@ impl App {
         };
         if node_id != 0 {
             unsafe {
-                lisp_effect::remove_effect_from_chain(self.graph.lg.0, node_id as i32, pred, succ);
-                lisp_effect::remove_effect_modulator(self.graph.lg.0, modulator_node_id as i32);
+                lisp_host::remove_effect_from_chain(self.graph.lg.0, node_id as i32, pred, succ);
+                lisp_host::remove_effect_modulator(self.graph.lg.0, modulator_node_id as i32);
             }
             self.connect_bus_effect_gap(pred, pred_outputs, succ, succ_inputs);
         }
@@ -2854,7 +2853,7 @@ impl App {
         if slot_idx < BUILTIN_SLOT_COUNT {
             return Err("The selected effect slot is not a custom effect slot.".to_string());
         }
-        crate::lisp_effect::save_effect(name, source).map_err(|e| e.to_string())?;
+        crate::lisp_host::save_effect(name, source).map_err(|e| e.to_string())?;
         self.load_saved_effect_to_slot_sync(track, slot_idx, name)?;
         self.ui.effect_tab = EffectTab::Slot(slot_idx);
         Ok(())
@@ -2862,16 +2861,16 @@ impl App {
 
     pub(super) fn apply_compiled_instrument(
         &mut self,
-        result: lisp_effect::CompileResult,
+        result: lisp_host::CompileResult,
         name: &str,
     ) {
-        let source = lisp_effect::load_instrument_source(name).unwrap_or_default();
+        let source = lisp_host::load_instrument_source(name).unwrap_or_default();
         let cache_idx = self.cache_instrument_engine(name, &source, &result.manifest, result.lib);
         let manifest = self.editor.engine_registry.engines[cache_idx]
             .manifest
             .clone();
         let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-        let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         match unsafe {
             self.graph_controller().add_custom_track(
                 name,
@@ -2895,7 +2894,7 @@ impl App {
     }
 
     fn run_instrument_editor(&mut self, existing_name: Option<String>) {
-        let result = lisp_effect::run_embedded_instrument_editor_flow(
+        let result = lisp_host::run_embedded_instrument_editor_flow(
             self.graph.sample_rate,
             Arc::clone(&self.state),
             Some(self.ui.cursor_track),
@@ -2912,7 +2911,7 @@ impl App {
                         self.graph.track_engine_ids.get(track).and_then(|id| *id);
                     let manifest = result.manifest.clone();
                     let lib_index = self.push_instrument_lib(result.lib);
-                    let lib_ptr: *const lisp_effect::LoadedDGenLib =
+                    let lib_ptr: *const lisp_host::LoadedDGenLib =
                         &self.editor.instrument_libs[lib_index];
                     unsafe {
                         self.graph_controller()
@@ -2967,7 +2966,7 @@ impl App {
                 let runtime_engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
                 let manifest = r.manifest.clone();
                 let lib_index = self.push_instrument_lib(r.lib);
-                let lib_ptr: *const lisp_effect::LoadedDGenLib =
+                let lib_ptr: *const lisp_host::LoadedDGenLib =
                     &self.editor.instrument_libs[lib_index];
                 match unsafe {
                     self.graph_controller()
@@ -3018,7 +3017,7 @@ impl App {
                     .manifest
                     .clone();
                 let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-                let lib_ptr: *const lisp_effect::LoadedDGenLib =
+                let lib_ptr: *const lisp_host::LoadedDGenLib =
                     &self.editor.instrument_libs[lib_index];
                 match unsafe {
                     self.graph_controller().add_custom_track(
@@ -3055,7 +3054,7 @@ impl App {
         let cursor_step = self.ui.cursor_step;
         self.sync_scratch_runtime_descriptors();
         let mut runtime = self.editor.scratch_runtime.take().unwrap_or_else(|| {
-            lisp_effect::ScratchControlRuntime::new(
+            lisp_host::ScratchControlRuntime::new(
                 Arc::clone(&self.state),
                 self.graph.effect_descriptors.clone(),
                 self.graph.instrument_descriptors.clone(),
@@ -3067,11 +3066,11 @@ impl App {
             self.graph.effect_descriptors.clone(),
             self.graph.instrument_descriptors.clone(),
         );
-        let midi_fx_library = lisp_effect::load_midi_fx_library_source();
+        let midi_fx_library = lisp_host::load_midi_fx_library_source();
         if !midi_fx_library.trim().is_empty() {
             let _ = runtime.eval(&midi_fx_library);
         }
-        if let Some((text, cursor, runtime)) = lisp_effect::run_embedded_scratch_flow(
+        if let Some((text, cursor, runtime)) = lisp_host::run_embedded_scratch_flow(
             track,
             cursor_step,
             &scratch_buffer,
@@ -3235,7 +3234,7 @@ impl App {
     }
 
     fn start_instrument_compile(&mut self, name: &str) {
-        let source = match lisp_effect::load_instrument_source(name) {
+        let source = match lisp_host::load_instrument_source(name) {
             Ok(s) => s,
             Err(e) => {
                 self.editor.status_message = Some((format!("Error: {e}"), Instant::now()));
@@ -3247,11 +3246,11 @@ impl App {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let sample_rate = self.graph.sample_rate;
-        let asset_base = lisp_effect::instrument_source_path(name)
+        let asset_base = lisp_host::instrument_source_path(name)
             .ok()
             .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
         std::thread::spawn(move || {
-            let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+            let result = lisp_host::compile_and_load_instrument_with_asset_base(
                 &source,
                 sample_rate,
                 asset_base.as_deref(),

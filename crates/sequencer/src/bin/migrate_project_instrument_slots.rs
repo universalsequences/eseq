@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sequencer::effects::EffectDescriptor;
-use sequencer::lisp_effect;
+use sequencer::lisp_host;
 use sequencer::project::{ProjectEffectSlot, ProjectFile, ProjectTrack};
 use sequencer::sequencer::MAX_STEPS;
 
@@ -11,15 +11,15 @@ fn usage() {
 }
 
 fn compile_instrument_descriptor(name: &str) -> Result<EffectDescriptor, String> {
-    let source = lisp_effect::load_instrument_source(name)
+    let source = lisp_host::load_instrument_source(name)
         .map_err(|error| format!("failed to load instrument source for '{name}': {error}"))?;
-    let asset_base = lisp_effect::instrument_source_path(name)
+    let asset_base = lisp_host::instrument_source_path(name)
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
     let manifest_json =
-        lisp_effect::compile_instrument_with_asset_base(&source, 44_100, asset_base.as_deref())?;
-    let manifest = lisp_effect::parse_manifest(&manifest_json)?;
-    Ok(lisp_effect::instrument_descriptor_from_manifest(
+        lisp_host::compile_instrument_with_asset_base(&source, 44_100, asset_base.as_deref())?;
+    let manifest = lisp_host::parse_manifest(&manifest_json)?;
+    Ok(lisp_host::instrument_descriptor_from_manifest(
         name, &manifest,
     ))
 }

@@ -113,7 +113,7 @@ impl App {
         match entry {
             EffectPaneEntry::Tab(tab) => self.select_effect_tab(tab),
             EffectPaneEntry::PlusButton => {
-                self.editor.picker_items = crate::lisp_effect::list_saved_effects();
+                self.editor.picker_items = crate::lisp_host::list_saved_effects();
                 self.editor.picker_cursor = 0;
                 self.editor.picker_filter.clear();
                 self.ui.input_mode = InputMode::EffectPicker;

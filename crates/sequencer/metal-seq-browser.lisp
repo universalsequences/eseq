@@ -280,14 +280,15 @@
 
 (def sbrowser-tag-chip (tag)
   (let ((name (get tag :name))
-        (selected (get tag :selected)))
+      (selected (get tag :selected)))
     (button name
       :variant :ghost
-      :background-color (if selected :black "#26272b")
-      :color (if selected :primary "#9ea1a8")
+      :background-color (if selected :blue "#36373b")
+      :color (if selected :white "#9ea1a8")
+      :border-color :black
       :height 1.02
       :padding 0.32
-      :font-size 9.0
+      :font-size 10.0
       :on-click |x y r| (sbrowser-toggle-tag name))))
 
 (def sbrowser-search-placeholder ()

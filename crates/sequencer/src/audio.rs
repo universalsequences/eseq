@@ -561,12 +561,12 @@ impl CustomEnginePool {
         let needed = (voice_idx + 1).min(MAX_VOICES).max(1);
         if needed > self.enabled_voice_count {
             self.enabled_voice_count = needed;
-            crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, needed);
+            crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, needed);
         }
     }
 
     fn sync_enabled_voice_count(&mut self, engine_id: usize) {
-        self.enabled_voice_count = crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id);
+        self.enabled_voice_count = crate::lisp_host::get_dgen_engine_enabled_voices(engine_id);
     }
 
     fn shrink_released_voices(
@@ -591,7 +591,7 @@ impl CustomEnginePool {
         let needed = (highest_retained_idx + 1).clamp(1, MAX_VOICES);
         if needed < self.enabled_voice_count {
             self.enabled_voice_count = needed;
-            crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, needed);
+            crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, needed);
         }
     }
 
@@ -660,7 +660,7 @@ fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut 
 
     if needs_reset {
         pool.reset();
-        crate::lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
+        crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
         for v in 0..desired_count {
             let lid = state.runtime.engine_voice_lids[engine_id][v].load(Ordering::Acquire);
             if lid != 0 {
@@ -857,7 +857,7 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     }
     for (engine_id, pool) in data.custom_engine_pools.iter_mut().enumerate() {
         pool.reset();
-        crate::lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
+        crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
     }
     for tracker in &mut data.gate_off_state {
         tracker.pending.clear();

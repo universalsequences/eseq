@@ -11,7 +11,7 @@ use crate::accumulator::{
     ACCUMULATOR_REGISTRY,
 };
 use crate::effects::EffectDescriptor;
-use crate::lisp_effect::{self, AccumulatorNoteSpan};
+use crate::lisp_host::{self, AccumulatorNoteSpan};
 use crate::neural::{NeuralOutput, NeuralRuntime, ParamNodeId};
 use crate::scheduled_event::{
     resolved_chord_transpose, EventSource, ScheduledChordData, ScheduledEffectParam,
@@ -962,6 +962,112 @@ fn publish_graph_visualizations(state: &SequencerState, graphs: &[crate::graph::
     );
 }
 
+fn same_coincident_note(
+    existing_sample_time: u64,
+    existing_track: Option<usize>,
+    existing_transpose: f32,
+    incoming_sample_time: u64,
+    incoming_track: Option<usize>,
+    incoming_transpose: f32,
+) -> bool {
+    existing_sample_time == incoming_sample_time
+        && existing_track == incoming_track
+        && existing_transpose == incoming_transpose
+}
+
+fn neural_outputs_are_same_accent(existing: &NeuralOutput, incoming: &NeuralOutput) -> bool {
+    same_coincident_note(
+        existing.sample_time,
+        Some(existing.event.track),
+        existing.event.resolved.transpose,
+        incoming.sample_time,
+        Some(incoming.event.track),
+        incoming.event.resolved.transpose,
+    )
+}
+
+fn merge_neural_output_accents(neural_events: Vec<NeuralOutput>) -> Vec<NeuralOutput> {
+    let mut merged: Vec<NeuralOutput> = Vec::with_capacity(neural_events.len());
+    for output in neural_events {
+        if output.emit_trigger {
+            if let Some(existing) = merged.iter_mut().find(|existing| {
+                existing.emit_trigger && neural_outputs_are_same_accent(existing, &output)
+            }) {
+                existing.event.resolved.velocity =
+                    (existing.event.resolved.velocity + output.event.resolved.velocity).min(1.0);
+                continue;
+            }
+        }
+        merged.push(output);
+    }
+    merged
+}
+
+fn generator_emissions_are_same_accent(
+    existing: &crate::generator::GeneratorEmission,
+    incoming: &crate::generator::GeneratorEmission,
+) -> bool {
+    same_coincident_note(
+        existing.sample_time,
+        existing.event.track,
+        existing.event.resolved.transpose,
+        incoming.sample_time,
+        incoming.event.track,
+        incoming.event.resolved.transpose,
+    )
+}
+
+fn merge_generator_emission_accents(
+    generator_emissions: Vec<crate::generator::GeneratorEmission>,
+) -> Vec<crate::generator::GeneratorEmission> {
+    let mut merged: Vec<crate::generator::GeneratorEmission> =
+        Vec::with_capacity(generator_emissions.len());
+    for emission in generator_emissions {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| generator_emissions_are_same_accent(existing, &emission))
+        {
+            existing.event.resolved.velocity =
+                (existing.event.resolved.velocity + emission.event.resolved.velocity).min(1.0);
+            continue;
+        }
+        merged.push(emission);
+    }
+    merged
+}
+
+fn graph_emissions_are_same_accent(
+    existing: &crate::graph::GraphEmission,
+    incoming: &crate::graph::GraphEmission,
+) -> bool {
+    same_coincident_note(
+        existing.sample_time,
+        existing.event.track,
+        existing.event.resolved.transpose,
+        incoming.sample_time,
+        incoming.event.track,
+        incoming.event.resolved.transpose,
+    )
+}
+
+fn merge_graph_emission_accents(
+    graph_emissions: Vec<crate::graph::GraphEmission>,
+) -> Vec<crate::graph::GraphEmission> {
+    let mut merged: Vec<crate::graph::GraphEmission> = Vec::with_capacity(graph_emissions.len());
+    for emission in graph_emissions {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| graph_emissions_are_same_accent(existing, &emission))
+        {
+            existing.event.resolved.velocity =
+                (existing.event.resolved.velocity + emission.event.resolved.velocity).min(1.0);
+            continue;
+        }
+        merged.push(emission);
+    }
+    merged
+}
+
 fn graph_overrides_for_manifest<'a>(
     manifest: &crate::graph::GraphManifest,
     overrides: &'a [crate::graph::ProjectGraphOverrides],
@@ -1464,7 +1570,7 @@ fn midi_fx_step_for_step_event(snapshot: &SequencerSnapshot, event: &StepEvent) 
 fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
-    runtime: Option<&mut lisp_effect::ScratchControlRuntime>,
+    runtime: Option<&mut lisp_host::ScratchControlRuntime>,
     pattern_epoch: u64,
     sample_time: u64,
     samples_per_quarter: f32,
@@ -1610,7 +1716,7 @@ fn enqueue_neuron_parameter_events<const QUEUE_CAP: usize>(
 fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
-    runtime: Option<&mut lisp_effect::ScratchControlRuntime>,
+    runtime: Option<&mut lisp_host::ScratchControlRuntime>,
     pattern_epoch: u64,
     sample_time: u64,
     samples_per_quarter: f32,
@@ -1707,13 +1813,13 @@ impl EmittedNetworkEventSource {
 fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
-    runtime: Option<&mut lisp_effect::ScratchControlRuntime>,
+    runtime: Option<&mut lisp_host::ScratchControlRuntime>,
     pattern_epoch: u64,
     sample_time: u64,
     samples_per_quarter: f32,
     arp_phase_beats: f32,
     source: EmittedNetworkEventSource,
-    emitted: lisp_effect::EmittedAccumulatorEvent,
+    emitted: lisp_host::EmittedAccumulatorEvent,
     debug_accum: bool,
 ) -> bool {
     let Some(track_idx) = source.resolve_track(emitted.track) else {
@@ -2552,7 +2658,7 @@ fn midi_fx_window_events_from_step(
 }
 
 fn run_midi_fx_chain_for_track(
-    runtime: &mut lisp_effect::ScratchControlRuntime,
+    runtime: &mut lisp_host::ScratchControlRuntime,
     snapshot: &SequencerSnapshot,
     source_track: usize,
     events: Vec<MidiFxEvent>,
@@ -2571,7 +2677,7 @@ fn run_midi_fx_chain_for_track(
 }
 
 fn run_midi_fx_chain_for_track_inner(
-    runtime: &mut lisp_effect::ScratchControlRuntime,
+    runtime: &mut lisp_host::ScratchControlRuntime,
     snapshot: &SequencerSnapshot,
     source_track: usize,
     events: Vec<MidiFxEvent>,
@@ -3052,7 +3158,7 @@ fn quantized_live_tick_sample(
 }
 
 fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
-    runtime: Option<&mut lisp_effect::ScratchControlRuntime>,
+    runtime: Option<&mut lisp_host::ScratchControlRuntime>,
     state: &SequencerState,
     snapshot: &SequencerSnapshot,
     queue: &ScheduledEventQueue<QUEUE_CAP>,
@@ -3384,13 +3490,13 @@ fn build_scheduler_scratch_runtime(
     state: Arc<SequencerState>,
     user_source: &str,
     debug_accum: bool,
-) -> Option<lisp_effect::ScratchControlRuntime> {
-    let midi_fx_source = lisp_effect::load_midi_fx_library_source();
+) -> Option<lisp_host::ScratchControlRuntime> {
+    let midi_fx_source = lisp_host::load_midi_fx_library_source();
     if midi_fx_source.trim().is_empty() && user_source.trim().is_empty() {
         return None;
     }
 
-    let mut runtime = lisp_effect::scratch_runtime_with_fallbacks(state, 0, 0);
+    let mut runtime = lisp_host::scratch_runtime_with_fallbacks(state, 0, 0);
     let mut keep_runtime = false;
     if !midi_fx_source.trim().is_empty() {
         match runtime.eval(&midi_fx_source) {
@@ -3456,7 +3562,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     state: &Arc<SequencerState>,
     snapshot: &SequencerSnapshot,
     queue: &ScheduledEventQueue<QUEUE_CAP>,
-    scratch_runtime: &mut Option<lisp_effect::ScratchControlRuntime>,
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
     live_midi_fx_tracks: &[LiveMidiFxTrackState; MAX_TRACKS],
     pattern_epoch: u64,
     rendered: u64,
@@ -4030,24 +4136,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             };
             (output.sample_time, output.event.track, neuron)
         });
-        let mut merged_neural_events: Vec<NeuralOutput> = Vec::new();
-        for output in neural_events {
-            if output.emit_trigger {
-                if let Some(last_output) = merged_neural_events.last_mut() {
-                    if last_output.emit_trigger
-                        && last_output.sample_time == output.sample_time
-                        && last_output.event.track == output.event.track
-                    {
-                        last_output.event.resolved.velocity = (last_output.event.resolved.velocity
-                            + output.event.resolved.velocity)
-                            .min(1.0);
-                        continue;
-                    }
-                }
-            }
-            merged_neural_events.push(output);
-        }
-        for output in merged_neural_events {
+        for output in merge_neural_output_accents(neural_events) {
             let sample_time = output.sample_time;
             let event_beats = sample_time_to_beats(
                 chunk_start_beats,
@@ -4106,24 +4195,9 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     chunk_start_beats, chunk_end_beats
                 );
             }
-            // Velocity-merge coincident hits on the same track (accent, not
-            // polyphony) — same policy as the neural layer.
-            let mut merged_generator_emissions: Vec<crate::generator::GeneratorEmission> =
-                Vec::new();
-            for emission in generator_emissions {
-                if let Some(last) = merged_generator_emissions.last_mut() {
-                    if last.sample_time == emission.sample_time
-                        && last.event.track == emission.event.track
-                    {
-                        last.event.resolved.velocity = (last.event.resolved.velocity
-                            + emission.event.resolved.velocity)
-                            .min(1.0);
-                        continue;
-                    }
-                }
-                merged_generator_emissions.push(emission);
-            }
-            for emission in merged_generator_emissions {
+            // Velocity-merge coincident hits only when they are the same note.
+            // Different notes at the same sample/track are polyphony.
+            for emission in merge_generator_emission_accents(generator_emissions) {
                 let event_beats = sample_time_to_beats(
                     chunk_start_beats,
                     scheduled_until_sample,
@@ -4236,22 +4310,9 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         .unwrap_or(0)
                 );
             }
-            // Velocity-merge coincident hits on the same track (accent).
-            let mut merged_graph_emissions: Vec<crate::graph::GraphEmission> = Vec::new();
-            for emission in graph_emissions {
-                if let Some(last) = merged_graph_emissions.last_mut() {
-                    if last.sample_time == emission.sample_time
-                        && last.event.track == emission.event.track
-                    {
-                        last.event.resolved.velocity = (last.event.resolved.velocity
-                            + emission.event.resolved.velocity)
-                            .min(1.0);
-                        continue;
-                    }
-                }
-                merged_graph_emissions.push(emission);
-            }
-            for emission in merged_graph_emissions {
+            // Velocity-merge coincident hits only when they are the same note.
+            // Different notes at the same sample/track are polyphony.
+            for emission in merge_graph_emission_accents(graph_emissions) {
                 let event_beats = sample_time_to_beats(
                     chunk_start_beats,
                     scheduled_until_sample,
@@ -4416,7 +4477,7 @@ pub fn spawn_scheduler_thread(
                         let runtime = scratch_runtime.get_or_insert_with(|| {
                             build_scheduler_scratch_runtime(Arc::clone(&state), "", debug_accum)
                                 .unwrap_or_else(|| {
-                                    lisp_effect::scratch_runtime_with_fallbacks(
+                                    lisp_host::scratch_runtime_with_fallbacks(
                                         Arc::clone(&state),
                                         0,
                                         0,
@@ -4714,7 +4775,7 @@ mod tests {
         ProjectGraphEdgeParamOverride, ProjectGraphNodeIntrinsicOverride, ProjectGraphOverrides,
         ProjectGraphRouteOverride, ProjectGraphSeedFrom, SeedFrom, ShapeSpec, Topology,
     };
-    use crate::lisp_effect;
+    use crate::lisp_host;
     use crate::neural::{
         NeuralMaxPolySelection, NeuralOutput, ParamNodeId, ProjectEffectParamOverride,
         ProjectNeuralNetwork, ProjectNeuron, ProjectParamOverride,
@@ -4744,6 +4805,147 @@ mod tests {
             pan: 0.0,
             chop: 1.0,
         }
+    }
+
+    fn graph_emission(
+        sample_time: u64,
+        node_index: usize,
+        track: Option<usize>,
+        transpose: f32,
+        velocity: f32,
+    ) -> GraphEmission {
+        let mut resolved = test_resolved_step();
+        resolved.transpose = transpose;
+        resolved.velocity = velocity;
+        GraphEmission {
+            sample_time,
+            node_index,
+            event: lisp_host::EmittedAccumulatorEvent {
+                offset_beats: 0.0,
+                track,
+                resolved,
+                chord: Vec::new(),
+                chord_durations: Vec::new(),
+                chord_step_transpose: 0.0,
+                effect_params: Vec::new(),
+                instrument_params: Vec::new(),
+            },
+        }
+    }
+
+    fn generator_emission(
+        sample_time: u64,
+        generator_index: usize,
+        track: Option<usize>,
+        transpose: f32,
+        velocity: f32,
+    ) -> crate::generator::GeneratorEmission {
+        let mut resolved = test_resolved_step();
+        resolved.transpose = transpose;
+        resolved.velocity = velocity;
+        crate::generator::GeneratorEmission {
+            sample_time,
+            generator_index,
+            event: lisp_host::EmittedAccumulatorEvent {
+                offset_beats: 0.0,
+                track,
+                resolved,
+                chord: Vec::new(),
+                chord_durations: Vec::new(),
+                chord_step_transpose: 0.0,
+                effect_params: Vec::new(),
+                instrument_params: Vec::new(),
+            },
+        }
+    }
+
+    fn neural_output(
+        sample_time: u64,
+        track: usize,
+        neuron: usize,
+        transpose: f32,
+        velocity: f32,
+    ) -> NeuralOutput {
+        let mut resolved = test_resolved_step();
+        resolved.transpose = transpose;
+        resolved.velocity = velocity;
+        NeuralOutput {
+            sample_time,
+            event: StepEvent {
+                track,
+                samples_per_step: 12_000.0,
+                resolved,
+                chord: ScheduledChordData {
+                    count: 0,
+                    notes: [0.0; crate::voice::MAX_VOICES],
+                    durations: [0.0; crate::voice::MAX_VOICES],
+                    delays: [0.0; crate::voice::MAX_VOICES],
+                    step_transpose: 0.0,
+                },
+                effect_params: Vec::new(),
+                instrument_params: ScheduledInstrumentParams::new(),
+                sampler_params: ScheduledSamplerParams::default(),
+                source: EventSource::Network {
+                    seed: Some((0, 0)),
+                    neuron,
+                    instrument_fingerprint: 0,
+                },
+            },
+            emit_trigger: true,
+        }
+    }
+
+    #[test]
+    fn neural_accent_merge_keeps_coincident_distinct_notes_polyphonic() {
+        let merged = super::merge_neural_output_accents(vec![
+            neural_output(1_000, 2, 0, 0.0, 0.5),
+            neural_output(1_000, 2, 1, 7.0, 0.25),
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].event.resolved.transpose, 0.0);
+        assert_eq!(merged[1].event.resolved.transpose, 7.0);
+    }
+
+    #[test]
+    fn generator_accent_merge_keeps_coincident_distinct_notes_polyphonic() {
+        let merged = super::merge_generator_emission_accents(vec![
+            generator_emission(1_000, 0, Some(2), 0.0, 0.5),
+            generator_emission(1_000, 1, Some(2), 7.0, 0.25),
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].event.resolved.transpose, 0.0);
+        assert_eq!(merged[1].event.resolved.transpose, 7.0);
+    }
+
+    #[test]
+    fn graph_accent_merge_keeps_coincident_distinct_notes_polyphonic() {
+        let merged = super::merge_graph_emission_accents(vec![
+            graph_emission(1_000, 0, Some(2), 0.0, 0.5),
+            graph_emission(1_000, 1, Some(2), 7.0, 0.25),
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].event.resolved.transpose, 0.0);
+        assert_eq!(merged[0].event.resolved.velocity, 0.5);
+        assert_eq!(merged[1].event.resolved.transpose, 7.0);
+        assert_eq!(merged[1].event.resolved.velocity, 0.25);
+    }
+
+    #[test]
+    fn graph_accent_merge_sums_only_matching_notes() {
+        let merged = super::merge_graph_emission_accents(vec![
+            graph_emission(1_000, 0, Some(2), 0.0, 0.5),
+            graph_emission(1_000, 1, Some(2), 7.0, 0.25),
+            graph_emission(1_000, 2, Some(2), 0.0, 0.75),
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].event.resolved.transpose, 0.0);
+        assert_eq!(merged[0].event.resolved.velocity, 1.0);
+        assert_eq!(merged[1].event.resolved.transpose, 7.0);
+        assert_eq!(merged[1].event.resolved.velocity, 0.25);
     }
 
     fn graph_manifest(id: u64, name: &str, shape: ShapeSpec) -> GraphManifest {
@@ -5168,7 +5370,7 @@ mod tests {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         state.pattern.track_params[0].set_midi_fx_chain(vec!["octave".to_string()]);
         let snapshot = state.publish_scheduler_snapshot();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new()],
             vec![EffectDescriptor::builtin_sampler()],
@@ -5243,7 +5445,7 @@ mod tests {
             .apply_descriptor(&EffectDescriptor::builtin_sampler(), 77);
         state.pattern.instrument_slots[0].defaults.set(12, 2.5);
         let snapshot = state.publish_scheduler_snapshot();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new()],
             vec![EffectDescriptor::builtin_sampler()],
@@ -5271,7 +5473,7 @@ mod tests {
             48_000.0,
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
-            lisp_effect::EmittedAccumulatorEvent {
+            lisp_host::EmittedAccumulatorEvent {
                 offset_beats: 0.0,
                 track: Some(0),
                 resolved: test_resolved_step(),
@@ -5320,12 +5522,12 @@ mod tests {
             ],
         ));
         state.pattern.track_params[0].set_midi_fx_chain(vec!["trigger-to-track".to_string()]);
-        let trigger_desc = lisp_effect::load_midi_fx_descriptor("trigger-to-track")
+        let trigger_desc = lisp_host::load_midi_fx_descriptor("trigger-to-track")
             .expect("trigger-to-track descriptor");
         state.pattern.midi_fx_slots[0][0].apply_descriptor(&trigger_desc, 0);
         state.pattern.midi_fx_slots[0][0].defaults.set(0, 5.0);
         let snapshot = state.publish_scheduler_snapshot();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             vec![
@@ -5339,7 +5541,7 @@ mod tests {
             0,
         );
         runtime
-            .eval(&lisp_effect::load_midi_fx_library_source())
+            .eval(&lisp_host::load_midi_fx_library_source())
             .unwrap();
         let queue = ScheduledEventQueue::<8>::new();
 
@@ -5352,7 +5554,7 @@ mod tests {
             48_000.0,
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
-            lisp_effect::EmittedAccumulatorEvent {
+            lisp_host::EmittedAccumulatorEvent {
                 offset_beats: 0.0,
                 track: Some(0),
                 resolved: ResolvedStep {
@@ -5406,7 +5608,7 @@ mod tests {
             ],
         ));
         state.pattern.track_params[1].set_midi_fx_chain(vec!["trigger-to-track".to_string()]);
-        let trigger_desc = lisp_effect::load_midi_fx_descriptor("trigger-to-track")
+        let trigger_desc = lisp_host::load_midi_fx_descriptor("trigger-to-track")
             .expect("trigger-to-track descriptor");
         state.pattern.midi_fx_slots[1][0].apply_descriptor(&trigger_desc, 0);
         state.pattern.midi_fx_slots[1][0].defaults.set(0, 5.0);
@@ -5448,7 +5650,7 @@ mod tests {
         assert!(!graph_emissions.is_empty());
         assert_eq!(graph_emissions[0].event.track, Some(1));
 
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             vec![
@@ -5462,7 +5664,7 @@ mod tests {
             0,
         );
         runtime
-            .eval(&lisp_effect::load_midi_fx_library_source())
+            .eval(&lisp_host::load_midi_fx_library_source())
             .unwrap();
         let queue = ScheduledEventQueue::<8>::new();
 
@@ -5502,7 +5704,7 @@ mod tests {
             vec![default_empty_effect_chain(), default_empty_effect_chain()],
         ));
         state.pattern.track_params[0].set_midi_fx_chain(vec!["trigger-to-track".to_string()]);
-        let trigger_desc = lisp_effect::load_midi_fx_descriptor("trigger-to-track")
+        let trigger_desc = lisp_host::load_midi_fx_descriptor("trigger-to-track")
             .expect("trigger-to-track descriptor");
         state.pattern.midi_fx_slots[0][0].apply_descriptor(&trigger_desc, 0);
         state.pattern.midi_fx_slots[0][0].defaults.set(0, 2.0);
@@ -5521,7 +5723,7 @@ mod tests {
                 graph_index: 0,
                 node_index: 0,
             },
-            lisp_effect::EmittedAccumulatorEvent {
+            lisp_host::EmittedAccumulatorEvent {
                 offset_beats: 0.0,
                 track: None,
                 resolved: ResolvedStep {
@@ -5550,12 +5752,12 @@ mod tests {
             vec![default_empty_effect_chain(), default_empty_effect_chain()],
         ));
         state.pattern.track_params[1].set_midi_fx_chain(vec!["arp".to_string()]);
-        let arp_desc = lisp_effect::load_midi_fx_descriptor("arp").expect("arp descriptor");
+        let arp_desc = lisp_host::load_midi_fx_descriptor("arp").expect("arp descriptor");
         state.pattern.midi_fx_slots[1][0].apply_descriptor(&arp_desc, 0);
         state.pattern.midi_fx_slots[1][0].defaults.set(0, 4.0);
         let snapshot = state.publish_scheduler_snapshot();
 
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new(), Vec::new()],
             vec![
@@ -5566,7 +5768,7 @@ mod tests {
             0,
         );
         runtime
-            .eval(&lisp_effect::load_midi_fx_library_source())
+            .eval(&lisp_host::load_midi_fx_library_source())
             .unwrap();
         let queue = ScheduledEventQueue::<16>::new();
 
@@ -5582,7 +5784,7 @@ mod tests {
                 graph_index: 0,
                 node_index: 0,
             },
-            lisp_effect::EmittedAccumulatorEvent {
+            lisp_host::EmittedAccumulatorEvent {
                 offset_beats: 0.0,
                 track: Some(1),
                 resolved: ResolvedStep {
@@ -5624,7 +5826,7 @@ mod tests {
         let mut authoring = Runtime::new();
         let publish_state = Arc::clone(&state);
         authoring.register_native("def-sequencer", move |args, _ctx| {
-            let published = lisp_effect::published_sequencer_from_def_args(&args)?;
+            let published = lisp_host::published_sequencer_from_def_args(&args)?;
             let name = published.name.clone();
             publish_state.publish_sequencer(published);
             Ok(Value::String(name))
@@ -5753,7 +5955,7 @@ mod tests {
         state.set_step_param(0, 0, StepParam::Transpose, 7.0);
         state.set_step_param(0, 4, StepParam::Transpose, 7.0);
         state.pattern.track_params[0].set_midi_fx_chain(vec!["trigger-to-track".to_string()]);
-        let trigger_desc = lisp_effect::load_midi_fx_descriptor("trigger-to-track")
+        let trigger_desc = lisp_host::load_midi_fx_descriptor("trigger-to-track")
             .expect("trigger-to-track descriptor");
         state.pattern.midi_fx_slots[0][0].apply_descriptor(&trigger_desc, 0);
         state.pattern.midi_fx_slots[0][0].defaults.set(0, 3.0);
@@ -5848,7 +6050,7 @@ mod tests {
         );
         assert_eq!(scheduler.graph_runtimes.len(), 1);
 
-        let mut scratch_runtime = Some(lisp_effect::scratch_runtime_with_fallbacks(
+        let mut scratch_runtime = Some(lisp_host::scratch_runtime_with_fallbacks(
             Arc::clone(&state),
             0,
             0,
@@ -5856,7 +6058,7 @@ mod tests {
         scratch_runtime
             .as_mut()
             .expect("scratch runtime")
-            .eval(&lisp_effect::load_midi_fx_library_source())
+            .eval(&lisp_host::load_midi_fx_library_source())
             .expect("load MIDI FX library");
         let queue = ScheduledEventQueue::<64>::new();
         let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
@@ -6007,7 +6209,7 @@ mod tests {
         state.pattern.track_params[0].set_midi_fx_chain(vec!["send".to_string()]);
         state.pattern.track_params[1].set_fts_scale(1);
         let snapshot = state.publish_scheduler_snapshot();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new(), Vec::new()],
             vec![
@@ -6081,7 +6283,7 @@ mod tests {
         ));
         state.pattern.track_params[0].set_midi_fx_chain(vec!["copy-to-track-2".to_string()]);
         let snapshot = state.publish_scheduler_snapshot();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new(), Vec::new()],
             vec![
@@ -6157,7 +6359,7 @@ mod tests {
         state.pattern.track_params[0].set_midi_fx_chain(vec!["copy-to-track-2".to_string()]);
         state.pattern.track_params[1].set_midi_fx_chain(vec!["copy-to-track-1".to_string()]);
         let snapshot = state.publish_scheduler_snapshot();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new(), Vec::new()],
             vec![
@@ -6249,7 +6451,7 @@ mod tests {
             .apply_descriptor(&EffectDescriptor::builtin_sampler(), 77);
         state.pattern.instrument_slots[1].defaults.set(12, 2.5);
         let snapshot = state.publish_scheduler_snapshot();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new(), Vec::new()],
             vec![
@@ -7162,7 +7364,7 @@ mod tests {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
         state.pattern.track_params[track].set_midi_fx_chain(vec!["arp".to_string()]);
-        let midi_fx_descriptors = lisp_effect::load_midi_fx_descriptors();
+        let midi_fx_descriptors = lisp_host::load_midi_fx_descriptors();
         let arp_desc = midi_fx_descriptors
             .iter()
             .find(|desc| desc.name == "arp")
@@ -7220,7 +7422,7 @@ mod tests {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
         state.pattern.track_params[track].set_midi_fx_chain(vec!["trigger-to-track".to_string()]);
-        let midi_fx_descriptors = lisp_effect::load_midi_fx_descriptors();
+        let midi_fx_descriptors = lisp_host::load_midi_fx_descriptors();
         let trigger_desc = midi_fx_descriptors
             .iter()
             .find(|desc| desc.name == "trigger-to-track")
@@ -7281,12 +7483,12 @@ mod tests {
             vec![default_empty_effect_chain(), default_empty_effect_chain()],
         ));
         state.pattern.track_params[0].set_midi_fx_chain(vec!["trigger-to-track".to_string()]);
-        let trigger_desc = lisp_effect::load_midi_fx_descriptor("trigger-to-track")
+        let trigger_desc = lisp_host::load_midi_fx_descriptor("trigger-to-track")
             .expect("trigger-to-track descriptor");
         state.pattern.midi_fx_slots[0][0].apply_descriptor(&trigger_desc, 0);
         state.pattern.midi_fx_slots[0][0].defaults.set(0, 2.0);
         let snapshot = state.publish_scheduler_snapshot();
-        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+        let mut runtime = lisp_host::ScratchControlRuntime::new(
             Arc::clone(&state),
             vec![Vec::new(), Vec::new()],
             vec![
@@ -7297,7 +7499,7 @@ mod tests {
             0,
         );
         runtime
-            .eval(&lisp_effect::load_midi_fx_library_source())
+            .eval(&lisp_host::load_midi_fx_library_source())
             .unwrap();
         let queue = ScheduledEventQueue::<8>::new();
         let mut live_tracks: [super::LiveMidiFxTrackState; MAX_TRACKS] =

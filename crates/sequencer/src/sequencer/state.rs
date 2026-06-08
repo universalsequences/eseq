@@ -1387,7 +1387,7 @@ impl PatternSnapshot {
             track_params: self.track_params.get(track)?.clone(),
             effect_slots: self.effect_slots.get(track)?.clone(),
             midi_fx_slots: self.midi_fx_slots.get(track).cloned().unwrap_or_else(|| {
-                vec![EffectSlotSnapshot::new_empty(); crate::lisp_effect::MAX_MIDI_FX_SLOTS]
+                vec![EffectSlotSnapshot::new_empty(); crate::lisp_host::MAX_MIDI_FX_SLOTS]
             }),
             instrument_slot: self
                 .instrument_slots
@@ -1530,7 +1530,7 @@ impl PatternSnapshot {
     }
 
     fn default_midi_fx_slots() -> Vec<EffectSlotSnapshot> {
-        (0..crate::lisp_effect::MAX_MIDI_FX_SLOTS)
+        (0..crate::lisp_host::MAX_MIDI_FX_SLOTS)
             .map(|_| EffectSlotSnapshot::new_empty())
             .collect()
     }
@@ -1878,7 +1878,7 @@ fn remap_snapshot_sidechain_references_after_track_delete(
 }
 
 pub fn default_empty_effect_chain() -> Vec<EffectSlotState> {
-    use crate::lisp_effect::MAX_CUSTOM_FX;
+    use crate::lisp_host::MAX_CUSTOM_FX;
     (0..MAX_CUSTOM_FX)
         .map(|_| EffectSlotState::empty())
         .collect()
@@ -1964,7 +1964,7 @@ pub struct RuntimeBindingState {
 ///
 /// Two shapes share this channel:
 /// - **tick mode** (`graph == None`): `tick_source` is the auto-quoted `:tick` body
-///   serialized to re-evaluable lisp (see `lisp_effect::sequencer_tick_source`) and
+///   serialized to re-evaluable lisp (see `lisp_host::sequencer_tick_source`) and
 ///   `resolution` is a `Timebase` index; the scheduler registers it into its generator
 ///   runtime.
 /// - **graph mode** (`graph == Some(_)`): the whole-body manifest is carried in-process
@@ -2090,7 +2090,7 @@ impl SequencerState {
         }
         let midi_fx_slots = (0..MAX_TRACKS)
             .map(|_| {
-                (0..crate::lisp_effect::MAX_MIDI_FX_SLOTS)
+                (0..crate::lisp_host::MAX_MIDI_FX_SLOTS)
                     .map(|_| EffectSlotState::empty())
                     .collect()
             })
@@ -2708,8 +2708,7 @@ impl SequencerState {
                 continue;
             }
             bus.effect_plocks.insert(slot_idx, Vec::new());
-            bus.effect_plocks
-                .truncate(crate::lisp_effect::MAX_CUSTOM_FX);
+            bus.effect_plocks.truncate(crate::lisp_host::MAX_CUSTOM_FX);
         }
     }
 
@@ -2740,8 +2739,7 @@ impl SequencerState {
                 target = target.saturating_sub(1);
             }
             bus.effect_plocks.insert(target, plocks);
-            bus.effect_plocks
-                .truncate(crate::lisp_effect::MAX_CUSTOM_FX);
+            bus.effect_plocks.truncate(crate::lisp_host::MAX_CUSTOM_FX);
         }
     }
 
@@ -4537,9 +4535,7 @@ mod tests {
                 .map(|track| vec![sample_effect_slot_snapshot(track)])
                 .collect(),
             midi_fx_slots: (0..num_tracks)
-                .map(|_| {
-                    vec![EffectSlotSnapshot::new_empty(); crate::lisp_effect::MAX_MIDI_FX_SLOTS]
-                })
+                .map(|_| vec![EffectSlotSnapshot::new_empty(); crate::lisp_host::MAX_MIDI_FX_SLOTS])
                 .collect(),
             instrument_slots: (0..num_tracks)
                 .map(|track| sample_effect_slot_snapshot(track + 10))
@@ -4696,7 +4692,7 @@ mod tests {
     fn repository_effect_slot_insert_applies_to_other_patterns_for_one_track_only() {
         let state = SequencerState::new(2, (0..2).map(|_| default_empty_effect_chain()).collect());
         let descriptor_lane =
-            vec![EffectDescriptor::empty_custom_slot(); crate::lisp_effect::MAX_CUSTOM_FX];
+            vec![EffectDescriptor::empty_custom_slot(); crate::lisp_host::MAX_CUSTOM_FX];
         let slot_descriptors = vec![descriptor_lane.clone(), descriptor_lane];
         let mut current = PatternSnapshot::new_default(2, &slot_descriptors);
         let mut other = PatternSnapshot::new_default(2, &slot_descriptors);
@@ -5488,7 +5484,7 @@ mod tests {
             midi_fx_slots: vec![
                 vec![
                     EffectSlotSnapshot::new_empty();
-                    crate::lisp_effect::MAX_MIDI_FX_SLOTS
+                    crate::lisp_host::MAX_MIDI_FX_SLOTS
                 ];
                 4
             ],
@@ -6927,7 +6923,7 @@ mod tests {
     #[test]
     fn default_empty_effect_chain_has_no_builtin_nodes() {
         let chain = default_empty_effect_chain();
-        assert_eq!(chain.len(), crate::lisp_effect::MAX_CUSTOM_FX);
+        assert_eq!(chain.len(), crate::lisp_host::MAX_CUSTOM_FX);
         for slot in chain {
             assert_eq!(slot.node_id.load(Ordering::Relaxed), 0);
             assert_eq!(slot.num_params.load(Ordering::Relaxed), 0);

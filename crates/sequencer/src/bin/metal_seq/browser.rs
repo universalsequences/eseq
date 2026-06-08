@@ -665,7 +665,7 @@ pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
         .collect();
 
     let custom: Vec<Value> =
-        filter_effect_names(sequencer::lisp_effect::list_saved_effects(), &query_lower)
+        filter_effect_names(sequencer::lisp_host::list_saved_effects(), &query_lower)
             .into_iter()
             .map(|name| effect_leaf(name, "custom-audio-effect"))
             .collect();
@@ -682,7 +682,7 @@ pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
 
 pub(crate) fn build_midi_effect_tree(query: &str) -> Value {
     let query_lower = query.trim().to_lowercase();
-    let mut names: Vec<String> = sequencer::lisp_effect::load_midi_fx_descriptors()
+    let mut names: Vec<String> = sequencer::lisp_host::load_midi_fx_descriptors()
         .into_iter()
         .map(|desc| desc.name)
         .collect();
@@ -708,7 +708,7 @@ pub(crate) fn visible_preset_items_for_track(app: &ui::App, track: usize) -> Vec
     let Some(name) = current_custom_instrument_name(app, track) else {
         return Vec::new();
     };
-    let mut items: Vec<String> = sequencer::lisp_effect::load_instrument_presets(&name)
+    let mut items: Vec<String> = sequencer::lisp_host::load_instrument_presets(&name)
         .unwrap_or_default()
         .into_iter()
         .map(|preset| preset.name)

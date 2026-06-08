@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::effects::BUILTIN_SLOT_COUNT;
-use crate::lisp_effect;
+use crate::lisp_host;
 use crate::sequencer::{KeyboardTrigger, StepParam, STEPS_PER_PAGE};
 
 use super::browser::BrowserNode;
@@ -281,7 +281,7 @@ impl App {
                         }
                     }
                     // Otherwise, open the effect picker
-                    self.editor.picker_items = lisp_effect::list_saved_effects();
+                    self.editor.picker_items = lisp_host::list_saved_effects();
                     self.editor.picker_cursor = 0;
                     self.editor.picker_filter.clear();
                     self.ui.input_mode = InputMode::EffectPicker;
@@ -1024,7 +1024,7 @@ impl App {
                 match entries[idx] {
                     EffectPaneEntry::Tab(tab) => self.select_effect_tab(tab),
                     EffectPaneEntry::PlusButton => {
-                        self.editor.picker_items = lisp_effect::list_saved_effects();
+                        self.editor.picker_items = lisp_host::list_saved_effects();
                         self.editor.picker_cursor = 0;
                         self.editor.picker_filter.clear();
                         self.ui.input_mode = InputMode::EffectPicker;

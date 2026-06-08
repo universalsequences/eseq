@@ -18,7 +18,7 @@ use crate::agent::ui_validate::validate_effect_ui_source;
 use crate::analysis::{AnalysisJob, AnalysisService};
 use crate::audiograph::LiveGraphPtr;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScaling};
-use crate::lisp_effect::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
+use crate::lisp_host::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
     BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
@@ -212,7 +212,7 @@ struct PendingHookInvocation {
 }
 
 struct PendingCompile {
-    receiver: std::sync::mpsc::Receiver<Result<crate::lisp_effect::CompileResult, String>>,
+    receiver: std::sync::mpsc::Receiver<Result<crate::lisp_host::CompileResult, String>>,
     target: CompileTarget,
     tick: usize,
 }
@@ -289,7 +289,7 @@ impl EngineRegistry {
 #[cfg(test)]
 mod engine_registry_tests {
     use super::{EngineDescriptor, EngineRegistry};
-    use crate::lisp_effect::DGenManifest;
+    use crate::lisp_host::DGenManifest;
 
     fn manifest() -> DGenManifest {
         DGenManifest {
@@ -648,18 +648,18 @@ impl BusChannelState {
             gate_sequence: BusGateSequence::default(),
             effect_descriptors: Self::default_effect_descriptors(),
             effect_slots: Self::default_effect_slots(),
-            custom_effect_names: vec![None; crate::lisp_effect::MAX_CUSTOM_FX],
+            custom_effect_names: vec![None; crate::lisp_host::MAX_CUSTOM_FX],
         }
     }
 
     pub fn default_effect_descriptors() -> Vec<EffectDescriptor> {
-        (0..crate::lisp_effect::MAX_CUSTOM_FX)
+        (0..crate::lisp_host::MAX_CUSTOM_FX)
             .map(|_| EffectDescriptor::empty_custom_slot())
             .collect()
     }
 
     pub fn default_effect_slots() -> Vec<EffectSlotSnapshot> {
-        (0..crate::lisp_effect::MAX_CUSTOM_FX)
+        (0..crate::lisp_host::MAX_CUSTOM_FX)
             .map(|_| EffectSlotSnapshot::new_empty())
             .collect()
     }
@@ -1339,7 +1339,7 @@ impl App {
         });
         let current_instrument_source = current_instrument_name
             .as_deref()
-            .and_then(|name| crate::lisp_effect::load_instrument_source(name).ok());
+            .and_then(|name| crate::lisp_host::load_instrument_source(name).ok());
         let current_effect_slot = self
             .selected_effect_slot()
             .filter(|slot| !self.tracks.is_empty() && *slot >= crate::effects::BUILTIN_SLOT_COUNT);
@@ -1352,10 +1352,10 @@ impl App {
         });
         let current_effect_source = current_effect_name
             .as_deref()
-            .and_then(|name| crate::lisp_effect::load_effect_source(name).ok());
+            .and_then(|name| crate::lisp_host::load_effect_source(name).ok());
         let current_effect_ui_source = current_effect_name
             .as_deref()
-            .and_then(|name| crate::lisp_effect::load_effect_ui_source(name).ok());
+            .and_then(|name| crate::lisp_host::load_effect_ui_source(name).ok());
         let current_instrument_preset_schema = self.current_agent_instrument_preset_schema(
             current_track_index,
             current_instrument_name.as_deref(),
@@ -1665,9 +1665,8 @@ impl App {
     ) -> Result<(), String> {
         validate_effect_dsp_source(dsp_source)
             .map_err(|error| format!("dsp.lisp validation error for '{name}':\n{error}"))?;
-        let compile_result =
-            crate::lisp_effect::compile_and_load(dsp_source, self.graph.sample_rate)
-                .map_err(|error| format!("compile error for '{name}':\n{error}"))?;
+        let compile_result = crate::lisp_host::compile_and_load(dsp_source, self.graph.sample_rate)
+            .map_err(|error| format!("compile error for '{name}':\n{error}"))?;
         validate_effect_ui_source(ui_source, &compile_result.manifest)
             .map_err(|error| format!("ui.lisp validation error for '{name}':\n{error}"))?;
         let audition = audition_loaded_effect(&compile_result, self.graph.sample_rate)
@@ -1686,8 +1685,8 @@ impl App {
             .clone()
             .ok_or_else(|| "No validated draft effect artifact exists to finalize.".to_string())?;
         let final_name = format!("{}/", name.trim_end_matches('/'));
-        if crate::lisp_effect::effect_source_path(&final_name).exists()
-            || crate::lisp_effect::effect_ui_path(&final_name).exists()
+        if crate::lisp_host::effect_source_path(&final_name).exists()
+            || crate::lisp_host::effect_ui_path(&final_name).exists()
         {
             return Err(format!(
                 "Effect '{}' already exists.",
@@ -1713,11 +1712,11 @@ impl App {
         dsp_source: &str,
         ui_source: &str,
     ) -> Result<(), String> {
-        let previous_source = crate::lisp_effect::load_effect_source(name).ok();
-        let previous_ui = crate::lisp_effect::load_effect_ui_source(name).ok();
-        crate::lisp_effect::save_effect(name, dsp_source)
+        let previous_source = crate::lisp_host::load_effect_source(name).ok();
+        let previous_ui = crate::lisp_host::load_effect_ui_source(name).ok();
+        crate::lisp_host::save_effect(name, dsp_source)
             .map_err(|error| format!("Failed to save effect '{}': {error}", name))?;
-        if let Err(error) = crate::lisp_effect::save_effect_ui(name, ui_source) {
+        if let Err(error) = crate::lisp_host::save_effect_ui(name, ui_source) {
             self.restore_effect_source(name, previous_source.as_deref())?;
             self.restore_effect_ui_source(name, previous_ui.as_deref())?;
             return Err(format!("Failed to save effect UI '{}': {error}", name));
@@ -1766,8 +1765,8 @@ impl App {
                 self.finalize_agent_effect_artifact(name)
             }
             AgentAppAction::CreateInstrumentTrack { name, source } => {
-                let previous_source = crate::lisp_effect::load_instrument_source(&name).ok();
-                crate::lisp_effect::save_instrument(&name, &source)
+                let previous_source = crate::lisp_host::load_instrument_source(&name).ok();
+                crate::lisp_host::save_instrument(&name, &source)
                     .map_err(|error| format!("Failed to save instrument '{}': {error}", name))?;
                 let track_idx = match self.add_saved_instrument_track_sync(&name) {
                     Ok(track_idx) => track_idx,
@@ -1799,8 +1798,8 @@ impl App {
                             .unwrap_or_else(|| "current track".to_string())
                     )
                 })?;
-                let previous_source = crate::lisp_effect::load_effect_source(&name).ok();
-                crate::lisp_effect::save_effect(&name, &source)
+                let previous_source = crate::lisp_host::load_effect_source(&name).ok();
+                crate::lisp_host::save_effect(&name, &source)
                     .map_err(|error| format!("Failed to save effect '{}': {error}", name))?;
                 if let Err(error) = self.load_saved_effect_to_slot_sync(track, slot_idx, &name) {
                     self.restore_effect_source(&name, previous_source.as_deref())?;
@@ -1817,7 +1816,7 @@ impl App {
                 ))
             }
             AgentAppAction::UpdateCurrentEffect { name, source } => {
-                let previous_source = crate::lisp_effect::load_effect_source(&name).ok();
+                let previous_source = crate::lisp_host::load_effect_source(&name).ok();
                 if let Err(error) = self.replace_current_effect_sync(&name, &source) {
                     self.restore_effect_source(&name, previous_source.as_deref())?;
                     return Err(error);
@@ -1825,8 +1824,8 @@ impl App {
                 Ok(format!("Updated current effect to '{}'.", name))
             }
             AgentAppAction::UpdateCurrentInstrument { name, source } => {
-                let previous_source = crate::lisp_effect::load_instrument_source(&name).ok();
-                crate::lisp_effect::save_instrument(&name, &source)
+                let previous_source = crate::lisp_host::load_instrument_source(&name).ok();
+                crate::lisp_host::save_instrument(&name, &source)
                     .map_err(|error| format!("Failed to save instrument '{}': {error}", name))?;
                 if let Err(error) = self.replace_current_custom_instrument_sync(&name, &source) {
                     self.restore_instrument_source(&name, previous_source.as_deref())?;
@@ -1850,7 +1849,7 @@ impl App {
         let instrument_name = current_instrument_name?;
         let desc = self.graph.instrument_descriptors.get(track)?;
         let slot = self.state.pattern.instrument_slots.get(track)?;
-        let existing_presets = crate::lisp_effect::load_instrument_presets(instrument_name)
+        let existing_presets = crate::lisp_host::load_instrument_presets(instrument_name)
             .map(|presets| presets.into_iter().map(|preset| preset.name).collect())
             .unwrap_or_default();
         let synth_indices = self.synth_param_indices(track);
@@ -1909,7 +1908,7 @@ impl App {
             .current_instrument_descriptor()
             .ok_or_else(|| "No current instrument descriptor is available.".to_string())?;
         let existing =
-            crate::lisp_effect::load_instrument_presets(instrument_name).map_err(|error| {
+            crate::lisp_host::load_instrument_presets(instrument_name).map_err(|error| {
                 format!(
                     "Failed to load preset bank for '{}': {error}",
                     instrument_name
@@ -1944,7 +1943,7 @@ impl App {
                 let _ = idx;
                 params.insert(param_name.clone(), *value);
             }
-            let preset = crate::lisp_effect::InstrumentPreset {
+            let preset = crate::lisp_host::InstrumentPreset {
                 id: draft.name.clone(),
                 name: draft.name.clone(),
                 base_note_offset: draft
@@ -1957,14 +1956,12 @@ impl App {
 
         let mut presets = presets_by_name.into_values().collect::<Vec<_>>();
         presets.sort_by(|a, b| a.name.cmp(&b.name));
-        crate::lisp_effect::save_instrument_presets(instrument_name, &presets).map_err(
-            |error| {
-                format!(
-                    "Failed to save preset bank for '{}': {error}",
-                    instrument_name
-                )
-            },
-        )?;
+        crate::lisp_host::save_instrument_presets(instrument_name, &presets).map_err(|error| {
+            format!(
+                "Failed to save preset bank for '{}': {error}",
+                instrument_name
+            )
+        })?;
         Ok(format!(
             "Saved {} preset(s) for '{}': {}.",
             drafts.len(),
@@ -1983,7 +1980,7 @@ impl App {
         previous_source: Option<&str>,
     ) -> Result<(), String> {
         match previous_source {
-            Some(source) => crate::lisp_effect::save_instrument(name, source)
+            Some(source) => crate::lisp_host::save_instrument(name, source)
                 .map_err(|error| format!("Failed to restore instrument '{}': {error}", name)),
             None => std::fs::remove_file(format!("instruments/{name}.lisp"))
                 .or_else(|error| {
@@ -2003,9 +2000,9 @@ impl App {
         previous_source: Option<&str>,
     ) -> Result<(), String> {
         match previous_source {
-            Some(source) => crate::lisp_effect::save_effect(name, source)
+            Some(source) => crate::lisp_host::save_effect(name, source)
                 .map_err(|error| format!("Failed to restore effect '{}': {error}", name)),
-            None => std::fs::remove_file(crate::lisp_effect::effect_source_path(name))
+            None => std::fs::remove_file(crate::lisp_host::effect_source_path(name))
                 .or_else(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
                         Ok(())
@@ -2023,9 +2020,9 @@ impl App {
         previous_source: Option<&str>,
     ) -> Result<(), String> {
         match previous_source {
-            Some(source) => crate::lisp_effect::save_effect_ui(name, source)
+            Some(source) => crate::lisp_host::save_effect_ui(name, source)
                 .map_err(|error| format!("Failed to restore effect UI '{}': {error}", name)),
-            None => std::fs::remove_file(crate::lisp_effect::effect_ui_path(name))
+            None => std::fs::remove_file(crate::lisp_host::effect_ui_path(name))
                 .or_else(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
                         Ok(())

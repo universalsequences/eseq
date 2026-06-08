@@ -158,7 +158,7 @@ pub(crate) fn log_active_voice_counts(state: &SequencerState, track_names: &[Str
         parts.join(" ")
     );
 
-    let engine_stats = sequencer::lisp_effect::take_dgen_engine_process_stats();
+    let engine_stats = sequencer::lisp_host::take_dgen_engine_process_stats();
     let mut engine_parts = Vec::new();
     for stats in engine_stats {
         let configured = state.runtime.engine_voice_counts[stats.engine_id].load(Ordering::Relaxed);

@@ -510,7 +510,7 @@ impl AgentToolRuntime {
     }
 
     fn execute_list_instruments(&self) -> Result<ToolResult, String> {
-        let names = crate::lisp_effect::list_saved_instruments();
+        let names = crate::lisp_host::list_saved_instruments();
         Ok(ToolResult {
             summary: format!("Listed {} saved instrument(s).", names.len()),
             content: if names.is_empty() {
@@ -524,9 +524,9 @@ impl AgentToolRuntime {
 
     fn execute_read_instrument_source(&self, arguments: &Value) -> Result<ToolResult, String> {
         let name = required_string(arguments, "name")?;
-        let dsp_source = crate::lisp_effect::load_instrument_source(name)
+        let dsp_source = crate::lisp_host::load_instrument_source(name)
             .map_err(|error| format!("Failed to read instrument '{name}' dsp source: {error}"))?;
-        let ui_source = crate::lisp_effect::load_instrument_ui_source(name).ok();
+        let ui_source = crate::lisp_host::load_instrument_ui_source(name).ok();
         let content = match ui_source {
             Some(ui_source) => {
                 format!("instrument: {name}\n\n[dsp.lisp]\n{dsp_source}\n\n[ui.lisp]\n{ui_source}")
@@ -541,7 +541,7 @@ impl AgentToolRuntime {
     }
 
     fn execute_list_effects(&self) -> Result<ToolResult, String> {
-        let names = crate::lisp_effect::list_saved_effects();
+        let names = crate::lisp_host::list_saved_effects();
         Ok(ToolResult {
             summary: format!("Listed {} saved effect(s).", names.len()),
             content: if names.is_empty() {
@@ -555,9 +555,9 @@ impl AgentToolRuntime {
 
     fn execute_read_effect_source(&self, arguments: &Value) -> Result<ToolResult, String> {
         let name = required_string(arguments, "name")?;
-        let dsp_source = crate::lisp_effect::load_effect_source(name)
+        let dsp_source = crate::lisp_host::load_effect_source(name)
             .map_err(|error| format!("Failed to read effect '{name}' source: {error}"))?;
-        let ui_source = crate::lisp_effect::load_effect_ui_source(name).ok();
+        let ui_source = crate::lisp_host::load_effect_ui_source(name).ok();
         let content = match ui_source {
             Some(ui_source) => {
                 format!("effect: {name}\n\n[dsp.lisp]\n{dsp_source}\n\n[ui.lisp]\n{ui_source}")
