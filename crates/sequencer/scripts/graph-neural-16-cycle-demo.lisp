@@ -422,5 +422,5 @@
               :max 1
               :value (g16c-viz-matrix viz :dampening-matrix (g16c-zero-matrix)))))))))
 
-(effect-buffer "*16x16*" (g16c-panel SEQ.current-pattern SEQ.graph-visualizations))
+(effect-buffer "*16x16-cycle*" (g16c-panel SEQ.current-pattern SEQ.graph-visualizations))
 (seq-register-step-sequencer-tab script-tab-label script-buffer-name)

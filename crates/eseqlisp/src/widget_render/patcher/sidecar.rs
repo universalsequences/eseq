@@ -77,16 +77,20 @@ pub(super) fn sidecar_path_for_source(source_path: &Path) -> PathBuf {
 pub(super) fn apply_or_materialize(source_path: &Path, patch: &mut Patch) -> Result<(), String> {
     match load_sidecar(source_path) {
         Ok((SidecarStatus::Present, sidecar)) => {
-            apply_sidecar(patch, &sidecar);
-            save_patch_layout(source_path, patch)
+            apply_sidecar(patch, &sidecar, false);
+            Ok(())
         }
-        Ok((SidecarStatus::Missing, _)) => save_patch_layout(source_path, patch),
+        Ok((SidecarStatus::Missing, _)) => {
+            log_layout_auto_materialize(source_path, "missing-sidecar", patch);
+            save_patch_layout(source_path, patch, "materialize-missing-sidecar")
+        }
         Err(error) => {
             eprintln!(
                 "failed to load patcher layout sidecar for '{}': {error}",
                 source_path.display()
             );
-            save_patch_layout(source_path, patch)
+            log_layout_auto_materialize(source_path, "invalid-sidecar", patch);
+            save_patch_layout(source_path, patch, "materialize-invalid-sidecar")
         }
     }
 }
@@ -101,16 +105,28 @@ pub(super) fn apply_or_materialize_excluding_macro_scopes(
             sidecar
                 .macros
                 .retain(|macro_name, _| !excluded_macros.contains(macro_name));
-            apply_sidecar(patch, &sidecar);
-            save_patch_layout(source_path, patch)
+            apply_sidecar(patch, &sidecar, false);
+            Ok(())
         }
-        Ok((SidecarStatus::Missing, _)) => save_patch_layout(source_path, patch),
+        Ok((SidecarStatus::Missing, _)) => {
+            log_layout_auto_materialize(source_path, "missing-sidecar-excluding-macros", patch);
+            save_patch_layout(
+                source_path,
+                patch,
+                "materialize-missing-sidecar-excluding-macros",
+            )
+        }
         Err(error) => {
             eprintln!(
                 "failed to load patcher layout sidecar for '{}': {error}",
                 source_path.display()
             );
-            save_patch_layout(source_path, patch)
+            log_layout_auto_materialize(source_path, "invalid-sidecar-excluding-macros", patch);
+            save_patch_layout(
+                source_path,
+                patch,
+                "materialize-invalid-sidecar-excluding-macros",
+            )
         }
     }
 }
@@ -121,16 +137,23 @@ pub(super) fn apply_layout_file(layout_path: &Path, patch: &mut Patch) -> Result
     }
     let source = fs::read_to_string(layout_path)
         .map_err(|error| format!("failed to read '{}': {error}", layout_path.display()))?;
+    apply_layout_json(&source, &layout_path.display().to_string(), patch)
+}
+
+pub(super) fn apply_layout_json(
+    source: &str,
+    source_label: &str,
+    patch: &mut Patch,
+) -> Result<(), String> {
     let sidecar: LayoutSidecar = serde_json::from_str(&source)
-        .map_err(|error| format!("failed to parse '{}': {error}", layout_path.display()))?;
+        .map_err(|error| format!("failed to parse '{source_label}': {error}"))?;
     if sidecar.version != SIDECAR_VERSION {
         return Err(format!(
             "unsupported layout sidecar version {} in '{}'",
-            sidecar.version,
-            layout_path.display()
+            sidecar.version, source_label
         ));
     }
-    apply_sidecar(patch, &sidecar);
+    apply_sidecar(patch, &sidecar, false);
     Ok(())
 }
 
@@ -140,7 +163,7 @@ pub(super) fn save_current_layout(
     interaction_state: &PatcherInteractionState,
 ) -> Result<(), String> {
     let patch = root_patch_with_interaction(root_patch, interaction_state);
-    save_patch_layout(source_path, &patch)
+    save_patch_layout(source_path, &patch, "explicit-layout-save")
 }
 
 pub(super) fn current_layout_json(
@@ -196,9 +219,42 @@ fn load_sidecar(source_path: &Path) -> Result<(SidecarStatus, LayoutSidecar), St
     Ok((SidecarStatus::Present, sidecar))
 }
 
-fn save_patch_layout(source_path: &Path, patch: &Patch) -> Result<(), String> {
+fn save_patch_layout(source_path: &Path, patch: &Patch, reason: &str) -> Result<(), String> {
+    log_layout_write(source_path, reason, patch);
     let sidecar = sidecar_from_patch(patch);
     write_sidecar(source_path, &sidecar)
+}
+
+fn log_layout_auto_materialize(source_path: &Path, reason: &str, patch: &Patch) {
+    let (node_count, macro_count) = patch_layout_counts(patch);
+    eprintln!(
+        "[patcher layout auto-materialize] reason={reason} path={} sidecar={} nodes={} macros={}",
+        source_path.display(),
+        sidecar_path_for_source(source_path).display(),
+        node_count,
+        macro_count
+    );
+}
+
+fn log_layout_write(source_path: &Path, reason: &str, patch: &Patch) {
+    let (node_count, macro_count) = patch_layout_counts(patch);
+    eprintln!(
+        "[patcher layout write] reason={reason} path={} sidecar={} nodes={} macros={}",
+        source_path.display(),
+        sidecar_path_for_source(source_path).display(),
+        node_count,
+        macro_count
+    );
+}
+
+fn patch_layout_counts(patch: &Patch) -> (usize, usize) {
+    let node_count = patch.nodes.len()
+        + patch
+            .macros
+            .iter()
+            .map(|macro_patch| macro_patch.patch.nodes.len())
+            .sum::<usize>();
+    (node_count, patch.macros.len())
 }
 
 fn write_sidecar(source_path: &Path, sidecar: &LayoutSidecar) -> Result<(), String> {
@@ -223,16 +279,16 @@ fn write_sidecar(source_path: &Path, sidecar: &LayoutSidecar) -> Result<(), Stri
     })
 }
 
-fn apply_sidecar(patch: &mut Patch, sidecar: &LayoutSidecar) {
-    apply_scope_layout(patch, &sidecar.root);
+fn apply_sidecar(patch: &mut Patch, sidecar: &LayoutSidecar, place_unmatched: bool) {
+    apply_scope_layout(patch, &sidecar.root, place_unmatched);
     for macro_patch in &mut patch.macros {
         if let Some(scope) = sidecar.macros.get(&macro_patch.name) {
-            apply_scope_layout(&mut macro_patch.patch, scope);
+            apply_scope_layout(&mut macro_patch.patch, scope, place_unmatched);
         }
     }
 }
 
-fn apply_scope_layout(patch: &mut Patch, scope: &ScopeLayout) {
+fn apply_scope_layout(patch: &mut Patch, scope: &ScopeLayout, place_unmatched: bool) {
     for connection in &mut patch.connections {
         let key = destination_input_key(&connection.to_node, connection.to_input);
         if let Some(presentation) = scope.input_presentation.get(&key).copied() {
@@ -254,7 +310,9 @@ fn apply_scope_layout(patch: &mut Patch, scope: &ScopeLayout) {
             fixed.insert(node.id.clone());
         }
     }
-    place_unmatched_nodes(patch, &fixed);
+    if place_unmatched {
+        place_unmatched_nodes(patch, &fixed, "apply-sidecar-place-unmatched");
+    }
 
     let connection_endpoint_new = patch
         .connections
@@ -279,7 +337,7 @@ fn apply_scope_layout(patch: &mut Patch, scope: &ScopeLayout) {
     }
 }
 
-fn place_unmatched_nodes(patch: &mut Patch, fixed: &HashSet<String>) {
+fn place_unmatched_nodes(patch: &mut Patch, fixed: &HashSet<String>, reason: &str) {
     let hidden_node_ids = hidden_inline_node_ids(patch);
     let mut occupied = patch
         .nodes
@@ -292,11 +350,23 @@ fn place_unmatched_nodes(patch: &mut Patch, fixed: &HashSet<String>) {
             continue;
         }
         let (_, height) = node_size(node);
+        let original_position = node.position;
         while occupied
             .iter()
             .any(|rect| rects_overlap(node_rect(node), *rect))
         {
             node.position.1 += height + NODE_PADDING;
+        }
+        if node.position != original_position {
+            eprintln!(
+                "[patcher layout auto-place] reason={reason} node={} old=({:.3},{:.3}) new=({:.3},{:.3}) fixed_nodes={}",
+                node.id,
+                original_position.0,
+                original_position.1,
+                node.position.0,
+                node.position.1,
+                fixed.len()
+            );
         }
         occupied.push(node_rect(node));
     }

@@ -109,20 +109,37 @@ impl std::error::Error for DefmacroLibraryError {}
 
 impl DefmacroLibrary {
     pub fn load(root: impl AsRef<Path>) -> Result<Self, DefmacroLibraryError> {
+        let (library, errors) = Self::load_available(root)?;
+        if let Some(error) = errors.into_iter().next() {
+            return Err(error);
+        }
+        Ok(library)
+    }
+
+    pub fn load_available(
+        root: impl AsRef<Path>,
+    ) -> Result<(Self, Vec<DefmacroLibraryError>), DefmacroLibraryError> {
         let root = root.as_ref().to_path_buf();
         let mut packages = BTreeMap::new();
+        let mut errors = Vec::new();
         if !root.exists() {
-            return Ok(Self { root, packages });
+            return Ok((Self { root, packages }, errors));
         }
         let entries = fs::read_dir(&root).map_err(|error| DefmacroLibraryError::Io {
             path: root.clone(),
             message: error.to_string(),
         })?;
         for entry in entries {
-            let entry = entry.map_err(|error| DefmacroLibraryError::Io {
-                path: root.clone(),
-                message: error.to_string(),
-            })?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.push(DefmacroLibraryError::Io {
+                        path: root.clone(),
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             let path = entry.path();
             if !path.is_dir() {
                 continue;
@@ -134,13 +151,53 @@ impl DefmacroLibrary {
             {
                 continue;
             }
-            let package = DefmacroPackage::load(&path)?;
-            if packages.insert(package.name.clone(), package).is_some() {
-                return Err(DefmacroLibraryError::InvalidPackage {
+            let package = match DefmacroPackage::load(&path) {
+                Ok(package) => package,
+                Err(error) => {
+                    errors.push(error);
+                    continue;
+                }
+            };
+            if packages.contains_key(&package.name) {
+                errors.push(DefmacroLibraryError::InvalidPackage {
                     path,
-                    message: "duplicate public macro name".to_string(),
+                    message: format!("duplicate public macro name `{}`", package.name),
                 });
+                continue;
             }
+            packages.insert(package.name.clone(), package);
+        }
+        Ok((Self { root, packages }, errors))
+    }
+
+    pub fn load_for_source(
+        root: impl AsRef<Path>,
+        source: &str,
+    ) -> Result<Self, DefmacroLibraryError> {
+        let root = root.as_ref().to_path_buf();
+        let exprs = parse_exprs(source, None)?;
+        let local_macros = local_macro_names(&exprs);
+        let direct_imports = top_level_imports(&exprs)?;
+        Self::load_import_closure(root, &direct_imports, &local_macros)
+    }
+
+    fn load_import_closure(
+        root: PathBuf,
+        direct_imports: &[String],
+        local_macros: &HashSet<String>,
+    ) -> Result<Self, DefmacroLibraryError> {
+        let mut packages = BTreeMap::new();
+        let mut visiting = Vec::new();
+        let mut visited = HashSet::new();
+        for import in direct_imports {
+            load_package_dependency(
+                &root,
+                import,
+                local_macros,
+                &mut visiting,
+                &mut visited,
+                &mut packages,
+            )?;
         }
         Ok(Self { root, packages })
     }
@@ -446,18 +503,53 @@ pub fn default_library_root() -> Option<PathBuf> {
 }
 
 pub fn materialize_with_default_library(source: &str) -> Result<String, DefmacroLibraryError> {
-    let Some(root) = default_library_root() else {
-        if source.contains("use-defmacro") {
-            return DefmacroLibrary::empty("defmacros")
-                .materialize_source(source)
-                .map(|materialized| materialized.source);
-        }
+    let exprs = parse_exprs(source, None)?;
+    let direct_imports = top_level_imports(&exprs)?;
+    if direct_imports.is_empty() {
         return Ok(source.to_string());
+    }
+    let Some(root) = default_library_root() else {
+        return DefmacroLibrary::empty("defmacros")
+            .materialize_source(source)
+            .map(|materialized| materialized.source);
     };
-    let library = DefmacroLibrary::load(root)?;
+    let library = DefmacroLibrary::load_for_source(root, source)?;
     library
         .materialize_source(source)
         .map(|materialized| materialized.source)
+}
+
+fn load_package_dependency(
+    root: &Path,
+    name: &str,
+    local_macros: &HashSet<String>,
+    visiting: &mut Vec<String>,
+    visited: &mut HashSet<String>,
+    packages: &mut BTreeMap<String, DefmacroPackage>,
+) -> Result<(), DefmacroLibraryError> {
+    if local_macros.contains(name) || visited.contains(name) {
+        return Ok(());
+    }
+    if let Some(position) = visiting.iter().position(|active| active == name) {
+        let mut chain = visiting[position..].to_vec();
+        chain.push(name.to_string());
+        return Err(DefmacroLibraryError::ImportCycle { chain });
+    }
+    let package_dir = root.join(name);
+    if !package_dir.exists() {
+        return Err(DefmacroLibraryError::MissingMacro {
+            name: name.to_string(),
+        });
+    }
+    let package = DefmacroPackage::load(&package_dir)?;
+    visiting.push(name.to_string());
+    for import in &package.imports {
+        load_package_dependency(root, import, local_macros, visiting, visited, packages)?;
+    }
+    visiting.pop();
+    visited.insert(name.to_string());
+    packages.insert(package.name.clone(), package);
+    Ok(())
 }
 
 fn parse_exprs(
@@ -802,6 +894,55 @@ mod tests {
                 .source
                 .starts_with("(defmacro pitch2freq (p) (* p 2.0))\n(defmacro pluck")
         );
+    }
+
+    #[test]
+    fn load_for_source_ignores_invalid_unrelated_packages() {
+        let root = tmp_root("load-for-source-unrelated-invalid");
+        write_package(&root, "gain2", "(defmacro gain2 (x) (* x 2))");
+        write_package(&root, "broken", "(use-defmacro gain2)");
+
+        let strict_error = DefmacroLibrary::load(&root).unwrap_err();
+        assert!(matches!(
+            strict_error,
+            DefmacroLibraryError::InvalidPackage { .. }
+        ));
+
+        let library =
+            DefmacroLibrary::load_for_source(&root, "(use-defmacro gain2)\n(def y (gain2 x))")
+                .unwrap();
+        let materialized = library
+            .materialize_source("(use-defmacro gain2)\n(def y (gain2 x))")
+            .unwrap();
+        assert_eq!(
+            materialized.source,
+            "(defmacro gain2 (x) (* x 2.0))\n(def y (gain2 x))"
+        );
+    }
+
+    #[test]
+    fn load_available_keeps_valid_packages_and_reports_invalid_packages() {
+        let root = tmp_root("load-available");
+        write_package(&root, "gain2", "(defmacro gain2 (x) (* x 2))");
+        write_package(&root, "broken", "(use-defmacro gain2)");
+
+        let (library, errors) = DefmacroLibrary::load_available(&root).unwrap();
+        assert!(library.package("gain2").is_some());
+        assert!(library.package("broken").is_none());
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors.first(),
+            Some(DefmacroLibraryError::InvalidPackage { .. })
+        ));
+    }
+
+    #[test]
+    fn load_for_source_with_no_imports_does_not_scan_invalid_packages() {
+        let root = tmp_root("load-for-source-no-imports");
+        write_package(&root, "broken", "(use-defmacro nope)");
+
+        let library = DefmacroLibrary::load_for_source(&root, "(def y (* x 2))").unwrap();
+        assert!(library.packages().is_empty());
     }
 
     #[test]

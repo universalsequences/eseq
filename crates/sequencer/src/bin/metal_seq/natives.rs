@@ -740,6 +740,8 @@ pub(crate) fn init_runtime(
                 ("editor-error", Value::String(String::new())),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
+                ("editor-active-macro-name", Value::String(String::new())),
+                ("editor-active-macro-action", Value::String(String::new())),
                 (
                     "editor-instrument-run-mode",
                     Value::String("instrument".to_string()),

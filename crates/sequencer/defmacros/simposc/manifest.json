@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "simposc",
+  "params": [
+    "input"
+  ],
+  "outputs": [
+    "out"
+  ]
+}

@@ -84,7 +84,6 @@ pub(super) fn begin_patcher_text_edit(
         autocomplete_selected: 0,
     });
     state.hover_back_button = false;
-    state.hovered_macro_library_action = None;
     debug_log_edit_event("begin-text-edit", state);
 }
 

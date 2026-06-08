@@ -1,0 +1,79 @@
+{
+  "macros": {
+    "simp3": {
+      "cables": {
+        "input:0->phasor1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "phasor1:0->triangle1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "scale1:0->out:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "shape:0->triangle1:1": {
+          "segmented": true,
+          "y": 8.836249
+        },
+        "triangle1:0->scale1:0": {
+          "segmented": true,
+          "y": 21.49625
+        }
+      },
+      "inputPresentation": {
+        "created-1:0": "cable",
+        "created-2:0": "cable",
+        "created-2:1": "cable",
+        "created-3:0": "cable",
+        "out:0": "cable"
+      },
+      "nodes": {
+        "created-1": {
+          "x": 22.6957,
+          "y": 9.913424
+        },
+        "created-2": {
+          "x": 22.21523,
+          "y": 12.434477
+        },
+        "created-3": {
+          "x": 22.526201,
+          "y": 15.069222
+        },
+        "created-4": {
+          "x": 39.301777,
+          "y": 4.106873
+        },
+        "input": {
+          "x": 9.09873,
+          "y": 4.0
+        },
+        "out": {
+          "x": 22.526201,
+          "y": 18.756641
+        },
+        "phasor1": {
+          "x": 17.081837,
+          "y": 10.6825
+        },
+        "scale1": {
+          "x": 13.627541,
+          "y": 26.6275
+        },
+        "shape": {
+          "x": 37.379295,
+          "y": 4.0
+        },
+        "triangle1": {
+          "x": 16.841602,
+          "y": 22.525
+        }
+      }
+    }
+  },
+  "root": {},
+  "version": 1
+}

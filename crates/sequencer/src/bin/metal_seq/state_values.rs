@@ -6525,7 +6525,7 @@ pub(crate) fn track_step_has_plock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eseqlisp::parser::{ASTParser, Parser, ParserError, Token};
+    use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
     use sequencer::sequencer::default_empty_effect_chain;
     use std::collections::HashMap;
 
@@ -7017,6 +7017,7 @@ mod tests {
     fn metal_seq_core_lisp_files_parse() {
         for path in [
             "mac-osx-dark.lisp",
+            "ableton-mid.lisp",
             "mac-osx-graphite.lisp",
             "mac-osx-haze.lisp",
             "mac-osx-midnight.lisp",
@@ -7821,6 +7822,8 @@ mod tests {
                 ("editor-buffer-name", Value::String(String::new())),
                 ("editor-canceling", Value::Bool(false)),
                 ("editor-error", Value::String(String::new())),
+                ("editor-active-macro-name", Value::String(String::new())),
+                ("editor-active-macro-action", Value::String(String::new())),
                 (
                     "editor-instrument-run-mode",
                     Value::String("instrument".to_string()),
@@ -8216,6 +8219,66 @@ mod tests {
                     && node.rect.width > 0.0
                     && node.rect.height > 0.0,
                 "editor text should have a finite nonzero rect for {label}: {:?}",
+                node.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_editor_macro_action_replaces_finalize_controls() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-active", Value::Bool(true));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-instrument".to_string()),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-active-macro-name",
+            Value::String("simp".to_string()),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-active-macro-action",
+            Value::String("save-to-library".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser
+            .widget_tree
+            .as_ref()
+            .expect("browser widget tree")
+            .clone();
+        assert!(value_contains_string(&tree, "Defmacro"));
+        assert!(value_contains_string(&tree, "Current macro"));
+        assert!(value_contains_string(&tree, "simp"));
+        assert!(value_contains_string(&tree, "Save Macro to Library"));
+        assert!(
+            !value_contains_string(&tree, "Finalize"),
+            "macro action panel should replace the normal new-instrument finalize control"
+        );
+
+        let layout = editor
+            .runtime_mut()
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((28.0, 13.0)))
+            .expect("macro action editor sidebar should lay out");
+        for label in ["Defmacro", "Current macro", "simp", "Save Macro to Library"] {
+            let node = find_layout_text_containing(&layout, label)
+                .unwrap_or_else(|| panic!("expected visible macro editor text: {label}"));
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.width > 0.0
+                    && node.rect.height > 0.0,
+                "macro editor text should have a finite nonzero rect for {label}: {:?}",
                 node.rect
             );
         }
@@ -12010,6 +12073,8 @@ mod tests {
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
                 ("editor-error", Value::String(String::new())),
+                ("editor-active-macro-name", Value::String(String::new())),
+                ("editor-active-macro-action", Value::String(String::new())),
                 (
                     "editor-instrument-run-mode",
                     Value::String("instrument".to_string()),
@@ -13235,6 +13300,52 @@ mod tests {
                 ("Picker Test".to_string(), "*picker-test-seq*".to_string())
             ],
             "loading through the picker should register the script buffer tab on the first load"
+        );
+    }
+
+    #[test]
+    fn metal_seq_16_cycle_script_effect_buffer_matches_script_contract() {
+        let src = std::fs::read_to_string("scripts/graph-neural-16-cycle-demo.lisp")
+            .expect("read 16-cycle script");
+        let tokens = Parser::new(src).parse().expect("tokenize 16-cycle script");
+        let exprs = ASTParser::new(tokens)
+            .parse()
+            .expect("parse 16-cycle script");
+
+        let mut script_buffer_name = None;
+        let mut effect_buffer_targets = Vec::new();
+        for expr in &exprs {
+            let Expression::List(items) = expr else {
+                continue;
+            };
+            match items.as_slice() {
+                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
+                    if form == "def" && name == "script-buffer-name" =>
+                {
+                    script_buffer_name = Some(value.clone());
+                }
+                [Expression::Symbol(form), Expression::String(target), ..]
+                    if form == "effect-buffer" =>
+                {
+                    effect_buffer_targets.push(target.clone());
+                }
+                [Expression::Symbol(form), Expression::Symbol(target), ..]
+                    if form == "effect-buffer" =>
+                {
+                    panic!(
+                        "effect-buffer target names are literal; pass a string target, not symbol {target}"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let script_buffer_name =
+            script_buffer_name.expect("script should define script-buffer-name");
+        assert_eq!(
+            effect_buffer_targets,
+            vec![script_buffer_name],
+            "16-cycle script tab registration and effect-buffer must target the same buffer"
         );
     }
 

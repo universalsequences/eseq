@@ -5,6 +5,7 @@
 (def seq-theme-registry ()
   (list
     (dict :name "mac-osx-dark" :command "seq-theme-mac-osx-dark" :file "mac-osx-dark.lisp")
+    (dict :name "ableton-mid" :command "seq-theme-ableton-mid" :file "ableton-mid.lisp")
     (dict :name "mac-osx-graphite" :command "seq-theme-mac-osx-graphite" :file "mac-osx-graphite.lisp")
     (dict :name "mac-osx-haze" :command "seq-theme-mac-osx-haze" :file "mac-osx-haze.lisp")
     (dict :name "mac-osx-midnight" :command "seq-theme-mac-osx-midnight" :file "mac-osx-midnight.lisp")
@@ -20,6 +21,9 @@
 
 (def seq-theme-mac-osx-dark ()
   (seq-apply-theme-file "mac-osx-dark" "mac-osx-dark.lisp"))
+
+(def seq-theme-ableton-mid ()
+  (seq-apply-theme-file "ableton-mid" "ableton-mid.lisp"))
 
 (def seq-theme-mac-osx-graphite ()
   (seq-apply-theme-file "mac-osx-graphite" "mac-osx-graphite.lisp"))

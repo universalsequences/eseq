@@ -265,6 +265,134 @@ struct PendingEffectPreview {
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
 }
 
+fn editor_macro_action_strings(
+    action: Option<&eseqlisp::widget_render::patcher::ActiveMacroLibraryAction>,
+) -> (String, String) {
+    let Some(action) = action else {
+        return (String::new(), String::new());
+    };
+    let action_name = match action.kind {
+        eseqlisp::widget_render::patcher::MacroLibraryActionKind::SaveToLibrary => {
+            "save-to-library"
+        }
+        eseqlisp::widget_render::patcher::MacroLibraryActionKind::Fork => "fork",
+    };
+    (action.macro_name.clone(), action_name.to_string())
+}
+
+fn active_instrument_editor_macro_action(
+    session: &InstrumentEditSession,
+) -> Option<eseqlisp::widget_render::patcher::ActiveMacroLibraryAction> {
+    if !session.visible_revision_valid {
+        return None;
+    }
+    match eseqlisp::widget_render::patcher::active_macro_library_action_for_path(
+        &session.path,
+        &session.last_valid_source,
+        eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+    ) {
+        Ok(action) => action,
+        Err(error) => {
+            eprintln!(
+                "[editor macro-library-action query failed] path={} intent=instrument error={error}",
+                session.path.display()
+            );
+            None
+        }
+    }
+}
+
+fn active_effect_editor_macro_action(
+    session: &EffectEditSession,
+) -> Option<eseqlisp::widget_render::patcher::ActiveMacroLibraryAction> {
+    if !session.visible_revision_valid {
+        return None;
+    }
+    match eseqlisp::widget_render::patcher::active_macro_library_action_for_path(
+        &session.path,
+        &session.last_valid_source,
+        eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+    ) {
+        Ok(action) => action,
+        Err(error) => {
+            eprintln!(
+                "[editor macro-library-action query failed] path={} intent=effect error={error}",
+                session.path.display()
+            );
+            None
+        }
+    }
+}
+
+fn apply_active_instrument_editor_macro_action(
+    session: &mut InstrumentEditSession,
+) -> Result<Option<eseqlisp::widget_render::patcher::MacroLibraryActionResult>, String> {
+    if !session.visible_revision_valid {
+        return Err("Cannot save macro: the current patch has errors".to_string());
+    }
+    if active_instrument_editor_macro_action(session).is_none() {
+        return Ok(None);
+    }
+    let result = eseqlisp::widget_render::patcher::apply_active_macro_library_action_for_path(
+        &session.path,
+        &session.last_valid_source,
+        session.last_valid_layout.as_deref(),
+        eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+    )?;
+    std::fs::write(&session.path, &result.source)
+        .map_err(|error| format!("Failed to save patch source after macro action: {error}"))?;
+    write_patcher_layout_sidecar(&session.path, &result.layout)
+        .map_err(|error| format!("Failed to save patch layout after macro action: {error}"))?;
+    session.last_valid_source = result.source.clone();
+    session.last_valid_layout = Some(result.layout.clone());
+    eseqlisp::widget_render::patcher::reload_patcher_macro_view_for_path(
+        &session.path,
+        result.macro_name.clone(),
+    );
+    Ok(Some(result))
+}
+
+fn apply_active_effect_editor_macro_action(
+    session: &mut EffectEditSession,
+) -> Result<Option<eseqlisp::widget_render::patcher::MacroLibraryActionResult>, String> {
+    if !session.visible_revision_valid {
+        return Err("Cannot save macro: the current patch has errors".to_string());
+    }
+    if active_effect_editor_macro_action(session).is_none() {
+        return Ok(None);
+    }
+    let result = eseqlisp::widget_render::patcher::apply_active_macro_library_action_for_path(
+        &session.path,
+        &session.last_valid_source,
+        session.last_valid_layout.as_deref(),
+        eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+    )?;
+    std::fs::write(&session.path, &result.source)
+        .map_err(|error| format!("Failed to save patch source after macro action: {error}"))?;
+    write_patcher_layout_sidecar(&session.path, &result.layout)
+        .map_err(|error| format!("Failed to save patch layout after macro action: {error}"))?;
+    session.last_valid_source = result.source.clone();
+    session.last_valid_layout = Some(result.layout.clone());
+    eseqlisp::widget_render::patcher::reload_patcher_macro_view_for_path(
+        &session.path,
+        result.macro_name.clone(),
+    );
+    Ok(Some(result))
+}
+
+fn macro_library_action_status(
+    result: &eseqlisp::widget_render::patcher::MacroLibraryActionResult,
+) -> String {
+    match result.kind {
+        eseqlisp::widget_render::patcher::MacroLibraryActionKind::SaveToLibrary => {
+            format!("Saved macro '{}' to library", result.macro_name)
+        }
+        eseqlisp::widget_render::patcher::MacroLibraryActionKind::Fork => {
+            format!("Forked macro '{}' into current patch", result.macro_name)
+        }
+    }
+}
+
 struct PendingEffectCancelRestore {
     session: EffectEditSession,
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
@@ -4303,6 +4431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_effect_preview: Option<PendingEffectPreview> = None;
     let mut pending_effect_cancel_restore: Option<PendingEffectCancelRestore> = None;
     let mut pending_agentic_bubbles: HashMap<String, PendingAgenticBubble> = HashMap::new();
+    let mut prev_editor_macro_action: (String, String) = (String::new(), String::new());
     let mut prev_playing = false;
     let mut prev_bpm: u32 = 0;
     let mut prev_playhead: u32 = u32::MAX;
@@ -10356,10 +10485,117 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
+                    "save-active-editor-macro" => {
+                        let result = if let Some(session) = instrument_edit_session.as_mut() {
+                            apply_active_instrument_editor_macro_action(session)
+                        } else if let Some(session) = effect_edit_session.as_mut() {
+                            apply_active_effect_editor_macro_action(session)
+                        } else {
+                            Err("No patch editor session is active".to_string())
+                        };
+                        match result {
+                            Ok(Some(result)) => {
+                                let action_status = macro_library_action_status(&result);
+                                let editor_macro_action = instrument_edit_session
+                                    .as_ref()
+                                    .and_then(active_instrument_editor_macro_action)
+                                    .or_else(|| {
+                                        effect_edit_session
+                                            .as_ref()
+                                            .and_then(active_effect_editor_macro_action)
+                                    });
+                                let editor_macro_action =
+                                    editor_macro_action_strings(editor_macro_action.as_ref());
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-active-macro-name",
+                                    Value::String(editor_macro_action.0.clone()),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-active-macro-action",
+                                    Value::String(editor_macro_action.1.clone()),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-error",
+                                    Value::String(String::new()),
+                                );
+                                prev_editor_macro_action = editor_macro_action;
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                editor.refresh_visible_layouts_for_buffer_named("*samples*");
+                                editor.handle_host_event(HostEvent::Status(action_status));
+                            }
+                            Ok(None) => {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-error",
+                                    Value::String("No active macro is selected".to_string()),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                editor.refresh_visible_layouts_for_buffer_named("*samples*");
+                            }
+                            Err(error) => {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive("SEQ", "editor-error", Value::String(error));
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                editor.refresh_visible_layouts_for_buffer_named("*samples*");
+                            }
+                        }
+                    }
+
                     "save-new-instrument" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(cell) = map.get("name") {
                                 if let Value::String(inst_name) = &*cell.borrow() {
+                                    if instrument_edit_session
+                                        .as_ref()
+                                        .and_then(active_instrument_editor_macro_action)
+                                        .is_some()
+                                    {
+                                        if let Some(session) = instrument_edit_session.as_mut() {
+                                            match apply_active_instrument_editor_macro_action(
+                                                session,
+                                            ) {
+                                                Ok(Some(result)) => {
+                                                    let action_status =
+                                                        macro_library_action_status(&result);
+                                                    let rt = editor.runtime_mut();
+                                                    rt.set_reactive(
+                                                        "SEQ",
+                                                        "editor-error",
+                                                        Value::String(String::new()),
+                                                    );
+                                                    rt.run_reactive_cycle();
+                                                    editor.refresh_runtime_side_effects();
+                                                    editor
+                                                        .refresh_visible_layouts_for_buffer_named(
+                                                            "*samples*",
+                                                        );
+                                                    editor.handle_host_event(HostEvent::Status(
+                                                        action_status,
+                                                    ));
+                                                }
+                                                Ok(None) => {}
+                                                Err(error) => {
+                                                    let rt = editor.runtime_mut();
+                                                    rt.set_reactive(
+                                                        "SEQ",
+                                                        "editor-error",
+                                                        Value::String(error),
+                                                    );
+                                                    rt.run_reactive_cycle();
+                                                    editor.refresh_runtime_side_effects();
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     let inst_name = inst_name.trim().to_string();
                                     if inst_name.is_empty() {
                                         let rt = editor.runtime_mut();
@@ -10775,6 +11011,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Value::String(inst_name) = &*cell.borrow() {
                                     let inst_name = inst_name.clone();
                                     if let Some(session) = instrument_edit_session.as_ref() {
+                                        if active_instrument_editor_macro_action(session).is_some()
+                                        {
+                                            let session = instrument_edit_session
+                                                .as_mut()
+                                                .expect("instrument session must still be active");
+                                            match apply_active_instrument_editor_macro_action(
+                                                session,
+                                            ) {
+                                                Ok(Some(result)) => {
+                                                    let action_status =
+                                                        macro_library_action_status(&result);
+                                                    let rt = editor.runtime_mut();
+                                                    rt.set_reactive(
+                                                        "SEQ",
+                                                        "editor-error",
+                                                        Value::String(String::new()),
+                                                    );
+                                                    rt.run_reactive_cycle();
+                                                    editor.refresh_runtime_side_effects();
+                                                    editor.handle_host_event(HostEvent::Status(
+                                                        action_status,
+                                                    ));
+                                                }
+                                                Ok(None) => {}
+                                                Err(error) => {
+                                                    let rt = editor.runtime_mut();
+                                                    rt.set_reactive(
+                                                        "SEQ",
+                                                        "editor-error",
+                                                        Value::String(error),
+                                                    );
+                                                    rt.run_reactive_cycle();
+                                                    editor.refresh_runtime_side_effects();
+                                                }
+                                            }
+                                            continue;
+                                        }
                                         if !session.visible_revision_valid {
                                             let rt = editor.runtime_mut();
                                             rt.set_reactive(
@@ -13395,6 +13668,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut profile_pattern_reactive_cycle = false;
             let mut refresh_visible_sequencer_after_cycle = false;
             let mut refresh_visible_mixer_after_cycle = false;
+            let mut refresh_visible_samples_after_cycle = false;
             let typed_invalidations = ui_invalidations.drain();
             if apply_ui_invalidations(
                 typed_invalidations,
@@ -13785,6 +14059,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_auto_follow = auto_follow;
                 needs_reactive_cycle = true;
             }
+            let editor_macro_action = instrument_edit_session
+                .as_ref()
+                .and_then(active_instrument_editor_macro_action)
+                .or_else(|| {
+                    effect_edit_session
+                        .as_ref()
+                        .and_then(active_effect_editor_macro_action)
+                });
+            let editor_macro_action = editor_macro_action_strings(editor_macro_action.as_ref());
+            if editor_macro_action != prev_editor_macro_action {
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-active-macro-name",
+                    Value::String(editor_macro_action.0.clone()),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-active-macro-action",
+                    Value::String(editor_macro_action.1.clone()),
+                );
+                prev_editor_macro_action = editor_macro_action;
+                refresh_visible_samples_after_cycle = true;
+                needs_reactive_cycle = true;
+            }
 
             if needs_reactive_cycle {
                 let profile_cycle = profile_pattern_reactive_cycle;
@@ -13797,6 +14096,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let side_effects_elapsed = started.elapsed();
                 let mut refresh_seq_elapsed = Duration::ZERO;
                 let mut refresh_mixer_elapsed = Duration::ZERO;
+                let mut refresh_samples_elapsed = Duration::ZERO;
                 if refresh_visible_sequencer_after_cycle {
                     let started = Instant::now();
                     editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
@@ -13807,17 +14107,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     editor.refresh_visible_layouts_for_buffer_named("*mixer*");
                     refresh_mixer_elapsed = started.elapsed();
                 }
+                if refresh_visible_samples_after_cycle {
+                    let started = Instant::now();
+                    editor.refresh_visible_layouts_for_buffer_named("*samples*");
+                    refresh_samples_elapsed = started.elapsed();
+                }
                 editor.mark_needs_redraw();
                 if profile_cycle {
                     eprintln!(
-                        "[pattern-switch-profile][reactive-cycle] total={:.2}ms reactive={:.2}ms side_effects={:.2}ms refresh_seq={:.2}ms refresh_mixer={:.2}ms refresh_seq_flag={} refresh_mixer_flag={}",
+                        "[pattern-switch-profile][reactive-cycle] total={:.2}ms reactive={:.2}ms side_effects={:.2}ms refresh_seq={:.2}ms refresh_mixer={:.2}ms refresh_samples={:.2}ms refresh_seq_flag={} refresh_mixer_flag={} refresh_samples_flag={}",
                         duration_ms(cycle_total_started.elapsed()),
                         duration_ms(reactive_elapsed),
                         duration_ms(side_effects_elapsed),
                         duration_ms(refresh_seq_elapsed),
                         duration_ms(refresh_mixer_elapsed),
+                        duration_ms(refresh_samples_elapsed),
                         refresh_visible_sequencer_after_cycle,
                         refresh_visible_mixer_after_cycle,
+                        refresh_visible_samples_after_cycle,
                     );
                 }
             }

@@ -816,16 +816,26 @@
 
 ;; ── Editor sidebar panels ──
 
+(def sbrowser-editor-macro-action? ()
+  (or (= SEQ.editor-active-macro-action "save-to-library")
+      (= SEQ.editor-active-macro-action "fork")))
+
+(def sbrowser-editor-macro-action-label ()
+  (if (= SEQ.editor-active-macro-action "fork")
+    "Fork Macro"
+    "Save Macro to Library"))
+
 (def sbrowser-editor-header ()
   (box :width :fill :padding 0.25
     (v-stack :width :fill :gap 0.4
       (h-stack :width :fill :gap 0.5 :align :center
         (label
-          (if (= SEQ.editor-mode "new-instrument") "New Instrument"
-            (if (= SEQ.editor-mode "edit-instrument") "Edit Instrument"
-              (if (= SEQ.editor-mode "new-effect") "New Effect"
-                (if (= SEQ.editor-mode "edit-effect") "Edit Effect"
-                  "Editor"))))
+          (if (sbrowser-editor-macro-action?) "Defmacro"
+            (if (= SEQ.editor-mode "new-instrument") "New Instrument"
+              (if (= SEQ.editor-mode "edit-instrument") "Edit Instrument"
+                (if (= SEQ.editor-mode "new-effect") "New Effect"
+                  (if (= SEQ.editor-mode "edit-effect") "Edit Effect"
+                    "Editor")))))
           :font-size 12
           :color :white
           :bg :transparent)
@@ -836,7 +846,25 @@
             :font-size 9
             :color (if SEQ.editor-canceling :dim :gray)
             :bg :transparent)))
-      (if (= SEQ.editor-mode "new-instrument")
+      (if (sbrowser-editor-macro-action?)
+        (v-stack :width :fill :gap 0.35
+          (label "Current macro"
+            :font-size 9
+            :color :gray
+            :bg :transparent)
+          (label SEQ.editor-active-macro-name
+            :font-size 11
+            :color :white
+            :bg :transparent)
+          (label "Action"
+            :font-size 9
+            :color :gray
+            :bg :transparent)
+          (label (sbrowser-editor-macro-action-label)
+            :font-size 11
+            :color :white
+            :bg :transparent))
+        (if (= SEQ.editor-mode "new-instrument")
         (v-stack :width :fill :gap 0.35
           (label "Draft patch"
             :font-size 9
@@ -903,7 +931,7 @@
           (label SEQ.editor-buffer-name
             :font-size 10
             :color :gray
-            :bg :transparent)))
+            :bg :transparent))))
       ;; Status display
       (if SEQ.editor-canceling
         (sbrowser-editor-status-row "Canceling..." :gray)
@@ -919,24 +947,27 @@
       (if (sbrowser-editor-busy?)
         (box :height 1.2)
         (button
-          (if (= SEQ.editor-mode "new-instrument")
+          (if (sbrowser-editor-macro-action?)
+            (sbrowser-editor-macro-action-label)
+            (if (= SEQ.editor-mode "new-instrument")
             "Finalize"
             (if (= SEQ.editor-mode "new-effect")
               "Save & Add"
-            "Save")
-          )
+            "Save")))
           :variant :primary
-          :width 10
+          :width (if (sbrowser-editor-macro-action?) 13.5 10)
           :height 1.2
           :font-size 11
           :on-click |x y r|
-            (if (= SEQ.editor-mode "new-instrument")
+            (if (sbrowser-editor-macro-action?)
+              (host-command "save-active-editor-macro" (dict))
+              (if (= SEQ.editor-mode "new-instrument")
               (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
               (if (= SEQ.editor-mode "edit-instrument")
                 (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
                 (if (= SEQ.editor-mode "new-effect")
                   (host-command "save-new-effect" (dict :name sbrowser-editor-name))
-                  (host-command "update-effect" (dict)))))
+                  (host-command "update-effect" (dict))))))
           :color :white)))))
 
 (def sbrowser-editor-panel ()

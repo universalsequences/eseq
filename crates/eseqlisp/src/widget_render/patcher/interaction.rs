@@ -15,8 +15,8 @@ use super::geometry::{
     hit_patcher_segmented_cable_horizontal_segment, nearest_patcher_input_port,
     nearest_patcher_output_port, patch_content_size, patch_input_indices, patch_input_slot_counts,
     patch_node_rects, patch_output_counts, patcher_back_button_rect, patcher_breadcrumb_rect,
-    patcher_macro_library_action_rect, patcher_origin, patcher_zoom, port_center, rect_contains,
-    rect_from_points, rects_intersect, screen_to_model,
+    patcher_origin, patcher_zoom, port_center, rect_contains, rect_from_points, rects_intersect,
+    screen_to_model,
 };
 use super::metrics::{
     PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET, SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS,
@@ -37,7 +37,7 @@ use super::text::{
     begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col_with_zoom,
     update_patcher_text_edit_pointer,
 };
-use super::{debug_patch_for_state, load_patch_from_props, macro_library_action_for_state};
+use super::{debug_patch_for_state, load_patch_from_props};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PatcherChangeKind {
@@ -159,21 +159,6 @@ pub(super) fn handle_patcher_pointer_down(
         && rect_contains(patcher_back_button_rect(node.rect), local_col, local_row)
     {
         navigate_patcher_to_root(key, &mut state);
-        return;
-    }
-    if let Ok((_, root_patch)) = load_patch_from_props(&node.props)
-        && let Some(kind) = macro_library_action_for_state(&root_patch, &state)
-        && let Some(macro_name) = state.active_macro.clone()
-        && rect_contains(
-            patcher_macro_library_action_rect(node.rect),
-            local_col,
-            local_row,
-        )
-    {
-        state.pending_macro_library_action =
-            Some(super::state::PatcherMacroLibraryAction { kind, macro_name });
-        state.macro_library_action_error = None;
-        set_patcher_interaction_state(key, state);
         return;
     }
     let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) else {
@@ -788,9 +773,6 @@ pub(super) fn handle_patcher_pointer_up(
         )
     );
     let mut semantic_changed = false;
-    if state.pending_macro_library_action.is_some() {
-        semantic_changed = true;
-    }
     if let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) {
         state.last_pointer_model_position = Some(screen_to_model(
             node.rect,
@@ -898,16 +880,6 @@ pub(super) fn handle_patcher_pointer_moved(
     ));
     state.hover_back_button = state.active_macro.is_some()
         && rect_contains(patcher_back_button_rect(node.rect), local_col, local_row);
-    state.hovered_macro_library_action = load_patch_from_props(&node.props)
-        .ok()
-        .and_then(|(_, root_patch)| macro_library_action_for_state(&root_patch, &state))
-        .filter(|_| {
-            rect_contains(
-                patcher_macro_library_action_rect(node.rect),
-                local_col,
-                local_row,
-            )
-        });
     let ordered_nodes = ordered_patch_nodes(&patch, &state, &_view_key);
     state.hovered_node = hit_patcher_node(
         &patch,
@@ -981,7 +953,6 @@ pub(super) fn open_selected_macro_node(
     state.selected_cable = None;
     state.hovered_node = None;
     state.hover_back_button = false;
-    state.hovered_macro_library_action = None;
     state.drag = None;
     state.text_edit = None;
     debug_log_edit_event(&format!("open-macro name={macro_name}"), state);
@@ -1119,8 +1090,6 @@ fn navigate_patcher_to_root(key: u64, state: &mut PatcherInteractionState) {
     state.selected_cable = None;
     state.hovered_node = None;
     state.hover_back_button = false;
-    state.hovered_macro_library_action = None;
-    state.pending_macro_library_action = None;
     state.drag = None;
     debug_log_edit_event("navigate-root", state);
     set_patcher_interaction_state(key, state.clone());

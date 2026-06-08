@@ -193,6 +193,11 @@ fn emit_patch_writeback_result_for_root_patch(
     register_created_modulatable_params(&mut document, interaction_state);
     apply_created_macro_writeback(&mut document, &root_patch, interaction_state)?;
     let effective_root_patch = patch_with_created_macros(root_patch.clone(), interaction_state);
+    apply_created_macro_scaffold_deletions(
+        &mut document,
+        &effective_root_patch,
+        interaction_state,
+    )?;
     apply_created_macro_parameter_writeback(&mut document, interaction_state)?;
 
     validate_connection_edits(&effective_root_patch, interaction_state)?;
@@ -875,6 +880,47 @@ fn apply_created_macro_parameter_writeback(
     Ok(())
 }
 
+fn apply_created_macro_scaffold_deletions(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+) -> Result<(), WriteBackError> {
+    let mut deleted_params = interaction_state
+        .edit_state
+        .deleted_nodes
+        .iter()
+        .filter_map(|key| {
+            let (view_key, node_id) = split_scoped_key(key);
+            created_macro_scaffold_parameter_deletion(
+                root_patch,
+                interaction_state,
+                &view_key,
+                &node_id,
+            )
+            .map(|index| (view_key, node_id, index))
+        })
+        .collect::<Vec<_>>();
+    deleted_params.sort_by(|(view_a, _, index_a), (view_b, _, index_b)| {
+        view_a.cmp(view_b).then(index_b.cmp(index_a))
+    });
+    deleted_params.dedup_by(|(view_a, _, index_a), (view_b, _, index_b)| {
+        view_a == view_b && index_a == index_b
+    });
+
+    for (view_key, node_id, index) in deleted_params {
+        if !deleted_macro_parameter_has_no_live_source_consumers(
+            root_patch,
+            interaction_state,
+            &view_key,
+            &node_id,
+        ) {
+            continue;
+        }
+        document.remove_macro_param(&scope_for_view_key(&view_key), index, &view_key, &node_id)?;
+    }
+    Ok(())
+}
+
 fn apply_created_out_writeback(
     document: &mut SourceDocument,
     root_patch: &Patch,
@@ -1107,8 +1153,33 @@ fn apply_node_deletions(
             let Some(node) =
                 patch_for_view(root_patch, &view_key).and_then(|patch| patch_node(patch, &node_id))
             else {
-                return Err(WriteBackError::UnsupportedDeletedNode { view_key, node_id });
+                return Ok(Vec::new());
             };
+            if created_macro_scaffold_parameter_deletion(
+                root_patch,
+                interaction_state,
+                &view_key,
+                &node_id,
+            )
+            .is_some()
+                && deleted_macro_parameter_has_no_live_source_consumers(
+                    root_patch,
+                    interaction_state,
+                    &view_key,
+                    &node_id,
+                )
+            {
+                return Ok(Vec::new());
+            }
+            if deleted_macro_visual_return_has_out_replacement(
+                root_patch,
+                interaction_state,
+                &view_key,
+                &node_id,
+                node,
+            ) {
+                return Ok(Vec::new());
+            }
             let Some(source) = node.source.as_ref() else {
                 return Err(WriteBackError::MissingSourceOwner { view_key, node_id });
             };
@@ -1176,6 +1247,128 @@ fn apply_node_deletions(
     Ok(())
 }
 
+fn deleted_macro_visual_return_has_out_replacement(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+    node: &PatchNode,
+) -> bool {
+    if !view_key.starts_with("macro:") || node.kind == NodeKind::Out {
+        return false;
+    }
+    let Some(source) = node.source.as_ref() else {
+        return false;
+    };
+    if !matches!(source.owner, SourceOwner::TopLevelForm { .. }) {
+        return false;
+    }
+    let Some((form_id, _)) = source_owner_location(&source.owner, source.expr.as_ref()) else {
+        return false;
+    };
+    if !matches!(form_id.scope, SourceScopeId::Macro { .. }) {
+        return false;
+    }
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return false;
+    };
+    let out_node_ids = patch
+        .nodes
+        .iter()
+        .filter(|candidate| candidate.kind == NodeKind::Out)
+        .filter(|candidate| {
+            !interaction_state
+                .edit_state
+                .deleted_nodes
+                .contains(&node_edit_key(view_key, &candidate.id))
+        })
+        .map(|candidate| candidate.id.as_str())
+        .collect::<HashSet<_>>();
+    if out_node_ids.is_empty() {
+        return false;
+    }
+    let was_projected_as_macro_return = patch.connections.iter().any(|connection| {
+        connection.from_node == node_id
+            && connection.to_input == 0
+            && out_node_ids.contains(connection.to_node.as_str())
+    });
+    if !was_projected_as_macro_return {
+        return false;
+    }
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .any(|connection| {
+            connection.view_key == view_key
+                && connection.to.input_index == 0
+                && out_node_ids.contains(connection.to.node_id.as_str())
+                && connection.from.node_id != node_id
+                && !interaction_state
+                    .edit_state
+                    .deleted_nodes
+                    .contains(&node_edit_key(view_key, &connection.from.node_id))
+        })
+}
+
+fn created_macro_scaffold_parameter_deletion(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> Option<usize> {
+    let macro_name = view_key.strip_prefix("macro:")?;
+    interaction_state
+        .edit_state
+        .created_macros
+        .get(macro_name)?;
+    patch_for_view(root_patch, view_key)
+        .and_then(|patch| patch_node(patch, node_id))
+        .and_then(|node| node.source.as_ref())
+        .and_then(|source| match &source.owner {
+            SourceOwner::MacroParameter { index, .. } => Some(*index),
+            _ => None,
+        })
+}
+
+fn deleted_macro_parameter_has_no_live_source_consumers(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    let Some(patch) = patch_for_view(root_patch, view_key) else {
+        return true;
+    };
+    patch
+        .connections
+        .iter()
+        .filter(|connection| connection.from_node == node_id)
+        .all(|connection| {
+            interaction_state
+                .edit_state
+                .deleted_nodes
+                .contains(&node_edit_key(view_key, &connection.to_node))
+                || interaction_state
+                    .edit_state
+                    .deleted_connections
+                    .contains(&connection_edit_key(
+                        view_key,
+                        &source_connection_id(connection),
+                    ))
+                || interaction_state
+                    .edit_state
+                    .connections
+                    .values()
+                    .any(|edit| {
+                        edit.view_key == view_key
+                            && edit.to.node_id == connection.to_node
+                            && edit.to.input_index == connection.to_input
+                            && edit.from.node_id != node_id
+                    })
+        })
+}
+
 fn source_deletion_targets_for_owner(
     view_key: &str,
     node_id: &str,
@@ -1231,6 +1424,7 @@ fn macro_prune_candidate_names(
         .macros
         .iter()
         .filter(|macro_patch| !newly_created.contains(macro_patch.name.as_str()))
+        .filter(|macro_patch| interaction_state.active_macro.as_deref() != Some(&macro_patch.name))
         .map(|macro_patch| macro_patch.name.clone())
         .collect()
 }
@@ -2943,6 +3137,11 @@ fn node_reference_expr_with_pending_source_input_rewrites(
     if output_index != 0 || !source_node_accepts_positional_input_rewrites(node) {
         return Ok(expr);
     }
+    if !matches!(expr, Expression::List(_))
+        && let Some(original_expr) = source_node_original_expression(document, node, output_index)
+    {
+        expr = original_expr;
+    }
     let Expression::List(items) = &mut expr else {
         return Ok(expr);
     };
@@ -4145,6 +4344,12 @@ fn source_node_call_path_was_replaced_by_created_rewrite(
         view_key,
         &node.id,
     ) || source_node_feeds_created_value_rewrite(root_patch, interaction_state, view_key, &node.id)
+        || source_node_feeds_source_backed_rewrite(
+            root_patch,
+            interaction_state,
+            view_key,
+            &node.id,
+        )
 }
 
 fn source_node_feeds_generated_binding(
@@ -4200,6 +4405,26 @@ fn source_node_feeds_created_value_rewrite(
                 view_key,
                 &connection.to.node_id,
             )
+        })
+}
+
+fn source_node_feeds_source_backed_rewrite(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> bool {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key)
+        .filter(|connection| connection.from.node_id == node_id)
+        .any(|connection| {
+            patch_for_view(root_patch, view_key)
+                .and_then(|patch| patch_node(patch, &connection.to.node_id))
+                .and_then(|node| node.source.as_ref())
+                .is_some()
         })
 }
 
@@ -5897,6 +6122,38 @@ impl SourceDocument {
             });
         }
         macro_doc.params[index] = Expression::Symbol(name);
+        Ok(())
+    }
+
+    fn remove_macro_param(
+        &mut self,
+        scope: &SourceScopeId,
+        index: usize,
+        view_key: &str,
+        node_id: &str,
+    ) -> Result<(), WriteBackError> {
+        let SourceScopeId::Macro { name } = scope else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: "macro parameter removal requires a macro scope".to_string(),
+            });
+        };
+        let Some(macro_doc) = self.macros.get_mut(name) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: "missing macro scope for parameter removal".to_string(),
+            });
+        };
+        if index >= macro_doc.params.len() {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node_id.to_string(),
+                reason: format!("missing macro parameter {}", index),
+            });
+        }
+        macro_doc.params.remove(index);
         Ok(())
     }
 

@@ -54,6 +54,26 @@ pub struct EmittedSourceBufferSnapshot {
     pub source: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MacroLibraryActionKind {
+    SaveToLibrary,
+    Fork,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveMacroLibraryAction {
+    pub macro_name: String,
+    pub kind: MacroLibraryActionKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MacroLibraryActionResult {
+    pub macro_name: String,
+    pub kind: MacroLibraryActionKind,
+    pub source: String,
+    pub layout: String,
+}
+
 pub fn emitted_source_buffer_snapshot(
     node: &crate::layout::LayoutNode,
 ) -> Result<EmittedSourceBufferSnapshot, String> {
@@ -161,6 +181,22 @@ pub fn reset_patcher_state_for_path(path: impl AsRef<std::path::Path>, intent: P
     ]);
     let key = state::patcher_state_key_from_parts(None, &props);
     state::reset_patcher_widget_states_for_path(path, key);
+}
+
+pub fn reload_patcher_macro_view_for_path(
+    path: impl AsRef<std::path::Path>,
+    macro_name: impl Into<String>,
+) {
+    let macro_name = macro_name.into();
+    for key in state::patcher_keys_for_path(path.as_ref()) {
+        state::set_patcher_interaction_state(
+            key,
+            state::PatcherInteractionState {
+                active_macro: Some(macro_name.clone()),
+                ..state::PatcherInteractionState::default()
+            },
+        );
+    }
 }
 
 pub fn resolve_agentic_bubble(
@@ -1330,8 +1366,16 @@ fn defmacro_library_for_props(
     let root = prop_str(props, "defmacro-library-root")
         .map(PathBuf::from)
         .or_else(crate::defmacro_library::default_library_root)?;
-    match crate::defmacro_library::DefmacroLibrary::load(&root) {
-        Ok(library) => Some(library),
+    match crate::defmacro_library::DefmacroLibrary::load_available(&root) {
+        Ok((library, errors)) => {
+            for error in errors {
+                eprintln!(
+                    "failed to load defmacro library package from '{}': {error}",
+                    root.display()
+                );
+            }
+            Some(library)
+        }
         Err(error) => {
             eprintln!(
                 "failed to load defmacro library '{}': {error}",
@@ -1429,19 +1473,264 @@ fn interaction_state_without_library_macro_views(
     filtered
 }
 
-fn macro_library_action_for_state(
+fn clear_persisted_macro_view_edits(
+    state: &mut state::PatcherInteractionState,
+    macro_names: &[String],
+) {
+    if macro_names.is_empty() {
+        return;
+    }
+    let views = macro_names
+        .iter()
+        .map(|name| format!("macro:{name}"))
+        .collect::<std::collections::HashSet<_>>();
+    state
+        .edit_state
+        .nodes
+        .retain(|_, edit| !views.contains(&edit.view_key));
+    state.edit_state.deleted_nodes.retain(|key| {
+        !key.split_once("::")
+            .is_some_and(|(view, _)| views.contains(view))
+    });
+    state
+        .edit_state
+        .connections
+        .retain(|_, edit| !views.contains(&edit.view_key));
+    state.edit_state.deleted_connections.retain(|key| {
+        !key.split_once("::")
+            .is_some_and(|(view, _)| views.contains(view))
+    });
+    state
+        .edit_state
+        .input_presentations
+        .retain(|_, edit| !views.contains(&edit.view_key));
+    for view in &views {
+        state.z_order.remove(view);
+    }
+    if views.contains(&active_patcher_view_key(state)) {
+        state.selected_nodes.clear();
+        state.selected_cable = None;
+        state.hovered_node = None;
+        state.hovered_input_port = None;
+        state.hovered_output_port = None;
+        state.text_edit = None;
+        state.drag = None;
+    }
+}
+
+fn public_macro_library_action_kind(
+    kind: state::PatcherMacroLibraryActionKind,
+) -> MacroLibraryActionKind {
+    match kind {
+        state::PatcherMacroLibraryActionKind::SaveToLibrary => {
+            MacroLibraryActionKind::SaveToLibrary
+        }
+        state::PatcherMacroLibraryActionKind::Fork => MacroLibraryActionKind::Fork,
+    }
+}
+
+fn state_macro_library_action_kind(
+    kind: MacroLibraryActionKind,
+) -> state::PatcherMacroLibraryActionKind {
+    match kind {
+        MacroLibraryActionKind::SaveToLibrary => {
+            state::PatcherMacroLibraryActionKind::SaveToLibrary
+        }
+        MacroLibraryActionKind::Fork => state::PatcherMacroLibraryActionKind::Fork,
+    }
+}
+
+pub fn active_macro_library_action_for_path(
+    path: impl AsRef<Path>,
+    source: &str,
+    intent: PatcherIntent,
+) -> Result<Option<ActiveMacroLibraryAction>, String> {
+    let Some(active_macro) = active_macro_name_for_path(path.as_ref()) else {
+        return Ok(None);
+    };
+    let library = default_defmacro_library_for_write()?;
+    let root_patch = parse_patch_source_with_library(source, intent, &library)?;
+    let action = macro_library_action_for_macro(&root_patch, &active_macro);
+    Ok(action.map(|kind| ActiveMacroLibraryAction {
+        macro_name: active_macro,
+        kind: public_macro_library_action_kind(kind),
+    }))
+}
+
+pub fn apply_active_macro_library_action_for_path(
+    path: impl AsRef<Path>,
+    source: &str,
+    layout: Option<&str>,
+    intent: PatcherIntent,
+) -> Result<MacroLibraryActionResult, String> {
+    let path = path.as_ref();
+    let action = active_macro_library_action_for_path(path, source, intent)?
+        .ok_or_else(|| "No active macro is selected in the patch editor".to_string())?;
+    let library = default_defmacro_library_for_write()?;
+    let mut root_patch = parse_patch_source_with_library(source, intent, &library)?;
+    if let Some(layout) = layout {
+        sidecar::apply_layout_json(layout, "active patcher layout", &mut root_patch)?;
+    }
+    let state = active_interaction_state_for_path(path, &action.macro_name).unwrap_or_default();
+    let props = HashMap::from([
+        (
+            "path".to_string(),
+            Value::String(path.to_string_lossy().into_owned()),
+        ),
+        (
+            "intent".to_string(),
+            Value::Keyword(match intent {
+                PatcherIntent::Effect => "effect".to_string(),
+                PatcherIntent::Instrument => "instrument".to_string(),
+            }),
+        ),
+        (
+            "defmacro-library-root".to_string(),
+            Value::String(library.root().to_string_lossy().into_owned()),
+        ),
+    ]);
+    let writeback_state = match action.kind {
+        MacroLibraryActionKind::SaveToLibrary => state.clone(),
+        MacroLibraryActionKind::Fork => {
+            interaction_state_without_library_macro_views(&state, &root_patch)
+        }
+    };
+    let writeback_result = writeback::emit_patch_writeback_result_with_library(
+        source,
+        intent,
+        &writeback_state,
+        &library,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let emitted_layout = writeback_layout_for_source(
+        &writeback_result.source,
+        intent,
+        &props,
+        &root_patch,
+        &writeback_state,
+        &writeback_result.generated_node_ids,
+    )?;
+    let mut emitted_root_patch =
+        parse_patch_source_with_library(&writeback_result.source, intent, &library)?;
+    sidecar::apply_layout_json(
+        &emitted_layout,
+        "active patcher emitted layout",
+        &mut emitted_root_patch,
+    )?;
+    let state_action = state::PatcherMacroLibraryAction {
+        kind: state_macro_library_action_kind(action.kind),
+        macro_name: action.macro_name.clone(),
+    };
+    let (source, layout) = apply_macro_library_action(
+        writeback_result.source,
+        emitted_layout,
+        &state_action,
+        &emitted_root_patch,
+        intent,
+        &props,
+        &library,
+        &writeback_state,
+        &writeback_result.generated_node_ids,
+    )?;
+    Ok(MacroLibraryActionResult {
+        macro_name: action.macro_name,
+        kind: action.kind,
+        source,
+        layout,
+    })
+}
+
+fn active_macro_name_for_path(path: &Path) -> Option<String> {
+    state::patcher_keys_for_path(path)
+        .into_iter()
+        .rev()
+        .find_map(|key| {
+            state::get_patcher_interaction_state(key)
+                .active_macro
+                .filter(|name| !name.trim().is_empty())
+        })
+}
+
+fn active_interaction_state_for_path(
+    path: &Path,
+    macro_name: &str,
+) -> Option<state::PatcherInteractionState> {
+    let view_key = format!("macro:{macro_name}");
+    state::patcher_keys_for_path(path)
+        .into_iter()
+        .map(state::get_patcher_interaction_state)
+        .filter(|state| state.active_macro.as_deref() == Some(macro_name))
+        .enumerate()
+        .max_by_key(|(idx, state)| (macro_view_edit_score(state, &view_key), *idx))
+        .map(|(_, state)| state)
+}
+
+fn macro_view_edit_score(state: &state::PatcherInteractionState, view_key: &str) -> usize {
+    let key_prefix = format!("{view_key}::");
+    state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| edit.view_key == view_key)
+        .count()
+        + state
+            .edit_state
+            .connections
+            .values()
+            .filter(|edit| edit.view_key == view_key)
+            .count()
+        + state
+            .edit_state
+            .input_presentations
+            .values()
+            .filter(|edit| edit.view_key == view_key)
+            .count()
+        + state
+            .edit_state
+            .deleted_nodes
+            .iter()
+            .filter(|key| key.starts_with(&key_prefix))
+            .count()
+        + state
+            .edit_state
+            .deleted_connections
+            .iter()
+            .filter(|key| key.starts_with(&key_prefix))
+            .count()
+        + usize::from(
+            state
+                .text_edit
+                .as_ref()
+                .is_some_and(|_| active_patcher_view_key(state) == view_key),
+        )
+}
+
+fn macro_library_action_for_macro(
     root_patch: &Patch,
-    state: &state::PatcherInteractionState,
+    macro_name: &str,
 ) -> Option<state::PatcherMacroLibraryActionKind> {
-    let active_name = state.active_macro.as_deref()?;
     let macro_patch = root_patch
         .macros
         .iter()
-        .find(|macro_patch| macro_patch.name == active_name)?;
+        .find(|macro_patch| macro_patch.name == macro_name)?;
     match macro_patch.origin {
         MacroOrigin::Local => Some(state::PatcherMacroLibraryActionKind::SaveToLibrary),
         MacroOrigin::Library { .. } => Some(state::PatcherMacroLibraryActionKind::Fork),
     }
+}
+
+fn default_defmacro_library_for_write() -> Result<DefmacroLibrary, String> {
+    let root = crate::defmacro_library::default_library_root()
+        .ok_or_else(|| "defmacro library root was not found".to_string())?;
+    let (library, errors) =
+        DefmacroLibrary::load_available(&root).map_err(|error| error.to_string())?;
+    for error in errors {
+        eprintln!(
+            "failed to load defmacro library package from '{}': {error}",
+            root.display()
+        );
+    }
+    Ok(library)
 }
 
 fn persist_library_macro_edits(
@@ -1449,7 +1738,8 @@ fn persist_library_macro_edits(
     intent: PatcherIntent,
     state: &state::PatcherInteractionState,
     library: &crate::defmacro_library::DefmacroLibrary,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
+    let mut persisted = Vec::new();
     for macro_patch in &root_patch.macros {
         let MacroOrigin::Library {
             source_path,
@@ -1491,12 +1781,13 @@ fn persist_library_macro_edits(
         let source = std::fs::read_to_string(&source_path)
             .map_err(|error| format!("failed to read '{}': {error}", source_path.display()))?;
         let library_state = interaction_state_for_only_view(state, &view_key);
-        let previous_patch = parse_patch_source_for_props_like_library_source(
+        let mut previous_patch = parse_patch_source_for_props_like_library_source(
             &source,
             intent,
             library,
             &macro_patch.name,
         )?;
+        sidecar::apply_layout_file(&PathBuf::from(layout_path), &mut previous_patch)?;
         let emitted = writeback::emit_patch_writeback_result_with_library(
             &source,
             intent,
@@ -1504,6 +1795,14 @@ fn persist_library_macro_edits(
             library,
         )
         .map_err(|error| format!("{error:?}"))?;
+        let package_dir = source_path.parent().ok_or_else(|| {
+            format!(
+                "failed to resolve package directory for '{}'",
+                source_path.display()
+            )
+        })?;
+        let package = DefmacroPackage::from_source(package_dir, &macro_patch.name, &emitted.source)
+            .map_err(|error| error.to_string())?;
         let mut emitted_patch = parse_patch_source_for_props_like_library_source(
             &emitted.source,
             intent,
@@ -1518,8 +1817,18 @@ fn persist_library_macro_edits(
         )?;
         write_atomic_text(&source_path, &emitted.source)?;
         write_atomic_text(&PathBuf::from(layout_path), &layout)?;
+        let manifest_json = serde_json::to_string_pretty(&package.rebuilt_manifest())
+            .map(|json| format!("{json}\n"))
+            .map_err(|error| {
+                format!(
+                    "failed to serialize `{}` manifest: {error}",
+                    macro_patch.name
+                )
+            })?;
+        write_atomic_text(&package.manifest_path, &manifest_json)?;
+        persisted.push(macro_patch.name.clone());
     }
-    Ok(())
+    Ok(persisted)
 }
 
 fn parse_patch_source_for_props_like_library_source(
@@ -1572,7 +1881,7 @@ fn writeback_layout_for_source(
     )
 }
 
-fn apply_pending_macro_library_action(
+fn apply_macro_library_action(
     source: String,
     layout: String,
     action: &state::PatcherMacroLibraryAction,
@@ -1619,6 +1928,12 @@ fn save_local_macro_to_library(
     interaction_state: &state::PatcherInteractionState,
     generated_node_ids: &std::collections::HashMap<(String, String), String>,
 ) -> Result<(String, String), String> {
+    eprintln!(
+        "[patcher macro-library-action save start] macro={macro_name} library_root={} source_len={} layout_len={}",
+        library.root().display(),
+        source.len(),
+        layout.len()
+    );
     let Some(macro_patch) = root_patch
         .macros
         .iter()
@@ -1635,6 +1950,10 @@ fn save_local_macro_to_library(
     }
     let package_dir = library.root().join(macro_name);
     if package_dir.exists() {
+        eprintln!(
+            "[patcher macro-library-action save blocked] macro={macro_name} package_dir={} reason=exists",
+            package_dir.display()
+        );
         return Err(format!(
             "cannot save `{macro_name}`: library package already exists"
         ));
@@ -1649,8 +1968,20 @@ fn save_local_macro_to_library(
         .map_err(|error| format!("failed to serialize `{macro_name}` manifest: {error}"))?;
 
     write_atomic_text(&package.source_path, &format!("{macro_source}\n"))?;
+    eprintln!(
+        "[patcher macro-library-action save wrote-source] macro={macro_name} path={}",
+        package.source_path.display()
+    );
     write_atomic_text(&package.layout_path, &package_layout)?;
+    eprintln!(
+        "[patcher macro-library-action save wrote-layout] macro={macro_name} path={}",
+        package.layout_path.display()
+    );
     write_atomic_text(&package.manifest_path, &manifest_json)?;
+    eprintln!(
+        "[patcher macro-library-action save wrote-manifest] macro={macro_name} path={}",
+        package.manifest_path.display()
+    );
 
     let imported_source = writeback::replace_macro_with_import(&source, macro_name)
         .map_err(|error| format!("{error:?}"))?;
@@ -1664,6 +1995,10 @@ fn save_local_macro_to_library(
         generated_node_ids,
     )
     .and_then(|layout| remove_macro_scope_from_layout_json(&layout, macro_name))?;
+    eprintln!(
+        "[patcher macro-library-action save success] macro={macro_name} package_dir={}",
+        package_dir.display()
+    );
     Ok((imported_source, final_layout))
 }
 
@@ -1677,6 +2012,11 @@ fn fork_library_macro_to_local(
     interaction_state: &state::PatcherInteractionState,
     generated_node_ids: &std::collections::HashMap<(String, String), String>,
 ) -> Result<(String, String), String> {
+    eprintln!(
+        "[patcher macro-library-action fork start] macro={macro_name} library_root={} source_len={}",
+        library.root().display(),
+        source.len()
+    );
     let Some(macro_patch) = root_patch
         .macros
         .iter()
@@ -1707,6 +2047,11 @@ fn fork_library_macro_to_local(
         generated_node_ids,
     )
     .and_then(|layout| merge_package_macro_layout(&layout, &package.layout_path, macro_name))?;
+    eprintln!(
+        "[patcher macro-library-action fork success] macro={macro_name} source_path={} layout_path={}",
+        package.source_path.display(),
+        package.layout_path.display()
+    );
     Ok((forked_source, final_layout))
 }
 
@@ -1844,15 +2189,23 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
 
     let library = defmacro_library_for_props(&node.props);
     if let Some(library) = library.as_ref() {
-        if let Err(error) = persist_library_macro_edits(&root_patch, intent, &state, library) {
-            return map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                (
-                    "diagnostic",
-                    Value::String(format!("failed to persist library macro edits: {error}")),
-                ),
-            ]);
+        match persist_library_macro_edits(&root_patch, intent, &state, library) {
+            Ok(persisted_macros) => {
+                if !persisted_macros.is_empty() {
+                    clear_persisted_macro_view_edits(&mut state, &persisted_macros);
+                    set_patcher_interaction_state(key, state.clone());
+                }
+            }
+            Err(error) => {
+                return map_value(vec![
+                    ("status", Value::Keyword("invalid".to_string())),
+                    ("path", Value::String(path_str)),
+                    (
+                        "diagnostic",
+                        Value::String(format!("failed to persist library macro edits: {error}")),
+                    ),
+                ]);
+            }
         }
     }
     let root_state = if library.is_some() {
@@ -1869,8 +2222,8 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
 
     match writeback_result {
         Ok(result) => {
-            let mut source = result.source;
-            let mut layout = match writeback_layout_for_source(
+            let source = result.source;
+            let layout = match writeback_layout_for_source(
                 &source,
                 intent,
                 &node.props,
@@ -1896,58 +2249,6 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
                     ]);
                 }
             };
-            if let Some(action) = state.pending_macro_library_action.clone() {
-                let Some(library) = defmacro_library_for_props(&node.props) else {
-                    let diagnostic = "defmacro library root was not found".to_string();
-                    state.pending_macro_library_action = None;
-                    state.macro_library_action_error = Some(diagnostic.clone());
-                    set_patcher_interaction_state(key, state);
-                    return map_value(vec![
-                        ("status", Value::Keyword("invalid".to_string())),
-                        ("path", Value::String(path_str)),
-                        ("diagnostic", Value::String(diagnostic)),
-                    ]);
-                };
-                match apply_pending_macro_library_action(
-                    source,
-                    layout,
-                    &action,
-                    &root_patch,
-                    intent,
-                    &node.props,
-                    &library,
-                    &state,
-                    &result.generated_node_ids,
-                ) {
-                    Ok((action_source, action_layout)) => {
-                        source = action_source;
-                        layout = action_layout;
-                        state.pending_macro_library_action = None;
-                        state.macro_library_action_error = None;
-                        set_patcher_interaction_state(key, state.clone());
-                    }
-                    Err(error) => {
-                        let diagnostic = format!(
-                            "{} `{}` failed: {error}",
-                            match action.kind {
-                                state::PatcherMacroLibraryActionKind::SaveToLibrary => {
-                                    "save to library"
-                                }
-                                state::PatcherMacroLibraryActionKind::Fork => "fork",
-                            },
-                            action.macro_name
-                        );
-                        state.pending_macro_library_action = None;
-                        state.macro_library_action_error = Some(diagnostic.clone());
-                        set_patcher_interaction_state(key, state);
-                        return map_value(vec![
-                            ("status", Value::Keyword("invalid".to_string())),
-                            ("path", Value::String(path_str)),
-                            ("diagnostic", Value::String(diagnostic)),
-                        ]);
-                    }
-                }
-            }
             debug_log_writeback_event(
                 "payload-valid",
                 format!("path={path_str}\nintent={intent:?}\nsource:\n{}", source),

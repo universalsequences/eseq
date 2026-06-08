@@ -678,13 +678,3 @@ pub(super) fn patcher_back_button_rect(rect: Rect) -> Rect {
         height: 1.4,
     }
 }
-
-pub(super) fn patcher_macro_library_action_rect(rect: Rect) -> Rect {
-    let width = (rect.width - 4.5).clamp(0.0, 12.0);
-    Rect {
-        row: rect.row + 0.45,
-        col: rect.col + (rect.width - width - 1.0).max(3.5),
-        width,
-        height: 1.4,
-    }
-}

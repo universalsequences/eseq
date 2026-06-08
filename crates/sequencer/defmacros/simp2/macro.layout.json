@@ -1,0 +1,48 @@
+{
+  "macros": {
+    "simp2": {
+      "cables": {
+        "cos1:0->out:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "input:0->phasor1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "mul1:0->cos1:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "phasor1:0->mul1:0": {
+          "segmented": true,
+          "y": 14.813749
+        }
+      },
+      "nodes": {
+        "cos1": {
+          "x": 9.74873,
+          "y": 24.0475
+        },
+        "input": {
+          "x": 8.353027,
+          "y": 4.0
+        },
+        "mul1": {
+          "x": 8.32666,
+          "y": 17.365
+        },
+        "out": {
+          "x": 9.252929,
+          "y": 30.73
+        },
+        "phasor1": {
+          "x": 8.353027,
+          "y": 10.6825
+        }
+      }
+    }
+  },
+  "root": {},
+  "version": 1
+}

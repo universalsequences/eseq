@@ -136,7 +136,10 @@ fn library_macro_view_edit_persists_to_library_source_not_root_source() {
         .unwrap()
         .text = "* 3".to_string();
 
-    persist_library_macro_edits(&root_patch, PatcherIntent::Instrument, &state, &library).unwrap();
+    let persisted =
+        persist_library_macro_edits(&root_patch, PatcherIntent::Instrument, &state, &library)
+            .unwrap();
+    assert_eq!(persisted, vec!["shape".to_string()]);
 
     let library_source = fs::read_to_string(&package.source_path).unwrap();
     assert_eq!(library_source, "(defmacro shape (x) (* x 3.0))");
@@ -172,6 +175,244 @@ fn library_macro_view_edit_persists_to_library_source_not_root_source() {
 }
 
 #[test]
+fn library_macro_text_edit_preserves_existing_package_layout_for_untouched_nodes() {
+    let library = temp_defmacro_library(
+        "view-edit-preserve-layout",
+        &[("shape", "(defmacro shape (x) (* x 2))")],
+    );
+    let package = library.package("shape").unwrap();
+    fs::write(
+        &package.layout_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1,
+            "root": {},
+            "macros": {
+                "shape": {
+                    "nodes": {
+                        "x": { "x": 41.0, "y": 7.0 },
+                        "return": { "x": 52.0, "y": 13.0 },
+                        "out": { "x": 63.0, "y": 19.0 }
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let library = DefmacroLibrary::load(library.root()).unwrap();
+    let source = "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)";
+    let root_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "shape")
+        .unwrap();
+    let return_node = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "return")
+        .unwrap();
+    assert_eq!(return_node.position, (52.0, 13.0));
+
+    let mut state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.edit_state.nodes.insert(
+        node_edit_key("macro:shape", "return"),
+        PatcherNodeEdit {
+            view_key: "macro:shape".to_string(),
+            id: "return".to_string(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: "return".to_string(),
+            },
+            text: "* 5".to_string(),
+            position: return_node.position,
+            width: return_node.width,
+        },
+    );
+
+    let persisted =
+        persist_library_macro_edits(&root_patch, PatcherIntent::Instrument, &state, &library)
+            .unwrap();
+    assert_eq!(persisted, vec!["shape".to_string()]);
+
+    let layout: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&package.layout_path).unwrap()).unwrap();
+    assert_eq!(layout["macros"]["shape"]["nodes"]["x"]["x"], 41.0);
+    assert_eq!(layout["macros"]["shape"]["nodes"]["x"]["y"], 7.0);
+    assert_eq!(layout["macros"]["shape"]["nodes"]["out"]["x"], 63.0);
+    assert_eq!(layout["macros"]["shape"]["nodes"]["out"]["y"], 19.0);
+    assert_eq!(layout["macros"]["shape"]["nodes"]["return"]["x"], 52.0);
+    assert_eq!(layout["macros"]["shape"]["nodes"]["return"]["y"], 13.0);
+}
+
+#[test]
+fn library_macro_autosave_consumes_live_macro_edit_overlay_after_persist() {
+    let library = temp_defmacro_library(
+        "view-edit-consumes-overlay",
+        &[("shape", "(defmacro shape (x) (* x 2))")],
+    );
+    let source = "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)";
+    let root_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    let mut state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.selected_nodes.insert("created-0".to_string());
+    state.z_order.insert(
+        "macro:shape".to_string(),
+        vec![
+            "x".to_string(),
+            "return".to_string(),
+            "created-0".to_string(),
+        ],
+    );
+    state.edit_state.nodes.insert(
+        node_edit_key("macro:shape", "created-0"),
+        PatcherNodeEdit {
+            view_key: "macro:shape".to_string(),
+            id: "created-0".to_string(),
+            origin: PatcherNodeOrigin::Created {
+                created_id: "created-0".to_string(),
+            },
+            text: "in 2 @name shape".to_string(),
+            position: (50.0, 12.0),
+            width: None,
+        },
+    );
+
+    let persisted =
+        persist_library_macro_edits(&root_patch, PatcherIntent::Instrument, &state, &library)
+            .unwrap();
+    clear_persisted_macro_view_edits(&mut state, &persisted);
+
+    assert_eq!(state.active_macro.as_deref(), Some("shape"));
+    assert!(
+        state.edit_state.nodes.is_empty(),
+        "persisted created node overlay should be consumed after library autosave"
+    );
+    assert!(
+        state.selected_nodes.is_empty(),
+        "selection should not keep pointing at consumed overlay nodes"
+    );
+    assert!(
+        !state.z_order.contains_key("macro:shape"),
+        "macro z-order should be rebuilt from persisted source after autosave"
+    );
+
+    let package = library.package("shape").unwrap();
+    let library_source = fs::read_to_string(&package.source_path).unwrap();
+    assert!(
+        library_source.contains("(defmacro shape (x shape)"),
+        "created macro input should be persisted as a macro parameter"
+    );
+    let reloaded_library = DefmacroLibrary::load(library.root()).unwrap();
+    let reloaded_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &reloaded_library)
+            .unwrap();
+    let reloaded_shape = reloaded_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "shape")
+        .unwrap();
+    let shape_param_count = reloaded_shape
+        .patch
+        .nodes
+        .iter()
+        .filter(|node| node.id == "shape")
+        .count();
+    assert_eq!(
+        shape_param_count, 1,
+        "reloaded macro should contain the persisted parameter once, without the stale overlay duplicate"
+    );
+}
+
+#[test]
+fn library_macro_autosave_keeps_package_macro_when_adding_library_dependency() {
+    let library = temp_defmacro_library(
+        "view-edit-library-dependency",
+        &[
+            ("simp8", "(defmacro simp8 (x) (* x 8))"),
+            ("simp10", "(defmacro simp10 (input) (* input 1))"),
+        ],
+    );
+    let source =
+        "(use-defmacro simp10)\n(def sig (in 1))\n(def shaped (simp10 sig))\n(out shaped 1)";
+    let root_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "simp10")
+        .expect("library macro should project");
+    let input = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let return_node = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "return")
+        .expect("macro should expose return node");
+    let out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let return_to_out = macro_patch
+        .patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == return_node.id && connection.to_node == out.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState {
+        active_macro: Some("simp10".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:simp10", &return_node.id));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "macro:simp10",
+            &source_connection_id(return_to_out),
+        ));
+    let dependency = allocate_created_text_node(&mut state, "macro:simp10", "simp8");
+    connect_output_to_input(&mut state, "macro:simp10", &input.id, &dependency, 0);
+    connect_output_to_input(&mut state, "macro:simp10", &dependency, &out.id, 0);
+
+    let persisted =
+        persist_library_macro_edits(&root_patch, PatcherIntent::Instrument, &state, &library)
+            .unwrap();
+    assert_eq!(persisted, vec!["simp10".to_string()]);
+
+    let package = library.package("simp10").unwrap();
+    let saved = fs::read_to_string(&package.source_path).unwrap();
+    assert!(
+        saved.contains("(use-defmacro simp8)"),
+        "library dependency import should be saved:\n{saved}"
+    );
+    assert!(
+        saved.contains("(defmacro simp10 (input)"),
+        "package must keep its public defmacro:\n{saved}"
+    );
+    DefmacroPackage::from_source(&package.package_dir, "simp10", &saved).unwrap();
+    DefmacroLibrary::load(library.root()).unwrap();
+}
+
+#[test]
 fn save_local_macro_to_library_replaces_local_def_with_import() {
     let library = temp_defmacro_library("save-action", &[]);
     let path = temp_patcher_dsp_path("patcher-save-macro-to-library");
@@ -187,10 +428,6 @@ fn save_local_macro_to_library_replaces_local_def_with_import() {
     );
     let mut state = PatcherInteractionState {
         active_macro: Some("shape".to_string()),
-        pending_macro_library_action: Some(PatcherMacroLibraryAction {
-            kind: PatcherMacroLibraryActionKind::SaveToLibrary,
-            macro_name: "shape".to_string(),
-        }),
         ..PatcherInteractionState::default()
     };
     let root_patch = load_patch_from_props(&node.props).unwrap().1;
@@ -207,9 +444,38 @@ fn save_local_macro_to_library_replaces_local_def_with_import() {
         (19.0, 23.0),
         node_display_label(return_node),
     );
-    set_patcher_interaction_state(patcher_state_key(&node), state);
-
-    let (source, _layout) = persistence_payload_source_and_layout(&node, "save macro to library");
+    let source = fs::read_to_string(&path).unwrap();
+    let result = emit_patch_writeback_result_with_library(
+        &source,
+        PatcherIntent::Instrument,
+        &state,
+        &library,
+    )
+    .unwrap();
+    let layout = writeback_layout_for_source(
+        &result.source,
+        PatcherIntent::Instrument,
+        &node.props,
+        &root_patch,
+        &state,
+        &result.generated_node_ids,
+    )
+    .unwrap();
+    let (source, _layout) = apply_macro_library_action(
+        result.source,
+        layout,
+        &PatcherMacroLibraryAction {
+            kind: PatcherMacroLibraryActionKind::SaveToLibrary,
+            macro_name: "shape".to_string(),
+        },
+        &root_patch,
+        PatcherIntent::Instrument,
+        &node.props,
+        &library,
+        &state,
+        &result.generated_node_ids,
+    )
+    .unwrap();
 
     assert!(source.contains("(use-defmacro shape)"));
     assert!(!source.contains("(defmacro shape"));
@@ -264,19 +530,43 @@ fn fork_library_macro_to_local_replaces_import_with_defmacro_and_copies_layout()
         "defmacro-library-root".to_string(),
         Value::String(library.root().display().to_string()),
     );
-    set_patcher_interaction_state(
-        patcher_state_key(&node),
-        PatcherInteractionState {
-            active_macro: Some("shape".to_string()),
-            pending_macro_library_action: Some(PatcherMacroLibraryAction {
-                kind: PatcherMacroLibraryActionKind::Fork,
-                macro_name: "shape".to_string(),
-            }),
-            ..PatcherInteractionState::default()
+    let state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let source = fs::read_to_string(&path).unwrap();
+    let result = emit_patch_writeback_result_with_library(
+        &source,
+        PatcherIntent::Instrument,
+        &state,
+        &library,
+    )
+    .unwrap();
+    let layout = writeback_layout_for_source(
+        &result.source,
+        PatcherIntent::Instrument,
+        &node.props,
+        &root_patch,
+        &state,
+        &result.generated_node_ids,
+    )
+    .unwrap();
+    let (source, layout) = apply_macro_library_action(
+        result.source,
+        layout,
+        &PatcherMacroLibraryAction {
+            kind: PatcherMacroLibraryActionKind::Fork,
+            macro_name: "shape".to_string(),
         },
-    );
-
-    let (source, layout) = persistence_payload_source_and_layout(&node, "fork macro to local");
+        &root_patch,
+        PatcherIntent::Instrument,
+        &node.props,
+        &library,
+        &state,
+        &result.generated_node_ids,
+    )
+    .unwrap();
 
     assert!(source.contains("(defmacro shape"));
     assert!(source.contains("(* x 4.0)"));
@@ -449,7 +739,7 @@ fn missing_layout_sidecar_is_materialized_on_first_load() {
 }
 
 #[test]
-fn existing_layout_sidecar_preserves_positions_and_places_only_new_nodes() {
+fn existing_layout_sidecar_preserves_positions_without_materializing_new_nodes() {
     let path = temp_patcher_dsp_path("patcher-sidecar-preserve");
     fs::write(
         &path,
@@ -476,15 +766,16 @@ fn existing_layout_sidecar_preserves_positions_and_places_only_new_nodes() {
     assert_ne!(
         shaped.position,
         (0.0, 0.0),
-        "new node should keep an auto/constrained placement"
+        "new source node can retain its projected fallback position"
     );
     let saved: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
     assert!(
-        saved["root"]["nodes"]
+        !saved["root"]["nodes"]
             .as_object()
             .unwrap()
-            .contains_key("shaped")
+            .contains_key("shaped"),
+        "loading source with an existing sidecar must not materialize new node layout"
     );
 }
 
@@ -847,10 +1138,11 @@ fn stale_and_malformed_sidecar_entries_do_not_change_semantics() {
     let saved: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
     assert!(
-        !saved["root"]["nodes"]
+        saved["root"]["nodes"]
             .as_object()
             .unwrap()
-            .contains_key("missing")
+            .contains_key("missing"),
+        "valid existing sidecars are user-authored layout and should not be rewritten on load"
     );
     fs::write(&sidecar_path, "{ not json").unwrap();
     let (_path, reparsed) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
@@ -1692,6 +1984,180 @@ fn reset_patcher_state_for_path_clears_registered_stable_widget_state() {
     assert!(
         get_patcher_interaction_state(key).selected_nodes.is_empty(),
         "mode reset should clear stable-widget keyed patcher interaction state"
+    );
+}
+
+#[test]
+fn reload_patcher_macro_view_for_path_keeps_macro_view_and_clears_edit_overlays() {
+    let path = temp_patcher_dsp_path("patcher-reload-macro-view");
+    fs::write(&path, "(defmacro simp (x) (phasor x))\n(out 0)").unwrap();
+    let mut node = patcher_test_node(&path);
+    node.stable_widget_id = Some(112_358);
+    let key = patcher_state_key(&node);
+
+    let mut state = PatcherInteractionState {
+        active_macro: Some("simp".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.selected_nodes.insert("return".to_string());
+    state.edit_state.nodes.insert(
+        node_edit_key("macro:simp", "created-0"),
+        PatcherNodeEdit {
+            view_key: "macro:simp".to_string(),
+            id: "created-0".to_string(),
+            origin: PatcherNodeOrigin::Created {
+                created_id: "created-0".to_string(),
+            },
+            text: "triangle".to_string(),
+            position: (12.0, 14.0),
+            width: None,
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    reload_patcher_macro_view_for_path(&path, "simp");
+
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.active_macro.as_deref(), Some("simp"));
+    assert!(
+        state.selected_nodes.is_empty(),
+        "reload should clear stale selection"
+    );
+    assert!(
+        state.edit_state.nodes.is_empty(),
+        "reload should clear stale edited/created macro graph overlays"
+    );
+}
+
+#[test]
+fn active_macro_layout_merge_preserves_previous_positions_for_untouched_nodes() {
+    let source = "(defmacro simp (x) (scale (triangle (phasor x)) 0 1 -1 1))\n(out 0)";
+    let mut root_patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "simp")
+        .expect("simp macro");
+    let first_node = macro_patch
+        .patch
+        .nodes
+        .first()
+        .expect("first macro node")
+        .id
+        .clone();
+    let second_node = macro_patch
+        .patch
+        .nodes
+        .get(1)
+        .expect("second macro node")
+        .clone();
+    let previous_layout = serde_json::json!({
+        "version": 1,
+        "root": {},
+        "macros": {
+            "simp": {
+                "nodes": {
+                    first_node.clone(): { "x": 42.0, "y": 10.0 },
+                    second_node.id.clone(): { "x": 77.0, "y": 20.0 }
+                }
+            }
+        }
+    })
+    .to_string();
+    sidecar::apply_layout_json(&previous_layout, "test previous layout", &mut root_patch).unwrap();
+
+    let mut state = PatcherInteractionState {
+        active_macro: Some("simp".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.edit_state.nodes.insert(
+        node_edit_key("macro:simp", &second_node.id),
+        PatcherNodeEdit {
+            view_key: "macro:simp".to_string(),
+            id: second_node.id.clone(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: second_node.id.clone(),
+            },
+            text: node_display_label(&second_node),
+            position: (99.0, 33.0),
+            width: None,
+        },
+    );
+    let merged_layout = sidecar::current_layout_json(&root_patch, &state).unwrap();
+    let package_layout = layout_json_for_single_macro_scope(&merged_layout, "simp").unwrap();
+    let package_layout: serde_json::Value = serde_json::from_str(&package_layout).unwrap();
+
+    assert_eq!(
+        package_layout["macros"]["simp"]["nodes"][&first_node]["x"], 42.0,
+        "untouched macro node should keep its previous layout position"
+    );
+    assert_eq!(
+        package_layout["macros"]["simp"]["nodes"][&second_node.id]["x"], 99.0,
+        "edited macro node should use the live interaction position"
+    );
+}
+
+#[test]
+fn active_macro_state_for_path_prefers_macro_edit_state_over_empty_registration() {
+    let path = temp_patcher_dsp_path("patcher-active-macro-recent-key");
+    fs::write(&path, "(defmacro simp (x) (phasor x))\n(out 0)").unwrap();
+
+    let mut old_node = patcher_test_node(&path);
+    old_node.stable_widget_id = Some(1001);
+    let old_key = patcher_state_key(&old_node);
+    set_patcher_interaction_state(
+        old_key,
+        PatcherInteractionState {
+            active_macro: Some("simp".to_string()),
+            ..PatcherInteractionState::default()
+        },
+    );
+
+    let mut current_node = patcher_test_node(&path);
+    current_node.stable_widget_id = Some(1002);
+    let current_key = patcher_state_key(&current_node);
+    let mut current_state = PatcherInteractionState {
+        active_macro: Some("simp".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    current_state.edit_state.nodes.insert(
+        node_edit_key("macro:simp", "input"),
+        PatcherNodeEdit {
+            view_key: "macro:simp".to_string(),
+            id: "input".to_string(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: "input".to_string(),
+            },
+            text: "in 1 @name input".to_string(),
+            position: (55.0, 66.0),
+            width: None,
+        },
+    );
+    set_patcher_interaction_state(current_key, current_state);
+
+    let active_state =
+        active_interaction_state_for_path(&path, "simp").expect("active macro state");
+    assert_eq!(
+        active_state
+            .edit_state
+            .nodes
+            .get(&node_edit_key("macro:simp", "input"))
+            .map(|edit| edit.position),
+        Some((55.0, 66.0)),
+        "save/fork should use the current visible patcher state, not an older registered state"
+    );
+
+    let _ = patcher_state_key(&old_node);
+    let active_state =
+        active_interaction_state_for_path(&path, "simp").expect("active macro state");
+    assert_eq!(
+        active_state
+            .edit_state
+            .nodes
+            .get(&node_edit_key("macro:simp", "input"))
+            .map(|edit| edit.position),
+        Some((55.0, 66.0)),
+        "an empty active macro state must not clobber the visible edited macro layout"
     );
 }
 
@@ -9076,6 +9542,41 @@ fn display_labels_omit_def_names_and_show_in_out_channels() {
 }
 
 #[test]
+fn display_label_hides_missing_input_sentinel_for_trailing_unconnected_inlet() {
+    let patch = parse(
+        r#"
+            (defmacro gain2 (x) (* x 2))
+            (def shaped (gain2 __patcher_missing_input__))
+            "#,
+    );
+    let shaped = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "shaped")
+        .expect("macro instance");
+
+    assert_eq!(node_display_label(shaped), "gain2");
+}
+
+#[test]
+fn display_label_shows_placeholder_for_missing_input_before_later_literal() {
+    let patch = parse(
+        r#"
+            (defmacro ap (sig g d) sig)
+            (def signal (in 1))
+            (def tapped (ap signal __patcher_missing_input__ 0.6))
+            "#,
+    );
+    let tapped = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "tapped")
+        .expect("macro instance");
+
+    assert_eq!(node_display_label(tapped), "ap ? 0.6");
+}
+
+#[test]
 fn display_label_shows_out_modulator_metadata() {
     let patch = parse(
         r#"
@@ -13115,6 +13616,133 @@ fn writeback_replacing_created_macro_default_body_with_chain_compiles() {
 }
 
 #[test]
+fn writeback_replacing_existing_macro_return_by_deleting_return_node_compiles() {
+    let source = "(defmacro simp (input) (* input 1))\n(def sig (in 1))\n(def simp1 (simp sig))\n(out simp1 1)";
+    let root_patch = parse(source);
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "simp")
+        .expect("macro should project");
+    let input = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .unwrap();
+    let return_node = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "return")
+        .expect("macro should expose the visual return expression");
+    let out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let return_to_out = macro_patch
+        .patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == return_node.id && connection.to_node == out.id)
+        .unwrap();
+
+    let mut state = PatcherInteractionState {
+        active_macro: Some("simp".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:simp", &return_node.id));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "macro:simp",
+            &source_connection_id(return_to_out),
+        ));
+    let phasor = allocate_created_text_node(&mut state, "macro:simp", "phasor");
+    let multiply = allocate_created_text_node(&mut state, "macro:simp", "* twopi");
+    let cos = allocate_created_text_node(&mut state, "macro:simp", "cos");
+    connect_output_to_input(&mut state, "macro:simp", &input.id, &phasor, 0);
+    connect_output_to_input(&mut state, "macro:simp", &phasor, &multiply, 0);
+    connect_output_to_input(&mut state, "macro:simp", &multiply, &cos, 0);
+    connect_output_to_input(&mut state, "macro:simp", &cos, &out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert_eq!(
+        emitted,
+        "(defmacro simp (input)\n  (def phasor1 (phasor input))\n  (def mul1 (* phasor1 twopi))\n  (def cos1 (cos mul1))\n  cos1)\n(def sig (in 1))\n(def simp1 (simp sig))\n(out simp1 1)"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn writeback_replacing_created_macro_scaffold_with_created_in_and_out_compiles() {
+    let source = "(def sig (in 1))\n(out sig 1)";
+    let root_patch = parse(source);
+    let mut state = PatcherInteractionState::default();
+    let created_id = allocate_created_text_node(&mut state, "root", "defmacro *op*");
+    assert!(promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        "root",
+        &created_id,
+    ));
+    state.active_macro = Some("op".to_string());
+
+    let macro_patch = active_patcher_patch(&root_patch, &state);
+    let input = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::In)
+        .expect("default macro should expose an input node");
+    let return_node = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "return")
+        .expect("default macro should expose a return node");
+    let out = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .expect("default macro should expose an output node");
+
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:op", &input.id));
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:op", &return_node.id));
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:op", &out.id));
+
+    let pitch = allocate_created_text_node(&mut state, "macro:op", "in 1 @name pitch");
+    let harmonicity = allocate_created_text_node(&mut state, "macro:op", "in 2 @name harmonicity");
+    let multiply = allocate_created_text_node(&mut state, "macro:op", "*");
+    let out1 = allocate_created_text_node(&mut state, "macro:op", "out 1");
+    connect_output_to_input(&mut state, "macro:op", &pitch, &multiply, 0);
+    connect_output_to_input(&mut state, "macro:op", &harmonicity, &multiply, 1);
+    connect_output_to_input(&mut state, "macro:op", &multiply, &out1, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert_eq!(
+        emitted,
+        "(defmacro op (pitch harmonicity) (* pitch harmonicity))\n(def sig (in 1))\n(out sig 1)"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
 fn writeback_created_macro_default_return_rewired_to_chain_then_root_input_compiles() {
     let source = "(def pitch (in 1 @name pitch))\n(out (* (phasor pitch) 1) 1 @name audio)";
     let root_patch = parse(source);
@@ -13420,6 +14048,81 @@ fn writeback_stale_deleted_source_connection_recovers_when_created_sum_replaces_
         emitted.contains("(def env (adsr gate trigger add1 100.0 1.0 release))"),
         "stale attack deletion should not prevent recovery once env input is replaced:\n{emitted}"
     );
+}
+
+#[test]
+fn writeback_rewires_displaced_nested_call_through_source_consumers() {
+    let source = r#"
+        (defmacro simp11 (input) input)
+        (def pitch (in 1 @name pitch))
+        (def env (in 2 @name env))
+        (def velocity (in 3 @name velocity))
+        (param gain @default 0.5 @min 0.0 @max 1.0 @mod true @mod-mode additive)
+        (def phase (phasor pitch))
+        (def simp111 (simp11 (* phase env velocity (mod gain))))
+        (def simp112 (simp11 simp111))
+        (out simp112 1 @name audio)
+    "#;
+    let root_patch = parse(source);
+    let phase = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "phase")
+        .unwrap();
+    let multiply = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "*#0")
+        .unwrap();
+    let multiply_to_simp111 = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == multiply.id && connection.to_node == "simp111")
+        .unwrap();
+    let simp111_to_simp112 = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == "simp111" && connection.to_node == "simp112")
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &phase.id));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(multiply_to_simp111),
+        ));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(simp111_to_simp112),
+        ));
+    connect_output_to_input(&mut state, "root", "pitch", "simp111", 0);
+    connect_output_to_input(&mut state, "root", "simp111", &multiply.id, 0);
+    connect_output_to_input(&mut state, "root", &multiply.id, "simp112", 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        !emitted.contains("(def phase"),
+        "deleted phasor binding should be removed:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def simp111 (simp11 pitch))"),
+        "pitch should feed the first simp11 call directly:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(def simp112 (simp11 (* simp111 env velocity (mod gain))))"),
+        "the displaced multiply should move to the second simp11 input with simp111 as its first input:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
 }
 
 #[test]

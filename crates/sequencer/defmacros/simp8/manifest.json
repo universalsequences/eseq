@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "simp8",
+  "params": [
+    "input"
+  ],
+  "outputs": [
+    "out"
+  ]
+}
