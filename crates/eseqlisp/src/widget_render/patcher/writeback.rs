@@ -1394,10 +1394,10 @@ fn source_deletion_targets_for_owner(
             }
             Ok(())
         }
-        SourceOwner::CodeIsland { .. } => Err(WriteBackError::EditedCodeIsland {
-            view_key: view_key.to_string(),
-            node_id: node_id.to_string(),
-        }),
+        SourceOwner::CodeIsland { form_id } => {
+            targets.push(SourceDeletionTarget::Form(form_id.clone()));
+            Ok(())
+        }
         SourceOwner::MacroParameter { .. } | SourceOwner::Created { .. } => {
             Err(WriteBackError::UnsupportedDeletedNode {
                 view_key: view_key.to_string(),
@@ -2896,11 +2896,15 @@ fn out_channel_from_edit(edit: &super::state::PatcherNodeEdit) -> Result<usize, 
 }
 
 fn output_channel_from_node(node: &PatchNode) -> Option<usize> {
-    node.args
-        .first()
-        .and_then(|arg| match arg {
-            ArgValue::Literal(value) => value.parse::<usize>().ok(),
-            _ => None,
+    node.label
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            node.args.iter().rev().find_map(|arg| match arg {
+                ArgValue::Literal(value) => value.parse::<usize>().ok(),
+                _ => None,
+            })
         })
         .filter(|channel| *channel > 0)
 }

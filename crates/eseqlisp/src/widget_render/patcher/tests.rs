@@ -106,6 +106,188 @@ fn writeback_with_library_adds_import_for_used_library_macro() {
 }
 
 #[test]
+fn staged_library_macro_edits_overlay_compile_library_without_writing_package() {
+    let library = temp_defmacro_library(
+        "staged-overlay",
+        &[("shape", "(defmacro shape (x) (* x 2))")],
+    );
+    let source = "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)";
+    let root_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    let package = library.package("shape").unwrap();
+    let package_source_before = fs::read_to_string(&package.source_path).unwrap();
+    let mut state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.edit_state.nodes.insert(
+        node_edit_key("macro:shape", "return"),
+        PatcherNodeEdit {
+            view_key: "macro:shape".to_string(),
+            id: "return".to_string(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: "return".to_string(),
+            },
+            text: "* 3".to_string(),
+            position: (8.0, 8.0),
+            width: None,
+        },
+    );
+
+    let staged =
+        library_with_staged_macro_edits(&root_patch, PatcherIntent::Instrument, &state, &library)
+            .unwrap();
+    let materialized = staged.materialize_source(source).unwrap().source;
+
+    assert!(materialized.contains("(defmacro shape (x) (* x 3.0))"));
+    assert_eq!(
+        fs::read_to_string(&package.source_path).unwrap(),
+        package_source_before,
+        "preview staging must not write library package source"
+    );
+}
+
+#[test]
+fn patcher_writeback_payload_stages_library_macro_edits_without_autosave() {
+    let library = temp_defmacro_library(
+        "payload-stage",
+        &[("shape", "(defmacro shape (x) (* x 2))")],
+    );
+    let package = library.package("shape").unwrap();
+    let path = temp_patcher_dsp_path("patcher-payload-stage-library-macro");
+    fs::write(
+        &path,
+        "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)",
+    )
+    .unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+    let package_source_before = fs::read_to_string(&package.source_path).unwrap();
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.edit_state.nodes.insert(
+        node_edit_key("macro:shape", "return"),
+        PatcherNodeEdit {
+            view_key: "macro:shape".to_string(),
+            id: "return".to_string(),
+            origin: PatcherNodeOrigin::Source {
+                source_node_id: "return".to_string(),
+            },
+            text: "* 3".to_string(),
+            position: (8.0, 8.0),
+            width: None,
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    let Value::Map(payload) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    let status = payload
+        .get("status")
+        .and_then(|value| match &*value.borrow() {
+            Value::Keyword(value) | Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let source = payload
+        .get("source")
+        .and_then(|value| match &*value.borrow() {
+            Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let compile_source = payload
+        .get("compile-source")
+        .and_then(|value| match &*value.borrow() {
+            Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(status, "valid");
+    assert!(source.contains("(use-defmacro shape)"));
+    assert!(!source.contains("(defmacro shape"));
+    assert!(compile_source.contains("(defmacro shape (x) (* x 3.0))"));
+    assert_eq!(
+        fs::read_to_string(&package.source_path).unwrap(),
+        package_source_before,
+        "preview payload generation must not write library package source"
+    );
+}
+
+#[test]
+fn missing_macro_return_projects_as_recoverable_out_node() {
+    let source = "(defmacro simp (input) __patcher_missing_input__)";
+    let patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "simp")
+        .unwrap();
+
+    assert!(
+        !macro_patch
+            .patch
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::CodeIsland),
+        "bare missing return sentinel should not become a code island"
+    );
+    let out = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    assert_eq!(node_display_label(out), "out 1");
+    let input_indices = patch_input_indices(&macro_patch.patch);
+    assert_eq!(
+        input_indices.get(&out.id).map(Vec::as_slice),
+        Some(&[0][..])
+    );
+}
+
+#[test]
+fn writeback_can_reconnect_missing_macro_return_out_node() {
+    let source = "(defmacro simp (input) __patcher_missing_input__)";
+    let mut state = PatcherInteractionState {
+        active_macro: Some("simp".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.edit_state.connections.insert(
+        connection_edit_key("macro:simp", "created-cable-0"),
+        PatcherConnectionEdit {
+            view_key: "macro:simp".to_string(),
+            id: "created-cable-0".to_string(),
+            origin: PatcherConnectionOrigin::Created {
+                created_id: "created-cable-0".to_string(),
+            },
+            from: OutputPortRef {
+                node_id: "input".to_string(),
+                output_index: 0,
+            },
+            to: InputPortRef {
+                node_id: "out".to_string(),
+                input_index: 0,
+            },
+            kind: ConnectionKind::Forward,
+            segment: None,
+        },
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+
+    assert_eq!(emitted, "(defmacro simp (input) input)");
+}
+
+#[test]
 fn library_macro_view_edit_persists_to_library_source_not_root_source() {
     let library = temp_defmacro_library("view-edit", &[("shape", "(defmacro shape (x) (* x 2))")]);
     let source = "(use-defmacro shape)\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)";
@@ -5631,6 +5813,109 @@ fn writeback_edited_code_island_returns_blocker() {
 }
 
 #[test]
+fn writeback_deleting_code_island_removes_unsupported_form() {
+    let source = "(let ((x 1)) x)\n(param freq)";
+    let patch = parse(source);
+    let code = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::CodeIsland)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &code.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(param freq)"
+    );
+}
+
+#[test]
+fn writeback_deleting_macro_code_island_removes_unsupported_macro_form() {
+    let source = "(defmacro simp (input)\n  (make-history history1)\n  (write-history missing value)\n  input)";
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "simp")
+        .unwrap();
+    let code = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::CodeIsland)
+        .unwrap();
+    let mut state = PatcherInteractionState {
+        active_macro: Some("simp".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:simp", &code.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro simp (input)\n  (make-history history1)\n  input)"
+    );
+}
+
+#[test]
+fn library_macro_autosave_deleting_code_island_recovers_package_source() {
+    let library = temp_defmacro_library(
+        "view-edit-delete-code-island",
+        &[(
+            "simp11",
+            "(defmacro simp11 (input)\n  (make-history history1)\n  (write-history missing value)\n  input)",
+        )],
+    );
+    let source =
+        "(use-defmacro simp11)\n(def sig (in 1))\n(def shaped (simp11 sig))\n(out shaped 1)";
+    let root_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    let macro_patch = root_patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "simp11")
+        .expect("library macro should project");
+    let code = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::CodeIsland)
+        .expect("unsupported write-history should project as a code island");
+
+    let mut state = PatcherInteractionState {
+        active_macro: Some("simp11".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("macro:simp11", &code.id));
+
+    let persisted =
+        persist_library_macro_edits(&root_patch, PatcherIntent::Instrument, &state, &library)
+            .unwrap();
+    assert_eq!(persisted, vec!["simp11".to_string()]);
+
+    let package = library.package("simp11").unwrap();
+    let saved = fs::read_to_string(&package.source_path).unwrap();
+    assert!(
+        !saved.contains("write-history"),
+        "deleted code island form should be removed from package source:\n{saved}"
+    );
+    assert!(
+        saved.contains("(defmacro simp11 (input)"),
+        "package should still contain its public macro:\n{saved}"
+    );
+    DefmacroPackage::from_source(&package.package_dir, "simp11", &saved).unwrap();
+}
+
+#[test]
 fn writeback_unknown_operator_edit_returns_blocker() {
     let source = "(def result (phasor freq))";
     let patch = parse(source);
@@ -9556,6 +9841,11 @@ fn display_label_hides_missing_input_sentinel_for_trailing_unconnected_inlet() {
         .expect("macro instance");
 
     assert_eq!(node_display_label(shaped), "gain2");
+    let input_indices = patch_input_indices(&patch);
+    assert_eq!(
+        input_indices.get(&shaped.id).map(Vec::as_slice),
+        Some(&[0][..])
+    );
 }
 
 #[test]
@@ -9574,6 +9864,27 @@ fn display_label_shows_placeholder_for_missing_input_before_later_literal() {
         .expect("macro instance");
 
     assert_eq!(node_display_label(tapped), "ap ? 0.6");
+}
+
+#[test]
+fn source_backed_missing_input_sentinel_preserves_all_operator_inlets() {
+    let patch = parse(
+        "(def mixed (mix __patcher_missing_input__ __patcher_missing_input__ __patcher_missing_input__))",
+    );
+    let mixed = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "mixed")
+        .expect("mix node");
+
+    assert_eq!(node_display_label(mixed), "mix");
+    let input_indices = patch_input_indices(&patch);
+    assert_eq!(
+        input_indices.get(&mixed.id).map(Vec::as_slice),
+        Some(&[0, 1, 2][..])
+    );
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    assert_eq!(input_slot_counts.get(&mixed.id).copied(), Some(3));
 }
 
 #[test]

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "unison-frequencies",
+  "params": [
+    "base_freq",
+    "detune_st"
+  ],
+  "outputs": [
+    "out",
+    "out2",
+    "out3",
+    "out4",
+    "out5",
+    "out6",
+    "out7"
+  ]
+}

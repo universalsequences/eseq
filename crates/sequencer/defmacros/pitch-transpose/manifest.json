@@ -1,10 +1,9 @@
 {
   "version": 1,
-  "name": "simp11",
+  "name": "pitch-transpose",
   "params": [
-    "input",
-    "shape",
-    "depth"
+    "hz",
+    "semitones"
   ],
   "outputs": [
     "out"

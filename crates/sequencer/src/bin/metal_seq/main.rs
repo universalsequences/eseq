@@ -393,6 +393,36 @@ fn macro_library_action_status(
     }
 }
 
+fn flush_staged_instrument_library_macro_edits(
+    session: &InstrumentEditSession,
+) -> Result<Vec<String>, String> {
+    eseqlisp::widget_render::patcher::flush_staged_library_macro_edits_for_path(
+        &session.path,
+        &session.last_valid_source,
+        session.last_valid_layout.as_deref(),
+        eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+    )
+}
+
+fn flush_staged_effect_library_macro_edits(
+    session: &EffectEditSession,
+) -> Result<Vec<String>, String> {
+    eseqlisp::widget_render::patcher::flush_staged_library_macro_edits_for_path(
+        &session.path,
+        &session.last_valid_source,
+        session.last_valid_layout.as_deref(),
+        eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+    )
+}
+
+fn staged_library_macro_flush_status(macros: &[String]) -> Option<String> {
+    if macros.is_empty() {
+        None
+    } else {
+        Some(format!("Saved library macro edits: {}", macros.join(", ")))
+    }
+}
+
 struct PendingEffectCancelRestore {
     session: EffectEditSession,
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
@@ -10553,49 +10583,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Value::Map(ref map) = payload {
                             if let Some(cell) = map.get("name") {
                                 if let Value::String(inst_name) = &*cell.borrow() {
-                                    if instrument_edit_session
-                                        .as_ref()
-                                        .and_then(active_instrument_editor_macro_action)
-                                        .is_some()
-                                    {
-                                        if let Some(session) = instrument_edit_session.as_mut() {
-                                            match apply_active_instrument_editor_macro_action(
-                                                session,
-                                            ) {
-                                                Ok(Some(result)) => {
-                                                    let action_status =
-                                                        macro_library_action_status(&result);
-                                                    let rt = editor.runtime_mut();
-                                                    rt.set_reactive(
-                                                        "SEQ",
-                                                        "editor-error",
-                                                        Value::String(String::new()),
-                                                    );
-                                                    rt.run_reactive_cycle();
-                                                    editor.refresh_runtime_side_effects();
-                                                    editor
-                                                        .refresh_visible_layouts_for_buffer_named(
-                                                            "*samples*",
-                                                        );
-                                                    editor.handle_host_event(HostEvent::Status(
-                                                        action_status,
-                                                    ));
-                                                }
-                                                Ok(None) => {}
-                                                Err(error) => {
-                                                    let rt = editor.runtime_mut();
-                                                    rt.set_reactive(
-                                                        "SEQ",
-                                                        "editor-error",
-                                                        Value::String(error),
-                                                    );
-                                                    rt.run_reactive_cycle();
-                                                    editor.refresh_runtime_side_effects();
-                                                }
-                                            }
-                                        }
-                                        continue;
-                                    }
                                     let inst_name = inst_name.trim().to_string();
                                     if inst_name.is_empty() {
                                         let rt = editor.runtime_mut();
@@ -10652,6 +10639,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.refresh_runtime_side_effects();
                                         continue;
                                     }
+
+                                    let flushed_macros =
+                                        match flush_staged_instrument_library_macro_edits(session) {
+                                            Ok(macros) => macros,
+                                            Err(error) => {
+                                                let rt = editor.runtime_mut();
+                                                rt.set_reactive(
+                                                    "SEQ",
+                                                    "editor-error",
+                                                    Value::String(format!(
+                                                        "Failed to save library macro edits: {error}"
+                                                    )),
+                                                );
+                                                rt.run_reactive_cycle();
+                                                editor.refresh_runtime_side_effects();
+                                                continue;
+                                            }
+                                        };
 
                                     let final_slug =
                                         sequencer::agent::actions::normalize_patch_name(
@@ -10814,6 +10819,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     editor.refresh_runtime_side_effects();
                                     editor.remove_buffer_by_name(&buf_name);
+                                    if let Some(status) =
+                                        staged_library_macro_flush_status(&flushed_macros)
+                                    {
+                                        editor.handle_host_event(HostEvent::Status(status));
+                                    }
                                     editor_buffer_name = None;
                                     editor_mode = None;
                                     current_track.store(draft_track, Ordering::Relaxed);
@@ -11011,43 +11021,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Value::String(inst_name) = &*cell.borrow() {
                                     let inst_name = inst_name.clone();
                                     if let Some(session) = instrument_edit_session.as_ref() {
-                                        if active_instrument_editor_macro_action(session).is_some()
-                                        {
-                                            let session = instrument_edit_session
-                                                .as_mut()
-                                                .expect("instrument session must still be active");
-                                            match apply_active_instrument_editor_macro_action(
-                                                session,
-                                            ) {
-                                                Ok(Some(result)) => {
-                                                    let action_status =
-                                                        macro_library_action_status(&result);
-                                                    let rt = editor.runtime_mut();
-                                                    rt.set_reactive(
-                                                        "SEQ",
-                                                        "editor-error",
-                                                        Value::String(String::new()),
-                                                    );
-                                                    rt.run_reactive_cycle();
-                                                    editor.refresh_runtime_side_effects();
-                                                    editor.handle_host_event(HostEvent::Status(
-                                                        action_status,
-                                                    ));
-                                                }
-                                                Ok(None) => {}
-                                                Err(error) => {
-                                                    let rt = editor.runtime_mut();
-                                                    rt.set_reactive(
-                                                        "SEQ",
-                                                        "editor-error",
-                                                        Value::String(error),
-                                                    );
-                                                    rt.run_reactive_cycle();
-                                                    editor.refresh_runtime_side_effects();
-                                                }
-                                            }
-                                            continue;
-                                        }
                                         if !session.visible_revision_valid {
                                             let rt = editor.runtime_mut();
                                             rt.set_reactive(
@@ -11062,6 +11035,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             editor.refresh_runtime_side_effects();
                                             continue;
                                         }
+                                        let flushed_macros =
+                                            match flush_staged_instrument_library_macro_edits(
+                                                session,
+                                            ) {
+                                                Ok(macros) => macros,
+                                                Err(error) => {
+                                                    let rt = editor.runtime_mut();
+                                                    rt.set_reactive(
+                                                        "SEQ",
+                                                        "editor-error",
+                                                        Value::String(format!(
+                                                            "Failed to save library macro edits: {error}"
+                                                        )),
+                                                    );
+                                                    rt.run_reactive_cycle();
+                                                    editor.refresh_runtime_side_effects();
+                                                    continue;
+                                                }
+                                            };
                                         if let Err(e) = std::fs::write(
                                             &session.path,
                                             &session.last_valid_source,
@@ -11107,6 +11099,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         editor.refresh_runtime_side_effects();
                                         editor.remove_buffer_by_name(&buf_name);
+                                        if let Some(status) =
+                                            staged_library_macro_flush_status(&flushed_macros)
+                                        {
+                                            editor.handle_host_event(HostEvent::Status(status));
+                                        }
                                         editor_buffer_name = None;
                                         editor_mode = None;
                                         instrument_edit_session = None;
@@ -11396,13 +11393,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
 
+                        let compile_source =
+                            extract_string_from_payload(&payload, "compile-source")
+                                .unwrap_or_else(|| source.clone());
                         let layout = extract_string_from_payload(&payload, "layout");
                         session.preview_generation = session.preview_generation.wrapping_add(1);
                         session.visible_revision_valid = false;
                         let generation = session.preview_generation;
                         let sample_rate = app.graph.sample_rate;
                         let asset_base = session.path.parent().map(|parent| parent.to_path_buf());
-                        let compile_source = source.clone();
                         let (tx, rx) = std::sync::mpsc::channel();
                         std::thread::spawn(move || {
                             let result =
@@ -11549,13 +11548,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
 
+                        let compile_source =
+                            extract_string_from_payload(&payload, "compile-source")
+                                .unwrap_or_else(|| source.clone());
                         let layout = extract_string_from_payload(&payload, "layout");
                         session.preview_generation = session.preview_generation.wrapping_add(1);
                         session.visible_revision_valid = false;
                         let generation = session.preview_generation;
                         let sample_rate = app.graph.sample_rate;
                         let asset_base = session.path.parent().map(|parent| parent.to_path_buf());
-                        let compile_source = source.clone();
                         let (tx, rx) = std::sync::mpsc::channel();
                         std::thread::spawn(move || {
                             let result = sequencer::lisp_effect::compile_and_load_with_asset_base(
@@ -11865,6 +11866,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         continue;
                                     }
 
+                                    let flushed_macros =
+                                        match flush_staged_effect_library_macro_edits(session) {
+                                            Ok(macros) => macros,
+                                            Err(error) => {
+                                                let rt = editor.runtime_mut();
+                                                rt.set_reactive(
+                                                    "SEQ",
+                                                    "editor-error",
+                                                    Value::String(format!(
+                                                        "Failed to save library macro edits: {error}"
+                                                    )),
+                                                );
+                                                rt.run_reactive_cycle();
+                                                editor.refresh_runtime_side_effects();
+                                                continue;
+                                            }
+                                        };
+
                                     let final_slug =
                                         sequencer::agent::actions::normalize_patch_name(
                                             &effect_name,
@@ -11985,6 +12004,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     editor.refresh_runtime_side_effects();
                                     editor.remove_buffer_by_name(&session.buffer_name);
+                                    if let Some(status) =
+                                        staged_library_macro_flush_status(&flushed_macros)
+                                    {
+                                        editor.handle_host_event(HostEvent::Status(status));
+                                    }
                                     editor_buffer_name = None;
                                     editor_mode = None;
 
@@ -12175,6 +12199,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             editor.refresh_runtime_side_effects();
                             continue;
                         }
+                        let flushed_macros = match flush_staged_effect_library_macro_edits(session)
+                        {
+                            Ok(macros) => macros,
+                            Err(error) => {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-error",
+                                    Value::String(format!(
+                                        "Failed to save library macro edits: {error}"
+                                    )),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                continue;
+                            }
+                        };
                         if let Err(e) = std::fs::write(&session.path, &session.last_valid_source) {
                             let rt = editor.runtime_mut();
                             rt.set_reactive(
@@ -12213,6 +12254,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         editor.refresh_runtime_side_effects();
                         editor.remove_buffer_by_name(&session.buffer_name);
+                        if let Some(status) = staged_library_macro_flush_status(&flushed_macros) {
+                            editor.handle_host_event(HostEvent::Status(status));
+                        }
                         editor_buffer_name = None;
                         editor_mode = None;
 

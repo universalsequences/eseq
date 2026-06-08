@@ -221,6 +221,26 @@ impl DefmacroLibrary {
         self.packages.get(name)
     }
 
+    pub fn with_package_source(
+        &self,
+        name: &str,
+        source: &str,
+    ) -> Result<Self, DefmacroLibraryError> {
+        let existing =
+            self.packages
+                .get(name)
+                .ok_or_else(|| DefmacroLibraryError::MissingMacro {
+                    name: name.to_string(),
+                })?;
+        let package = DefmacroPackage::from_source(&existing.package_dir, name, source)?;
+        let mut packages = self.packages.clone();
+        packages.insert(name.to_string(), package);
+        Ok(Self {
+            root: self.root.clone(),
+            packages,
+        })
+    }
+
     pub fn materialize_source(
         &self,
         source: &str,

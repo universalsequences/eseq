@@ -1640,6 +1640,39 @@ pub fn apply_active_macro_library_action_for_path(
     })
 }
 
+pub fn flush_staged_library_macro_edits_for_path(
+    path: impl AsRef<Path>,
+    source: &str,
+    layout: Option<&str>,
+    intent: PatcherIntent,
+) -> Result<Vec<String>, String> {
+    let path = path.as_ref();
+    let Some((state_key, state)) = interaction_state_for_path(path) else {
+        return Ok(Vec::new());
+    };
+    let library = default_defmacro_library_for_write()?;
+    let mut root_patch = parse_patch_source_with_library(source, intent, &library)?;
+    if let Some(layout) = layout {
+        sidecar::apply_layout_json(layout, "active patcher layout", &mut root_patch)?;
+    }
+    let persisted = persist_library_macro_edits(&root_patch, intent, &state, &library)?;
+    if persisted.is_empty() {
+        return Ok(persisted);
+    }
+    let keys = state::patcher_keys_for_path(path);
+    for key in &keys {
+        let mut state = state::get_patcher_interaction_state(*key);
+        clear_persisted_macro_view_edits(&mut state, &persisted);
+        state::set_patcher_interaction_state(*key, state);
+    }
+    if !keys.contains(&state_key) {
+        let mut state = state;
+        clear_persisted_macro_view_edits(&mut state, &persisted);
+        state::set_patcher_interaction_state(state_key, state);
+    }
+    Ok(persisted)
+}
+
 fn active_macro_name_for_path(path: &Path) -> Option<String> {
     state::patcher_keys_for_path(path)
         .into_iter()
@@ -1649,6 +1682,26 @@ fn active_macro_name_for_path(path: &Path) -> Option<String> {
                 .active_macro
                 .filter(|name| !name.trim().is_empty())
         })
+}
+
+fn interaction_state_for_path(path: &Path) -> Option<(u64, state::PatcherInteractionState)> {
+    state::patcher_keys_for_path(path)
+        .into_iter()
+        .rev()
+        .map(|key| (key, state::get_patcher_interaction_state(key)))
+        .enumerate()
+        .max_by_key(|(idx, (_, state))| (interaction_edit_score(state), *idx))
+        .map(|(_, entry)| entry)
+}
+
+fn interaction_edit_score(state: &state::PatcherInteractionState) -> usize {
+    state.edit_state.nodes.len()
+        + state.edit_state.connections.len()
+        + state.edit_state.input_presentations.len()
+        + state.edit_state.deleted_nodes.len()
+        + state.edit_state.deleted_connections.len()
+        + state.edit_state.created_macros.len()
+        + usize::from(state.text_edit.is_some())
 }
 
 fn active_interaction_state_for_path(
@@ -1705,6 +1758,35 @@ fn macro_view_edit_score(state: &state::PatcherInteractionState, view_key: &str)
         )
 }
 
+fn library_macro_view_has_edits(state: &state::PatcherInteractionState, view_key: &str) -> bool {
+    let scoped_prefix = format!("{view_key}::");
+    state
+        .edit_state
+        .nodes
+        .values()
+        .any(|edit| edit.view_key == view_key)
+        || state
+            .edit_state
+            .connections
+            .values()
+            .any(|edit| edit.view_key == view_key)
+        || state
+            .edit_state
+            .deleted_nodes
+            .iter()
+            .any(|key| key.starts_with(&scoped_prefix))
+        || state
+            .edit_state
+            .deleted_connections
+            .iter()
+            .any(|key| key.starts_with(&scoped_prefix))
+        || state
+            .edit_state
+            .input_presentations
+            .values()
+            .any(|edit| edit.view_key == view_key)
+}
+
 fn macro_library_action_for_macro(
     root_patch: &Patch,
     macro_name: &str,
@@ -1733,6 +1815,50 @@ fn default_defmacro_library_for_write() -> Result<DefmacroLibrary, String> {
     Ok(library)
 }
 
+fn staged_library_macro_writeback(
+    macro_patch: &MacroPatch,
+    intent: PatcherIntent,
+    state: &state::PatcherInteractionState,
+    library: &crate::defmacro_library::DefmacroLibrary,
+) -> Result<writeback::PatchWritebackResult, String> {
+    let MacroOrigin::Library { source_path, .. } = &macro_patch.origin else {
+        return Err(format!(
+            "cannot stage `{}`: macro is not from the library",
+            macro_patch.name
+        ));
+    };
+    let source_path = PathBuf::from(source_path);
+    let source = std::fs::read_to_string(&source_path)
+        .map_err(|error| format!("failed to read '{}': {error}", source_path.display()))?;
+    let view_key = format!("macro:{}", macro_patch.name);
+    let library_state = interaction_state_for_only_view(state, &view_key);
+    writeback::emit_patch_writeback_result_with_library(&source, intent, &library_state, library)
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn library_with_staged_macro_edits(
+    root_patch: &Patch,
+    intent: PatcherIntent,
+    state: &state::PatcherInteractionState,
+    library: &crate::defmacro_library::DefmacroLibrary,
+) -> Result<crate::defmacro_library::DefmacroLibrary, String> {
+    let mut staged_library = library.clone();
+    for macro_patch in &root_patch.macros {
+        if !matches!(macro_patch.origin, MacroOrigin::Library { .. }) {
+            continue;
+        }
+        let view_key = format!("macro:{}", macro_patch.name);
+        if !library_macro_view_has_edits(state, &view_key) {
+            continue;
+        }
+        let emitted = staged_library_macro_writeback(macro_patch, intent, state, &staged_library)?;
+        staged_library = staged_library
+            .with_package_source(&macro_patch.name, &emitted.source)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(staged_library)
+}
+
 fn persist_library_macro_edits(
     root_patch: &Patch,
     intent: PatcherIntent,
@@ -1749,32 +1875,7 @@ fn persist_library_macro_edits(
             continue;
         };
         let view_key = format!("macro:{}", macro_patch.name);
-        let has_edits = state
-            .edit_state
-            .nodes
-            .values()
-            .any(|edit| edit.view_key == view_key)
-            || state
-                .edit_state
-                .connections
-                .values()
-                .any(|edit| edit.view_key == view_key)
-            || state
-                .edit_state
-                .deleted_nodes
-                .iter()
-                .any(|key| key.starts_with(&format!("{view_key}::")))
-            || state
-                .edit_state
-                .deleted_connections
-                .iter()
-                .any(|key| key.starts_with(&format!("{view_key}::")))
-            || state
-                .edit_state
-                .input_presentations
-                .values()
-                .any(|edit| edit.view_key == view_key);
-        if !has_edits {
+        if !library_macro_view_has_edits(state, &view_key) {
             continue;
         }
         let source_path = PathBuf::from(source_path);
@@ -2141,7 +2242,7 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
     let intent = patcher_intent_from_props(&node.props);
     let key = patcher_state_key(node);
-    let mut state = get_patcher_interaction_state(key);
+    let state = get_patcher_interaction_state(key);
 
     let Some(path_str) = path else {
         return map_value(vec![
@@ -2188,32 +2289,11 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     };
 
     let library = defmacro_library_for_props(&node.props);
-    if let Some(library) = library.as_ref() {
-        match persist_library_macro_edits(&root_patch, intent, &state, library) {
-            Ok(persisted_macros) => {
-                if !persisted_macros.is_empty() {
-                    clear_persisted_macro_view_edits(&mut state, &persisted_macros);
-                    set_patcher_interaction_state(key, state.clone());
-                }
-            }
-            Err(error) => {
-                return map_value(vec![
-                    ("status", Value::Keyword("invalid".to_string())),
-                    ("path", Value::String(path_str)),
-                    (
-                        "diagnostic",
-                        Value::String(format!("failed to persist library macro edits: {error}")),
-                    ),
-                ]);
-            }
-        }
-    }
     let root_state = if library.is_some() {
         interaction_state_without_library_macro_views(&state, &root_patch)
     } else {
         state.clone()
     };
-    let library = defmacro_library_for_props(&node.props);
     let writeback_result = if let Some(library) = library.as_ref() {
         writeback::emit_patch_writeback_result_with_library(&source, intent, &root_state, library)
     } else {
@@ -2253,10 +2333,46 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
                 "payload-valid",
                 format!("path={path_str}\nintent={intent:?}\nsource:\n{}", source),
             );
+            let compile_source = if let Some(library) = library.as_ref() {
+                let staged_library =
+                    match library_with_staged_macro_edits(&root_patch, intent, &state, library) {
+                        Ok(library) => library,
+                        Err(error) => {
+                            return map_value(vec![
+                                ("status", Value::Keyword("invalid".to_string())),
+                                ("path", Value::String(path_str)),
+                                (
+                                    "diagnostic",
+                                    Value::String(format!(
+                                        "failed to stage library macro edits: {error}"
+                                    )),
+                                ),
+                            ]);
+                        }
+                    };
+                match staged_library.materialize_source(&source) {
+                    Ok(materialized) => materialized.source,
+                    Err(error) => {
+                        return map_value(vec![
+                            ("status", Value::Keyword("invalid".to_string())),
+                            ("path", Value::String(path_str)),
+                            (
+                                "diagnostic",
+                                Value::String(format!(
+                                    "failed to materialize staged defmacro imports: {error}"
+                                )),
+                            ),
+                        ]);
+                    }
+                }
+            } else {
+                source.clone()
+            };
             let entries = vec![
                 ("status", Value::Keyword("valid".to_string())),
                 ("path", Value::String(path_str)),
                 ("source", Value::String(source)),
+                ("compile-source", Value::String(compile_source)),
                 ("layout", Value::String(layout)),
             ];
             map_value(entries)

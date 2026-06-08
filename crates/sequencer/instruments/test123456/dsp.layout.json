@@ -1,0 +1,164 @@
+{
+  "version": 1,
+  "root": {
+    "nodes": {
+      "attack": {
+        "x": 4.0,
+        "y": 5.0535717
+      },
+      "audio": {
+        "x": 88.883224,
+        "y": 40.595478
+      },
+      "clock": {
+        "x": 182.31639,
+        "y": 8.0
+      },
+      "created-0": {
+        "x": 145.5957,
+        "y": 27.154974
+      },
+      "created-1": {
+        "x": 162.42467,
+        "y": 23.415182
+      },
+      "created-2": {
+        "x": 122.69043,
+        "y": 29.35491
+      },
+      "created-3": {
+        "x": 111.285576,
+        "y": 31.300385
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 10.68
+      },
+      "depth": {
+        "x": 135.2307,
+        "y": 19.208199
+      },
+      "env": {
+        "x": 84.56223,
+        "y": 20.788198
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "gate": {
+        "x": 121.4081,
+        "y": 8.0
+      },
+      "modulated1": {
+        "x": 133.40053,
+        "y": 24.230867
+      },
+      "mul1": {
+        "x": 92.13525,
+        "y": 33.664997
+      },
+      "phasor1": {
+        "x": 114.92467,
+        "y": 23.388329
+      },
+      "pitch": {
+        "x": 77.993835,
+        "y": 8.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "simp111": {
+        "x": 107.203835,
+        "y": 27.189766
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 13.360001
+      },
+      "svf1": {
+        "x": 88.883224,
+        "y": 36.53358
+      },
+      "trigger": {
+        "x": 141.18797,
+        "y": 5.634885
+      },
+      "value1": {
+        "x": 128.65712,
+        "y": 11.298789
+      },
+      "velocity": {
+        "x": 98.50907,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->mul1:2": {
+        "segmented": true,
+        "y": 30.408747
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 14.150001
+      },
+      "pitch:0->simp111:0": {
+        "segmented": true,
+        "y": 19.949999
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 17.150002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.18
+      },
+      "trigger:0->phasor1:1": {
+        "segmented": true,
+        "y": 16.18
+      },
+      "value1:0->phasor1:0": {
+        "segmented": true,
+        "y": 14.94
+      },
+      "velocity:0->mul1:1": {
+        "segmented": true,
+        "y": 18.36625
+      }
+    },
+    "inputPresentation": {
+      "audio:0": "cable",
+      "created-0:0": "cable",
+      "created-0:1": "cable",
+      "created-2:0": "cable",
+      "created-2:1": "cable",
+      "created-2:2": "cable",
+      "created-3:0": "cable",
+      "created-3:1": "cable",
+      "env:2": "inline-raw-param",
+      "env:3": "inline-raw-param",
+      "env:4": "inline-raw-param",
+      "env:5": "inline-raw-param",
+      "modulated1:0": "cable",
+      "mul1:0": "cable",
+      "simp111:2": "cable",
+      "svf1:0": "cable"
+    }
+  },
+  "macros": {}
+}
