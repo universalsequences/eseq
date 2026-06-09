@@ -503,18 +503,21 @@
       (do
         (mixer-v2-select-bus i)
         (seq-set-bus-volume i (mixer-v2-event-volume event))))
-    (h-stack :gap 0.06 :align :center
-      (mixer-v2-volume-triangle
-        :value (bind-seq-nth "bus-volumes" i)
-        :on-click (lambda (sx sy region)
-          (do
-            (mixer-v2-select-bus i)
-            (seq-set-bus-volume i (mixer-v2-pointer-volume sy))))
-        :on-drag (lambda (sx sy region)
-          (do
-            (mixer-v2-select-bus i)
-            (seq-set-bus-volume i (mixer-v2-pointer-volume sy)))))
-      (mixer-v2-bus-meter i))))
+    (v-stack
+      (box :width :fill :height 4.0)
+      (h-stack :gap 0.06 
+      (box :width 2 )
+        (mixer-v2-volume-triangle
+          :value (bind-seq-nth "bus-volumes" i)
+          :on-click (lambda (sx sy region)
+            (do
+              (mixer-v2-select-bus i)
+              (seq-set-bus-volume i (mixer-v2-pointer-volume sy))))
+          :on-drag (lambda (sx sy region)
+            (do
+              (mixer-v2-select-bus i)
+              (seq-set-bus-volume i (mixer-v2-pointer-volume sy)))))
+        (mixer-v2-bus-meter i)))))
 
 (def mixer-v2-send-label (name)
   (if (= name "Bus A")
@@ -787,10 +790,11 @@
       :padding 0.45
       :on-click (lambda (event) (mixer-v2-select-bus i))
       (v-stack :gap 0.25
-        (box :height 5.8)
+        (box :height 2.8)
         (h-stack :gap 0.45 :align :center
           (box :width 3.0 :height 3.6)
           (mixer-v2-bus-meter-control i))
+        (box :height 2.8)
         (h-stack :gap 0.35
           (button (mixer-v2-bus-mute-label i)
             :width 2.1 :height 1.0 :padding 0 :font-size 10
@@ -887,27 +891,35 @@
 ;; the container, over the container color.
 (def mixer-v2-group-header-slot (gidx)
   (let ((group (nth SEQ.groups gidx))
-        (bus-idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
-    (box :width 5.0 :height 12.45
-      :padding 0.2
-      :bg :transparent
+      (c (mixer-v2-group-color gidx))
+      (bus-idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
+    (box :width 9.0 :height 12.8
+      :corner-radius 12
+      :padding 0.0
+      :background-color :mixer-strip-bg
       (v-stack :gap 0.4 :align :center
-        (button (if (get group :collapsed) "▸" "▾")
-          :width 2.2 :height 1.2 :padding 0 :font-size 12
-          :background-color :mixer-control-bg
-          :color :white
-          :on-click (lambda (event) (mixer-v2-toggle-group-collapsed (get group :id))))
-        (label (substring (get group :name) 0 10)
-          :font-size 11
-          :h-align :center
-          :color :black
-          :bg :transparent)
+        
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
         ;; them selects the group's bus (mixer-v2-bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
-          (mixer-v2-bus-meter-control bus-idx)
-          (box :width 0.0 :height 0.0 :bg :transparent))))))
+          (box  :width :fill :height 10.5
+            (mixer-v2-bus-meter-control bus-idx))
+          (box :width 0.0 :height 0.0 :bg :transparent))
+        (box :height 0.3)
+        (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
+          (h-stack :gap 0.2
+            (button (if (get group :collapsed) "▸" "▾")
+              :width 2.0 :height 0.9 :padding 0 :font-size 14
+              :background-color '(rgba 0.1 0.1 0.1 0.5)
+              :border-color '(rgba 0.8 0.8 0.8 0.9)
+              :color :white
+              :on-click (lambda (event) (mixer-v2-toggle-group-collapsed (get group :id))))
+            (label (substring (get group :name) 0 10)
+              :font-size 11
+              :h-align :center
+              :color :black
+              :bg :transparent))        )))))
 
 (def mixer-v2-group-member-strip (i)
   (if (seq-track-collapsed? i)
@@ -919,8 +931,8 @@
 ;; above the contained tracks.
 (def mixer-v2-group-container (gidx)
   (let ((group (nth SEQ.groups gidx))
-        (c (mixer-v2-group-color gidx))
-        (selected (mixer-v2-group-selected? gidx)))
+      (c (mixer-v2-group-color gidx))
+      (selected (mixer-v2-group-selected? gidx)))
     (box
       :corner-radius 8
       :padding 0.2
@@ -932,16 +944,17 @@
       :drop-meta (dict :kind "group" :gidx gidx)
       :on-drop (lambda (event) (mixer-v2-drop-track-into-group event gidx))
       :on-click (lambda (event) (mixer-v2-select-group gidx))
-      (h-stack :gap 0.3 :align :start
+      (h-stack :gap 0.0 :align :start
         (mixer-v2-group-header-slot gidx)
         (if (get group :collapsed)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :gap 0.0
-            (box :width :fill :height 0.3 :bg :transparent)
+            (box :width :fill :height 0.7 :bg :transparent)
             (h-stack :gap 0.3
               (each (get group :members) |m|
                 (subtree :key (str "mixer-v2-track-" m)
-                  (mixer-v2-group-member-strip m))))))))))
+                  (mixer-v2-group-member-strip m))))
+            ))))))
 
 (def mixer-v2-render-item (item)
   (let ((kind (get item :kind)))

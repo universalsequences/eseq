@@ -32,6 +32,10 @@ pub struct BusPatternSnapshot {
     pub id: BusId,
     pub gate_sequence: BusGateSequence,
     pub effect_plocks: Vec<Vec<Vec<Option<f32>>>>,
+    /// Per-scene base (non-plocked) effect parameter values, indexed
+    /// `[slot][param]`. Recalled on scene switch so a bus effect knob can
+    /// hold different values per scene. Empty for legacy snapshots.
+    pub effect_defaults: Vec<Vec<f32>>,
 }
 
 #[derive(Clone)]
@@ -2579,6 +2583,19 @@ impl SequencerState {
         }
     }
 
+    /// Force one track's output across every stored scene. Track output is
+    /// otherwise per-scene, but a track group is a global concept — its members
+    /// must reach the backing bus in every scene, or switching scenes would tear
+    /// the group's routing apart (and a saved project would silently lose it).
+    pub fn set_track_output_in_all_track_patterns(&self, track: usize, output: TrackOutput) {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        if let Some(pool) = scenes.track_pools.get_mut(track) {
+            for data in pool.patterns.values_mut() {
+                data.track_params.output = output.clone();
+            }
+        }
+    }
+
     fn ensure_scene_bus_patterns_len_locked(
         scenes: &mut ProjectScenes,
         len: usize,
@@ -4777,6 +4794,7 @@ mod tests {
                 vec![vec![Some(marker + 1.0)]],
                 vec![vec![Some(marker + 2.0)]],
             ],
+            effect_defaults: vec![vec![marker]],
         }]
     }
 

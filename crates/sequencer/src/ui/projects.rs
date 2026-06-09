@@ -598,14 +598,28 @@ fn project_bus_pattern_snapshot_from_ui(
         effect_slots: snapshot
             .effect_plocks
             .iter()
-            .map(|plocks| crate::project::ProjectEffectSlot {
-                num_params: plocks.iter().map(Vec::len).max().unwrap_or(0) as u32,
-                defaults: Vec::new(),
-                plocks: plocks.clone(),
-                plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
-                param_node_indices: Vec::new(),
-                param_node_spans: Vec::new(),
-                ir: None,
+            .enumerate()
+            .map(|(slot_idx, plocks)| {
+                let defaults = snapshot
+                    .effect_defaults
+                    .get(slot_idx)
+                    .cloned()
+                    .unwrap_or_default();
+                let num_params = plocks
+                    .iter()
+                    .map(Vec::len)
+                    .max()
+                    .unwrap_or(0)
+                    .max(defaults.len()) as u32;
+                crate::project::ProjectEffectSlot {
+                    num_params,
+                    defaults,
+                    plocks: plocks.clone(),
+                    plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+                    param_node_indices: Vec::new(),
+                    param_node_spans: Vec::new(),
+                    ir: None,
+                }
             })
             .collect(),
     }
@@ -615,6 +629,11 @@ fn project_bus_pattern_snapshot_to_ui(snapshot: ProjectBusPatternSnapshot) -> Bu
     BusPatternSnapshot {
         id: BusId(snapshot.id),
         gate_sequence: project_bus_gate_sequence_to_ui(snapshot.gate_sequence),
+        effect_defaults: snapshot
+            .effect_slots
+            .iter()
+            .map(|slot| slot.defaults.clone())
+            .collect(),
         effect_plocks: snapshot
             .effect_slots
             .into_iter()
@@ -818,6 +837,20 @@ impl App {
         self.publish_bus_gate_runtime();
         self.state.remove_bus_references_from_all_track_patterns(id);
         true
+    }
+
+    /// Route a track's output to `output` in the live pattern AND every stored
+    /// scene, then apply graph routing. Group membership is global, so its
+    /// members must keep this routing across every scene — see
+    /// `SequencerState::set_track_output_in_all_track_patterns`.
+    pub fn set_track_output_all_scenes(&mut self, track: usize, output: TrackOutput) {
+        if track >= self.state.pattern.track_params.len() {
+            return;
+        }
+        self.state.pattern.track_params[track].set_output(output.clone());
+        self.state
+            .set_track_output_in_all_track_patterns(track, output);
+        self.graph_controller().apply_track_output_routing(track);
     }
 
     fn remove_bus_references_from_live_pattern(&self, id: BusId) {
@@ -1541,6 +1574,16 @@ impl App {
                     && group.members.iter().all(|&m| m < group_track_count)
             })
             .collect();
+        // Reconcile group routing: a group's members must reach its backing bus
+        // in every scene. Output is stored per-scene, so older saves (or any
+        // pre-fix grouping) can have members still pointing at Mix in some/all
+        // scenes — repair that here so the group actually submixes on load.
+        for group in self.groups.clone() {
+            let output = TrackOutput::Bus(BusId(group.bus_id));
+            for &member in &group.members {
+                self.set_track_output_all_scenes(member, output.clone());
+            }
+        }
         let saved_bus_effects: Vec<(usize, usize, String, crate::effects::EffectSlotSnapshot)> =
             self.buses
                 .iter()

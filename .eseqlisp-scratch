@@ -1,1 +1,1 @@
-(load "crates/sequencer/scripts/graph-markov-8x8-demo.lisp")
+(load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")

@@ -4885,6 +4885,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ui_loop_stats.note_gestures(gestures_started.elapsed());
 
+        if !app.has_pending_project_load() {
+            pull_named_scratch_buffer_into_project(&editor, &mut app);
+        }
+
         // 1b. Drain host commands (sample browser etc.)
         let host_commands_started = Instant::now();
         for command in editor.drain_host_commands() {
@@ -6567,13 +6571,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let group_index = app.groups.len() + 1;
                             let bus = app.add_bus_channel(format!("Group {group_index}"));
                             for &track in &members {
-                                ui::apply_command(
-                                    &mut app,
-                                    ui::AppCommand::SetTrackOutput {
-                                        track,
-                                        output: TrackOutput::Bus(bus),
-                                    },
-                                );
+                                // Route across every scene — group routing is global.
+                                app.set_track_output_all_scenes(track, TrackOutput::Bus(bus));
                             }
                             let color = app
                                 .track_colors
@@ -6630,15 +6629,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .iter()
                                         .find(|g| g.id != target_id && g.members.contains(&track))
                                         .map(|g| g.id);
-                                    // Route the track into the target group's backing bus.
-                                    ui::apply_command(
-                                        &mut app,
-                                        ui::AppCommand::SetTrackOutput {
-                                            track,
-                                            output: TrackOutput::Bus(sequencer::sequencer::BusId(
-                                                target_bus_id,
-                                            )),
-                                        },
+                                    // Route the track into the target group's backing bus,
+                                    // across every scene (group routing is global).
+                                    app.set_track_output_all_scenes(
+                                        track,
+                                        TrackOutput::Bus(sequencer::sequencer::BusId(
+                                            target_bus_id,
+                                        )),
                                     );
                                     if let Some(g) =
                                         app.groups.iter_mut().find(|g| g.id == target_id)
@@ -6688,13 +6685,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(g_idx) =
                                 app.groups.iter().position(|g| g.members.contains(&track))
                             {
-                                ui::apply_command(
-                                    &mut app,
-                                    ui::AppCommand::SetTrackOutput {
-                                        track,
-                                        output: TrackOutput::Mix,
-                                    },
-                                );
+                                // Route back to the master mix across every scene.
+                                app.set_track_output_all_scenes(track, TrackOutput::Mix);
                                 app.groups[g_idx].members.retain(|&m| m != track);
                                 if app.groups[g_idx].members.len() < 2 {
                                     let bus = sequencer::sequencer::BusId(app.groups[g_idx].bus_id);

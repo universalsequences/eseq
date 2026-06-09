@@ -266,80 +266,88 @@
         :height 45
         (v-stack :gap 0.5
           ;; ── sequencer-level config (on top) ──
-          (h-stack :gap 0.6 :align :center
-            (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
-            (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (g8-num "graph-8x8-reset-bars"
-              (bind-graph-config g8-name :reset-bars) 0 64 1 0
-              (lambda (v) (g8-edit-config :reset-bars v)))
-            (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (g8-num "graph-8x8-max-poly"
-              (bind-graph-config g8-name :max-poly) 0 16 1 0
-              (lambda (v) (g8-edit-config :max-poly v))))
           (h-stack
-            (v-stack :gap 0.5
-              (h-stack :gap 0.5 :align :center
-                (label "per-node knobs" :width 14 :height 1.2 :font-size 9 :color :dim))
-              (v-stack :gap 0.2
-                (g8-header)
-                (each (range 0 g8-node-count) |n| (g8-row n))))
+            (v-stack
+              (h-stack :gap 0.6 :align :center
+                (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
+                (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                (g8-num "graph-8x8-reset-bars"
+                  (bind-graph-config g8-name :reset-bars) 0 64 1 0
+                  (lambda (v) (g8-edit-config :reset-bars v))))
+              (h-stack :gap 0.6 :align :center
+              (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+              (g8-num "graph-8x8-max-poly"
+                (bind-graph-config g8-name :max-poly) 0 16 1 0
+                (lambda (v) (g8-edit-config :max-poly v))))
+            )
+          (matrix
+            :key "graph-8x8-dampening-matrix"
+            :rows 8
+            :cols 8
+            :width 8
+            :height 4
             
-            (v-stack :gap 0.35
-              (label "trig" :width 2 :height 2.5 :font-size 8 :color :dim)
-              (matrix
-                :key "graph-8x8-trigger-matrix"
-                :rows 8
-                :cols 1
-                :width 1
-                :height 12
-                :min 0
-                :max 1
-                :value (g8-viz-matrix viz :trigger-matrix (g8-zero-column-matrix))))            
-            
-            (v-stack :gap 0.35
-              (label "energy" :width 3 :height 2.5 :font-size 8 :color :dim)
-              (matrix
-                :key "graph-8x8-energy-matrix"
-                :rows 8
-                :cols 1
-                :width 2
-                :height 12
-                :min 0
-                :max 4
-                :value (g8-viz-matrix viz :energy-matrix (g8-zero-column-matrix))))            
-            (v-stack :gap 0.35
-              (label "weights (from row -> to col)" :width 18 :height 2.5 :font-size 8 :color :dim)
-              (matrix
-                :key "graph-8x8-weight-matrix"
-                :rows 8
-                :cols 8
-                :width 26
-                :height 12
-                :min 0
-                :color :blue
-                :max 1
-                :value g8-weights
-                :on-cell-change (lambda (r c v)
-                  (do
-                    (set! g8-weights (g8-set-cell g8-weights r c v))
-                    (graph-edge g8-name :from r :to c :weight v))))))
+            :control :grid
+            :background :black
+            :fill :primary
+            :min 0
+            :max 1
+            :value (g8-viz-matrix viz :dampening-matrix (g8-zero-matrix))
+            )
+          )
+        (h-stack
           (v-stack :gap 0.5
-            
-            
-            (label "live dampening (from row -> to col)" :width 18 :height 1.2 :font-size 8 :color :dim)
+            (h-stack :gap 0.5 :align :center
+              (label "per-node knobs" :width 14 :height 1.2 :font-size 9 :color :dim))
+            (v-stack :gap 0.2
+              (g8-header)
+              (each (range 0 g8-node-count) |n| (g8-row n))))
+          
+          (v-stack :gap 0.35
+            (label "trig" :width 2 :height 2.5 :font-size 8 :color :dim)
             (matrix
-              :key "graph-8x8-dampening-matrix"
+              :key "graph-8x8-trigger-matrix"
+              :rows 8
+              :cols 1
+              :width 1
+              :height 12
+              :min 0
+              :max 1
+              :value (g8-viz-matrix viz :trigger-matrix (g8-zero-column-matrix))))            
+          
+          (v-stack :gap 0.35
+            (label "energy" :width 3 :height 2.5 :font-size 8 :color :dim)
+            (matrix
+              :key "graph-8x8-energy-matrix"
+              :rows 8
+              :cols 1
+              :width 2
+              :height 12
+              :min 0
+              :max 4
+              :value (g8-viz-matrix viz :energy-matrix (g8-zero-column-matrix))))            
+          (v-stack :gap 0.35
+            (label "weights (from row -> to col)" :width 18 :height 2.5 :font-size 8 :color :dim)
+            (matrix
+              :key "graph-8x8-weight-matrix"
               :rows 8
               :cols 8
               :width 26
               :height 12
-              
-              :control :grid
-              :background :black
-              :fill :primary
               :min 0
+              :color :blue
               :max 1
-              :value (g8-viz-matrix viz :dampening-matrix (g8-zero-matrix)))))))))
+              :value g8-weights
+              :on-cell-change (lambda (r c v)
+                (do
+                  (set! g8-weights (g8-set-cell g8-weights r c v))
+                  (graph-edge g8-name :from r :to c :weight v))))))
+        (v-stack :gap 0.5
+          
+          
+          (label "live dampening (from row -> to col)" :width 18 :height 1.2 :font-size 8 :color :dim)
+          
+          ))))))
 
 (effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations))
 (seq-register-step-sequencer-tab script-tab-label script-buffer-name)

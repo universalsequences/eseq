@@ -192,6 +192,9 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def custom-ui-select-section-in-scope (scope section) section)
             (def custom-ui-set-param-in-scope (scope p value) value)
             (def custom-ui-set-param-by-name-in-scope (scope name value) value)
+            (def audio-fx-ui-param (fx name) '())
+            (def param-set-option (fx p value) value)
+            (def string-starts-with? (s prefix) false)
             "#,
         )
         .map_err(|error| format!("ui validation runtime setup failed: {error:?}"))?;

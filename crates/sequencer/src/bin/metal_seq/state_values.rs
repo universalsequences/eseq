@@ -13376,6 +13376,66 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_script_picker_load_syncs_hidden_scratch_into_project_state() {
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = ui::App::new(
+            Arc::clone(&state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            ui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.editor.scratch_buffer.clear();
+        state.set_scratch_source(String::new());
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let script_path = std::env::temp_dir().join(format!(
+            "eseq-script-picker-sync-test-{}.lisp",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script_path,
+            r#"
+            (def script-buffer-name "*picker-sync-test-seq*")
+            (def script-tab-label "Picker Sync")
+            (def script-init-fn () false)
+            (effect-buffer "*picker-sync-test-seq*" (label "picker sync test"))
+            "#,
+        )
+        .expect("write script picker sync fixture");
+
+        let load_form = format!(
+            "(seq-script-load-file {:?})",
+            script_path.display().to_string()
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&load_form)
+            .expect("load selected script through script picker");
+        editor.refresh_runtime_side_effects();
+        let expected_scratch = format!("(load {:?})", script_path.display().to_string());
+        let _ = std::fs::remove_file(&script_path);
+
+        pull_named_scratch_buffer_into_project(&editor, &mut app);
+
+        assert_eq!(
+            app.editor.scratch_buffer, expected_scratch,
+            "saving after picker load should persist the picker-generated scratch load form"
+        );
+        assert_eq!(state.scratch_source(), expected_scratch);
+    }
+
+    #[test]
     fn metal_seq_project_scratch_sync_reads_hidden_named_scratch_buffer() {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();

@@ -103,6 +103,34 @@ fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PatternLengthShortcut {
+    Double,
+    Halve,
+}
+
+fn pattern_length_shortcut(key: &crossterm::event::KeyEvent) -> Option<PatternLengthShortcut> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let has_shortcut_modifier = key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+    if !has_shortcut_modifier || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char('+') => Some(PatternLengthShortcut::Double),
+        KeyCode::Char('=') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(PatternLengthShortcut::Double)
+        }
+        KeyCode::Char('-') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(PatternLengthShortcut::Halve)
+        }
+        _ => None,
+    }
+}
+
 fn is_plain_tab_shortcut(key: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -557,6 +585,20 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && active_buffer_accepts_global_ui_shortcuts(editor)
         && !focused_widget_captures_text_input(editor)
     {
+        if let Some(shortcut) = pattern_length_shortcut(key) {
+            if metal_has_selected_bus(editor) {
+                return false;
+            }
+            let command = match shortcut {
+                PatternLengthShortcut::Double => "(double-track-pattern)",
+                PatternLengthShortcut::Halve => "(halve-track-pattern)",
+            };
+            let _ = editor.runtime_mut().eval_str(command);
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+            return true;
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('a') | KeyCode::Char('A'), modifiers)
                 if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
@@ -1505,6 +1547,131 @@ mod live_keyboard_tests {
         assert!(
             cloned.load(Ordering::Relaxed),
             "Cmd+D in the mixer should invoke selected track-pattern clone"
+        );
+    }
+
+    #[test]
+    fn control_plus_and_minus_use_track_pattern_length_actions() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate selected-bus -1)
+                (defstate pattern-length-action "")
+                (def seq-has-selected-bus? () (>= selected-bus 0))
+                (def double-track-pattern () (set! pattern-length-action "double"))
+                (def halve-track-pattern () (set! pattern-length-action "halve"))
+                "#,
+            )
+            .expect("install pattern length handlers");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('+'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("double".to_string()))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set! pattern-length-action "")"#)
+            .expect("reset action");
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(
+                KeyCode::Char('='),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("double".to_string()))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('-'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("halve".to_string()))
+        );
+    }
+
+    #[test]
+    fn control_plus_and_minus_do_not_resize_track_pattern_while_bus_is_selected() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate selected-bus 0)
+                (defstate pattern-length-action "")
+                (def seq-has-selected-bus? () (>= selected-bus 0))
+                (def double-track-pattern () (set! pattern-length-action "double"))
+                (def halve-track-pattern () (set! pattern-length-action "halve"))
+                "#,
+            )
+            .expect("install selected bus fixture");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('+'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('-'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("pattern-length-action")
+                .unwrap(),
+            Some(Value::String("".to_string()))
         );
     }
 

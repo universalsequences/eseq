@@ -874,6 +874,11 @@ impl App {
                     .iter()
                     .map(|slot| slot.plocks.clone())
                     .collect(),
+                effect_defaults: bus
+                    .effect_slots
+                    .iter()
+                    .map(|slot| slot.defaults.clone())
+                    .collect(),
             })
             .collect()
     }
@@ -891,6 +896,16 @@ impl App {
             };
             bus.gate_sequence = saved.gate_sequence.clone();
             for (slot_idx, slot) in bus.effect_slots.iter_mut().enumerate() {
+                // Recall per-scene base parameter values. Legacy snapshots (and
+                // slots missing from the saved set) carry no defaults, so the
+                // slot's current values are left untouched.
+                if let Some(saved_defaults) = saved.effect_defaults.get(slot_idx) {
+                    for (param_idx, value) in saved_defaults.iter().copied().enumerate() {
+                        if param_idx < slot.defaults.len() {
+                            slot.defaults[param_idx] = value;
+                        }
+                    }
+                }
                 let Some(saved_plocks) = saved.effect_plocks.get(slot_idx) else {
                     slot.plocks = (0..MAX_STEPS)
                         .map(|_| vec![None; slot.num_params as usize])
@@ -914,6 +929,14 @@ impl App {
             }
         }
         self.publish_bus_gate_runtime();
+        // Push the recalled base values to the live audio nodes so the scene's
+        // effect settings take immediately (not just on the next gate step).
+        for bus_idx in 0..self.buses.len() {
+            let slot_count = self.buses[bus_idx].effect_slots.len();
+            for slot_idx in 0..slot_count {
+                self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+            }
+        }
     }
 
     pub fn save_current_bus_pattern(&self) {
