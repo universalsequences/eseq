@@ -3288,6 +3288,16 @@ impl ScratchControlRuntime {
         self.runtime.eval_str(code).map_err(|e| format!("{e:?}"))
     }
 
+    pub fn eval_source_at_path(
+        &mut self,
+        path: impl Into<PathBuf>,
+        code: &str,
+    ) -> Result<Option<EValue>, String> {
+        self.runtime
+            .eval_source_at_path(path.into(), code)
+            .map_err(|e| format!("{e:?}"))
+    }
+
     pub fn take_status_message(&mut self) -> Option<String> {
         self.runtime.take_status_message()
     }
@@ -15038,6 +15048,48 @@ mod tests {
 
         assert_eq!(result, Value::Bool(true));
         assert!(state.pattern.patterns[0].is_active(0));
+    }
+
+    #[test]
+    fn scratch_control_runtime_source_path_eval_resolves_relative_loads() {
+        let unique = format!(
+            "eseq-scratch-source-path-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create temp scratch source dir");
+        let loaded_path = dir.join("loaded.lisp");
+        std::fs::write(
+            &loaded_path,
+            r#"
+            (def-accumulator "loaded-relative"
+              (acc-add-step-param :transpose acc-value))
+            (scheduler-should-ignore-ui-only-tail)
+            "#,
+        )
+        .expect("write loaded scratch source");
+
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()])),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        assert!(
+            runtime
+                .eval_source_at_path(dir.join(".eseqlisp-scratch"), r#"(load "loaded.lisp")"#)
+                .is_err(),
+            "scheduler scratch should report the UI-only tail error"
+        );
+
+        let _ = std::fs::remove_file(loaded_path);
+        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(
+            runtime.accumulator_names(),
+            vec!["loaded-relative".to_string()]
+        );
     }
 
     #[test]

@@ -101,6 +101,29 @@
     (set! selected-bus -1)
     (mixer-v2-clear-delete-target)))
 
+;; cmd/super/meta-click on a mixer strip toggles multi-select membership.
+(def mixer-v2-multi-select-click? (event)
+  (or (get event :cmd) (get event :super) (get event :meta)))
+
+(def mixer-v2-toggle-track-select (i)
+  (do
+    (set! selected-bus -1)
+    (mixer-v2-clear-delete-target)
+    (seq-toggle-track-selected i)
+    (host-command "reveal-sequencer-track" (dict :track i))))
+
+;; Plain click = single-select; cmd-click = toggle membership in the set.
+(def mixer-v2-track-body-click (event i)
+  (if (mixer-v2-multi-select-click? event)
+    (mixer-v2-toggle-track-select i)
+    (mixer-v2-select-track i)))
+
+;; The label preserves its delete-target gesture on a plain click.
+(def mixer-v2-track-label-click (event i)
+  (if (mixer-v2-multi-select-click? event)
+    (mixer-v2-toggle-track-select i)
+    (mixer-v2-select-track-delete-target i)))
+
 (def mixer-v2-select-bus (i)
   (do
     (seq-clear-selection)
@@ -507,7 +530,9 @@
 (def mixer-v2-track-strip (i)
   (let ((muted (mixer-v2-muted? i))
       (sends (nth SEQ.track-bus-sends i)))
-    (box :width 12.9 :height 13.15
+    ;; Grouped strips drop the output dropdown, so they are shorter to avoid
+    ;; dead space at the bottom inside the group container.
+    (box :width 12.9 :height (if (mixer-v2-track-grouped? i) 12.15 13.15)
       :selected (mixer-v2-track-selected-binding i)
       :muted muted
       :background-color :mixer-strip-bg
@@ -523,16 +548,21 @@
       :drop-types (list "sample" "audio-effect" "midi-effect")
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (mixer-v2-drop-on-track event))
-      :on-click (lambda (event) (mixer-v2-select-track i))
+      :on-click (lambda (event) (mixer-v2-track-body-click event i))
       (v-stack :gap 0.20
-        (dropdown :value (nth SEQ.track-outputs i)
-          :key (str "mixer-v2-track-output-" i)
-          :options SEQ.track-output-options
-          :on-change (lambda (v)
-            (do
-              (mixer-v2-clear-delete-target)
-              (host-command "set-track-output" (dict :track i :label v))))
-          :width :fill :height 1.2 :font-size 10)
+        ;; Grouped tracks drop the output dropdown (their output is the group
+        ;; bus); the container provides the color above. A small spacer keeps
+        ;; the pattern grid aligned with loose strips.
+        (if (mixer-v2-track-grouped? i)
+          (box :width :fill :height 0.2 :bg :transparent)
+          (dropdown :value (nth SEQ.track-outputs i)
+            :key (str "mixer-v2-track-output-" i)
+            :options SEQ.track-output-options
+            :on-change (lambda (v)
+              (do
+                (mixer-v2-clear-delete-target)
+                (host-command "set-track-output" (dict :track i :label v))))
+            :width :fill :height 1.2 :font-size 10))
         (mixer-v2-track-pattern-grid i)
         
         	       
@@ -540,8 +570,10 @@
           (v-stack
             
             (h-stack :gap 0.05
-              (each sends |send send-idx|
-                (mixer-v2-send-knob i send)))
+              ;; Only the first two send knobs (Bus A / Bus B); group-backing
+              ;; bus sends are not shown on the strip.
+              (each (range 0 (min 2 (len sends))) |send-idx|
+                (mixer-v2-send-knob i (nth sends send-idx))))
             
             (knob-number :label "pan"
               :key (str "mixer-v2-track-pan-" i)
@@ -587,7 +619,7 @@
             (mixer-v2-track-color-b i muted)
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
-          :on-click (lambda (event) (mixer-v2-select-track-delete-target i))
+          :on-click (lambda (event) (mixer-v2-track-label-click event i))
           :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
           (label (substring (nth SEQ.track-names i) 0 10)
             :width 9.8
@@ -619,7 +651,7 @@
       :drop-types (list "sample" "audio-effect" "midi-effect")
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (mixer-v2-drop-on-track event))
-      :on-click (lambda (event) (mixer-v2-select-track i))
+      :on-click (lambda (event) (mixer-v2-track-body-click event i))
       (v-stack :gap 0.42 :align :center
         (box :width :fill :height 3.45 :bg :transparent)
         (mixer-v2-track-meter-control i)
@@ -640,7 +672,7 @@
             (mixer-v2-track-color-b i muted)
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
-          :on-click (lambda (event) (mixer-v2-select-track-delete-target i))
+          :on-click (lambda (event) (mixer-v2-track-label-click event i))
           :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
           (label (mixer-v2-track-collapsed-label i)
             :width 3.65
@@ -755,6 +787,141 @@
           :color :white
           :on-click (lambda (event) (mixer-v2-select-bus i)))))))
 
+;; --- Track groups -------------------------------------------------------
+
+(def mixer-v2-list-contains? (xs v)
+  (> (len (filter (lambda (x) (= x v)) xs)) 0))
+
+;; Index (in SEQ.groups) of the group anchored at track i (lowest member), else -1.
+(def mixer-v2-group-anchored-at (i)
+  (reduce |acc gidx|
+    (if (>= acc 0)
+      acc
+      (if (= (get (nth SEQ.groups gidx) :anchor) i) gidx acc))
+    -1
+    (range 0 (len SEQ.groups))))
+
+;; Index (in SEQ.groups) of the group containing track i, else -1.
+(def mixer-v2-group-of-track (i)
+  (reduce |acc gidx|
+    (if (>= acc 0)
+      acc
+      (if (mixer-v2-list-contains? (get (nth SEQ.groups gidx) :members) i) gidx acc))
+    -1
+    (range 0 (len SEQ.groups))))
+
+(def mixer-v2-track-grouped? (i)
+  (>= (mixer-v2-group-of-track i) 0))
+
+(def mixer-v2-group-color (gidx)
+  (let ((c (get (nth SEQ.groups gidx) :color)))
+    (if (>= (len c) 3) c (list 0.5 0.5 0.5))))
+
+;; Storage index of the bus with the given id, or -1.
+(def mixer-v2-bus-index-by-id (bid)
+  (reduce |acc i|
+    (if (>= acc 0)
+      acc
+      (if (= (nth SEQ.bus-ids i) bid) i acc))
+    -1
+    (range 0 (len SEQ.bus-ids))))
+
+;; Set of bus ids that back a group (hidden from the ordinary bus list).
+(def mixer-v2-group-bus-id? (bid)
+  (reduce |acc gidx|
+    (or acc (= (get (nth SEQ.groups gidx) :bus-id) bid))
+    false
+    (range 0 (len SEQ.groups))))
+
+;; Build the flat mixer render-item list: loose tracks and group containers,
+;; each group anchored at its lowest member index (visual contiguity without
+;; reindexing the track Vec).
+(def mixer-v2-render-order ()
+  (reduce |acc i|
+    (let ((ganch (mixer-v2-group-anchored-at i)))
+      (if (>= ganch 0)
+        (append acc (list (dict :kind "group" :gidx ganch)))
+        (if (mixer-v2-track-grouped? i)
+          acc
+          (append acc (list (dict :kind "loose" :track i))))))
+    (list)
+    (range 0 SEQ.num-tracks)))
+
+(def mixer-v2-toggle-group-collapsed (gid)
+  (seq-toggle-group-collapsed gid))
+
+(def mixer-v2-select-group (gidx)
+  (let ((idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
+    (if (>= idx 0)
+      (mixer-v2-select-bus idx)
+      false)))
+
+;; True when this group's backing bus is the currently selected channel.
+(def mixer-v2-group-selected? (gidx)
+  (let ((idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
+    (and (>= idx 0) (= selected-bus idx))))
+
+;; The group's own channel slot (collapse toggle + name) shown at the left of
+;; the container, over the container color.
+(def mixer-v2-group-header-slot (gidx)
+  (let ((group (nth SEQ.groups gidx)))
+    (box :width 5.0 :height 12.45
+      :padding 0.2
+      :bg :transparent
+      (v-stack :gap 0.4 :align :center
+        (button (if (get group :collapsed) "▸" "▾")
+          :width 2.2 :height 1.2 :padding 0 :font-size 12
+          :background-color :mixer-control-bg
+          :color :white
+          :on-click (lambda (event) (mixer-v2-toggle-group-collapsed (get group :id))))
+        (label (substring (get group :name) 0 10)
+          :font-size 11
+          :h-align :center
+          :color :black
+          :bg :transparent)))))
+
+(def mixer-v2-group-member-strip (i)
+  (if (seq-track-collapsed? i)
+    (mixer-v2-track-collapsed-strip i)
+    (mixer-v2-track-strip i)))
+
+;; A group rendered as a real container: a colored box wrapping the group's
+;; channel slot and its member strips, with a top spacer so the color shows
+;; above the contained tracks.
+(def mixer-v2-group-container (gidx)
+  (let ((group (nth SEQ.groups gidx))
+        (c (mixer-v2-group-color gidx))
+        (selected (mixer-v2-group-selected? gidx)))
+    (box
+      :corner-radius 8
+      :padding 0.2
+      :background-color (rgba (nth c 0) (nth c 1) (nth c 2) (if selected 1.0 0.78))
+      :border-width (if selected 4 2)
+      :border-color (if selected :mixer-strip-selected-border :mixer-strip-border)
+      :on-click (lambda (event) (mixer-v2-select-group gidx))
+      (h-stack :gap 0.3 :align :start
+        (mixer-v2-group-header-slot gidx)
+        (if (get group :collapsed)
+          (box :width 0.0 :height 0.0 :bg :transparent)
+          (v-stack :gap 0.0
+            (box :width :fill :height 0.3 :bg :transparent)
+            (h-stack :gap 0.3
+              (each (get group :members) |m|
+                (subtree :key (str "mixer-v2-track-" m)
+                  (mixer-v2-group-member-strip m))))))))))
+
+(def mixer-v2-render-item (item)
+  (let ((kind (get item :kind)))
+    (if (= kind "group")
+      (let ((gidx (get item :gidx)))
+        (subtree :key (str "mixer-v2-group-" (get (nth SEQ.groups gidx) :id))
+          (mixer-v2-group-container gidx)))
+      (let ((i (get item :track)))
+        (subtree :key (str "mixer-v2-track-" i)
+          (if (seq-track-collapsed? i)
+            (mixer-v2-track-collapsed-strip i)
+            (mixer-v2-track-strip i)))))))
+
 (def mixer-v2-sample-drop-zone ()
   (box :key "mixer-v2-sample-drop-zone"
     :width 11.8 :height 13.0
@@ -776,19 +943,30 @@
 
 (effect-buffer "*mixer*"
   (h-stack :padding 0.2 :gap 0.3
-    (each (range 0 SEQ.num-tracks) |i|
-      (subtree :key (str "mixer-v2-track-" i)
-          (if (seq-track-collapsed? i)
-            (mixer-v2-track-collapsed-strip i)
-            (mixer-v2-track-strip i))
-          ))
+    (each (mixer-v2-render-order) |item|
+      (mixer-v2-render-item item))
     (box :width 1.0 :height 11.0)
     (mixer-v2-sample-drop-zone)
     (box :width 1.0 :height 11.0)
     (each (range 0 (len SEQ.bus-names)) |display-i|
       (let ((i (mixer-v2-display-bus-index display-i)))
         (subtree :key (str "mixer-v2-bus-" i)
-          (mixer-v2-bus-strip i))))))
+          (if (mixer-v2-group-bus-id? (nth SEQ.bus-ids i))
+            (box :width 0.0 :height 0.0)
+            (mixer-v2-bus-strip i)))))))
+
+;; C-g — fold the multi-selected tracks into a new group.
+(def mixer-v2-group-selected ()
+  (do
+    (host-command "group-selected-tracks" (dict))
+    true))
+
+;; Global C-g dispatcher: a 2+ track multi-selection only exists via mixer
+;; cmd-click, so group when one is present; otherwise open the agent.
+(def seq-ctrl-g ()
+  (if (>= (len SEQ.selected-tracks) 2)
+    (mixer-v2-group-selected)
+    (agent-open-instrument)))
 
 (define-mode "seq-mixer-mode" :read-only true :on-key "mixer-v2-handle-key")
 (mode-bind-key "seq-mixer-mode" "LEFT" "mixer-v2-select-prev-channel")

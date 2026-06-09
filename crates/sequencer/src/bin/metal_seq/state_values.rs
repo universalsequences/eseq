@@ -368,6 +368,74 @@ pub(crate) fn sync_track_selection_binding_fields(
     }
 }
 
+/// Builds the `SEQ.selected-tracks` reactive list (sorted track indices).
+pub(crate) fn build_selected_tracks_value(selected: &HashSet<usize>) -> Value {
+    let mut tracks: Vec<usize> = selected.iter().copied().collect();
+    tracks.sort_unstable();
+    list_value(tracks.into_iter().map(|t| Value::Number(t as f64)))
+}
+
+/// Lights `track-selected-{i}` for every track in the multi-select set (union
+/// with the focused current track) and refreshes `SEQ.selected-tracks`.
+pub(crate) fn sync_selected_tracks_bindings(
+    rt: &mut Runtime,
+    track_count: usize,
+    current_track_idx: usize,
+    selected: &HashSet<usize>,
+) {
+    for track in 0..track_count {
+        let on = track == current_track_idx || selected.contains(&track);
+        rt.set_reactive("SEQ", &track_selected_field(track), Value::Bool(on));
+    }
+    rt.set_reactive(
+        "SEQ",
+        "selected-tracks",
+        build_selected_tracks_value(selected),
+    );
+}
+
+/// Builds `SEQ.groups`: one map per group with id, name, color, bus-id, anchor
+/// (lowest member index), collapsed flag, and ordered member indices.
+pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup]) -> Value {
+    list_value(groups.iter().map(|group| {
+        let anchor = group.members.iter().copied().min().unwrap_or(0);
+        map_value([
+            ("id", Value::Number(group.id as f64)),
+            ("name", Value::String(group.name.clone().into())),
+            (
+                "color",
+                list_value(group.color.iter().map(|c| Value::Number(*c as f64))),
+            ),
+            ("bus-id", Value::Number(group.bus_id as f64)),
+            ("anchor", Value::Number(anchor as f64)),
+            ("collapsed", Value::Bool(group.collapsed)),
+            (
+                "members",
+                list_value(group.members.iter().map(|m| Value::Number(*m as f64))),
+            ),
+        ])
+    }))
+}
+
+/// Builds `SEQ.group-collapsed`: parallel list of collapsed flags per group.
+pub(crate) fn build_group_collapsed_value(
+    groups: &[sequencer::project::ProjectTrackGroup],
+) -> Value {
+    list_value(groups.iter().map(|g| Value::Bool(g.collapsed)))
+}
+
+pub(crate) fn sync_groups_bindings(
+    rt: &mut Runtime,
+    groups: &[sequencer::project::ProjectTrackGroup],
+) {
+    rt.set_reactive("SEQ", "groups", build_groups_value(groups));
+    rt.set_reactive(
+        "SEQ",
+        "group-collapsed",
+        build_group_collapsed_value(groups),
+    );
+}
+
 pub(crate) fn set_current_track_reactive(
     rt: &mut Runtime,
     track_count: usize,
@@ -2354,6 +2422,12 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &ui::App) {
         .iter()
         .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.solo))))
         .collect();
+    let ids: Vec<Rc<RefCell<Value>>> = app
+        .buses
+        .iter()
+        .map(|bus| Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))))
+        .collect();
+    rt.set_reactive("SEQ", "bus-ids", Value::List(ids));
     rt.set_reactive("SEQ", "bus-names", build_track_names(&names));
     rt.set_reactive("SEQ", "bus-volumes", Value::List(volumes));
     rt.set_reactive("SEQ", "bus-mutes", Value::List(mutes));
@@ -5554,12 +5628,7 @@ pub(crate) fn sync_project_state(rt: &mut Runtime, app: &ui::App) {
 pub(crate) const PROJECT_SCRATCH_BUFFER_NAME: &str = "*scratch*";
 
 fn project_scratch_source_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .and_then(|crates_dir| crates_dir.parent())
-        .unwrap_or(&manifest_dir)
-        .join(".eseqlisp-scratch")
+    sequencer::paths::project_scratch_source_path()
 }
 
 pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ui::App) {

@@ -1666,6 +1666,34 @@ impl Runtime {
         result
     }
 
+    pub fn eval_source_at_path(
+        &mut self,
+        path: PathBuf,
+        source: &str,
+    ) -> Result<Option<Value>, crate::vm::VMError> {
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.vm.set_current_effect_context(current_buffer_id);
+        let path = self.vm.source_manager.canonicalize_path(&path);
+        let revision = crate::hot_reload::hash_source(source);
+        let result = self.vm.eval_module_source(path, source, revision);
+        if result.is_ok() {
+            self.flush_vm_reactive_sets();
+            if self.sync_theme_to_global {
+                self.sync_theme_from_vm();
+            }
+            self.invalidate_symbol_cache();
+            self.flush_widget_trees();
+        }
+        let load_errors = self.vm.take_source_load_errors();
+        if !load_errors.is_empty() {
+            for error in load_errors {
+                self.vm.source_manager.push_diagnostic(error);
+            }
+            return Err(crate::vm::VMError::CompileError);
+        }
+        result
+    }
+
     pub fn eval_source_transactional(
         &mut self,
         path: Option<PathBuf>,

@@ -14,6 +14,19 @@ pub fn sequencer_dir() -> io::Result<PathBuf> {
     })
 }
 
+pub fn workspace_root() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(|crates_dir| crates_dir.parent())
+        .unwrap_or(&manifest_dir)
+        .to_path_buf()
+}
+
+pub fn project_scratch_source_path() -> PathBuf {
+    workspace_root().join(".eseqlisp-scratch")
+}
+
 pub fn eseqlisp_init_candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(root) = std::env::var("ESEQLISP_ROOT") {

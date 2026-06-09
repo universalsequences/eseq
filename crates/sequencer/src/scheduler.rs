@@ -3522,7 +3522,8 @@ fn build_scheduler_scratch_runtime(
     }
 
     if !user_source.trim().is_empty() {
-        match runtime.eval(user_source) {
+        match runtime.eval_source_at_path(crate::paths::project_scratch_source_path(), user_source)
+        {
             Ok(_) => {
                 keep_runtime = true;
                 if debug_accum {

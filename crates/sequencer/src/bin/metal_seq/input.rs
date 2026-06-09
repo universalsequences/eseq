@@ -665,7 +665,10 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
     {
-        let _ = editor.runtime_mut().eval_str("(agent-open-instrument)");
+        // A 2+ track multi-selection only exists via mixer cmd-click, so C-g
+        // groups when one is present; otherwise it opens the agent. The Lisp
+        // dispatcher (seq-ctrl-g) decides.
+        let _ = editor.runtime_mut().eval_str("(seq-ctrl-g)");
         editor.refresh_runtime_side_effects();
         return true;
     }

@@ -3452,6 +3452,8 @@ mod tests {
         let bus_state = Arc::new(Mutex::new(app.buses.clone()));
         let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
         let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_tracks = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let track_groups = Arc::new(Mutex::new(app.groups.clone()));
         let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
         let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
             Arc::new(Mutex::new(BTreeSet::new()));
@@ -3482,6 +3484,8 @@ mod tests {
             bus_state.clone(),
             bus_node_ids.clone(),
             current_track.clone(),
+            selected_tracks.clone(),
+            track_groups.clone(),
             selected_steps.clone(),
             piano_roll_selection.clone(),
             piano_roll_move_state,
@@ -3869,6 +3873,8 @@ mod tests {
         let bus_state = Arc::new(Mutex::new(app.buses.clone()));
         let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
         let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_tracks = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let track_groups = Arc::new(Mutex::new(app.groups.clone()));
         let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
         let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
             Arc::new(Mutex::new(BTreeSet::new()));
@@ -3899,6 +3905,8 @@ mod tests {
             bus_state.clone(),
             bus_node_ids.clone(),
             current_track.clone(),
+            selected_tracks.clone(),
+            track_groups.clone(),
             selected_steps.clone(),
             piano_roll_selection.clone(),
             piano_roll_move_state,
@@ -4369,6 +4377,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Shared current track index
     let current_track = Arc::new(AtomicUsize::new(0));
+    // Multi-select set for mixer group operations (includes current_track when non-empty)
+    let selected_tracks: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Shared in-memory track groups (mirror of app.groups, mutated by natives)
+    let track_groups: Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>> =
+        Arc::new(Mutex::new(app.groups.clone()));
     // Selected steps for p-locking
     let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
     let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
@@ -4415,6 +4428,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bus_state.clone(),
         bus_node_ids.clone(),
         current_track.clone(),
+        selected_tracks.clone(),
+        track_groups.clone(),
         selected_steps.clone(),
         piano_roll_selection.clone(),
         piano_roll_move_state.clone(),
@@ -4469,6 +4484,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_peak_l_level = -1.0f64;
     let mut prev_peak_r_level = -1.0f64;
     let mut prev_master_recording = false;
+    let mut prev_selected_tracks: HashSet<usize> = HashSet::new();
+    let mut prev_groups: Vec<sequencer::project::ProjectTrackGroup> = Vec::new();
     let mut prev_track_peak_levels: Vec<f64> = Vec::new();
     let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
     let mut prev_modulator_phases: Vec<f64> = Vec::new();
@@ -5563,6 +5580,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *record_armed.lock().unwrap() = Vec::new();
+                        // Keep the shared bus mirror in sync so pull_shared_bus_state
+                        // can't restore the previous project's buses.
+                        *bus_state.lock().unwrap() = app.buses.clone();
+                        // Clear group state so the new project starts ungrouped and
+                        // the frame diff doesn't restore the previous project's groups.
+                        *track_groups.lock().unwrap() = app.groups.clone();
+                        selected_tracks.lock().unwrap().clear();
                         *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                         cached_track_peak_levels.clear();
                         cached_bus_peak_levels =
@@ -5585,6 +5609,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Value::Number(transport_playhead as f64),
                         );
                         sync_bus_mixer_state(rt, &app);
+                        sync_groups_bindings(rt, &app.groups);
                         sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                         sync_modulator_phase_fields(rt, &cached_modulator_phases);
                         sync_modulator_level_fields(rt, &cached_modulator_levels);
@@ -6516,6 +6541,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
+                        }
+                    }
+                    "group-selected-tracks" => {
+                        // Fold the multi-selected tracks into a new group backed by
+                        // an auto-created bus. Reject if <2 tracks or any member is
+                        // already grouped (one group per track).
+                        let members: Vec<usize> = {
+                            let set = selected_tracks.lock().unwrap();
+                            let mut v: Vec<usize> = set
+                                .iter()
+                                .copied()
+                                .filter(|&t| t < app.tracks.len())
+                                .collect();
+                            v.sort_unstable();
+                            v
+                        };
+                        let already_grouped = members
+                            .iter()
+                            .any(|m| app.groups.iter().any(|g| g.members.contains(m)));
+                        if members.len() >= 2 && !already_grouped {
+                            let group_index = app.groups.len() + 1;
+                            let bus = app.add_bus_channel(format!("Group {group_index}"));
+                            for &track in &members {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetTrackOutput {
+                                        track,
+                                        output: TrackOutput::Bus(bus),
+                                    },
+                                );
+                            }
+                            let color = app
+                                .track_colors
+                                .get(members[0])
+                                .map(|c| [c.r, c.g, c.b])
+                                .unwrap_or([0.5, 0.5, 0.5]);
+                            let group_id = app.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+                            app.groups.push(sequencer::project::ProjectTrackGroup {
+                                id: group_id,
+                                name: format!("Group {group_index}"),
+                                color,
+                                collapsed: false,
+                                members: members.clone(),
+                                bus_id: bus.0,
+                            });
+                            selected_tracks.lock().unwrap().clear();
+                            *bus_state.lock().unwrap() = app.buses.clone();
+                            *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                            *track_groups.lock().unwrap() = app.groups.clone();
+                            let ct = current_track.load(Ordering::Relaxed);
+                            let rt = editor.runtime_mut();
+                            sync_track_mixer_state(rt, &app, &state);
+                            sync_bus_mixer_state(rt, &app);
+                            sync_groups_bindings(rt, &app.groups);
+                            sync_selected_tracks_bindings(
+                                rt,
+                                app.tracks.len(),
+                                ct,
+                                &HashSet::new(),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     "set-track-output" => {
@@ -12566,6 +12654,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *record_armed.lock().unwrap() = vec![false; track_names.len()];
+                        // Keep the shared bus mirror in sync with the loaded buses,
+                        // else pull_shared_bus_state clobbers app.buses (length
+                        // mismatch) and drops the group's backing bus from the UI.
+                        *bus_state.lock().unwrap() = app.buses.clone();
+                        // Push loaded groups into the shared runtime store; the
+                        // per-frame groups diff rebuilds the SEQ.groups reactive.
+                        *track_groups.lock().unwrap() = app.groups.clone();
+                        {
+                            let mut sel = selected_tracks.lock().unwrap();
+                            sel.clear();
+                            if !app.tracks.is_empty() {
+                                sel.insert(restored_track);
+                            }
+                        }
 
                         let ct = current_track.load(Ordering::Relaxed);
                         let playhead = if app.tracks.is_empty() {
@@ -12600,6 +12702,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         sync_pattern_state(rt, &state);
                         sync_project_state(rt, &app);
+                        // Rebuild bus reactive (incl. SEQ.bus-ids) and groups so the
+                        // loaded group headers can resolve their backing bus index.
+                        sync_bus_mixer_state(rt, &app);
+                        sync_groups_bindings(rt, &app.groups);
                         rt.set_reactive("SEQ", "playing", Value::Bool(playing));
                         rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
                         rt.set_reactive(
@@ -13478,6 +13584,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_transport_playhead = transport_playhead;
                 prev_pattern_epoch = epoch;
                 needs_reactive_cycle = true;
+            }
+
+            // Track-groups reconcile: pull native-mutated groups (collapse toggle,
+            // group create) into app.groups and rebuild the SEQ.groups reactive.
+            {
+                let groups_snapshot = track_groups.lock().unwrap().clone();
+                if groups_snapshot != prev_groups {
+                    app.groups = groups_snapshot.clone();
+                    let rt = editor.runtime_mut();
+                    sync_groups_bindings(rt, &app.groups);
+                    prev_groups = groups_snapshot;
+                    needs_reactive_cycle = true;
+                }
+            }
+
+            // Multi-select highlight reconcile. Runs after the track-switch block
+            // so it overrides the single-select bindings written there.
+            {
+                let selected_snapshot = selected_tracks.lock().unwrap().clone();
+                if selected_snapshot != prev_selected_tracks {
+                    let rt = editor.runtime_mut();
+                    sync_selected_tracks_bindings(rt, app.tracks.len(), ct, &selected_snapshot);
+                    prev_selected_tracks = selected_snapshot;
+                    needs_reactive_cycle = true;
+                }
             }
 
             if playing != prev_playing {

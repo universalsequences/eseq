@@ -1,6 +1,7 @@
 (defmacro pitch-shift-hz (hz semitones)
   (def ratio (exp (/ (* (log 2.0) semitones) 12.0)))
   (* hz ratio))
+(use-defmacro simp2)
 (param semitone @min -12.0 @max 12.0 @default 0.0)
 (use-defmacro gain2)
 (make-history history1)

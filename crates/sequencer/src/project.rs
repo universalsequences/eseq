@@ -33,6 +33,26 @@ pub struct ProjectFile {
     #[serde(default)]
     pub scratch: ProjectScratchState,
     pub patterns: Vec<ProjectPattern>,
+    #[serde(default)]
+    pub groups: Vec<ProjectTrackGroup>,
+}
+
+/// A track group: lightweight metadata folding a set of tracks into one mixer
+/// unit backed by an auto-created bus. It references tracks by index and owns a
+/// backing bus by id; it does not own track data. See
+/// `docs/track-groups-spec.md`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectTrackGroup {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub color: [f32; 3],
+    #[serde(default)]
+    pub collapsed: bool,
+    /// Ordered member track indices.
+    pub members: Vec<usize>,
+    /// Backing `ProjectBusChannel` this group routes to.
+    pub bus_id: u64,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -1273,6 +1293,7 @@ mod tests {
                 replace: 0.3,
             },
             buses: default_project_buses(),
+            groups: Vec::new(),
             tracks: vec![
                 ProjectTrack::Custom {
                     instrument_name: "prophet-5".to_string(),

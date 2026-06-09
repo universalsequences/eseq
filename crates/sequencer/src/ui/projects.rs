@@ -674,6 +674,7 @@ impl From<ProjectBusChannel> for BusChannelState {
 impl App {
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
+        self.groups.clear();
 
         {
             let mut graph = self.graph_controller();
@@ -1115,6 +1116,7 @@ impl App {
                 cursor_col: self.editor.scratch_cursor.1,
             },
             patterns,
+            groups: self.groups.clone(),
         })
     }
 
@@ -1482,6 +1484,7 @@ impl App {
             tracks: _,
             custom_effects: _,
             patterns: _,
+            groups,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -1527,6 +1530,17 @@ impl App {
             self.graph_controller()
                 .ensure_bus_graph_node(bus.id, &bus.name);
         }
+        // Defensively drop dangling groups: every backing bus must resolve and
+        // every member index must be in range (track count is known here).
+        let group_track_count = self.tracks.len();
+        self.groups = groups
+            .into_iter()
+            .filter(|group| {
+                self.buses.iter().any(|bus| bus.id.0 == group.bus_id)
+                    && !group.members.is_empty()
+                    && group.members.iter().all(|&m| m < group_track_count)
+            })
+            .collect();
         let saved_bus_effects: Vec<(usize, usize, String, crate::effects::EffectSlotSnapshot)> =
             self.buses
                 .iter()
@@ -2318,6 +2332,7 @@ mod tests {
                 replace: 0.3,
             },
             buses: Vec::new(),
+            groups: Vec::new(),
             tracks: vec![ProjectTrack::Sampler {
                 sample_path: "samples/kick.wav".to_string(),
                 color: None,

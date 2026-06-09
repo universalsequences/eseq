@@ -284,6 +284,8 @@ pub(crate) fn init_runtime(
     buses: Arc<Mutex<Vec<ui::BusChannelState>>>,
     bus_node_ids: Arc<Mutex<Vec<ui::BusNodeIds>>>,
     current_track: Arc<AtomicUsize>,
+    selected_tracks: Arc<Mutex<HashSet<usize>>>,
+    track_groups: Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,
     selected_steps: Arc<Mutex<HashSet<usize>>>,
     piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
     piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>>,
@@ -325,6 +327,9 @@ pub(crate) fn init_runtime(
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
+                ("selected-tracks", Value::List(vec![])),
+                ("groups", Value::List(vec![])),
+                ("group-collapsed", Value::List(vec![])),
                 ("delete-target-version", Value::Number(0.0)),
                 ("selected-mod-routes", Value::List(vec![])),
                 (
@@ -477,6 +482,15 @@ pub(crate) fn init_runtime(
                 ("track-mutes", build_track_mutes(&state)),
                 ("track-solos", build_track_solos(&state)),
                 ("track-muted-by-solo", build_track_muted_by_solo(&state)),
+                (
+                    "bus-ids",
+                    Value::List(
+                        app.buses
+                            .iter()
+                            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))))
+                            .collect(),
+                    ),
+                ),
                 (
                     "bus-names",
                     build_track_names(
@@ -1397,9 +1411,10 @@ pub(crate) fn init_runtime(
         Ok(Value::String(status))
     });
 
-    // seq-set-track — switch current track
+    // seq-set-track — switch current track (single-select: resets the multi-select set)
     let st = state.clone();
     let ct = current_track.clone();
+    let sel_tracks = selected_tracks.clone();
     let sel = selected_steps.clone();
     let piano_sel = piano_roll_selection.clone();
     let ui_ep = ui_epoch.clone();
@@ -1414,6 +1429,11 @@ pub(crate) fn init_runtime(
         let track = *track as usize;
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track: track {track} out of range").into());
+        }
+        {
+            let mut set = sel_tracks.lock().unwrap();
+            set.clear();
+            set.insert(track);
         }
         let previous = ct.load(Ordering::Relaxed);
         ct.store(track, Ordering::Relaxed);
@@ -1447,6 +1467,68 @@ pub(crate) fn init_runtime(
             );
         }
         Ok(Value::Number(track as f64))
+    });
+
+    // seq-toggle-track-selected — (seq-toggle-track-selected track-idx)
+    // cmd-click multi-select: toggle this track's membership in the selection set.
+    // The last-clicked track becomes the focused current track. The set never
+    // becomes empty (toggling off the sole member re-selects it).
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel_tracks = selected_tracks.clone();
+    runtime.register_native("seq-toggle-track-selected", move |args, _ctx| {
+        let Some(Value::Number(track)) = args.first() else {
+            return Err("seq-toggle-track-selected: expected track number".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-toggle-track-selected: track {track} out of range").into());
+        }
+        let selected = {
+            let mut set = sel_tracks.lock().unwrap();
+            if set.contains(&track) {
+                set.remove(&track);
+                if set.is_empty() {
+                    set.insert(track);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                set.insert(track);
+                true
+            }
+        };
+        ct.store(track, Ordering::Relaxed);
+        Ok(Value::Bool(selected))
+    });
+
+    // seq-toggle-group-collapsed — (seq-toggle-group-collapsed group-id)
+    // Flips the collapsed flag on the in-memory group; the main loop rebuilds the
+    // SEQ.group-collapsed / SEQ.groups reactive surfaces from the project groups.
+    let groups_state = track_groups.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-toggle-group-collapsed", move |args, _ctx| {
+        let Some(Value::Number(group_id)) = args.first() else {
+            return Err("seq-toggle-group-collapsed: expected group id".into());
+        };
+        let group_id = *group_id as u64;
+        let collapsed = {
+            let mut groups = groups_state.lock().unwrap();
+            match groups.iter_mut().find(|g| g.id == group_id) {
+                Some(group) => {
+                    group.collapsed = !group.collapsed;
+                    group.collapsed
+                }
+                None => {
+                    return Err(
+                        format!("seq-toggle-group-collapsed: group {group_id} not found").into(),
+                    )
+                }
+            }
+        };
+        ui_inv.push(UiInvalidation::BusTopology);
+        Ok(Value::Bool(collapsed))
     });
 
     // seq-set-track-volume — (seq-set-track-volume track-idx volume)
