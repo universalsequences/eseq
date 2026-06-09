@@ -142,13 +142,33 @@
           (status "Drop a sample file, not a folder"))))))
 
 (def mixer-v2-drop-sample-new-track (event)
-  (let ((payload (get event :payload)))
-    (let ((path (get payload :path)))
-      (do
-        (mixer-v2-clear-delete-target)
-        (if path
-          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-          (status "Drop a sample file, not a folder"))))))
+  (if (= (get event :drag-type) "track-badge")
+    (mixer-v2-drop-track-out-of-group event)
+    (let ((payload (get event :payload)))
+      (let ((path (get payload :path)))
+        (do
+          (mixer-v2-clear-delete-target)
+          (if path
+            (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+            (status "Drop a sample file, not a folder")))))))
+
+;; Drag a track badge onto a group container -> add it to that group.
+(def mixer-v2-drop-track-into-group (event gidx)
+  (let ((trk (get (get event :payload) :track)))
+    (do
+      (mixer-v2-clear-delete-target)
+      (if (>= trk 0)
+        (host-command "move-track-to-group" (dict :track trk :gidx gidx))
+        false))))
+
+;; Drag a track badge onto the "Drop samples here" zone -> remove it from its group.
+(def mixer-v2-drop-track-out-of-group (event)
+  (let ((trk (get (get event :payload) :track)))
+    (do
+      (mixer-v2-clear-delete-target)
+      (if (>= trk 0)
+        (host-command "remove-track-from-group" (dict :track trk))
+        false))))
 
 (def mixer-v2-drop-effect-on-track (event)
   (let ((payload (get event :payload))
@@ -612,6 +632,8 @@
           :width :fill :height 1.0
           :corner-radius 30
           :padding 0
+          :drag-type "track-badge"
+          :drag-payload (dict :track i)
           :selected (mixer-v2-track-delete-target-binding i)
           :background-color (rgba
             (mixer-v2-track-color-r i muted)
@@ -864,7 +886,8 @@
 ;; The group's own channel slot (collapse toggle + name) shown at the left of
 ;; the container, over the container color.
 (def mixer-v2-group-header-slot (gidx)
-  (let ((group (nth SEQ.groups gidx)))
+  (let ((group (nth SEQ.groups gidx))
+        (bus-idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :width 5.0 :height 12.45
       :padding 0.2
       :bg :transparent
@@ -878,7 +901,13 @@
           :font-size 11
           :h-align :center
           :color :black
-          :bg :transparent)))))
+          :bg :transparent)
+        ;; Meter + fader reflect the group's backing bus. Selecting/dragging
+        ;; them selects the group's bus (mixer-v2-bus-meter-control selects by
+        ;; index). Fall back to nothing if the bus can't be resolved.
+        (if (>= bus-idx 0)
+          (mixer-v2-bus-meter-control bus-idx)
+          (box :width 0.0 :height 0.0 :bg :transparent))))))
 
 (def mixer-v2-group-member-strip (i)
   (if (seq-track-collapsed? i)
@@ -898,6 +927,10 @@
       :background-color (rgba (nth c 0) (nth c 1) (nth c 2) (if selected 1.0 0.78))
       :border-width (if selected 4 2)
       :border-color (if selected :mixer-strip-selected-border :mixer-strip-border)
+      :drop-hover-border-color :mixer-strip-selected-border
+      :drop-types (list "track-badge")
+      :drop-meta (dict :kind "group" :gidx gidx)
+      :on-drop (lambda (event) (mixer-v2-drop-track-into-group event gidx))
       :on-click (lambda (event) (mixer-v2-select-group gidx))
       (h-stack :gap 0.3 :align :start
         (mixer-v2-group-header-slot gidx)
@@ -933,7 +966,7 @@
     :corner-radius 10
     :padding 0.5
     :align :center
-    :drop-types (list "sample")
+    :drop-types (list "sample" "track-badge")
     :drop-meta (dict :kind "new-sample-track")
     :on-drop (lambda (event) (mixer-v2-drop-sample-new-track event))
     (label "Drop samples here"

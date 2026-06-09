@@ -4556,7 +4556,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             editor.mark_needs_redraw();
         }
         pull_shared_bus_state(&mut app, &bus_state);
-        pull_named_scratch_buffer_into_project(&editor, &mut app);
+        if !app.has_pending_project_load() {
+            pull_named_scratch_buffer_into_project(&editor, &mut app);
+        }
         editor.update_timers();
         let active_buffer_name = editor.active_buffer().name.clone();
         if active_buffer_name != prev_active_buffer_name {
@@ -5661,6 +5663,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "save-project" => {
                         let _ = current_track_for_app(&mut app, &current_track);
+                        pull_named_scratch_buffer_into_project(&editor, &mut app);
                         let requested_name = if let Value::Map(ref map) = payload {
                             map.get("name").and_then(|cell| match &*cell.borrow() {
                                 Value::String(name) => Some(name.clone()),
@@ -6604,6 +6607,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    "move-track-to-group" => {
+                        // Drag-drop: add `track` to the group at `gidx` (moving it
+                        // out of any other group first). Dissolve a source group
+                        // that would drop below 2 members.
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let gidx = extract_usize_from_payload(&payload, "gidx");
+                        if let (Some(track), Some(gidx)) = (track, gidx) {
+                            let target = app.groups.get(gidx).map(|g| (g.id, g.bus_id));
+                            if let Some((target_id, target_bus_id)) = target {
+                                let already = app
+                                    .groups
+                                    .get(gidx)
+                                    .map(|g| g.members.contains(&track))
+                                    .unwrap_or(false);
+                                if track < app.tracks.len() && !already {
+                                    // Source group (other than the target) holding the track.
+                                    let source_id = app
+                                        .groups
+                                        .iter()
+                                        .find(|g| g.id != target_id && g.members.contains(&track))
+                                        .map(|g| g.id);
+                                    // Route the track into the target group's backing bus.
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetTrackOutput {
+                                            track,
+                                            output: TrackOutput::Bus(sequencer::sequencer::BusId(
+                                                target_bus_id,
+                                            )),
+                                        },
+                                    );
+                                    if let Some(g) =
+                                        app.groups.iter_mut().find(|g| g.id == target_id)
+                                    {
+                                        g.members.push(track);
+                                        g.members.sort_unstable();
+                                        g.members.dedup();
+                                    }
+                                    // Remove from the source group; dissolve it (freeing its
+                                    // backing bus) if it would fall below 2 members.
+                                    if let Some(sid) = source_id {
+                                        if let Some(g) = app.groups.iter_mut().find(|g| g.id == sid)
+                                        {
+                                            g.members.retain(|&m| m != track);
+                                        }
+                                        if let Some(idx) =
+                                            app.groups.iter().position(|g| g.id == sid)
+                                        {
+                                            if app.groups[idx].members.len() < 2 {
+                                                let bus = sequencer::sequencer::BusId(
+                                                    app.groups[idx].bus_id,
+                                                );
+                                                app.delete_bus_channel(bus);
+                                                app.groups.remove(idx);
+                                            }
+                                        }
+                                    }
+                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                    *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                                    *track_groups.lock().unwrap() = app.groups.clone();
+                                    let rt = editor.runtime_mut();
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    sync_bus_mixer_state(rt, &app);
+                                    sync_groups_bindings(rt, &app.groups);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "remove-track-from-group" => {
+                        // Drag-drop onto the sample zone: pull `track` out of its
+                        // group, routing it back to the master mix. Dissolve the
+                        // group if it would fall below 2 members.
+                        if let Some(track) = extract_usize_from_payload(&payload, "track") {
+                            if let Some(g_idx) =
+                                app.groups.iter().position(|g| g.members.contains(&track))
+                            {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetTrackOutput {
+                                        track,
+                                        output: TrackOutput::Mix,
+                                    },
+                                );
+                                app.groups[g_idx].members.retain(|&m| m != track);
+                                if app.groups[g_idx].members.len() < 2 {
+                                    let bus = sequencer::sequencer::BusId(app.groups[g_idx].bus_id);
+                                    app.delete_bus_channel(bus);
+                                    app.groups.remove(g_idx);
+                                }
+                                *bus_state.lock().unwrap() = app.buses.clone();
+                                *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                                *track_groups.lock().unwrap() = app.groups.clone();
+                                let rt = editor.runtime_mut();
+                                sync_track_mixer_state(rt, &app, &state);
+                                sync_bus_mixer_state(rt, &app);
+                                sync_groups_bindings(rt, &app.groups);
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                     "set-track-output" => {

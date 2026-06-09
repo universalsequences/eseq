@@ -5677,10 +5677,13 @@ pub(crate) fn evaluate_project_scratch_on_ui_runtime(
 }
 
 pub(crate) fn pull_named_scratch_buffer_into_project(editor: &Editor, app: &mut ui::App) {
-    let buffer = editor.active_buffer();
-    if buffer.name != PROJECT_SCRATCH_BUFFER_NAME {
+    let Some(buffer) = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+    else {
         return;
-    }
+    };
 
     let text = buffer.text();
     let cursor = buffer.cursor;
@@ -13370,6 +13373,49 @@ mod tests {
             ],
             "loading through the picker should register the script buffer tab on the first load"
         );
+    }
+
+    #[test]
+    fn metal_seq_project_scratch_sync_reads_hidden_named_scratch_buffer() {
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = ui::App::new(
+            Arc::clone(&state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            ui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.editor.scratch_buffer.clear();
+        state.set_scratch_source(String::new());
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let scratch_source = r#"(load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")"#;
+        let scratch_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .expect("editor starts with project scratch buffer");
+        editor.buffers[scratch_idx].set_text(scratch_source);
+        editor.open_scratch_buffer_with_mode("*sequencer*", "", eseqlisp::BufferMode::ESeqLisp);
+        assert_eq!(editor.active_buffer().name, "*sequencer*");
+
+        pull_named_scratch_buffer_into_project(&editor, &mut app);
+
+        assert_eq!(
+            app.editor.scratch_buffer, scratch_source,
+            "project save sync should capture hidden *scratch* contents"
+        );
+        assert_eq!(state.scratch_source(), scratch_source);
     }
 
     #[test]
