@@ -344,6 +344,7 @@ fn emit_patch_writeback_result_for_root_patch(
     if let Some(library) = library {
         document.add_imports_for_used_library_macros(&effective_root_patch, library);
     }
+    document.enforce_binding_dependency_order();
 
     let mut generated_node_ids = generated.node_id_map();
     generated_node_ids.extend(history_bindings.node_id_map());
@@ -3177,7 +3178,11 @@ fn source_node_original_expression(
             .expr
             .as_ref()
             .and_then(|expr| document.original_expr(expr))
-            .cloned(),
+            .map(|expr| {
+                param_name(expr)
+                    .map(|name| Expression::Symbol(name.to_string()))
+                    .unwrap_or_else(|| expr.clone())
+            }),
         SourceOwner::BindingValue {
             binding: BindingTarget::Symbol(name),
             ..
@@ -3311,6 +3316,15 @@ fn node_reference_expr(
             view_key: view_key.to_string(),
             node_id: node.id.clone(),
         })?;
+    if output_index == 0
+        && let Some(name) = source
+            .expr
+            .as_ref()
+            .and_then(|expr| document.expr(expr))
+            .and_then(param_name)
+    {
+        return Ok(Expression::Symbol(name.to_string()));
+    }
     match &source.owner {
         SourceOwner::TopLevelForm { .. } | SourceOwner::BindingValue { .. }
             if node.kind == NodeKind::Param =>
@@ -3323,6 +3337,23 @@ fn node_reference_expr(
                 });
             };
             Ok(Expression::Symbol(name.to_string()))
+        }
+        SourceOwner::TopLevelForm { .. } => {
+            if let Some(expr) = source.expr.as_ref().and_then(|expr| document.expr(expr))
+                && let Some(name) = param_name(expr)
+            {
+                return Ok(Expression::Symbol(name.to_string()));
+            }
+            source
+                .expr
+                .as_ref()
+                .and_then(|expr| document.expr(expr))
+                .cloned()
+                .ok_or_else(|| WriteBackError::UnsupportedGeneratedBinding {
+                    view_key: view_key.to_string(),
+                    node_id: node.id.clone(),
+                    reason: "top-level source expression is missing".to_string(),
+                })
         }
         SourceOwner::BindingValue {
             binding: BindingTarget::Symbol(name),
@@ -3365,16 +3396,6 @@ fn node_reference_expr(
                 reason: "nested source expression is missing".to_string(),
             }
         }),
-        SourceOwner::TopLevelForm { .. } => source
-            .expr
-            .as_ref()
-            .and_then(|expr| document.expr(expr))
-            .cloned()
-            .ok_or_else(|| WriteBackError::UnsupportedGeneratedBinding {
-                view_key: view_key.to_string(),
-                node_id: node.id.clone(),
-                reason: "top-level source expression is missing".to_string(),
-            }),
         _ => Err(WriteBackError::UnsupportedGeneratedBinding {
             view_key: view_key.to_string(),
             node_id: node.id.clone(),
@@ -7071,6 +7092,16 @@ impl SourceDocument {
         live
     }
 
+    fn enforce_binding_dependency_order(&mut self) {
+        enforce_form_binding_dependency_order(&mut self.forms, |form| match &form.form {
+            SourceForm::Expr(expr) => Some(expr),
+            SourceForm::Macro(_) => None,
+        });
+        for macro_doc in self.macros.values_mut() {
+            enforce_form_binding_dependency_order(&mut macro_doc.body, |form| Some(&form.expr));
+        }
+    }
+
     fn insert_history_write(
         &mut self,
         scope: &SourceScopeId,
@@ -7775,6 +7806,98 @@ fn collect_scope_binding_names(expr: &Expression, names: &mut HashSet<String>) {
             if let Some(name) = symbol_at(items, 1) {
                 names.insert(name.to_string());
             }
+        }
+        _ => {}
+    }
+}
+
+fn enforce_form_binding_dependency_order<T, F>(forms: &mut Vec<T>, expr_for_form: F)
+where
+    F: Fn(&T) -> Option<&Expression>,
+{
+    let mut binding_positions = HashMap::new();
+    for (position, form) in forms.iter().enumerate() {
+        let Some(expr) = expr_for_form(form) else {
+            continue;
+        };
+        let mut names = HashSet::new();
+        collect_scope_binding_names(expr, &mut names);
+        for name in names {
+            binding_positions.entry(name).or_insert(position);
+        }
+    }
+
+    let dependencies = forms
+        .iter()
+        .enumerate()
+        .map(|(position, form)| {
+            let mut references = HashSet::new();
+            if let Some(expr) = expr_for_form(form) {
+                collect_scope_value_references(expr, &mut references);
+            }
+            references
+                .into_iter()
+                .filter_map(|name| binding_positions.get(&name).copied())
+                .filter(|dependency| *dependency != position)
+                .collect::<HashSet<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut emitted = HashSet::new();
+    let mut order = Vec::with_capacity(forms.len());
+    while order.len() < forms.len() {
+        let order_len = order.len();
+        for (position, form_dependencies) in dependencies.iter().enumerate() {
+            if emitted.contains(&position)
+                || !form_dependencies
+                    .iter()
+                    .all(|dependency| emitted.contains(dependency))
+            {
+                continue;
+            }
+            emitted.insert(position);
+            order.push(position);
+        }
+        if order.len() == order_len {
+            for position in 0..forms.len() {
+                if emitted.insert(position) {
+                    order.push(position);
+                }
+            }
+        }
+    }
+    if order.iter().copied().eq(0..forms.len()) {
+        return;
+    }
+
+    let mut ordered = forms.drain(..).map(Some).collect::<Vec<_>>();
+    for position in order {
+        if let Some(form) = ordered[position].take() {
+            forms.push(form);
+        }
+    }
+}
+
+fn collect_scope_value_references(expr: &Expression, references: &mut HashSet<String>) {
+    match expr {
+        Expression::Symbol(symbol) => {
+            references.insert(symbol.clone());
+        }
+        Expression::List(items) | Expression::QuoteList(items) => {
+            let head = symbol_at(items, 0);
+            for (idx, item) in items.iter().enumerate() {
+                if idx == 0
+                    || matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
+                    || matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
+                    || (idx == 1 && matches!(head, Some("def" | "param" | "make-history")))
+                {
+                    continue;
+                }
+                collect_scope_value_references(item, references);
+            }
+        }
+        Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
+            collect_scope_value_references(inner, references);
         }
         _ => {}
     }

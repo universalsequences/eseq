@@ -3086,6 +3086,9 @@ pub struct SlotPLockData {
     /// Number of non-NaN cells. Lets snapshot capture/restore and per-step
     /// plock masks take O(1) fast paths for the common plock-free slot.
     plock_count: AtomicU32,
+    /// Number of non-NaN cells per step. Lets per-step queries and snapshot
+    /// capture/restore skip the param scan for plock-free steps.
+    step_counts: Vec<AtomicU32>,
 }
 
 impl SlotPLockData {
@@ -3101,6 +3104,7 @@ impl SlotPLockData {
             id_node_param_indices,
             max_params,
             plock_count: AtomicU32::new(0),
+            step_counts: (0..MAX_STEPS).map(|_| AtomicU32::new(0)).collect(),
         }
     }
 
@@ -3112,15 +3116,29 @@ impl SlotPLockData {
         self.plock_count.load(Ordering::Relaxed) > 0
     }
 
-    /// Adjust plock_count for a cell transitioning between old and new bits.
-    fn note_cell_transition(&self, old_bits: u32, new_bits: u32) {
+    /// Adjust plock_count and the step's count for a cell transitioning
+    /// between old and new bits.
+    fn note_cell_transition(&self, step: usize, old_bits: u32, new_bits: u32) {
         let old_set = !f32::from_bits(old_bits).is_nan();
         let new_set = !f32::from_bits(new_bits).is_nan();
         if !old_set && new_set {
             self.plock_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(count) = self.step_counts.get(step) {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
         } else if old_set && !new_set {
             self.plock_count.fetch_sub(1, Ordering::Relaxed);
+            if let Some(count) = self.step_counts.get(step) {
+                count.fetch_sub(1, Ordering::Relaxed);
+            }
         }
+    }
+
+    fn step_count(&self, step: usize) -> u32 {
+        self.step_counts
+            .get(step)
+            .map(|count| count.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     /// Clear every plock value and param id.
@@ -3134,6 +3152,9 @@ impl SlotPLockData {
             self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
         self.plock_count.store(0, Ordering::Relaxed);
+        for count in &self.step_counts {
+            count.store(0, Ordering::Relaxed);
+        }
     }
 
     pub fn get(&self, step: usize, param_idx: usize) -> Option<f32> {
@@ -3154,7 +3175,7 @@ impl SlotPLockData {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
             let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
-            self.note_cell_transition(old_bits, val.to_bits());
+            self.note_cell_transition(step, old_bits, val.to_bits());
             self.id_logical_ids[idx].store(0, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
@@ -3164,7 +3185,7 @@ impl SlotPLockData {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
             let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
-            self.note_cell_transition(old_bits, val.to_bits());
+            self.note_cell_transition(step, old_bits, val.to_bits());
             self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
         }
@@ -3188,11 +3209,14 @@ impl SlotPLockData {
     }
 
     pub fn clear_step(&self, step: usize) {
+        if self.step_count(step) == 0 {
+            return;
+        }
         for p in 0..self.max_params {
             let idx = self.index(step, p);
             if idx < self.data.len() {
                 let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
-                self.note_cell_transition(old_bits, NAN_BITS);
+                self.note_cell_transition(step, old_bits, NAN_BITS);
                 self.id_logical_ids[idx].store(0, Ordering::Relaxed);
                 self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
             }
@@ -3203,7 +3227,7 @@ impl SlotPLockData {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
             let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
-            self.note_cell_transition(old_bits, NAN_BITS);
+            self.note_cell_transition(step, old_bits, NAN_BITS);
             self.id_logical_ids[idx].store(0, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
@@ -3225,6 +3249,13 @@ impl SlotPLockData {
         let mut plocks = Vec::with_capacity(MAX_STEPS);
         let mut plock_param_ids = Vec::with_capacity(MAX_STEPS);
         for step in 0..MAX_STEPS {
+            if self.step_count(step) == 0 {
+                // Empty rows denote "all None" for this step (consumers use
+                // guarded .get() access) and skip the per-param atomic scan.
+                plocks.push(Vec::new());
+                plock_param_ids.push(Vec::new());
+                continue;
+            }
             let base = step * self.max_params;
             let mut row = vec![None; num_params];
             let mut id_row = vec![None; num_params];
@@ -3266,18 +3297,19 @@ impl SlotPLockData {
             self.clear_all();
             return;
         }
-        // Cheap pre-scan over the snapshot (plain memory, no atomics): when the
-        // snapshot carries no values and the slot has none either, the cell
-        // writes below would all be no-ops.
-        if !self.has_any_plock()
-            && !plocks
-                .iter()
-                .any(|row| row.iter().any(|value| value.is_some()))
-        {
-            return;
-        }
         let np = num_params.min(self.max_params);
         for (step, row) in plocks.iter().enumerate().take(MAX_STEPS) {
+            if row.is_empty() {
+                // Empty row means "all None" at this step (see capture_rows):
+                // clear it, which is a no-op when the step holds nothing.
+                self.clear_step(step);
+                continue;
+            }
+            // Skip steps where the snapshot row carries no values and the slot
+            // holds none either: every cell write below would be a no-op.
+            if self.step_count(step) == 0 && !row.iter().any(|value| value.is_some()) {
+                continue;
+            }
             let base = step * self.max_params;
             let id_row = plock_param_ids.get(step);
             for p in 0..np.min(row.len()) {
@@ -3286,7 +3318,7 @@ impl SlotPLockData {
                     Some(val) => {
                         let param_id = id_row.and_then(|ids| ids.get(p)).copied().flatten();
                         let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
-                        self.note_cell_transition(old_bits, val.to_bits());
+                        self.note_cell_transition(step, old_bits, val.to_bits());
                         match param_id {
                             Some(param_id) => {
                                 self.id_logical_ids[idx]
@@ -3302,7 +3334,7 @@ impl SlotPLockData {
                     }
                     None => {
                         let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
-                        self.note_cell_transition(old_bits, NAN_BITS);
+                        self.note_cell_transition(step, old_bits, NAN_BITS);
                         self.id_logical_ids[idx].store(0, Ordering::Relaxed);
                         self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
                     }
@@ -3322,35 +3354,17 @@ impl SlotPLockData {
             return;
         }
         for step in 0..MAX_STEPS {
-            let word = step / 64;
-            let bit = 1u64 << (step % 64);
-            if mask[word] & bit != 0 {
-                continue;
-            }
-            let base = step * self.max_params;
-            for p in 0..np {
-                if !f32::from_bits(self.data[base + p].load(Ordering::Relaxed)).is_nan() {
-                    mask[word] |= bit;
-                    break;
-                }
+            if self.step_count(step) > 0 {
+                mask[step / 64] |= 1u64 << (step % 64);
             }
         }
     }
 
     pub fn step_has_any_plock(&self, step: usize, num_params: usize) -> bool {
-        if !self.has_any_plock() {
+        if num_params.min(self.max_params) == 0 {
             return false;
         }
-        for p in 0..num_params.min(self.max_params) {
-            let idx = self.index(step, p);
-            if idx < self.data.len() {
-                let bits = self.data[idx].load(Ordering::Relaxed);
-                if !f32::from_bits(bits).is_nan() {
-                    return true;
-                }
-            }
-        }
-        false
+        self.step_count(step) > 0
     }
 }
 

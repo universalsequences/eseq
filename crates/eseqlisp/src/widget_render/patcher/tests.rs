@@ -10325,6 +10325,125 @@ fn effect_writeback_created_modulatable_param_can_feed_existing_output() {
 }
 
 #[test]
+fn effect_writeback_created_modulated_delay_emits_param_before_mod_use() {
+    let source = r#"
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mix-amt (param mix @min 0 @max 1 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let input_l = patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "input_l")
+        .unwrap();
+    let left_out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out && node.id == "Left")
+        .unwrap();
+    let original_left_signal = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == left_out.id && connection.to_input == 0)
+        .unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(original_left_signal),
+        ));
+
+    let delaytime = allocate_created_text_node(
+        &mut state,
+        "root",
+        "param delaytime @min 50 @max 5000 @default 50 @mod true @mod-mode additive",
+    );
+    let delaytime_mod = allocate_created_text_node(&mut state, "root", "mod");
+    let delay = allocate_created_text_node(&mut state, "root", "delay");
+    connect_output_to_input(&mut state, "root", &input_l.id, &delay, 0);
+    connect_output_to_input(&mut state, "root", &delaytime, &delaytime_mod, 0);
+    connect_output_to_input(&mut state, "root", &delaytime_mod, &delay, 1);
+    connect_output_to_input(&mut state, "root", &delay, &left_out.id, 0);
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+    let param_index = emitted.find("(param delaytime").unwrap();
+    let mod_index = emitted.find("(def modulated").unwrap();
+    assert!(
+        param_index < mod_index,
+        "modulated delaytime must be emitted after its parameter definition:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
+fn effect_writeback_reconnecting_modulated_delay_preserves_param_before_mod_use() {
+    let source = r#"
+        (defmacro gain2 (x) (* x 0.45))
+        (defmacro simp2 (input) (def phasor1 (phasor input)) (def mul1 (* phasor1 twopi)) (def cos1 (cos mul1)) cos1)
+        (def input_l (in 1 @name Left))
+        (def input_r (in 2 @name Right))
+        (def mod1 (in 3 @name mod1 @modulator 1))
+        (def mod2 (in 4 @name mod2 @modulator 2))
+        (def mod3 (in 5 @name mod3 @modulator 3))
+        (def mod4 (in 6 @name mod4 @modulator 4))
+        (param delaytime @min 50.0 @max 5000.0 @default 50.0 @mod true @mod-mode additive)
+        (def modulated1 (mod delaytime))
+        (def delay1 (delay __patcher_missing_input__ modulated1))
+        (def mix-amt (param mix @min 0.0 @max 1.0 @default 0.5))
+        (def processed_l input_l)
+        (def processed_r input_r)
+        (out (mix input_l processed_l mix-amt) 1 @name Left)
+        (out (mix input_r processed_r mix-amt) 2 @name Right)
+    "#;
+    let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+    let mut state = PatcherInteractionState::default();
+    connect_output_to_input(&mut state, "root", "input_l", "delay1", 0);
+    let processed_l_to_left_mix = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == "mix#0" && connection.to_input == 1)
+        .unwrap();
+    set_connection_segment_edit(
+        &mut state,
+        "root",
+        processed_l_to_left_mix,
+        processed_l_to_left_mix.segment,
+    );
+    state
+        .edit_state
+        .connections
+        .get_mut(&connection_edit_key(
+            "root",
+            &source_connection_id(processed_l_to_left_mix),
+        ))
+        .unwrap()
+        .from = OutputPortRef {
+        node_id: "delay1".to_string(),
+        output_index: 0,
+    };
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Effect, &state).unwrap();
+    let input_l_index = emitted.find("(def input_l").unwrap();
+    let param_index = emitted.find("(param delaytime").unwrap();
+    let mod_index = emitted.find("(def modulated1").unwrap();
+    assert!(
+        input_l_index < param_index && param_index < mod_index,
+        "source-backed input, parameter, and mod use must keep dependency order:\n{emitted}"
+    );
+    compile_patch_source_with_dgenlisp(&emitted)
+        .unwrap_or_else(|error| panic!("emitted source should compile:\n{error}\n{emitted}"));
+}
+
+#[test]
 fn effect_writeback_created_modulatable_param_wrapping_inline_source_output_compiles() {
     let source = r#"
         (def input_l (in 1 @name Left))

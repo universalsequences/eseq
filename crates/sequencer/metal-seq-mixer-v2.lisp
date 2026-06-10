@@ -614,13 +614,14 @@
           (dict :track track :bus (get send :bus-idx) :amount v))))))
 
 (def mixer-v2-track-strip (i)
-  (let ((muted (mixer-v2-muted? i))
-      (sends (nth SEQ.track-bus-sends i)))
+  (let ((sends (nth SEQ.track-bus-sends i)))
     ;; Grouped strips drop the output dropdown, so they are shorter to avoid
     ;; dead space at the bottom inside the group container.
+    ;; Mute/name/output reads live in bindings or nested subtrees so those
+    ;; changes don't rerun the whole strip.
     (box :width 12.9 :height (if (mixer-v2-track-grouped? i) 12.15 13.15)
       :selected (mixer-v2-track-selected-binding i)
-      :muted muted
+      :muted (bind-seq-nth "track-muted-effective" i)
       :background-color :mixer-strip-bg
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
@@ -641,14 +642,15 @@
         ;; the pattern grid aligned with loose strips.
         (if (mixer-v2-track-grouped? i)
           (box :width :fill :height 0.2 :bg :transparent)
-          (dropdown :value (nth SEQ.track-outputs i)
-            :key (str "mixer-v2-track-output-" i)
-            :options SEQ.track-output-options
-            :on-change (lambda (v)
-              (do
-                (mixer-v2-clear-delete-target)
-                (host-command "set-track-output" (dict :track i :label v))))
-            :width :fill :height 1.2 :font-size 10))
+          (subtree :key (str "mixer-v2-track-output-sub-" i)
+            (dropdown :value (nth SEQ.track-outputs i)
+              :key (str "mixer-v2-track-output-" i)
+              :options SEQ.track-output-options
+              :on-change (lambda (v)
+                (do
+                  (mixer-v2-clear-delete-target)
+                  (host-command "set-track-output" (dict :track i :label v))))
+              :width :fill :height 1.2 :font-size 10)))
         (mixer-v2-track-pattern-grid i)
         
         	       
@@ -676,47 +678,60 @@
           (mixer-v2-track-meter-control i))
         
         (box :width :fill :height 0.25)
-        (h-stack :gap 0.35
-          (button (str (+ i 1))
-            :width 2.1 :height 1.0 :padding 0 :font-size 10
-            :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
-            :color (if muted :dim :black)
-            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-mute i))))
-          (button "S"
-            :width 2.1 :height 1.0 :padding 0 :font-size 10
-            :background-color (mixer-v2-button-bg (nth SEQ.track-solos i))
-            :color (if (nth SEQ.track-solos i) :black :dim)
-            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-solo i))))
-          (button "R"
-            :width 2.1 :height 1.0 :padding 0 :font-size 10
-            :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
-            :color (if (nth SEQ.record-armed i) :black :dim)
-            :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))
+        (subtree :key (str "mixer-v2-strip-buttons-" i)
+          (mixer-v2-strip-buttons i))
         (mixer-v2-mod-port-row i)
-        (box
-          :key (str "mixer-v2-track-label-" i)
-          :width :fill :height 1.0
-          :corner-radius 30
-          :padding 0
-          :drag-type "track-badge"
-          :drag-payload (dict :track i)
-          :selected (mixer-v2-track-delete-target-binding i)
-          :background-color (rgba
-            (mixer-v2-track-color-r i muted)
-            (mixer-v2-track-color-g i muted)
-            (mixer-v2-track-color-b i muted)
-            1.0)
-          :selected-background-color :fx-panel-header-selected-bg
-          :on-click (lambda (event) (mixer-v2-track-label-click event i))
-          :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
-          (label (substring (nth SEQ.track-names i) 0 10)
-            :width 9.8
-            :font-size 10
-            :h-align :center
-            :color (if muted :dim :black)
-            :active (mixer-v2-track-delete-target-binding i)
-            :active-color :white
-            :bg :transparent))))))
+        (subtree :key (str "mixer-v2-strip-label-" i)
+          (mixer-v2-strip-label i))))))
+
+;; Mute/solo/arm buttons in their own subtree: mute/solo/arm changes rerun
+;; just this row instead of the whole strip.
+(def mixer-v2-strip-buttons (i)
+  (let ((muted (mixer-v2-muted? i)))
+    (h-stack :gap 0.35
+      (button (str (+ i 1))
+        :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
+        :color (if muted :dim :black)
+        :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-mute i))))
+      (button "S"
+        :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :background-color (mixer-v2-button-bg (nth SEQ.track-solos i))
+        :color (if (nth SEQ.track-solos i) :black :dim)
+        :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-track-solo i))))
+      (button "R"
+        :width 2.1 :height 1.0 :padding 0 :font-size 10
+        :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
+        :color (if (nth SEQ.record-armed i) :black :dim)
+        :on-click (lambda (event) (do (mixer-v2-activate-track-control i) (seq-toggle-record-arm i)))))))
+
+;; Name label in its own subtree: rename/mute changes rerun just the label.
+(def mixer-v2-strip-label (i)
+  (let ((muted (mixer-v2-muted? i)))
+    (box
+      :key (str "mixer-v2-track-label-" i)
+      :width :fill :height 1.0
+      :corner-radius 30
+      :padding 0
+      :drag-type "track-badge"
+      :drag-payload (dict :track i)
+      :selected (mixer-v2-track-delete-target-binding i)
+      :background-color (rgba
+        (mixer-v2-track-color-r i muted)
+        (mixer-v2-track-color-g i muted)
+        (mixer-v2-track-color-b i muted)
+        1.0)
+      :selected-background-color :fx-panel-header-selected-bg
+      :on-click (lambda (event) (mixer-v2-track-label-click event i))
+      :on-double-click (lambda (event) (seq-toggle-track-collapsed-ui i))
+      (label (substring (nth SEQ.track-names i) 0 10)
+        :width 9.8
+        :font-size 10
+        :h-align :center
+        :color (if muted :dim :black)
+        :active (mixer-v2-track-delete-target-binding i)
+        :active-color :white
+        :bg :transparent))))
 
 (def mixer-v2-track-collapsed-label (i)
   (str (+ i 1) " " (substring (nth SEQ.track-names i) 0 3)))

@@ -2490,6 +2490,65 @@ pub(crate) fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
+fn track_effectively_muted(state: &Arc<SequencerState>, track: usize, has_solo: bool) -> bool {
+    let params = &state.pattern.track_params[track];
+    params.is_muted() || (has_solo && !params.is_solo())
+}
+
+fn any_track_solo(state: &Arc<SequencerState>) -> bool {
+    (0..state.active_track_count()).any(|t| state.pattern.track_params[t].is_solo())
+}
+
+/// Per-track "effectively muted" (explicit mute OR muted by another track's
+/// solo) as 0/1 numbers, for widget bindings via `bind-seq-nth`. Lets row
+/// `:muted` props update without rerunning the row's subtree.
+pub(crate) fn build_track_muted_effective(state: &Arc<SequencerState>) -> Value {
+    let count = state.active_track_count();
+    let has_solo = any_track_solo(state);
+    let items: Vec<Rc<RefCell<Value>>> = (0..count)
+        .map(|t| {
+            let muted = track_effectively_muted(state, t, has_solo);
+            Rc::new(RefCell::new(Value::Number(if muted { 1.0 } else { 0.0 })))
+        })
+        .collect();
+    Value::List(items)
+}
+
+/// Per-track step-cell color channel with the mute dim baked in, matching the
+/// Lisp seqv-track-color-r/g/b formulas. Published as flat per-channel lists
+/// so step-cell shader props can use `bind-seq-nth` instead of reading
+/// SEQ.track-mutes/track-colors in the row subtree.
+pub(crate) fn build_track_color_channel_effective(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    channel: usize,
+) -> Value {
+    let count = state.active_track_count();
+    let has_solo = any_track_solo(state);
+    let items: Vec<Rc<RefCell<Value>>> = (0..count)
+        .map(|track| {
+            let color = app
+                .track_colors
+                .get(track)
+                .copied()
+                .unwrap_or_else(|| sequencer::track_color::TrackColor::palette_color(track))
+                .clamped();
+            let (raw, dim_base) = match channel {
+                0 => (color.r as f64, 0.10),
+                1 => (color.g as f64, 0.10),
+                _ => (color.b as f64, 0.11),
+            };
+            let value = if track_effectively_muted(state, track, has_solo) {
+                raw * 0.34 + dim_base * 0.66
+            } else {
+                raw
+            };
+            Rc::new(RefCell::new(Value::Number(value)))
+        })
+        .collect();
+    Value::List(items)
+}
+
 pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Arc<SequencerState>) {
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
     rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
@@ -2531,6 +2590,26 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
         "SEQ",
         "track-muted-by-solo",
         build_track_muted_by_solo(state),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-muted-effective",
+        build_track_muted_effective(state),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-color-r-effective",
+        build_track_color_channel_effective(app, state, 0),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-color-g-effective",
+        build_track_color_channel_effective(app, state, 1),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-color-b-effective",
+        build_track_color_channel_effective(app, state, 2),
     );
 }
 
@@ -2603,6 +2682,10 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-by-solo", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-muted-effective", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-color-r-effective", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-color-g-effective", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-color-b-effective", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-names", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-volumes", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-mutes", Value::List(vec![]));

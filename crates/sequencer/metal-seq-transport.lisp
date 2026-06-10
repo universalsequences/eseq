@@ -433,7 +433,10 @@
               :color :gray
               :bg :transparent)))))
     
-    (box :background "transport-btn-bg" :padding 0.2 :height 1.4
+    ;; Pattern pills in their own subtree: current-pattern/num-patterns changes
+    ;; (every scene switch) rerun just this bar, not the whole transport.
+    (subtree :key "transport-pattern-pills"
+      (box :background "transport-btn-bg" :padding 0.2 :height 1.4
       (h-stack :gap 0.1 :align :center
         (each (range 0 SEQ.num-patterns) |i|
           (box :width 2.5 :height 1.1 
@@ -464,6 +467,6 @@
           (v-stack :align :center
             (label "-"
               :font-size 12
-              
+
               :color (if (> SEQ.num-patterns 1) :white :dark-gray)
-              :bg :transparent)))))))
+              :bg :transparent))))))))

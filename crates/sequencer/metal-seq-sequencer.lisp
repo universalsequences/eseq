@@ -423,7 +423,13 @@
 
 ;; Compact mixer track row — same controls as metal-seq-mixer.lisp but no
 ;; volume slider/meter or delete button (sequencer view stays focused on steps).
+;; The header lives in its own subtree so name/mute/solo/arm changes rerun
+;; only this header instead of the whole track row (incl. its step grid).
 (def seqv-track-header (i)
+  (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
+    (seqv-track-header-body i)))
+
+(def seqv-track-header-body (i)
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
       :padding 0.4
@@ -529,9 +535,11 @@
       (odd1 (mod (floor (/ step 4)) 2))
       (odd2 (mod (floor (/ step 32)) 2))
       (odd (if (= odd2 1) (if (= odd1 1) 0 1) odd1))
-      (track-r (seqv-track-color-r track (seqv-muted? track)))
-      (track-g (seqv-track-color-g track (seqv-muted? track)))
-      (track-b (seqv-track-color-b track (seqv-muted? track))))
+      ;; Bindings (mute dim baked in Rust-side) so mute/solo/color changes
+      ;; recolor cells without rerunning the whole track-row subtree.
+      (track-r (bind-seq-nth "track-color-r-effective" track))
+      (track-g (bind-seq-nth "track-color-g-effective" track))
+      (track-b (bind-seq-nth "track-color-b-effective" track)))
     (box
       :width 3.05 :height 1.45
       :key (str "seqv-step-cell-" track "-" step)
@@ -1106,32 +1114,33 @@
   (v-stack :padding 0.00 :gap 0.0
     (each (seq-visible-track-indices) |i|
       (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
-        (let ((muted (seqv-muted? i)))
-          (box :width :fill
-            :selected (seqv-track-selected-binding i)
-            :muted muted
-            :background-color :buffer-bg
-            :selected-background-color :mixer-strip-selected-bg
-            :muted-background-color :mixer-strip-muted-bg
-            :border-width 2
-            :corner-radius 10
-            :border-color :mixer-strip-border
-            :selected-border-color :mixer-strip-selected-border
-            :muted-border-color :mixer-strip-border
-            :padding 0.45
-            :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
-            (if (seqv-track-expanded? (nth SEQ.track-ids i))
-              (v-stack :width :fill :gap 0.2
-                (h-stack :width :fill :gap 0.6 :align :start
-                  (seqv-track-header i)
-                  (seqv-expanded-track-quick-controls i (nth SEQ.track-ids i))
-                  (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                  (seqv-track-actions i))
-                (seqv-expanded-track-editor i (nth SEQ.track-ids i)))
+        ;; :muted is a binding (not a value read) so mute/solo changes update
+        ;; the row chrome without rerunning this subtree.
+        (box :width :fill
+          :selected (seqv-track-selected-binding i)
+          :muted (bind-seq-nth "track-muted-effective" i)
+          :background-color :buffer-bg
+          :selected-background-color :mixer-strip-selected-bg
+          :muted-background-color :mixer-strip-muted-bg
+          :border-width 2
+          :corner-radius 10
+          :border-color :mixer-strip-border
+          :selected-border-color :mixer-strip-selected-border
+          :muted-border-color :mixer-strip-border
+          :padding 0.45
+          :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
+          (if (seqv-track-expanded? (nth SEQ.track-ids i))
+            (v-stack :width :fill :gap 0.2
               (h-stack :width :fill :gap 0.6 :align :start
                 (seqv-track-header i)
-                (seqv-track-grid i)
+                (seqv-expanded-track-quick-controls i (nth SEQ.track-ids i))
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-                (seqv-track-actions i)))))))))
+                (seqv-track-actions i))
+              (seqv-expanded-track-editor i (nth SEQ.track-ids i)))
+            (h-stack :width :fill :gap 0.6 :align :start
+              (seqv-track-header i)
+              (seqv-track-grid i)
+              (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+              (seqv-track-actions i))))))))
 
 (set-buffer-mode-for "*sequencer*" "seq-grid-mode")
