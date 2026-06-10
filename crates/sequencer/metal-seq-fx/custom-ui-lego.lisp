@@ -13,6 +13,7 @@
   (+ (ui-lego-medium-h) (ui-lego-small-h) (ui-lego-small-h)
      (ui-lego-gap) (ui-lego-gap)))
 (def ui-lego-col-w () 24.0)
+(def ui-lego-wide-col-w () 30.0)
 (def ui-lego-strip-w () 7.2)
 
 (def ui-lego-title (title accent)
@@ -45,11 +46,11 @@
        :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
        :corner-radius 7
        :border-width 1
-       :padding 0.20
+       :padding 0.24
        :on-click (ui-section-select-callback section)
-    (v-stack :width :fill :height :fill :gap 0.12
+    (v-stack :width :fill :height :fill :gap 0.18
       (ui-lego-title title accent)
-      (box :width :fill :flex 1 :padding 0.06 body))))
+      (box :width :fill :flex 1 :padding 0.12 body))))
 
 (def ui-lego-panel-s (height section surface body)
   (box :width (ui-lego-col-w) :height height
@@ -96,6 +97,20 @@
         (box :width 0.55 :height 0.1)
         body))))
 
+(def ui-lego-plain-surface-width-s (width height section surface body)
+  (box :width width :height height
+       :background-color surface
+       :corner-radius 7
+       :border-width 1
+       :padding 0.16
+       :debug-name "ui-lego-plain-surface"
+       :v-align :center
+       :on-click (ui-section-select-callback section)
+    (box :width :fill :padding 0.12
+      (h-stack :width :fill :gap 0 :align :center
+        (box :width 0.55 :height 0.1)
+        body))))
+
 (def ui-lego-text-row-3 (a b c)
   (box :width :fill :height 1.28 :v-align :start :debug-name "ui-lego-text-row"
     (h-stack :gap 0.34 :align :start a b c)))
@@ -119,6 +134,12 @@
 (def ui-control-block-medium-s (title accent section body)
   (ui-lego-surface-s title (ui-lego-medium-h) accent section :instrument-group-bg body))
 
+(def ui-control-block-small-wide-s (title accent section body)
+  (ui-lego-surface-width-s title (ui-lego-wide-col-w) (ui-lego-small-h) accent section :instrument-group-bg body))
+
+(def ui-control-block-medium-wide-s (title accent section body)
+  (ui-lego-surface-width-s title (ui-lego-wide-col-w) (ui-lego-medium-h) accent section :instrument-group-bg body))
+
 (def ui-control-block-dense-s (title accent section body)
   (ui-lego-surface-s title (ui-lego-dense-h) accent section :instrument-group-bg body))
 
@@ -139,6 +160,9 @@
 
 (def ui-readout-block-small-s (title accent section body)
   (ui-lego-plain-surface-s (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-readout-block-small-wide-s (title accent section body)
+  (ui-lego-plain-surface-width-s (ui-lego-wide-col-w) (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
 
 (def ui-readout-block-dense-s (title accent section body)
   (ui-lego-surface-s title (ui-lego-dense-h) accent section (rgba 0.055 0.058 0.064 1.0) body))
@@ -166,6 +190,15 @@
 
 (def ui-lego-column-full (a)
   (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap) a))
+
+(def ui-lego-column-wide (a b c)
+  (v-stack :width (ui-lego-wide-col-w) :gap (ui-lego-gap) a b c))
+
+(def ui-lego-column-wide-2 (a b)
+  (v-stack :width (ui-lego-wide-col-w) :gap (ui-lego-gap) a b))
+
+(def ui-lego-column-wide-full (a)
+  (v-stack :width (ui-lego-wide-col-w) :gap (ui-lego-gap) a))
 
 (def ui-lego-strip-s (title accent section body)
   (ui-lego-surface-width-s title (ui-lego-strip-w) (ui-lego-full-h) accent section :instrument-group-bg body))
@@ -200,24 +233,24 @@
 (def ui-lego-knob (name title width accent decimals)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
-            :base-value (instrument-param-base-value-prop p)
-            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
-            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
-            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
-            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
-            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
-            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
-            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
-            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
-            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
-            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
-            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
-            :selected-mod-slot (instrument-selected-mod-slot-prop p)
+            :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
+            :base-value (custom-ui-param-base-value-prop p)
+            :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
+            :mod-range-0-slot (custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (custom-ui-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (custom-ui-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (custom-ui-param-knob-mod-slot-prop p 2) :mod-range-2-depth (custom-ui-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (custom-ui-param-knob-mod-slot-prop p 3) :mod-range-3-depth (custom-ui-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (custom-ui-param-knob-mod-slot-prop p 4) :mod-range-4-depth (custom-ui-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (custom-ui-param-knob-mod-slot-prop p 5) :mod-range-5-depth (custom-ui-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (custom-ui-param-knob-mod-slot-prop p 6) :mod-range-6-depth (custom-ui-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (custom-ui-param-knob-mod-slot-prop p 7) :mod-range-7-depth (custom-ui-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (custom-ui-param-knob-mod-slot-prop p 8) :mod-range-8-depth (custom-ui-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
             :width width :height 2.62
@@ -228,24 +261,24 @@
 (def ui-lego-knob-s (section name title width accent decimals)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
-            :base-value (instrument-param-base-value-prop p)
-            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
-            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
-            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
-            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
-            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
-            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
-            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
-            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
-            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
-            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
-            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
-            :selected-mod-slot (instrument-selected-mod-slot-prop p)
+            :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
+            :base-value (custom-ui-param-base-value-prop p)
+            :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
+            :mod-range-0-slot (custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (custom-ui-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (custom-ui-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (custom-ui-param-knob-mod-slot-prop p 2) :mod-range-2-depth (custom-ui-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (custom-ui-param-knob-mod-slot-prop p 3) :mod-range-3-depth (custom-ui-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (custom-ui-param-knob-mod-slot-prop p 4) :mod-range-4-depth (custom-ui-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (custom-ui-param-knob-mod-slot-prop p 5) :mod-range-5-depth (custom-ui-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (custom-ui-param-knob-mod-slot-prop p 6) :mod-range-6-depth (custom-ui-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (custom-ui-param-knob-mod-slot-prop p 7) :mod-range-7-depth (custom-ui-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (custom-ui-param-knob-mod-slot-prop p 8) :mod-range-8-depth (custom-ui-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
             :width width :height 2.62
@@ -256,12 +289,12 @@
 (def ui-lego-num (name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
               :text-color accent :edit-color :yellow
@@ -273,12 +306,12 @@
 (def ui-lego-num-s (section name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
               :text-color accent :edit-color :yellow
@@ -290,12 +323,12 @@
 (def ui-lego-micro-num-s (section name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.18 :gap 0.16 :align :start
             (label title :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 9.0
               :text-color accent :edit-color :yellow
@@ -308,11 +341,11 @@
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (dropdown :value-index (fx-param-value p)
+            (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
               :width width :height 0.78 :font-size 8.0
@@ -327,11 +360,11 @@
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-            (dropdown :value-index (fx-param-value p)
+            (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
               :width width :height 0.78 :font-size 8.0
@@ -348,10 +381,10 @@
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-micro-option-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-micro-option-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-micro-option-" (custom-ui-scope-name) "-" name)
           (box :width width :height 1.18 :v-align :end
-            (dropdown :value-index (fx-param-value p)
+            (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
               :width width :height 0.92 :font-size 8.6
@@ -370,8 +403,8 @@
       (subtree :key (str "custom-ui-lego-micro-base-note-" (custom-ui-scope-name))
         (v-stack :width width :height 1.18 :gap 0.16 :align :start
           (label "note" :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
+          (number-picker :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 9.0
             :text-color accent :edit-color :yellow
@@ -383,12 +416,12 @@
 (def ui-lego-row (name title decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-lego-row-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-row-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-row-" (custom-ui-scope-name) "-" name)
           (h-stack :width :fill :height 0.86 :gap 0.35 :align :baseline
             (label title :font-size 8.8 :width 6.2 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.2
               :text-align :left
@@ -403,8 +436,8 @@
       (subtree :key (str "custom-ui-lego-base-note-" (custom-ui-scope-name))
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
           (label "note" :font-size 8.2 :width width :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
+          (number-picker :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 10.2
             :text-color accent :edit-color :yellow
@@ -416,12 +449,12 @@
 (def ui-adsr-number (name title decimals unit)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label title :font-size 10 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            (number-picker :value (custom-ui-param-value p)
+              :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
               :unit unit
               :noui true :font-size 10.5
               :text-align :center
@@ -434,12 +467,12 @@
   (if name
     (let ((p (custom-ui-current-param name)))
       (if p
-        (instrument-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
+        (custom-ui-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
           (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
             (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
               (label title :font-size 10 :color :dim :bg :transparent)
-              (number-picker :value (fx-param-value p)
-                :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+              (number-picker :value (custom-ui-param-value p)
+                :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
                 :unit unit
                 :noui true :font-size 10.5
                 :text-align :center

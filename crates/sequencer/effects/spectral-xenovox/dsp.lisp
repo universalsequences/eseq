@@ -96,8 +96,13 @@
 
 ; ALIEN 2 clock: one uniform random per hop; update only when it clears the
 ; stutter threshold -> geometric hold lengths (mean 1/(1-0.94*stutter) hops).
+; CPU-CRITICAL: `follow` feeds latch conds, and latch only inherits hop rate
+; from an explicitly hop-tagged cond node (a hop-hold output) -- derived math
+; like a bare gte carries no tag, which demotes both latches and everything
+; downstream of them (vowel chain, 2048-wide envelope latch, wet IFFTs) to
+; per-frame. So the gte itself must sit INSIDE a hop-hold.
 (def hop-rand (hop-hold (* 0.5 (+ 1 (noise))) 512))
-(def follow (gte hop-rand (* 0.94 stut-h)))
+(def follow (hop-hold (gte hop-rand (* 0.94 stut-h)) 512))
 
 ; --- Vowel morph position. talk wobbles it with two incommensurate sines
 ; (rate rises with talk), clamped to the table ends.

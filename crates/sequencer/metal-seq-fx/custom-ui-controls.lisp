@@ -2,24 +2,24 @@
 (def ui-param-knob (name title)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-knob-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-knob-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-knob-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-knob-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
-            :base-value (instrument-param-base-value-prop p)
-            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
-            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
-            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
-            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
-            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
-            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
-            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
-            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
-            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
-            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
-            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
-            :selected-mod-slot (instrument-selected-mod-slot-prop p)
+            :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 2
+            :base-value (custom-ui-param-base-value-prop p)
+            :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
+            :mod-range-0-slot (custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (custom-ui-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (custom-ui-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (custom-ui-param-knob-mod-slot-prop p 2) :mod-range-2-depth (custom-ui-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (custom-ui-param-knob-mod-slot-prop p 3) :mod-range-3-depth (custom-ui-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (custom-ui-param-knob-mod-slot-prop p 4) :mod-range-4-depth (custom-ui-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (custom-ui-param-knob-mod-slot-prop p 5) :mod-range-5-depth (custom-ui-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (custom-ui-param-knob-mod-slot-prop p 6) :mod-range-6-depth (custom-ui-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (custom-ui-param-knob-mod-slot-prop p 7) :mod-range-7-depth (custom-ui-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (custom-ui-param-knob-mod-slot-prop p 8) :mod-range-8-depth (custom-ui-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.5 :label-font-size 10
             :text-color :dim :label-color :dim
             :width 4.4 :height 2.4
@@ -33,24 +33,24 @@
 (def ui-param-knob-c (name title)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (instrument-param-mod-wrapper p (str "custom-ui-knob-c-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-knob-c-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
+      (custom-ui-param-mod-wrapper p (str "custom-ui-knob-c-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-knob-c-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
           (knob-number :label title
-            :value (fx-param-value p)
-            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
-            :base-value (instrument-param-base-value-prop p)
-            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
-            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
-            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
-            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
-            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
-            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
-            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
-            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
-            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
-            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
-            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
-            :selected-mod-slot (instrument-selected-mod-slot-prop p)
+            :value (custom-ui-param-value p)
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 2
+            :base-value (custom-ui-param-base-value-prop p)
+            :base-min (custom-ui-param-base-min-prop p) :base-max (custom-ui-param-base-max-prop p)
+            :mod-range-0-slot (custom-ui-param-knob-mod-slot-prop p 0) :mod-range-0-depth (custom-ui-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (custom-ui-param-knob-mod-slot-prop p 1) :mod-range-1-depth (custom-ui-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (custom-ui-param-knob-mod-slot-prop p 2) :mod-range-2-depth (custom-ui-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (custom-ui-param-knob-mod-slot-prop p 3) :mod-range-3-depth (custom-ui-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (custom-ui-param-knob-mod-slot-prop p 4) :mod-range-4-depth (custom-ui-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (custom-ui-param-knob-mod-slot-prop p 5) :mod-range-5-depth (custom-ui-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (custom-ui-param-knob-mod-slot-prop p 6) :mod-range-6-depth (custom-ui-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (custom-ui-param-knob-mod-slot-prop p 7) :mod-range-7-depth (custom-ui-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (custom-ui-param-knob-mod-slot-prop p 8) :mod-range-8-depth (custom-ui-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (custom-ui-param-knob-mod-slot-prop p 9) :mod-range-9-depth (custom-ui-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 8.5 :label-font-size 7.5
             :text-color :dim :label-color :dim
             :width 3.8 :height 1.8
@@ -63,8 +63,8 @@
     (if p
       (subtree :key (str "custom-ui-base-note-c-" (custom-ui-scope-name))
         (knob-number :label "note"
-          :value (fx-param-value p)
-          :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
+          :value (custom-ui-param-value p)
+          :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals 0
           :step 1
           :font-size 8.5 :label-font-size 7.5
           :text-color :dim :label-color :dim
@@ -94,7 +94,7 @@
 
 (def ui-param-bound-value (name fallback)
   (let ((p (custom-ui-current-param name)))
-    (if p (fx-param-value p) fallback)))
+    (if p (custom-ui-param-value p) fallback)))
 
 (def ui-set-param (name value)
   (let ((p (custom-ui-current-param name)))

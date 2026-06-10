@@ -21380,6 +21380,428 @@ mod tests {
     }
 
     #[test]
+    fn custom_audio_effect_common_controls_are_modulation_aware() {
+        fn layout_has_double_click(node: &eseqlisp::layout::LayoutNode) -> bool {
+            node.props.contains_key("on-double-click")
+                || node.children.iter().any(layout_has_double_click)
+        }
+
+        fn test_mod_target(depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-1.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]))
+        }
+
+        fn assert_set_effect_param(
+            command: &eseqlisp::host::HostCommand,
+            expected_idx: f64,
+            expected_value: f64,
+        ) {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-effect-param");
+                    let Value::Map(payload) = payload else {
+                        panic!("set-effect-param payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("slot-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(0.0))
+                    );
+                    assert_eq!(
+                        payload.get("param-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_idx))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                }
+                other => panic!("expected set-effect-param host command, got {other:?}"),
+            }
+        }
+
+        let mut haze = test_param_map("haze", 1, 0.3, 0.0, 1.0);
+        haze.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        haze.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                11.0, 1.0, 0.25,
+            )]))),
+        );
+        let mut freeze = test_param_map("freeze", 2, 0.0, 0.0, 1.0);
+        freeze.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        freeze.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                12.0, 1.0, 0.5,
+            )]))),
+        );
+        let effect = Value::Map(HashMap::from([
+            (
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String("custom-mod-effect".to_string()))),
+            ),
+            (
+                "slot-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            ),
+            (
+                "builtin".to_string(),
+                Rc::new(RefCell::new(Value::Bool(false))),
+            ),
+            (
+                "params".to_string(),
+                Rc::new(RefCell::new(test_list(vec![
+                    Value::Map(test_param_map("decay", 0, 0.55, 0.0, 1.0)),
+                    Value::Map(haze),
+                    Value::Map(freeze),
+                    Value::Map(test_param_map("mix", 3, 0.5, 0.0, 1.0)),
+                ]))),
+            ),
+            (
+                "modulators".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                ]))]))),
+            ),
+            (
+                "sources".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            30,
+                            1.0,
+                            vec!["off", "lfo", "env", "rand", "drift"],
+                        )))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![Value::Map(test_param_map(
+                            "rate", 31, 2.0, 0.1, 20.0,
+                        ))]))),
+                    ),
+                ]))]))),
+            ),
+        ]));
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![effect])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def custom-audio-fx-ui (fx)
+                  (do
+                    (set! audio-fx-ui-current-fx fx)
+                    (set! audio-fx-ui-current-name (get fx :name))
+                    (set! custom-ui-current-kind "audio-fx")
+                    (h-stack :width :fill :gap 0.35 :align :stretch
+                      (ui-lego-column-2
+                        (ui-control-block-medium-s "CUSTOM" (ui-accent-violet) 0
+                          (h-stack :gap 0.32 :align :start
+                            (ui-lego-knob-s 0 "decay" "dcy" 4.8 (ui-accent-violet) 2)
+                            (ui-lego-knob-s 0 "haze" "haze" 4.8 (ui-accent-green) 2)))
+                        (ui-control-block-small-s "OUT" (ui-accent-blue) 1
+                          (h-stack :gap 0.30 :align :start
+                            (ui-lego-num-s 1 "freeze" "frz" 5.2 2 false (ui-accent-cyan))
+                            (ui-lego-num-s 1 "mix" "mix" 5.2 2 false (ui-accent-orange))))))))
+
+                (do
+                  (set! effect-mods-open true)
+                  (set! effect-mods-chain "audio")
+                  (set! effect-mods-slot 0)
+                  (set! effect-mods-bus -1)
+                  (set! effect-selected-mod-slot 1))
+                "#,
+            )
+            .expect("install custom audio effect UI and open mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom audio effect mods status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor
+            .widget_layout()
+            .expect("custom audio effect mods layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            find_layout_node_by_debug_name(&layout, "effect-mods-inline-body").is_some(),
+            "effect mods body should render around custom audio effect UI"
+        );
+
+        let haze_wrapper = find_layout_node_by_stable_key(
+            &layout,
+            "custom-ui-lego-knob-mod-custom-mod-effect-slot-0-haze",
+        )
+        .expect("custom audio effect knob should render a modulation wrapper");
+        assert!(
+            layout_has_double_click(haze_wrapper),
+            "custom audio effect modulation wrapper should expose on-double-click"
+        );
+        let haze_knob = find_layout_node_by_widget_type(haze_wrapper, "knob-number")
+            .expect("custom audio effect haze control should render a knob-number");
+        assert!(
+            haze_knob.rect.width > 1.0 && haze_knob.rect.height > 1.0,
+            "custom audio effect modulatable knob should have a visible measured rect: {:?}",
+            haze_knob.rect
+        );
+        for prop in [
+            "base-value",
+            "mod-range-0-slot",
+            "mod-range-0-depth",
+            "selected-mod-slot",
+        ] {
+            assert!(
+                haze_knob.props.contains_key(prop),
+                "custom audio effect knob should expose modulation prop {prop}"
+            );
+        }
+
+        let callback = haze_knob
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("custom audio effect modulatable knob should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.6)])
+            .expect("edit custom audio effect modulation depth");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_effect_param(&commands[0], 11.0, 0.6);
+
+        let freeze_wrapper = find_layout_node_by_stable_key(
+            &layout,
+            "custom-ui-lego-num-mod-custom-mod-effect-slot-0-freeze",
+        )
+        .expect("custom audio effect number control should render a modulation wrapper");
+        assert!(
+            layout_has_double_click(freeze_wrapper),
+            "custom audio effect number wrapper should expose on-double-click"
+        );
+        let freeze_number = find_layout_node_by_widget_type(freeze_wrapper, "number-picker")
+            .expect("custom audio effect freeze control should render a number-picker");
+        let callback = freeze_number
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("custom audio effect modulatable number should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.8)])
+            .expect("edit custom audio effect number modulation depth");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_effect_param(&commands[0], 12.0, 0.8);
+    }
+
+    #[test]
+    fn custom_audio_effect_wide_lego_panel_fits_five_spectral_knobs() {
+        let effect = Value::Map(test_fx_map(
+            "spectral-wide-effect",
+            0,
+            vec![
+                Value::Map(test_param_map("decay", 0, 0.55, 0.0, 1.0)),
+                Value::Map(test_param_map("drift", 1, 0.2, -1.0, 1.0)),
+                Value::Map(test_param_map("bloom", 2, 0.25, 0.0, 1.0)),
+                Value::Map(test_param_map("haze", 3, 0.3, 0.0, 1.0)),
+                Value::Map(test_param_map("damp", 4, 0.35, 0.0, 1.0)),
+            ],
+        ));
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![effect])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def custom-audio-fx-ui (fx)
+                  (do
+                    (set! audio-fx-ui-current-fx fx)
+                    (set! audio-fx-ui-current-name (get fx :name))
+                    (set! custom-ui-current-kind "audio-fx")
+                    (h-stack :width :fill :gap 0.35 :align :stretch
+                      (ui-lego-column-wide-full
+                        (ui-control-block-medium-wide-s "SPECTRAL" (ui-accent-violet) 0
+                          (h-stack :debug-name "spectral-five-knob-row"
+                                   :gap 0.32 :align :start
+                            (ui-lego-knob-s 0 "decay" "dcy" 4.8 (ui-accent-violet) 2)
+                            (ui-lego-knob-s 0 "drift" "drft" 4.8 (ui-accent-cyan) 2)
+                            (ui-lego-knob-s 0 "bloom" "blm" 4.8 (ui-accent-blue) 2)
+                            (ui-lego-knob-s 0 "haze" "haze" 4.8 (ui-accent-green) 2)
+                            (ui-lego-knob-s 0 "damp" "dmp" 4.8 (ui-accent-orange) 2)))))))
+
+                (do
+                  (set! effect-mods-open true)
+                  (set! effect-mods-chain "audio")
+                  (set! effect-mods-slot 0)
+                  (set! effect-mods-bus -1)
+                  (set! effect-selected-mod-slot 1))
+                "#,
+            )
+            .expect("install custom spectral-style audio effect UI");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom spectral-style audio effect UI status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor
+            .widget_layout()
+            .expect("custom spectral-style audio effect layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+
+        let panel = find_layout_node_by_debug_name(&layout, "custom-audio-fx-wrapper")
+            .unwrap_or_else(|| panic!("custom spectral UI wrapper; layout={layout_summaries:#?}"));
+        assert!(
+            panel.rect.width >= 29.5 && panel.rect.width <= 30.5,
+            "wide spectral panel should reserve 30 columns for five knobs, got {:?}",
+            panel.rect
+        );
+        let damp = find_layout_node_by_stable_key(
+            &layout,
+            "custom-ui-lego-knob-spectral-wide-effect-slot-0-base-damp",
+        )
+        .unwrap_or_else(|| panic!("fifth spectral knob; layout={layout_summaries:#?}"));
+        assert!(
+            damp.rect.col + damp.rect.width <= panel.rect.col + panel.rect.width + 0.1,
+            "fifth spectral knob should stay inside the wide panel; panel={:?} damp={:?}",
+            panel.rect,
+            damp.rect
+        );
+    }
+
+    #[test]
     fn custom_audio_effect_mods_button_reopens_after_close() {
         fn test_mod_target(depth_idx: f64, source_slot: f64, depth: f64) -> Value {
             Value::Map(HashMap::from([
@@ -25015,6 +25437,8 @@ mod tests {
                 (def ui-control-block-full (title accent body) body)
                 (def ui-control-block-small-s (title accent section body) body)
                 (def ui-control-block-medium-s (title accent section body) body)
+                (def ui-control-block-small-wide-s (title accent section body) body)
+                (def ui-control-block-medium-wide-s (title accent section body) body)
                 (def ui-control-block-dense-s (title accent section body) body)
                 (def ui-control-panel-dense-s (section body) body)
                 (def ui-control-panel-small-s (section body) body)
@@ -25022,6 +25446,7 @@ mod tests {
                 (def ui-control-block-full-s (title accent section body) body)
                 (def ui-readout-block-small (title accent body) body)
                 (def ui-readout-block-small-s (title accent section body) body)
+                (def ui-readout-block-small-wide-s (title accent section body) body)
                 (def ui-readout-block-dense-s (title accent section body) body)
                 (def ui-readout-panel-small-s (section body) body)
                 (def ui-readout-panel-dense-s (section body) body)
@@ -25031,6 +25456,9 @@ mod tests {
                 (def ui-lego-column (a b c) (v-stack a b c))
                 (def ui-lego-column-2 (a b) (v-stack a b))
                 (def ui-lego-column-full (a) (v-stack a))
+                (def ui-lego-column-wide (a b c) (v-stack a b c))
+                (def ui-lego-column-wide-2 (a b) (v-stack a b))
+                (def ui-lego-column-wide-full (a) (v-stack a))
                 (def ui-lego-strip-s (title accent section body) body)
                 (def ui-lego-strip-half-s (title accent section body) body)
                 (def ui-lego-strip-panel-s (section body) body)
@@ -25176,13 +25604,19 @@ mod tests {
                 (def ui-accent-violet () :magenta)
                 (def ui-control-block-small-s (title accent section body) body)
                 (def ui-control-block-medium-s (title accent section body) body)
+                (def ui-control-block-small-wide-s (title accent section body) body)
+                (def ui-control-block-medium-wide-s (title accent section body) body)
                 (def ui-control-block-full-s (title accent section body) body)
                 (def ui-readout-block-small-s (title accent section body) body)
+                (def ui-readout-block-small-wide-s (title accent section body) body)
                 (def ui-readout-block-medium (title accent body) body)
                 (def ui-readout-block-full (title accent body) body)
                 (def ui-lego-column (a b c) (v-stack a b c))
                 (def ui-lego-column-2 (a b) (v-stack a b))
                 (def ui-lego-column-full (a) (v-stack a))
+                (def ui-lego-column-wide (a b c) (v-stack a b c))
+                (def ui-lego-column-wide-2 (a b) (v-stack a b))
+                (def ui-lego-column-wide-full (a) (v-stack a))
                 (def ui-lego-knob-s (section name title width accent decimals)
                   (audio-fx-ui-param-control name))
                 (def ui-lego-num-s (section name title width decimals unit accent)

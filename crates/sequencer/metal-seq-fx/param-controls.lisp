@@ -213,6 +213,44 @@
     (bind-seq (get target :depth-value-field))
     (get target :depth)))
 
+(def param-knob-mod-target (fx p idx)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (nth (instrument-param-mod-targets p) idx)
+    false))
+
+(def param-knob-mod-slot-prop (fx p idx)
+  (let ((target (param-knob-mod-target fx p idx)))
+    (if target (instrument-mod-target-source-slot target) false)))
+
+(def param-knob-mod-depth-prop (fx p idx)
+  (let ((target (param-knob-mod-target fx p idx)))
+    (if target (instrument-mod-target-depth target) false)))
+
+(def param-base-value-prop (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (instrument-param-base-value p)
+    false))
+
+(def param-base-min-prop (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (get p :min)
+    false))
+
+(def param-base-max-prop (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (get p :max)
+    false))
+
+(def param-selected-mod-slot-prop (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    (param-mod-selected-slot fx)
+    false))
+
+(def param-control-key-mode (fx p)
+  (if (and (param-mods-open? fx) (get p :modulatable))
+    "-mod-depth"
+    "-base"))
+
 (def instrument-param-base-value (p)
   (if (get p :value-field)
     (bind-seq (get p :value-field))
@@ -225,42 +263,28 @@
     '()))
 
 (def instrument-param-knob-mod-target (p idx)
-  (if (and instrument-mods-open (get p :modulatable))
-    (nth (instrument-param-mod-targets p) idx)
-    false))
+  (param-knob-mod-target false p idx))
 
 (def instrument-param-knob-mod-slot-prop (p idx)
-  (let ((target (instrument-param-knob-mod-target p idx)))
-    (if target (instrument-mod-target-source-slot target) false)))
+  (param-knob-mod-slot-prop false p idx))
 
 (def instrument-param-knob-mod-depth-prop (p idx)
-  (let ((target (instrument-param-knob-mod-target p idx)))
-    (if target (instrument-mod-target-depth target) false)))
+  (param-knob-mod-depth-prop false p idx))
 
 (def instrument-param-base-value-prop (p)
-  (if (and instrument-mods-open (get p :modulatable))
-    (instrument-param-base-value p)
-    false))
+  (param-base-value-prop false p))
 
 (def instrument-param-base-min-prop (p)
-  (if (and instrument-mods-open (get p :modulatable))
-    (get p :min)
-    false))
+  (param-base-min-prop false p))
 
 (def instrument-param-base-max-prop (p)
-  (if (and instrument-mods-open (get p :modulatable))
-    (get p :max)
-    false))
+  (param-base-max-prop false p))
 
 (def instrument-selected-mod-slot-prop (p)
-  (if (and instrument-mods-open (get p :modulatable))
-    (instrument-mod-selected-slot)
-    false))
+  (param-selected-mod-slot-prop false p))
 
 (def instrument-param-control-key-mode (p)
-  (if (and instrument-mods-open (get p :modulatable))
-    "-mod-depth"
-    "-base"))
+  (param-control-key-mode false p))
 
 (def instrument-param-selected-mod-target (p)
   (nth

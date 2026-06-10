@@ -1,5 +1,5 @@
 (def vox-main-block ()
-  (ui-control-block-medium-s "SPECTRAL VOX" (ui-accent-orange) 0
+  (ui-control-block-medium-wide-s "SPECTRAL VOX" (ui-accent-orange) 0
     (h-stack :gap 0.32 :align :start
       (ui-lego-knob-s 0 "vowel" "vwl" 4.8 (ui-accent-orange) 2)
       (ui-lego-knob-s 0 "talk" "tlk" 4.8 (ui-accent-cyan) 2)
@@ -8,7 +8,7 @@
       (ui-lego-knob-s 0 "resonance" "res" 4.8 (ui-accent-green) 2))))
 
 (def vox-out-block ()
-  (ui-control-block-small-s "THROAT/OUT" (ui-accent-violet) 1
+  (ui-control-block-small-wide-s "THROAT/OUT" (ui-accent-violet) 1
     (h-stack :gap 0.30 :align :start
       (ui-lego-num-s 1 "body" "bdy" 5.2 2 false (ui-accent-orange))
       (ui-lego-num-s 1 "breath" "brt" 5.2 2 false (ui-accent-cyan))
@@ -38,14 +38,14 @@
             :color :dim :bg :transparent))))))
 
 (def vox-route-block ()
-  (ui-readout-block-small-s "VOICE IN" (ui-accent-cyan) 0
+  (ui-readout-block-small-wide-s "VOICE IN" (ui-accent-cyan) 0
     (h-stack :gap 0.32 :align :center
       (vox-route-selector)
       (label "vocoder modulator" :font-size 9.0 :color (ui-accent-orange) :bg :transparent))))
 
 (defeffect-ui
   (h-stack :width :fill :gap 0.35 :align :stretch
-    (ui-lego-column
+    (ui-lego-column-wide
       (vox-main-block)
       (vox-out-block)
       (vox-route-block))))
