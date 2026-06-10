@@ -1130,8 +1130,17 @@ mod tests {
     fn builtin_dj_mixer_exposes_sp_style_params() {
         let desc = EffectDescriptor::builtin_dj_mixer();
         let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["enabled", "speed", "length", "loop"]);
-        assert_eq!(desc.input_channels, 2);
+        assert_eq!(
+            &names[..7],
+            &["enabled", "speed", "length", "loop", "sync", "div", "warp"]
+        );
+        assert_eq!(
+            desc.input_channels,
+            2 + crate::voice_modulator::NUM_OUTPUTS
+        );
+        assert_eq!(desc.instrument_modulators.len(), 4);
+        // 5 modulatable targets × 4 slots
+        assert_eq!(desc.instrument_modulation_targets.len(), 20);
         assert_eq!(desc.output_channels, 2);
         assert_eq!(desc.params[0].default, 1.0);
         assert_eq!(desc.params[1].min, -1.0);
@@ -2106,11 +2115,16 @@ impl EffectDescriptor {
     }
 
     pub fn builtin_dj_mixer() -> Self {
-        Self {
+        let mut desc = Self {
             name: "DJ Mixer".to_string(),
-            input_channels: 2,
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: Vec::new(),
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
             instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::dj_mixer::DJ_MIXER_PARAM_ENABLED as u32, 1.0),
@@ -2152,8 +2166,157 @@ impl EffectDescriptor {
                     host_control: None,
                     ui_metadata: None,
                 },
+                ParamDescriptor {
+                    name: "sync".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_SYNC as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "div".to_string(),
+                    min: 0.0,
+                    max: 5.0,
+                    default: 4.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "1/16".to_string(),
+                            "1/8".to_string(),
+                            "1/4".to_string(),
+                            "1/2".to_string(),
+                            "1 bar".to_string(),
+                            "2 bars".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_DIV as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "warp".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_WARP as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
             ],
-        }
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let mut append_depth_targets =
+            |target_name: &str,
+             depth_params: [u64; 4],
+             depth_min: f32,
+             depth_max: f32,
+             depth_unit: Option<&str>| {
+                let base_param_idx = desc
+                    .params
+                    .iter()
+                    .position(|param| param.name == target_name)
+                    .expect("dj mixer modulation target param should exist");
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {} slot {} amt", target_name, slot + 1),
+                        min: depth_min,
+                        max: depth_max,
+                        default: 0.0,
+                        kind: ParamKind::Continuous {
+                            unit: depth_unit.map(str::to_string),
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min,
+                            depth_max,
+                            depth_unit: depth_unit.map(str::to_string),
+                        });
+                }
+            };
+        append_depth_targets(
+            "enabled",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            "speed",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_SPEED_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_SPEED_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_SPEED_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_SPEED_DEPTH_4,
+            ],
+            -2.0,
+            2.0,
+            None,
+        );
+        append_depth_targets(
+            "length",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LENGTH_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LENGTH_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LENGTH_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LENGTH_DEPTH_4,
+            ],
+            -3.0,
+            3.0,
+            Some("oct"),
+        );
+        append_depth_targets(
+            "loop",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LOOP_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LOOP_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LOOP_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_LOOP_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            "warp",
+            [
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_WARP_DEPTH_1,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_WARP_DEPTH_2,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_WARP_DEPTH_3,
+                crate::dj_mixer::DJ_MIXER_PARAM_MOD_WARP_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        desc
     }
 
     /// Built-in reverb as an insert effect. The DSP node is mono-in/stereo-out,

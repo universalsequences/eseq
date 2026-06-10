@@ -1248,6 +1248,7 @@ impl App {
                         "Delay" => crate::delay::DELAY_PARAM_BPM,
                         "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
                         "Filter" => crate::filter::FILTER_PARAM_BPM,
+                        "DJ Mixer" => crate::dj_mixer::DJ_MIXER_PARAM_BPM,
                         _ => continue,
                     };
                     unsafe {
@@ -1285,6 +1286,7 @@ impl App {
                         "Delay" => crate::delay::DELAY_PARAM_BPM,
                         "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
                         "Filter" => crate::filter::FILTER_PARAM_BPM,
+                        "DJ Mixer" => crate::dj_mixer::DJ_MIXER_PARAM_BPM,
                         _ => continue,
                     };
                     unsafe {

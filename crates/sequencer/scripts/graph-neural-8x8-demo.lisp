@@ -193,7 +193,7 @@
 
 ;; ── UI ──
 
-(def g8-row-height 1.3)
+(def g8-row-height 1.0)
 (def g8-node-width 1.4)
 (def g8-control-width 7.0)
 
@@ -297,43 +297,41 @@
           )
         (h-stack
           (v-stack :gap 0.5
-            (h-stack :gap 0.5 :align :center
-              (label "per-node knobs" :width 14 :height 1.2 :font-size 9 :color :dim))
             (v-stack :gap 0.2
               (g8-header)
               (each (range 0 g8-node-count) |n| (g8-row n))))
           
           (v-stack :gap 0.35
-            (label "trig" :width 2 :height 2.5 :font-size 8 :color :dim)
+            (box :width 0 :height 0.8)
             (matrix
               :key "graph-8x8-trigger-matrix"
               :rows 8
               :cols 1
               :width 1
-              :height 12
+              :height 9.5
               :min 0
               :max 1
               :value (g8-viz-matrix viz :trigger-matrix (g8-zero-column-matrix))))            
           
           (v-stack :gap 0.35
-            (label "energy" :width 3 :height 2.5 :font-size 8 :color :dim)
+            (box :width 0 :height 0.8 :font-size 8 :color :dim)
             (matrix
               :key "graph-8x8-energy-matrix"
               :rows 8
               :cols 1
               :width 2
-              :height 12
+              :height 9.5
               :min 0
               :max 4
               :value (g8-viz-matrix viz :energy-matrix (g8-zero-column-matrix))))            
           (v-stack :gap 0.35
-            (label "weights (from row -> to col)" :width 18 :height 2.5 :font-size 8 :color :dim)
+            (box :width 0 :height 0.7 :font-size 8 :color :dim)
             (matrix
               :key "graph-8x8-weight-matrix"
               :rows 8
               :cols 8
               :width 26
-              :height 12
+              :height 9.5
               :min 0
               :color :blue
               :max 1

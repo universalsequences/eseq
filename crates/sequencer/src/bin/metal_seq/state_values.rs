@@ -22543,6 +22543,275 @@ mod tests {
     }
 
     #[test]
+    fn builtin_dj_mixer_boolean_mod_targets_render_as_depth_toggles() {
+        fn layout_has_double_click(node: &eseqlisp::layout::LayoutNode) -> bool {
+            node.props.contains_key("on-double-click")
+                || node.children.iter().any(layout_has_double_click)
+        }
+
+        fn test_mod_target(depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(0.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]))
+        }
+
+        fn assert_set_effect_param(
+            command: &eseqlisp::host::HostCommand,
+            expected_idx: f64,
+            expected_value: f64,
+        ) {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-effect-param");
+                    let Value::Map(payload) = payload else {
+                        panic!("set-effect-param payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("slot-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(0.0))
+                    );
+                    assert_eq!(
+                        payload.get("param-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_idx))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                }
+                other => panic!("expected set-effect-param host command, got {other:?}"),
+            }
+        }
+
+        let mut enabled = test_param_map("enabled", 0, 1.0, 0.0, 1.0);
+        enabled.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        enabled.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                40.0, 1.0, 1.0,
+            )]))),
+        );
+        let mut loop_param = test_param_map("loop", 3, 0.0, 0.0, 1.0);
+        loop_param.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        loop_param.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                43.0, 1.0, 0.0,
+            )]))),
+        );
+
+        let effect = Value::Map(HashMap::from([
+            (
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String("DJ Mixer".to_string()))),
+            ),
+            (
+                "slot-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            ),
+            (
+                "builtin".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            ),
+            (
+                "params".to_string(),
+                Rc::new(RefCell::new(test_list(vec![
+                    Value::Map(enabled),
+                    Value::Map(test_param_map("speed", 1, 1.0, -2.0, 2.0)),
+                    Value::Map(test_param_map("length", 2, 0.23, 0.012, 0.23)),
+                    Value::Map(loop_param),
+                    Value::Map(test_param_map("sync", 4, 0.0, 0.0, 1.0)),
+                    Value::Map(test_enum_param_map(
+                        "div",
+                        5,
+                        3.0,
+                        vec!["1/16", "1/8", "1/4", "1/2", "1 bar", "2 bars"],
+                    )),
+                    Value::Map(test_param_map("warp", 6, 0.0, 0.0, 1.0)),
+                ]))),
+            ),
+            (
+                "modulators".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                ]))]))),
+            ),
+            (
+                "sources".to_string(),
+                Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("Mod 1".to_string()))),
+                    ),
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "source-param".to_string(),
+                        Rc::new(RefCell::new(Value::Map(test_enum_param_map(
+                            "type",
+                            30,
+                            5.0,
+                            vec!["off", "lfo", "env", "rand", "drift", "ext1"],
+                        )))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![]))),
+                    ),
+                ]))]))),
+            ),
+        ]));
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![effect])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(do
+                  (set! effect-mods-open true)
+                  (set! effect-mods-chain "audio")
+                  (set! effect-mods-slot 0)
+                  (set! effect-mods-bus -1)
+                  (set! effect-selected-mod-slot 1))"#,
+            )
+            .expect("open DJ Mixer effect mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("DJ Mixer boolean mods status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("DJ Mixer mods layout");
+        assert_finite_layout_tree(&layout);
+
+        let loop_wrapper = find_layout_node_by_stable_key(&layout, "dj-mixer-param-3-mod-wrapper")
+            .expect("Loop should render a modulation wrapper");
+        assert!(
+            layout_has_double_click(loop_wrapper),
+            "Loop modulation wrapper should expose on-double-click"
+        );
+        let loop_button = find_layout_node_by_stable_key(&layout, "dj-mixer-param-3-mod-depth")
+            .and_then(|node| find_layout_node_by_widget_type(node, "button"))
+            .expect("Loop modulation depth should render as a button");
+        assert!(
+            loop_button.rect.width > 1.0 && loop_button.rect.height > 0.5,
+            "Loop mod-depth button should have a visible measured rect: {:?}",
+            loop_button.rect
+        );
+        let loop_callback = loop_button
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("Loop mod-depth button should be clickable");
+        editor
+            .runtime_mut()
+            .invoke(
+                loop_callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("toggle Loop modulation depth");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_effect_param(&commands[0], 43.0, 1.0);
+
+        let enabled_button = find_layout_node_by_stable_key(&layout, "dj-mixer-param-0-mod-depth")
+            .and_then(|node| find_layout_node_by_widget_type(node, "button"))
+            .expect("On modulation depth should render as a button");
+        let enabled_callback = enabled_button
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("On mod-depth button should be clickable");
+        editor
+            .runtime_mut()
+            .invoke(
+                enabled_callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("toggle On modulation depth");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_effect_param(&commands[0], 40.0, 0.0);
+    }
+
+    #[test]
     fn custom_audio_effect_mods_button_reopens_after_close() {
         fn test_mod_target(depth_idx: f64, source_slot: f64, depth: f64) -> Value {
             Value::Map(HashMap::from([
