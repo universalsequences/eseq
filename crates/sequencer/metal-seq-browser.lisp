@@ -13,6 +13,7 @@
 (defstate sbrowser-selected-sample "")
 (defstate sbrowser-selected-tags (list))
 (defstate sbrowser-auditioned-sample "")
+(defstate sbrowser-loading-instrument-name "")
 
 ;; Editor state for inline instrument/effect creation
 (def sbrowser-editor-name (state ""))
@@ -153,9 +154,10 @@
   (status "New project"))
 
 (def sbrowser-add-instrument-track (name)
+  (set! sbrowser-loading-instrument-name name)
   (host-command "add-track-instrument" (dict :name name))
   (set! sbrowser-tab "presets")
-  (status (str "Add instrument track: " name)))
+  (status (str "Loading instrument: " name)))
 
 (def sbrowser-add-sampler-track ()
   (host-command "add-track-sampler" (dict))
@@ -454,6 +456,24 @@
         (sbrowser-add-instrument-track (get item :name))
         (status "Open a folder or choose an instrument")))))
 
+(def sbrowser-focus-create-item (item)
+  (if (= (get item :kind) "instrument")
+    (status (str (get item :label)))
+    (if (= (get item :kind) "folder")
+      (status (str "Folder: " (get item :label)))
+      (status "Open a folder or choose an instrument"))))
+
+(def sbrowser-drop-instrument-on-folder (event)
+  (let ((payload (get event :payload))
+        (target (get event :target)))
+    (let ((name (get payload :name))
+          (folder (get target :folder)))
+      (if (and name folder)
+        (do
+          (host-command "move-saved-instrument" (dict :name name :folder folder))
+          (status (str "Move instrument to " (get target :label))))
+        (status "Drop instruments onto a folder")))))
+
 (def sbrowser-create-search-bar ()
   (box :key "create-search-bar" :width :fill :height 2.0 :padding 0.25
     (h-stack :width :fill :gap 0.5 :align :center
@@ -493,10 +513,22 @@
       :color :gray
       :bg :transparent)))
 
+(def sbrowser-loading-instrument? ()
+  (not (= sbrowser-loading-instrument-name "")))
+
+(def sbrowser-instrument-loading-row ()
+  (if (sbrowser-loading-instrument?)
+    (box :key "instrument-loading-row" :width :fill :padding 0.25
+      (sbrowser-editor-status-row
+        (str "Loading " sbrowser-loading-instrument-name "...")
+        :gray))
+    (box :height 0)))
+
 (def sbrowser-create-picker ()
   (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
     (sbrowser-create-search-bar)
     (sbrowser-create-toolbar)
+    (sbrowser-instrument-loading-row)
     (sbrowser-library-label)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "create-picker-scroll" :width :fill :flex 1
@@ -506,7 +538,10 @@
           :background-color :buffer-bg
           :items (sbrowser-create-items)
           :expand-all (not (= sbrowser-filter ""))
-          :on-select (lambda (item) (sbrowser-select-create-item item))
+          :drag-type "instrument"
+          :drop-types (list "instrument")
+          :on-drop (lambda (event) (sbrowser-drop-instrument-on-folder event))
+          :on-select (lambda (item) (sbrowser-focus-create-item item))
           :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
 
 (def sbrowser-tab-button (name label)
@@ -569,6 +604,7 @@
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1
     (sbrowser-create-toolbar)
+    (sbrowser-instrument-loading-row)
     (sbrowser-library-label)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "instruments-tab-scroll" :width :fill :flex 1
@@ -578,7 +614,10 @@
           :background-color :buffer-bg
           :items (sbrowser-create-items)
           :expand-all (not (= sbrowser-filter ""))
-          :on-select (lambda (item) (sbrowser-select-create-item item))
+          :drag-type "instrument"
+          :drop-types (list "instrument")
+          :on-drop (lambda (event) (sbrowser-drop-instrument-on-folder event))
+          :on-select (lambda (item) (sbrowser-focus-create-item item))
           :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
 
 (def sbrowser-audio-fx-toolbar ()

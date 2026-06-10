@@ -35,6 +35,17 @@ pub(crate) fn handle_add_track_instrument_command(payload: &Value, ctx: AddTrack
         return;
     };
 
+    match ctx.app.add_saved_instrument_track_sync(&name) {
+        Ok(idx) => finish_added_instrument_track(idx, ctx),
+        Err(e) => {
+            ctx.editor.handle_host_event(HostEvent::Status(format!(
+                "Error adding instrument track: {e}"
+            )));
+        }
+    }
+}
+
+pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentCtx<'_>) {
     let AddTrackInstrumentCtx {
         app,
         editor,
@@ -50,66 +61,57 @@ pub(crate) fn handle_add_track_instrument_command(payload: &Value, ctx: AddTrack
         lg_raw,
     } = ctx;
 
-    match app.add_saved_instrument_track_sync(&name) {
-        Ok(idx) => {
-            current_track.store(idx, Ordering::Relaxed);
-            let new_name = app.tracks[idx].clone();
-            track_names.push(new_name.clone());
+    current_track.store(idx, Ordering::Relaxed);
+    let new_name = app.tracks[idx].clone();
+    track_names.push(new_name.clone());
 
-            {
-                let mut pan_ids = track_pan_ids.lock().unwrap();
-                pan_ids.push(app.graph.track_node_ids[idx].pan_id);
-                push_solo_mutes(lg_raw, state, &pan_ids);
-            }
-            record_armed.lock().unwrap().push(false);
-
-            let rt = editor.runtime_mut();
-            rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
-            rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
-            set_current_track_reactive(rt, app.tracks.len(), idx);
-            rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
-            sync_all_track_sequencer_state(rt, state, app, idx, selected_steps);
-            rt.set_reactive("SEQ", "steps", build_steps_value(state, idx));
-            sync_step_param_lists(rt, state, idx);
-            sync_track_mixer_state(rt, app, state);
-            sync_track_peak_fields(rt, cached_track_peak_levels);
-            rt.set_reactive(
-                "SEQ",
-                "effects",
-                build_effects_value(state, idx, &app.graph.effect_descriptors, selected_steps),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "midi-effects",
-                build_midi_effects_value(state, idx, selected_steps),
-            );
-            rt.set_reactive(
-                "SEQ",
-                "instrument-panel",
-                build_instrument_panel_value(app, idx, selected_steps),
-            );
-            *accumulator_names.lock().unwrap() = build_accumulator_names(app);
-            sync_track_params(rt, app, state, idx, selected_steps);
-            sync_fx_param_binding_fields(rt, app, state, idx, selected_steps);
-            rt.set_reactive(
-                "SEQ",
-                "step-has-plocks",
-                build_step_has_plocks(state, idx, &app.graph.effect_descriptors),
-            );
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            ui_epoch.fetch_add(1, Ordering::Relaxed);
-            editor.handle_host_event(HostEvent::Status(format!(
-                "Added instrument track {}: {new_name}",
-                idx + 1
-            )));
-        }
-        Err(e) => {
-            editor.handle_host_event(HostEvent::Status(format!(
-                "Error adding instrument track: {e}"
-            )));
-        }
+    {
+        let mut pan_ids = track_pan_ids.lock().unwrap();
+        pan_ids.push(app.graph.track_node_ids[idx].pan_id);
+        push_solo_mutes(lg_raw, state, &pan_ids);
     }
+    record_armed.lock().unwrap().push(false);
+
+    let rt = editor.runtime_mut();
+    rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
+    rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
+    set_current_track_reactive(rt, app.tracks.len(), idx);
+    rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
+    sync_all_track_sequencer_state(rt, state, app, idx, selected_steps);
+    rt.set_reactive("SEQ", "steps", build_steps_value(state, idx));
+    sync_step_param_lists(rt, state, idx);
+    sync_track_mixer_state(rt, app, state);
+    sync_track_peak_fields(rt, cached_track_peak_levels);
+    rt.set_reactive(
+        "SEQ",
+        "effects",
+        build_effects_value(state, idx, &app.graph.effect_descriptors, selected_steps),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "midi-effects",
+        build_midi_effects_value(state, idx, selected_steps),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "instrument-panel",
+        build_instrument_panel_value(app, idx, selected_steps),
+    );
+    *accumulator_names.lock().unwrap() = build_accumulator_names(app);
+    sync_track_params(rt, app, state, idx, selected_steps);
+    sync_fx_param_binding_fields(rt, app, state, idx, selected_steps);
+    rt.set_reactive(
+        "SEQ",
+        "step-has-plocks",
+        build_step_has_plocks(state, idx, &app.graph.effect_descriptors),
+    );
+    rt.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+    editor.handle_host_event(HostEvent::Status(format!(
+        "Added instrument track {}: {new_name}",
+        idx + 1
+    )));
 }
 
 fn payload_name(payload: &Value) -> Option<String> {

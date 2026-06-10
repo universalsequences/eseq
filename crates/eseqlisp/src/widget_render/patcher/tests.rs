@@ -15312,26 +15312,28 @@ fn layout_aligns_primary_signal_chain_centers() {
             (out c 1 @name audio)
             "#,
     );
-    let center = |id: &str| {
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let port_x = |id: &str, inlet: bool| {
         let node = patch.nodes.iter().find(|node| node.id == id).unwrap();
-        let input_indices = patch_input_indices(&patch);
-        let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
-        let output_counts = patch_output_counts(&patch);
-        let (width, _) = node_size_for_ports(
-            node,
-            input_slot_counts.get(&node.id).copied().unwrap_or(0),
-            output_counts.get(&node.id).copied().unwrap_or(0),
-        );
-        node.position.0 + width * 0.5
+        let input_count = input_slot_counts.get(&node.id).copied().unwrap_or(0);
+        let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
+        let (width, _) = node_size_for_ports(node, input_count, output_count);
+        let count = if inlet { input_count } else { output_count };
+        node.position.0 + port_x_offset(0, count, width)
     };
 
-    let a = center("a");
-    let b = center("b");
-    let c = center("c");
-    assert!(
-        (a - b).abs() < 0.01 && (b - c).abs() < 0.01,
-        "primary signal chain should align vertically by center: a={a} b={b} c={c}"
-    );
+    // The chain cable should be perfectly vertical: each node's first inlet
+    // sits directly under the previous node's outlet.
+    for (from, to) in [("a", "b"), ("b", "c")] {
+        let outlet = port_x(from, false);
+        let inlet = port_x(to, true);
+        assert!(
+            (outlet - inlet).abs() < 0.01,
+            "primary signal chain cable {from}->{to} should be vertical: outlet={outlet} inlet={inlet}"
+        );
+    }
 }
 
 #[test]

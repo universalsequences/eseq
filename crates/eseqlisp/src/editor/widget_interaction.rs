@@ -1618,9 +1618,15 @@ impl Editor {
             "widget-drop: dispatch drag_type={drag_type}; target_type={}; target_key={:?}; payload={payload:?}",
             target.widget_type, target.stable_key
         );
-        let event = crate::widget_render::box_widget::box_drop_info(
-            &target, &drag_type, payload, hit_col, hit_row,
-        );
+        let event = if target.widget_type == "tree" {
+            crate::widget_render::tree::tree_drop_info(
+                &target, &drag_type, payload, hit_col, hit_row,
+            )
+        } else {
+            crate::widget_render::box_widget::box_drop_info(
+                &target, &drag_type, payload, hit_col, hit_row,
+            )
+        };
         Some(crate::widget_render::EventOutput {
             callback,
             args: vec![event],

@@ -26,6 +26,7 @@ pub(crate) struct SampleTreeNode {
 pub(crate) struct InstrumentTreeNode {
     label: String,
     name: Option<String>,
+    folder: Option<String>,
     children: Vec<InstrumentTreeNode>,
 }
 
@@ -463,6 +464,7 @@ fn build_instrument_tree_nodes(
                 items.push(InstrumentTreeNode {
                     label,
                     name: Some(instrument_name),
+                    folder: None,
                     children: Vec::new(),
                 });
             }
@@ -471,9 +473,15 @@ fn build_instrument_tree_nodes(
 
         let children = build_instrument_tree_nodes(&path, root);
         if !children.is_empty() {
+            let folder = path
+                .strip_prefix(root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .filter(|folder| !folder.is_empty());
             items.push(InstrumentTreeNode {
                 label,
                 name: None,
+                folder,
                 children,
             });
         }
@@ -482,6 +490,7 @@ fn build_instrument_tree_nodes(
         items.push(InstrumentTreeNode {
             label,
             name: Some(name),
+            folder: None,
             children: Vec::new(),
         });
     }
@@ -506,6 +515,15 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
                     map.insert(
                         "kind".to_string(),
                         Rc::new(RefCell::new(Value::String("instrument".to_string()))),
+                    );
+                } else if let Some(folder) = &item.folder {
+                    map.insert(
+                        "folder".to_string(),
+                        Rc::new(RefCell::new(Value::String(folder.clone()))),
+                    );
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("folder".to_string()))),
                     );
                 }
                 if !item.children.is_empty() {

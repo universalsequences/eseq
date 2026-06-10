@@ -145,12 +145,19 @@
   (if (= (get event :drag-type) "track-badge")
     (mixer-v2-drop-track-out-of-group event)
     (let ((payload (get event :payload)))
-      (let ((path (get payload :path)))
+      (let ((path (get payload :path))
+            (name (get payload :name)))
         (do
           (mixer-v2-clear-delete-target)
-          (if path
-            (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-            (status "Drop a sample file, not a folder")))))))
+          (if (= (get event :drag-type) "instrument")
+            (if name
+              (do
+                (set! sbrowser-loading-instrument-name name)
+                (host-command "add-track-instrument" (dict :name name)))
+              (status "Drop an instrument, not a folder"))
+            (if path
+              (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+              (status "Drop a sample file, not a folder"))))))))
 
 ;; Drag a track badge onto a group container -> add it to that group.
 (def mixer-v2-drop-track-into-group (event gidx)
@@ -1058,10 +1065,10 @@
     :corner-radius 10
     :padding 0.5
     :align :center
-    :drop-types (list "sample" "track-badge")
+    :drop-types (list "sample" "instrument" "track-badge")
     :drop-meta (dict :kind "new-sample-track")
     :on-drop (lambda (event) (mixer-v2-drop-sample-new-track event))
-    (label "Drop samples here"
+    (label "Drop sounds here"
       :font-size 9.5
       :color :gray
       :bg :transparent)))

@@ -184,6 +184,56 @@ impl App {
         }
     }
 
+    pub fn try_add_cached_saved_instrument_track_sync(
+        &mut self,
+        name: &str,
+        source: &str,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Option<Result<usize, String>> {
+        let cache_idx = self.cached_instrument_engine_idx(name, source)?;
+        let manifest = self.editor.engine_registry.engines[cache_idx]
+            .manifest
+            .clone();
+        let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+        let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
+            match self.register_dedicated_instrument_engine(name, source, &manifest, lib_index) {
+                Ok(engine_id) => engine_id,
+                Err(error) => return Some(Err(error)),
+            }
+        } else {
+            cache_idx
+        };
+        Some(unsafe {
+            self.graph_controller()
+                .add_custom_track(name, engine_id, &manifest, &*lib_ptr, run_mode)
+        })
+    }
+
+    pub fn add_compiled_saved_instrument_track_sync(
+        &mut self,
+        name: &str,
+        source: &str,
+        run_mode: CustomInstrumentRunMode,
+        result: lisp_host::CompileResult,
+    ) -> Result<usize, String> {
+        let cache_idx = self.cache_instrument_engine(name, source, &result.manifest, result.lib);
+        let manifest = self.editor.engine_registry.engines[cache_idx]
+            .manifest
+            .clone();
+        let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+        let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        let engine_id = if run_mode == CustomInstrumentRunMode::FreePatch {
+            self.register_dedicated_instrument_engine(name, source, &manifest, lib_index)?
+        } else {
+            cache_idx
+        };
+        unsafe {
+            self.graph_controller()
+                .add_custom_track(name, engine_id, &manifest, &*lib_ptr, run_mode)
+        }
+    }
+
     pub fn add_transient_instrument_track_sync(
         &mut self,
         name: &str,

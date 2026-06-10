@@ -477,6 +477,57 @@ fn make_drag_value(drag_type: &str, item: &Value) -> Value {
     Value::Map(map)
 }
 
+pub(crate) fn tree_drop_info(
+    node: &LayoutNode,
+    drag_type: &str,
+    payload: Value,
+    local_col: f32,
+    local_row: f32,
+) -> Value {
+    let items = get_items_from_props(&node.props);
+    let expand_all = get_expand_all_prop(&node.props);
+    let widget_key = tree_state_key(node);
+    let mut state = get_tree_state(widget_key);
+    sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
+    let mut rows = Vec::new();
+    flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+
+    let rh = row_height_from_props(&node.props);
+    let scroll_offset = find_parent_scroll_offset(node);
+    let row_relative = local_row - node.rect.row + scroll_offset;
+    let target = if row_relative >= 0.0 {
+        rows.get((row_relative / rh).floor() as usize)
+            .map(|row| item_to_map(&row.item_value))
+            .unwrap_or(Value::Nil)
+    } else {
+        Value::Nil
+    };
+
+    let mut info = HashMap::new();
+    info.insert(
+        "type".to_string(),
+        std::rc::Rc::new(RefCell::new(Value::String("drop".to_string()))),
+    );
+    info.insert(
+        "x".to_string(),
+        std::rc::Rc::new(RefCell::new(Value::Number(local_col as f64))),
+    );
+    info.insert(
+        "y".to_string(),
+        std::rc::Rc::new(RefCell::new(Value::Number(local_row as f64))),
+    );
+    info.insert(
+        "drag-type".to_string(),
+        std::rc::Rc::new(RefCell::new(Value::String(drag_type.to_string()))),
+    );
+    info.insert(
+        "payload".to_string(),
+        std::rc::Rc::new(RefCell::new(payload)),
+    );
+    info.insert("target".to_string(), std::rc::Rc::new(RefCell::new(target)));
+    Value::Map(info)
+}
+
 // ── Widget definition ────────────────────────────────────────────────────────
 
 pub struct TreeWidget;

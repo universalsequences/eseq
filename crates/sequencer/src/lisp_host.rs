@@ -2281,6 +2281,134 @@ pub fn list_saved_instruments() -> Vec<String> {
     names
 }
 
+fn validate_instrument_relative_dir(path: &str) -> io::Result<PathBuf> {
+    let trimmed = path.trim().trim_matches('/');
+    let mut relative = PathBuf::new();
+    if trimmed.is_empty() {
+        return Ok(relative);
+    }
+    for component in Path::new(trimmed).components() {
+        match component {
+            std::path::Component::Normal(part) => relative.push(part),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid instrument folder '{path}'"),
+                ));
+            }
+        }
+    }
+    Ok(relative)
+}
+
+pub fn move_saved_instrument(name: &str, target_folder: &str) -> io::Result<String> {
+    let root = Path::new(INSTRUMENTS_DIR);
+    let source = instrument_source_path(name)?;
+    if !source.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("instrument '{name}' does not exist"),
+        ));
+    }
+
+    let target_dir = root.join(validate_instrument_relative_dir(target_folder)?);
+    if !target_dir.exists() || !target_dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "target instrument folder '{}' does not exist",
+                target_dir.display()
+            ),
+        ));
+    }
+
+    if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        let source_dir = source.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "instrument source '{}' has no parent directory",
+                    source.display()
+                ),
+            )
+        })?;
+        if source_dir == target_dir {
+            return Ok(name.to_string());
+        }
+        if target_dir.starts_with(source_dir) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot move an instrument folder into itself",
+            ));
+        }
+        let folder_name = source_dir.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("instrument folder '{}' has no name", source_dir.display()),
+            )
+        })?;
+        let dest = target_dir.join(folder_name);
+        if dest.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("target instrument '{}' already exists", dest.display()),
+            ));
+        }
+        std::fs::rename(source_dir, &dest)?;
+        return dest
+            .strip_prefix(root)
+            .map(|rel| format!("{}/", rel.to_string_lossy().replace('\\', "/")))
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()));
+    }
+
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("instrument source '{}' has no file stem", source.display()),
+            )
+        })?;
+    let dest_source = target_dir.join(format!("{stem}.lisp"));
+    if dest_source.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "target instrument '{}' already exists",
+                dest_source.display()
+            ),
+        ));
+    }
+    let mut sidecars = Vec::new();
+    for extension in ["presets", "instrument.json"] {
+        let sidecar = source.with_extension(extension);
+        if sidecar.exists() {
+            let dest = target_dir.join(sidecar.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("sidecar '{}' has no file name", sidecar.display()),
+                )
+            })?);
+            if dest.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("target sidecar '{}' already exists", dest.display()),
+                ));
+            }
+            sidecars.push((sidecar, dest));
+        }
+    }
+    std::fs::rename(&source, &dest_source)?;
+    for (sidecar, dest) in sidecars {
+        std::fs::rename(sidecar, dest)?;
+    }
+    dest_source
+        .strip_prefix(root)
+        .map(|rel| rel.with_extension("").to_string_lossy().replace('\\', "/"))
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))
+}
+
 pub fn load_instrument_source(name: &str) -> io::Result<String> {
     let path = resolve_instrument_storage_path(name, "lisp")?;
     std::fs::read_to_string(&path)

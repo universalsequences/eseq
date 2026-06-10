@@ -190,6 +190,13 @@ struct PendingInstrumentCancelRestore {
     receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
+struct PendingSavedInstrumentLoad {
+    name: String,
+    source: String,
+    run_mode: CustomInstrumentRunMode,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
+}
+
 #[derive(Debug, Clone)]
 enum EffectEditTarget {
     Track { track: usize, slot: usize },
@@ -4512,6 +4519,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut instrument_edit_session: Option<InstrumentEditSession> = None;
     let mut pending_instrument_preview: Option<PendingInstrumentPreview> = None;
     let mut pending_instrument_cancel_restore: Option<PendingInstrumentCancelRestore> = None;
+    let mut pending_saved_instrument_load: Option<PendingSavedInstrumentLoad> = None;
     let mut effect_edit_session: Option<EffectEditSession> = None;
     let mut pending_effect_preview: Option<PendingEffectPreview> = None;
     let mut pending_effect_cancel_restore: Option<PendingEffectCancelRestore> = None;
@@ -5402,23 +5410,134 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     "add-track-instrument" => {
-                        handle_add_track_instrument_command(
-                            &payload,
-                            AddTrackInstrumentCtx {
-                                app: &mut app,
-                                editor: &mut editor,
-                                state: &state,
-                                current_track: &current_track,
-                                track_names: &mut track_names,
-                                track_pan_ids: &track_pan_ids,
-                                record_armed: &record_armed,
-                                selected_steps: &selected_steps,
-                                accumulator_names: &accumulator_names,
-                                cached_track_peak_levels: &cached_track_peak_levels,
-                                ui_epoch: &ui_epoch,
-                                lg_raw,
-                            },
-                        );
+                        if let Some(pending) = pending_saved_instrument_load.as_ref() {
+                            let escaped = escape_lisp_string(&pending.name);
+                            let _ = editor.runtime_mut().eval_str(&format!(
+                                "(set! sbrowser-loading-instrument-name \"{escaped}\")"
+                            ));
+                            editor.handle_host_event(HostEvent::Status(
+                                "An instrument is already loading".to_string(),
+                            ));
+                            continue;
+                        }
+                        let Some(name) = extract_string_from_payload(&payload, "name") else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Instrument load is missing a name".to_string(),
+                            ));
+                            continue;
+                        };
+                        let source = match sequencer::lisp_host::load_instrument_source(&name) {
+                            Ok(source) => source,
+                            Err(error) => {
+                                let _ = editor
+                                    .runtime_mut()
+                                    .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error loading instrument source: {error}"
+                                )));
+                                continue;
+                            }
+                        };
+                        let run_mode = match sequencer::lisp_host::load_instrument_run_mode(&name) {
+                            Ok(run_mode) => run_mode,
+                            Err(error) => {
+                                let _ = editor
+                                    .runtime_mut()
+                                    .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error loading instrument metadata: {error}"
+                                )));
+                                continue;
+                            }
+                        };
+                        if let Some(cached_result) =
+                            app.try_add_cached_saved_instrument_track_sync(&name, &source, run_mode)
+                        {
+                            let _ = editor
+                                .runtime_mut()
+                                .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                            match cached_result {
+                                Ok(idx) => finish_added_instrument_track(
+                                    idx,
+                                    AddTrackInstrumentCtx {
+                                        app: &mut app,
+                                        editor: &mut editor,
+                                        state: &state,
+                                        current_track: &current_track,
+                                        track_names: &mut track_names,
+                                        track_pan_ids: &track_pan_ids,
+                                        record_armed: &record_armed,
+                                        selected_steps: &selected_steps,
+                                        accumulator_names: &accumulator_names,
+                                        cached_track_peak_levels: &cached_track_peak_levels,
+                                        ui_epoch: &ui_epoch,
+                                        lg_raw,
+                                    },
+                                ),
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error adding instrument track: {error}"
+                                ))),
+                            }
+                            continue;
+                        }
+                        let sample_rate = app.graph.sample_rate;
+                        let asset_base = sequencer::lisp_host::instrument_source_path(&name)
+                            .ok()
+                            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+                        let compile_source = source.clone();
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let result =
+                                sequencer::lisp_host::compile_and_load_instrument_with_asset_base(
+                                    &compile_source,
+                                    sample_rate,
+                                    asset_base.as_deref(),
+                                );
+                            let _ = tx.send(result);
+                        });
+                        pending_saved_instrument_load = Some(PendingSavedInstrumentLoad {
+                            name: name.clone(),
+                            source,
+                            run_mode,
+                            receiver: rx,
+                        });
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Loading instrument: {name}"
+                        )));
+                        editor.mark_needs_redraw();
+                    }
+                    "move-saved-instrument" => {
+                        let name = extract_string_from_payload(&payload, "name");
+                        let folder = extract_string_from_payload(&payload, "folder");
+                        match (name, folder) {
+                            (Some(name), Some(folder)) => {
+                                match sequencer::lisp_host::move_saved_instrument(&name, &folder) {
+                                    Ok(new_name) => {
+                                        if let Err(error) = editor
+                                            .runtime_mut()
+                                            .eval_str("(sbrowser-refresh-buffer)")
+                                        {
+                                            eprintln!(
+                                                "instrument browser: failed to refresh after move: {error:?}"
+                                            );
+                                        }
+                                        editor.refresh_runtime_side_effects();
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Moved instrument: {new_name}"
+                                        )));
+                                        editor.mark_needs_redraw();
+                                    }
+                                    Err(error) => {
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error moving instrument: {error}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Instrument move is missing a name or folder".to_string(),
+                            )),
+                        }
                     }
                     "delete-track" => {
                         let track = match &payload {
@@ -13077,6 +13196,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
+
+        if let Some(completed_load) = pending_saved_instrument_load.as_ref().and_then(|pending| {
+            match pending.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Instrument load compile thread crashed".to_string()))
+                }
+            }
+        }) {
+            let pending = pending_saved_instrument_load
+                .take()
+                .expect("completed saved instrument load must have pending state");
+            let _ = editor
+                .runtime_mut()
+                .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+            match completed_load {
+                Ok(result) => match app.add_compiled_saved_instrument_track_sync(
+                    &pending.name,
+                    &pending.source,
+                    pending.run_mode,
+                    result,
+                ) {
+                    Ok(idx) => {
+                        finish_added_instrument_track(
+                            idx,
+                            AddTrackInstrumentCtx {
+                                app: &mut app,
+                                editor: &mut editor,
+                                state: &state,
+                                current_track: &current_track,
+                                track_names: &mut track_names,
+                                track_pan_ids: &track_pan_ids,
+                                record_armed: &record_armed,
+                                selected_steps: &selected_steps,
+                                accumulator_names: &accumulator_names,
+                                cached_track_peak_levels: &cached_track_peak_levels,
+                                ui_epoch: &ui_epoch,
+                                lg_raw,
+                            },
+                        );
+                        editor.mark_needs_redraw();
+                    }
+                    Err(error) => {
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Error adding instrument track: {error}"
+                        )));
+                        editor.mark_needs_redraw();
+                    }
+                },
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Error loading instrument: {error}"
+                    )));
+                    editor.mark_needs_redraw();
+                }
+            }
+        }
 
         if let Some(completed_cancel_restore) =
             pending_instrument_cancel_restore

@@ -10006,6 +10006,67 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_browser_instrument_focus_does_not_add_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-focus-create-item
+                    (dict :kind "instrument" :name "emulations/digitone" :label "digitone"))"#,
+            )
+            .expect("focus instrument");
+
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "single-click focus should not add an instrument track"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-tab")
+                .expect("read browser tab"),
+            Some(Value::String("instruments".to_string()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_instrument_drop_on_folder_queues_move() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-drop-instrument-on-folder
+                    (dict :payload (dict :kind "instrument"
+                                           :name "emulations/digitone"
+                                           :label "digitone")
+                          :target (dict :kind "folder"
+                                        :folder "wips"
+                                        :label "wips")))"#,
+            )
+            .expect("drop instrument on folder");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "move-saved-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("instrument move payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("emulations/digitone".to_string()))
+                );
+                assert_eq!(
+                    payload.get("folder").map(|value| value.borrow().clone()),
+                    Some(Value::String("wips".to_string()))
+                );
+            }
+            other => panic!("expected move-saved-instrument host command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn metal_seq_browser_audio_effect_click_only_updates_browser_selection() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
@@ -25511,6 +25572,39 @@ mod tests {
             }
             other => panic!("expected add-track-sample host command, got {other:?}"),
         }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-sample-new-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "instrument"
+                                         :name "emulations/digitone"
+                                         :label "digitone")))"#,
+            )
+            .expect("drop instrument on new-track zone");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("add-track-instrument payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("emulations/digitone".to_string()))
+                );
+            }
+            other => panic!("expected add-track-instrument host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-loading-instrument-name")
+                .expect("read loading instrument"),
+            Some(Value::String("emulations/digitone".to_string()))
+        );
 
         let layout = editor
             .runtime_mut()
