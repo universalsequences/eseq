@@ -558,7 +558,8 @@ mod tests {
     };
     use crate::audiograph::LiveGraphPtr;
     use crate::effects::{
-        EffectDescriptor, InstrumentModulationTarget, ParamDescriptor, ParamKind, ParamScaling,
+        EffectDescriptor, EffectSlotSnapshot, InstrumentModulationTarget, ParamDescriptor,
+        ParamKind, ParamScaling,
     };
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
@@ -670,6 +671,17 @@ mod tests {
         );
         app.tracks = vec!["Track 1".to_string()];
         app.graph.effect_descriptors = vec![vec![desc]];
+        app
+    }
+
+    fn test_app_with_bus_effect_descriptor(desc: EffectDescriptor) -> App {
+        let mut app = test_app_with_effect_descriptor(desc.clone());
+        let bus = app
+            .buses
+            .first_mut()
+            .expect("test app should start with a mix bus");
+        bus.effect_descriptors = vec![desc.clone()];
+        bus.effect_slots = vec![EffectSlotSnapshot::new_default(&desc, 0)];
         app
     }
 
@@ -870,6 +882,50 @@ mod tests {
             app.state.pattern.effect_chains[0][0].plocks.get(step, 1),
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn bus_effect_depth_default_updates_dgen_mod_active_param() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_bus_effect_descriptor(desc);
+
+        app.set_bus_effect_param(0, 0, 2, 0.25)
+            .expect("bus depth default should update");
+
+        assert_eq!(app.buses[0].effect_slots[0].defaults[1], 1.0);
+
+        app.set_bus_effect_param(0, 0, 2, 0.0)
+            .expect("bus depth default should clear");
+
+        assert_eq!(app.buses[0].effect_slots[0].defaults[1], 0.0);
+
+        app.buses[0].effect_slots[0].defaults[2] = 0.25;
+        app.set_bus_effect_param(0, 0, 0, 0.75)
+            .expect("unrelated bus param should repair active flag");
+
+        assert_eq!(app.buses[0].effect_slots[0].defaults[1], 1.0);
+    }
+
+    #[test]
+    fn bus_effect_depth_plock_updates_dgen_mod_active_plock() {
+        let desc = effect_mod_test_descriptor();
+        let mut app = test_app_with_bus_effect_descriptor(desc);
+        let step = 7;
+
+        app.set_bus_effect_param(0, 0, 2, 0.25)
+            .expect("bus depth default should update");
+        app.set_bus_effect_plock(0, 0, step, 2, 0.0)
+            .expect("bus depth p-lock should update");
+
+        let slot = &app.buses[0].effect_slots[0];
+        assert_eq!(slot.defaults[1], 1.0);
+        assert_eq!(slot.plocks[step][1], Some(0.0));
+
+        app.set_bus_effect_plock(0, 0, step, 3, 0.5)
+            .expect("second bus depth p-lock should update");
+
+        let slot = &app.buses[0].effect_slots[0];
+        assert_eq!(slot.plocks[step][1], Some(1.0));
     }
 }
 

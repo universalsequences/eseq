@@ -224,6 +224,7 @@ impl TrackPatternData {
         tp.set_output(snap.output.clone());
         tp.set_sends(snap.sends.clone());
         tp.polyphonic.store(snap.polyphonic, Ordering::Relaxed);
+        tp.set_max_polyphony(snap.max_polyphony);
         tp.set_timebase(snap.timebase);
         tp.set_accumulator_idx(snap.accumulator_idx);
         tp.set_script_accumulator_name(snap.script_accumulator_name.clone());
@@ -232,6 +233,7 @@ impl TrackPatternData {
         tp.set_accum_limit(snap.accum_limit);
         tp.set_accum_mode(snap.accum_mode);
         tp.set_fts_scale(snap.fts_scale);
+        tp.set_mute_group(snap.mute_group);
 
         for (slot_idx, slot_snap) in self.effect_slots.iter().enumerate() {
             if slot_idx < state.pattern.effect_chains[track].len() {
@@ -1205,7 +1207,7 @@ impl PatternSnapshot {
         }
         self.mod_connections.retain(|connection| {
             connection.source_track < track_count
-                && connection.dest_track < track_count
+                && mod_destination_valid_for_track_count(connection.destination, track_count)
                 && connection.dest_input < EXT_MOD_INPUT_COUNT
         });
 
@@ -1240,7 +1242,7 @@ impl PatternSnapshot {
         self.instrument_run_modes.truncate(track_count);
         self.mod_connections.retain(|connection| {
             connection.source_track < track_count
-                && connection.dest_track < track_count
+                && mod_destination_valid_for_track_count(connection.destination, track_count)
                 && connection.dest_input < EXT_MOD_INPUT_COUNT
         });
     }
@@ -1273,8 +1275,7 @@ impl PatternSnapshot {
 
         let scene_trace = {
             static SCENE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            *SCENE_TRACE
-                .get_or_init(|| std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1"))
+            *SCENE_TRACE.get_or_init(|| std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1"))
         };
         let mut steps_elapsed = std::time::Duration::ZERO;
         let mut effects_elapsed = std::time::Duration::ZERO;
@@ -1789,22 +1790,39 @@ fn remap_mod_connection_after_track_delete(
     connection: ModConnection,
     deleted_track: usize,
 ) -> Option<ModConnection> {
-    if connection.source_track == deleted_track || connection.dest_track == deleted_track {
+    if connection.source_track == deleted_track {
         return None;
     }
+    let destination = match connection.destination {
+        crate::sequencer::ModDestination::Track(track) if track == deleted_track => return None,
+        crate::sequencer::ModDestination::Track(track) => {
+            crate::sequencer::ModDestination::Track(if track > deleted_track {
+                track - 1
+            } else {
+                track
+            })
+        }
+        crate::sequencer::ModDestination::Bus(bus) => crate::sequencer::ModDestination::Bus(bus),
+    };
     Some(ModConnection {
         source_track: if connection.source_track > deleted_track {
             connection.source_track - 1
         } else {
             connection.source_track
         },
-        dest_track: if connection.dest_track > deleted_track {
-            connection.dest_track - 1
-        } else {
-            connection.dest_track
-        },
+        destination,
         dest_input: connection.dest_input,
     })
+}
+
+fn mod_destination_valid_for_track_count(
+    destination: crate::sequencer::ModDestination,
+    track_count: usize,
+) -> bool {
+    match destination {
+        crate::sequencer::ModDestination::Track(track) => track < track_count,
+        crate::sequencer::ModDestination::Bus(_) => true,
+    }
 }
 
 fn sidechain_source_track(
@@ -2101,6 +2119,7 @@ fn capture_track_params_snapshot(track_params: &TrackParams) -> TrackParamsSnaps
         accum_limit: track_params.get_accum_limit(),
         accum_mode: track_params.get_accum_mode(),
         fts_scale: track_params.get_fts_scale(),
+        mute_group: track_params.get_mute_group(),
     }
 }
 
@@ -3090,6 +3109,7 @@ impl SequencerState {
         params.set_accum_limit(defaults.accum_limit);
         params.set_accum_mode(defaults.accum_mode);
         params.set_fts_scale(defaults.fts_scale);
+        params.set_mute_group(defaults.mute_group);
     }
 
     pub fn clear_live_track_state(&self, track_count: usize) {
@@ -4514,6 +4534,7 @@ mod tests {
         EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
         BUILTIN_SLOT_COUNT,
     };
+    use crate::sequencer::ModDestination;
 
     fn sample_track_params(id: usize) -> TrackParamsSnapshot {
         TrackParamsSnapshot {
@@ -4543,6 +4564,7 @@ mod tests {
             accum_limit: (1 + id) as f32,
             accum_mode: id as u32,
             fts_scale: id + 1,
+            mute_group: (id % 9) as u8,
         }
     }
 
@@ -4566,6 +4588,18 @@ mod tests {
             param_node_spans: vec![1, 1],
             ir: None,
         }
+    }
+
+    #[test]
+    fn track_mute_group_defaults_and_clamps() {
+        let params = TrackParams::new();
+        assert_eq!(params.get_mute_group(), 0);
+
+        params.set_mute_group(4);
+        assert_eq!(params.get_mute_group(), 4);
+
+        params.set_mute_group(42);
+        assert_eq!(params.get_mute_group(), 8);
     }
 
     fn sample_pattern_snapshot(num_tracks: usize) -> PatternSnapshot {
@@ -4980,7 +5014,7 @@ mod tests {
         second.track_bits[1][0] = 199;
         let route = ModConnection {
             source_track: 0,
-            dest_track: 1,
+            destination: ModDestination::Track(1),
             dest_input: 2,
         };
         second.mod_connections.push(route);
@@ -5045,7 +5079,7 @@ mod tests {
         let first = sample_pattern_snapshot(2);
         let route = ModConnection {
             source_track: 0,
-            dest_track: 1,
+            destination: ModDestination::Track(1),
             dest_input: 3,
         };
         let mut scenes = ProjectScenes::from_pattern_snapshots(&[first], 0);
@@ -5318,17 +5352,17 @@ mod tests {
         snapshot.mod_connections = vec![
             ModConnection {
                 source_track: 1,
-                dest_track: 3,
+                destination: ModDestination::Track(3),
                 dest_input: 2,
             },
             ModConnection {
                 source_track: 0,
-                dest_track: 2,
+                destination: ModDestination::Track(2),
                 dest_input: 1,
             },
             ModConnection {
                 source_track: 2,
-                dest_track: 1,
+                destination: ModDestination::Track(1),
                 dest_input: 3,
             },
         ];
@@ -5339,7 +5373,35 @@ mod tests {
             snapshot.mod_connections,
             vec![ModConnection {
                 source_track: 0,
-                dest_track: 1,
+                destination: ModDestination::Track(1),
+                dest_input: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_preserves_bus_mod_destinations() {
+        let mut snapshot = sample_pattern_snapshot(4);
+        snapshot.mod_connections = vec![
+            ModConnection {
+                source_track: 2,
+                destination: ModDestination::Bus(BusId(42)),
+                dest_input: 1,
+            },
+            ModConnection {
+                source_track: 1,
+                destination: ModDestination::Bus(BusId(42)),
+                dest_input: 2,
+            },
+        ];
+
+        snapshot.remove_track(1);
+
+        assert_eq!(
+            snapshot.mod_connections,
+            vec![ModConnection {
+                source_track: 1,
+                destination: ModDestination::Bus(BusId(42)),
                 dest_input: 1,
             }]
         );
@@ -5676,7 +5738,7 @@ mod tests {
         let state = make_state_with_tracks(2);
         let route = ModConnection {
             source_track: 0,
-            dest_track: 1,
+            destination: ModDestination::Track(1),
             dest_input: 2,
         };
         state
@@ -5708,7 +5770,7 @@ mod tests {
         state.pattern.chord_data[0].add_note(5, 7.0);
         let route = ModConnection {
             source_track: 0,
-            dest_track: 1,
+            destination: ModDestination::Track(1),
             dest_input: 3,
         };
         state
@@ -5757,7 +5819,7 @@ mod tests {
         let state = make_state_with_tracks(2);
         let route = ModConnection {
             source_track: 0,
-            dest_track: 1,
+            destination: ModDestination::Track(1),
             dest_input: 1,
         };
         state
@@ -6277,6 +6339,7 @@ mod tests {
                 .set_script_accumulator_name(Some(format!("acc-{track}")));
             state.pattern.track_params[track].set_accum_limit(10.0 + track as f32);
             state.pattern.track_params[track].set_fts_scale(track + 1);
+            state.pattern.track_params[track].set_mute_group(track as u8);
             state.pattern.patterns[track].set_step_active(track, true);
             state.pattern.step_data[track].set(
                 track,
@@ -6356,6 +6419,7 @@ mod tests {
         );
         assert_eq!(state.pattern.track_params[1].get_accum_limit(), 12.0);
         assert_eq!(state.pattern.track_params[1].get_fts_scale(), 3);
+        assert_eq!(state.pattern.track_params[1].get_mute_group(), 2);
         assert!(state.pattern.patterns[1].is_active(2));
         assert_eq!(state.pattern.step_data[1].get(2, StepParam::Velocity), 0.3);
         assert_eq!(state.pattern.chord_data[1].get(2, 0), 2.5);
@@ -6942,7 +7006,7 @@ mod tests {
         let state = make_state_with_tracks(2);
         let route = ModConnection {
             source_track: 0,
-            dest_track: 1,
+            destination: ModDestination::Track(1),
             dest_input: 2,
         };
         state

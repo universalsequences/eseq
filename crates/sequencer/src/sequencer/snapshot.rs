@@ -113,6 +113,7 @@ impl SequencerSnapshot {
                 accum_limit: tp.get_accum_limit(),
                 accum_mode: tp.get_accum_mode(),
                 fts_scale: tp.get_fts_scale(),
+                mute_group: tp.get_mute_group(),
             };
             let instrument_type = InstrumentType::from_runtime_flag(
                 state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),

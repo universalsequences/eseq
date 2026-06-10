@@ -48,7 +48,7 @@
       :bg :transparent)))
 
 (def fx-bus-selection-panel ()
-  (v-stack :padding 0.5 :gap 1
+  (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
       (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
         (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))

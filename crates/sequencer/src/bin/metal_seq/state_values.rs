@@ -269,17 +269,32 @@ pub(crate) fn track_pattern_cell_selected_field(track: usize, pattern_id: u64) -
     format!("track-pattern-cell-selected-{track}-{pattern_id}")
 }
 
+fn mod_destination_kind_value(destination: sequencer::sequencer::ModDestination) -> Value {
+    match destination {
+        sequencer::sequencer::ModDestination::Track(_) => Value::String("track".to_string()),
+        sequencer::sequencer::ModDestination::Bus(_) => Value::String("bus".to_string()),
+    }
+}
+
+fn mod_destination_id_value(destination: sequencer::sequencer::ModDestination) -> Value {
+    match destination {
+        sequencer::sequencer::ModDestination::Track(track) => Value::Number(track as f64),
+        sequencer::sequencer::ModDestination::Bus(bus) => Value::Number(bus.0 as f64),
+    }
+}
+
 pub(crate) fn selected_mod_routes_value(
     active_delete_target: Option<&ActiveDeleteTarget>,
 ) -> Value {
     match active_delete_target {
         Some(ActiveDeleteTarget::ModRoute {
             source,
-            dest,
+            destination,
             input,
         }) => list_value([map_value([
             ("source", Value::Number(*source as f64)),
-            ("dest", Value::Number(*dest as f64)),
+            ("dest-kind", mod_destination_kind_value(*destination)),
+            ("dest", mod_destination_id_value(*destination)),
             ("input", Value::Number(*input as f64)),
         ])]),
         _ => list_value(Vec::<Value>::new()),
@@ -2046,6 +2061,21 @@ pub(crate) fn build_fts_options() -> Value {
     Value::List(items)
 }
 
+pub(crate) fn mute_group_label(group: u8) -> String {
+    match group.min(8) {
+        0 => "Off".to_string(),
+        group => group.to_string(),
+    }
+}
+
+pub(crate) fn build_mute_group_options() -> Value {
+    let items = std::iter::once("Off".to_string())
+        .chain((1..=8).map(|group| group.to_string()))
+        .map(|label| Rc::new(RefCell::new(Value::String(label))))
+        .collect();
+    Value::List(items)
+}
+
 pub(crate) fn builtin_accumulator_default_limit(idx: usize) -> f32 {
     match idx {
         1 => 48.0,
@@ -2402,8 +2432,16 @@ pub(crate) fn build_mod_routes(state: &Arc<SequencerState>) -> Value {
                     Rc::new(RefCell::new(Value::Number(connection.source_track as f64))),
                 );
                 map.insert(
+                    "dest-kind".to_string(),
+                    Rc::new(RefCell::new(mod_destination_kind_value(
+                        connection.destination,
+                    ))),
+                );
+                map.insert(
                     "dest".to_string(),
-                    Rc::new(RefCell::new(Value::Number(connection.dest_track as f64))),
+                    Rc::new(RefCell::new(mod_destination_id_value(
+                        connection.destination,
+                    ))),
                 );
                 map.insert(
                     "input".to_string(),
@@ -4256,10 +4294,147 @@ pub(crate) fn build_bus_effects_value_for_selection(
     app: &ui::App,
     selected: Option<&Arc<Mutex<HashSet<usize>>>>,
 ) -> Value {
-    use sequencer::effects::ParamKind;
+    use sequencer::effects::{ParamKind, SyncDivision};
     use std::collections::HashMap;
 
     let plock_step = selected.and_then(|selected| selected.lock().unwrap().iter().copied().min());
+
+    struct UiModMetadata {
+        source_param_idx: Option<usize>,
+        depth_param_idx: usize,
+        source_slot: f32,
+        source_value_field: Option<String>,
+        depth_value: f32,
+        depth_value_field: Option<String>,
+        depth_min: f32,
+        depth_max: f32,
+        depth_unit: Option<String>,
+    }
+
+    fn is_mod_param(name: &str) -> bool {
+        name.starts_with("mod ")
+    }
+
+    fn is_generated_host_mod_param(name: &str) -> bool {
+        name.starts_with("__host_mod__")
+    }
+
+    fn is_hidden_dgen_mod_param(name: &str) -> bool {
+        name.starts_with("__dgen_mod_active__")
+    }
+
+    fn is_source_param(node_param_idx: u32) -> bool {
+        sequencer::voice_modulator::is_source_param(node_param_idx)
+    }
+
+    fn rename_source_param(name: &str) -> String {
+        sequencer::voice_modulator::source_param_display_name(name)
+    }
+
+    fn bus_slot_param_stored_value(
+        slot: Option<&sequencer::effects::EffectSlotSnapshot>,
+        desc: &sequencer::effects::EffectDescriptor,
+        param_idx: usize,
+        plock_step: Option<usize>,
+    ) -> f32 {
+        let Some(pdesc) = desc.params.get(param_idx) else {
+            return 0.0;
+        };
+        slot.and_then(|slot| {
+            plock_step
+                .and_then(|step| {
+                    slot.plocks
+                        .get(step)
+                        .and_then(|step_plocks| step_plocks.get(param_idx))
+                        .copied()
+                        .flatten()
+                })
+                .or_else(|| {
+                    if param_idx < slot.num_params as usize {
+                        slot.defaults.get(param_idx).copied()
+                    } else {
+                        None
+                    }
+                })
+        })
+        .unwrap_or(pdesc.default)
+    }
+
+    fn selected_bus_voice_mod_source_indices(
+        desc: &sequencer::effects::EffectDescriptor,
+        slot: Option<&sequencer::effects::EffectSlotSnapshot>,
+        plock_step: Option<usize>,
+    ) -> Vec<usize> {
+        sequencer::voice_modulator::selected_source_param_indices(&desc.params, |idx, param| {
+            slot.map(|_| bus_slot_param_stored_value(slot, desc, idx, plock_step))
+                .unwrap_or(param.default)
+        })
+    }
+
+    fn insert_mod_metadata(
+        pmap: &mut HashMap<String, Rc<RefCell<Value>>>,
+        targets: &[UiModMetadata],
+    ) {
+        pmap.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let target_values = targets
+            .iter()
+            .map(|meta| {
+                let mut target = HashMap::new();
+                if let Some(source_param_idx) = meta.source_param_idx {
+                    target.insert(
+                        "source-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(source_param_idx as f64))),
+                    );
+                }
+                target.insert(
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
+                );
+                target.insert(
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
+                );
+                if let Some(field) = &meta.source_value_field {
+                    target.insert(
+                        "source-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(field.clone()))),
+                    );
+                }
+                target.insert(
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
+                );
+                if let Some(field) = &meta.depth_value_field {
+                    target.insert(
+                        "depth-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(field.clone()))),
+                    );
+                }
+                target.insert(
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_min as f64))),
+                );
+                target.insert(
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_max as f64))),
+                );
+                if let Some(unit) = &meta.depth_unit {
+                    target.insert(
+                        "depth-unit".to_string(),
+                        Rc::new(RefCell::new(Value::String(unit.clone()))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(target)))
+            })
+            .collect();
+        pmap.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(Value::List(target_values))),
+        );
+    }
 
     let buses: Vec<Rc<RefCell<Value>>> = app
         .buses
@@ -4311,26 +4486,98 @@ pub(crate) fn build_bus_effects_value_for_selection(
                         );
                     }
 
+                    let slot = bus.effect_slots.get(slot_idx);
+                    let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
+                    for target in desc
+                        .instrument_modulation_targets
+                        .iter()
+                        .filter_map(|target| {
+                            let depth_desc = desc.params.get(target.depth_param_idx)?;
+                            let source_current =
+                                if let Some(source_param_idx) = target.source_param_idx {
+                                    bus_slot_param_stored_value(
+                                        slot,
+                                        desc,
+                                        source_param_idx,
+                                        plock_step,
+                                    )
+                                } else {
+                                    target.modulator_slot as f32
+                                };
+                            let depth_current = bus_slot_param_stored_value(
+                                slot,
+                                desc,
+                                target.depth_param_idx,
+                                plock_step,
+                            );
+                            Some((
+                                target.base_param_idx,
+                                UiModMetadata {
+                                    source_param_idx: target.source_param_idx,
+                                    depth_param_idx: target.depth_param_idx,
+                                    source_slot: target
+                                        .source_param_idx
+                                        .and_then(|source_param_idx| {
+                                            desc.params.get(source_param_idx).map(|source_desc| {
+                                                source_desc.stored_to_user(source_current)
+                                            })
+                                        })
+                                        .unwrap_or(source_current),
+                                    source_value_field: target.source_param_idx.map(
+                                        |source_param_idx| {
+                                            let source_desc = &desc.params[source_param_idx];
+                                            bus_effect_param_value_field(
+                                                bus_idx,
+                                                slot_idx,
+                                                source_param_idx,
+                                                &source_desc.name,
+                                            )
+                                        },
+                                    ),
+                                    depth_value: depth_desc.stored_to_user(depth_current),
+                                    depth_value_field: Some(bus_effect_param_value_field(
+                                        bus_idx,
+                                        slot_idx,
+                                        target.depth_param_idx,
+                                        &depth_desc.name,
+                                    )),
+                                    depth_min: target.depth_min,
+                                    depth_max: target.depth_max,
+                                    depth_unit: target.depth_unit.clone(),
+                                },
+                            ))
+                        })
+                    {
+                        modulation_targets
+                            .entry(target.0)
+                            .or_default()
+                            .push(target.1);
+                    }
+
                     let params: Vec<Rc<RefCell<Value>>> = desc
                         .params
                         .iter()
                         .enumerate()
-                        .map(|(param_idx, pdesc)| {
-                            let current_val = bus
-                                .effect_slots
-                                .get(slot_idx)
-                                .and_then(|slot| {
-                                    plock_step
-                                        .and_then(|step| {
-                                            slot.plocks
-                                                .get(step)
-                                                .and_then(|step_plocks| step_plocks.get(param_idx))
-                                                .copied()
-                                                .flatten()
-                                        })
-                                        .or_else(|| slot.defaults.get(param_idx).copied())
-                                })
-                                .unwrap_or(pdesc.default);
+                        .filter_map(|(param_idx, pdesc)| {
+                            if (is_source_param(pdesc.node_param_idx)
+                                && !matches!(
+                                    pdesc.host_control,
+                                    Some(sequencer::effects::HostControl::FxSidechain { .. })
+                                ))
+                                || is_mod_param(&pdesc.name)
+                                || is_generated_host_mod_param(&pdesc.name)
+                                || is_hidden_dgen_mod_param(&pdesc.name)
+                            {
+                                return None;
+                            }
+                            let current_val =
+                                bus_slot_param_stored_value(slot, desc, param_idx, plock_step);
+                            let delay_synced = if desc.name == "Delay" {
+                                slot.map(|slot| slot.defaults.get(1).copied().unwrap_or(0.0) > 0.5)
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
                             let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
                             pmap.insert(
                                 "name".to_string(),
@@ -4403,6 +4650,40 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                     }
                                 }
                                 ParamKind::Continuous { .. } => {
+                                    if desc.name == "Delay" && param_idx == 2 && delay_synced {
+                                        let labels: Vec<String> = SyncDivision::ALL
+                                            .iter()
+                                            .map(|d| d.label().to_string())
+                                            .collect();
+                                        let selected_idx = (current_val.round() as usize)
+                                            .min(labels.len().saturating_sub(1));
+                                        let selected =
+                                            labels.get(selected_idx).cloned().unwrap_or_default();
+                                        let option_values = labels
+                                            .into_iter()
+                                            .map(|label| {
+                                                Rc::new(RefCell::new(Value::String(label)))
+                                            })
+                                            .collect();
+                                        pmap.insert(
+                                            "text-value".to_string(),
+                                            Rc::new(RefCell::new(Value::String(selected))),
+                                        );
+                                        pmap.insert(
+                                            "options".to_string(),
+                                            Rc::new(RefCell::new(Value::List(option_values))),
+                                        );
+                                        pmap.insert(
+                                            "min".to_string(),
+                                            Rc::new(RefCell::new(Value::Number(0.0))),
+                                        );
+                                        pmap.insert(
+                                            "max".to_string(),
+                                            Rc::new(RefCell::new(Value::Number(
+                                                (SyncDivision::ALL.len() - 1) as f64,
+                                            ))),
+                                        );
+                                    }
                                     if param_supports_value_binding(pdesc) {
                                         insert_string_prop(
                                             &mut pmap,
@@ -4417,12 +4698,170 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                     }
                                 }
                             }
-                            Rc::new(RefCell::new(Value::Map(pmap)))
+                            if let Some(targets) = modulation_targets.get(&param_idx) {
+                                insert_mod_metadata(&mut pmap, targets);
+                            }
+                            insert_param_ui_metadata(&mut pmap, pdesc.ui_metadata.as_ref());
+                            Some(Rc::new(RefCell::new(Value::Map(pmap))))
                         })
                         .collect();
+
+                    let source_actual =
+                        selected_bus_voice_mod_source_indices(desc, slot, plock_step);
+                    let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
+                    let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
+                    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+                        let section_name =
+                            sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+                        let mut section_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+                        let mut source_param: Option<Rc<RefCell<Value>>> = None;
+                        for &param_idx in &source_actual {
+                            let Some(pdesc) = desc.params.get(param_idx) else {
+                                continue;
+                            };
+                            if sequencer::voice_modulator::slot_from_param_name(&pdesc.name)
+                                != Some(slot_number)
+                            {
+                                continue;
+                            }
+                            let current_val =
+                                bus_slot_param_stored_value(slot, desc, param_idx, plock_step);
+                            let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                            pmap.insert(
+                                "name".to_string(),
+                                Rc::new(RefCell::new(Value::String(rename_source_param(
+                                    &pdesc.name,
+                                )))),
+                            );
+                            pmap.insert(
+                                "idx".to_string(),
+                                Rc::new(RefCell::new(Value::Number(param_idx as f64))),
+                            );
+                            pmap.insert(
+                                "value".to_string(),
+                                Rc::new(RefCell::new(Value::Number(
+                                    pdesc.stored_to_user(current_val) as f64,
+                                ))),
+                            );
+                            pmap.insert(
+                                "min".to_string(),
+                                Rc::new(RefCell::new(Value::Number(
+                                    pdesc.stored_to_user(pdesc.min) as f64,
+                                ))),
+                            );
+                            pmap.insert(
+                                "max".to_string(),
+                                Rc::new(RefCell::new(Value::Number(
+                                    pdesc.stored_to_user(pdesc.max) as f64,
+                                ))),
+                            );
+                            match &pdesc.kind {
+                                ParamKind::Boolean => {
+                                    pmap.insert(
+                                        "boolean".to_string(),
+                                        Rc::new(RefCell::new(Value::Bool(true))),
+                                    );
+                                }
+                                ParamKind::Enum { labels } => {
+                                    let selected = labels
+                                        .get(current_val.round() as usize)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let option_values = labels
+                                        .iter()
+                                        .filter(|label| {
+                                            !(is_source_param(pdesc.node_param_idx)
+                                                && label.as_str() == "env")
+                                        })
+                                        .cloned()
+                                        .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                                        .collect();
+                                    pmap.insert(
+                                        "text-value".to_string(),
+                                        Rc::new(RefCell::new(Value::String(selected))),
+                                    );
+                                    pmap.insert(
+                                        "options".to_string(),
+                                        Rc::new(RefCell::new(Value::List(option_values))),
+                                    );
+                                }
+                                ParamKind::Continuous { .. } => {}
+                            }
+                            insert_string_prop(
+                                &mut pmap,
+                                "value-field",
+                                bus_effect_param_value_field(
+                                    bus_idx,
+                                    slot_idx,
+                                    param_idx,
+                                    &pdesc.name,
+                                ),
+                            );
+                            let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
+                            if sequencer::voice_modulator::source_type_name_from_param_name(
+                                &pdesc.name,
+                            ) == Some("source")
+                            {
+                                source_param = Some(param_value);
+                            } else {
+                                section_params.push(param_value);
+                            }
+                        }
+                        source_names
+                            .push(Rc::new(RefCell::new(Value::String(section_name.clone()))));
+                        let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                        section_map.insert(
+                            "name".to_string(),
+                            Rc::new(RefCell::new(Value::String(section_name))),
+                        );
+                        section_map.insert(
+                            "slot".to_string(),
+                            Rc::new(RefCell::new(Value::Number(slot_number as f64))),
+                        );
+                        if let Some(source_param) = source_param {
+                            section_map.insert("source-param".to_string(), source_param);
+                        }
+                        section_map.insert(
+                            "params".to_string(),
+                            Rc::new(RefCell::new(Value::List(section_params))),
+                        );
+                        source_sections.push(Rc::new(RefCell::new(Value::Map(section_map))));
+                    }
+
                     slot_map.insert(
                         "params".to_string(),
                         Rc::new(RefCell::new(Value::List(params))),
+                    );
+                    slot_map.insert(
+                        "modulators".to_string(),
+                        Rc::new(RefCell::new(Value::List(
+                            desc.instrument_modulators
+                                .iter()
+                                .map(|modulator| {
+                                    let mut map: HashMap<String, Rc<RefCell<Value>>> =
+                                        HashMap::new();
+                                    map.insert(
+                                        "slot".to_string(),
+                                        Rc::new(RefCell::new(Value::Number(modulator.slot as f64))),
+                                    );
+                                    map.insert(
+                                        "label".to_string(),
+                                        Rc::new(RefCell::new(Value::String(
+                                            modulator.label.clone(),
+                                        ))),
+                                    );
+                                    Rc::new(RefCell::new(Value::Map(map)))
+                                })
+                                .collect(),
+                        ))),
+                    );
+                    slot_map.insert(
+                        "source-names".to_string(),
+                        Rc::new(RefCell::new(Value::List(source_names))),
+                    );
+                    slot_map.insert(
+                        "sources".to_string(),
+                        Rc::new(RefCell::new(Value::List(source_sections))),
                     );
                     Rc::new(RefCell::new(Value::Map(slot_map)))
                 })
@@ -6034,6 +6473,11 @@ pub(crate) fn sync_track_params(
     );
     rt.set_reactive(
         "SEQ",
+        "tp-mute-group",
+        Value::String(mute_group_label(tp.get_mute_group())),
+    );
+    rt.set_reactive(
+        "SEQ",
         "tp-accumulator",
         Value::String(selected_accumulator_name(app, track)),
     );
@@ -6049,6 +6493,7 @@ pub(crate) fn sync_track_params(
     );
     rt.set_reactive("SEQ", "accumulator-options", build_accumulator_options(app));
     rt.set_reactive("SEQ", "fts-options", build_fts_options());
+    rt.set_reactive("SEQ", "mute-group-options", build_mute_group_options());
     rt.set_reactive("SEQ", "accum-mode-options", build_accum_mode_options());
     rt.set_reactive(
         "SEQ",
@@ -6626,6 +7071,10 @@ pub(crate) fn build_track_params(state: &Arc<SequencerState>, track: usize) -> V
     map.insert(
         "max-polyphony".into(),
         Rc::new(RefCell::new(Value::Number(tp.get_max_polyphony() as f64))),
+    );
+    map.insert(
+        "mute-group".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_mute_group() as f64))),
     );
     Value::Map(map)
 }
@@ -10231,6 +10680,20 @@ mod tests {
             .find_map(|child| find_layout_node_by_text(child, text))
     }
 
+    fn find_dropdown_by_value<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        value: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.widget_type == "dropdown"
+            && matches!(node.props.get("value"), Some(Value::String(current)) if current == value)
+        {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_dropdown_by_value(child, value))
+    }
+
     fn collect_layout_node_summaries(node: &eseqlisp::layout::LayoutNode, out: &mut Vec<String>) {
         let debug_name = match node.props.get("debug-name") {
             Some(Value::String(value)) => value.as_str(),
@@ -12190,11 +12653,16 @@ mod tests {
                 ("tp-accum-mode", Value::Number(0.0)),
                 ("tp-accum-limit", Value::Number(0.0)),
                 ("tp-fts", Value::Number(0.0)),
+                ("tp-mute-group", Value::String("Off".to_string())),
                 (
                     "sync-labels",
                     test_string_list(&["off", "1/16", "1/8", "1/4"]),
                 ),
                 ("fts-options", test_string_list(&["off", "up", "down"])),
+                (
+                    "mute-group-options",
+                    test_string_list(&["Off", "1", "2", "3", "4", "5", "6", "7", "8"]),
+                ),
                 ("accum-mode-options", test_string_list(&["off", "wrap"])),
                 ("accumulator-options", test_string_list(&["off", "step"])),
                 ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
@@ -13758,6 +14226,31 @@ mod tests {
             track_count, 1,
             "bottom piano roll layout should have one expanded track tile: {tile_buffers:?}"
         );
+    }
+
+    #[test]
+    fn metal_seq_track_panel_lays_out_mute_group_dropdown() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.refresh_runtime_side_effects();
+
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
+        editor.set_layout_viewport(80, 20);
+
+        let layout = editor.widget_layout().expect("track panel layout");
+        let track_params_panel = find_layout_node_by_debug_name(&layout, "track-parameters-strip")
+            .expect("track parameters panel");
+        let label =
+            find_layout_node_by_text(track_params_panel, "mute grp").expect("mute group label");
+        assert_finite_nonzero_rect(label, "mute group label");
+        let dropdown =
+            find_dropdown_by_value(track_params_panel, "Off").expect("mute group dropdown");
+        assert_finite_nonzero_rect(dropdown, "mute group dropdown");
     }
 
     #[test]
@@ -16801,22 +17294,48 @@ mod tests {
                 ),
                 (
                     "mod-routes",
-                    test_list(vec![Value::Map({
-                        let mut map = std::collections::HashMap::new();
-                        map.insert(
-                            "source".to_string(),
-                            Rc::new(RefCell::new(Value::Number(0.0))),
-                        );
-                        map.insert(
-                            "dest".to_string(),
-                            Rc::new(RefCell::new(Value::Number(1.0))),
-                        );
-                        map.insert(
-                            "input".to_string(),
-                            Rc::new(RefCell::new(Value::Number(2.0))),
-                        );
-                        map
-                    })]),
+                    test_list(vec![
+                        Value::Map({
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(
+                                "source".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map.insert(
+                                "dest-kind".to_string(),
+                                Rc::new(RefCell::new(Value::String("track".to_string()))),
+                            );
+                            map.insert(
+                                "dest".to_string(),
+                                Rc::new(RefCell::new(Value::Number(1.0))),
+                            );
+                            map.insert(
+                                "input".to_string(),
+                                Rc::new(RefCell::new(Value::Number(2.0))),
+                            );
+                            map
+                        }),
+                        Value::Map({
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(
+                                "source".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map.insert(
+                                "dest-kind".to_string(),
+                                Rc::new(RefCell::new(Value::String("bus".to_string()))),
+                            );
+                            map.insert(
+                                "dest".to_string(),
+                                Rc::new(RefCell::new(Value::Number(2.0))),
+                            );
+                            map.insert(
+                                "input".to_string(),
+                                Rc::new(RefCell::new(Value::Number(1.0))),
+                            );
+                            map
+                        }),
+                    ]),
                 ),
                 ("selected-mod-routes", test_list(vec![])),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
@@ -17018,6 +17537,11 @@ mod tests {
                     ]),
                 ),
                 ("midi-effects", test_list(vec![])),
+                ("tp-mute-group", Value::String("Off".to_string())),
+                (
+                    "mute-group-options",
+                    test_string_list(&["Off", "1", "2", "3", "4", "5", "6", "7", "8"]),
+                ),
                 (
                     "instrument-panel",
                     test_list(vec![Value::Map(test_instrument_map())]),
@@ -22372,6 +22896,95 @@ mod tests {
     }
 
     #[test]
+    fn bus_effects_value_exposes_mod_sources_for_group_headers() {
+        fn map_get<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow())
+        }
+
+        fn source_param_contains_option(source_param: &Value, label: &str) -> bool {
+            let Some(options) = map_get(source_param, "options") else {
+                return false;
+            };
+            let Value::List(options) = &*options else {
+                return false;
+            };
+            options
+                .iter()
+                .any(|option| matches!(&*option.borrow(), Value::String(option) if option == label))
+        }
+
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let mut app = test_app_with_instrument_descriptor(desc.clone());
+        let bus = app
+            .buses
+            .first_mut()
+            .expect("test app should start with the mix bus");
+        bus.effect_descriptors = vec![desc.clone()];
+        bus.effect_slots = vec![sequencer::effects::EffectSlotSnapshot::new_default(
+            &desc, 99,
+        )];
+
+        let bus_effects = build_bus_effects_value_for_selection(&app, None);
+        let Value::List(buses) = bus_effects else {
+            panic!("bus effects should be a list");
+        };
+        let mix_bus = buses.first().expect("mix bus should be present").borrow();
+        let Value::List(slots) = &*mix_bus else {
+            panic!("mix bus effects should be a slot list: {mix_bus:?}");
+        };
+        let filter = slots
+            .first()
+            .expect("bus filter slot should be present")
+            .borrow();
+
+        let sources = map_get(&filter, "sources").expect("bus effect should expose sources");
+        let Value::List(source_sections) = &*sources else {
+            panic!("bus effect sources should be a list: {sources:?}");
+        };
+        assert!(
+            !source_sections.is_empty(),
+            "bus effect sources are required so fx-has-modulators? renders the mods header button"
+        );
+        let mod1 = source_sections
+            .first()
+            .expect("mod1 bus source section should exist")
+            .borrow();
+        let source_param = map_get(&mod1, "source-param")
+            .expect("bus mod source sections should expose source-param controls");
+        assert!(
+            !source_param_contains_option(&source_param, "env"),
+            "group/bus source dropdowns should not offer envelope sources"
+        );
+
+        let params = map_get(&filter, "params").expect("bus effect should expose params");
+        let Value::List(params) = &*params else {
+            panic!("bus effect params should be a list: {params:?}");
+        };
+        let cutoff = params
+            .iter()
+            .find(|param| {
+                map_get(&param.borrow(), "name")
+                    .map(|name| matches!(&*name, Value::String(name) if name == "cutoff"))
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("cutoff param should be visible: {params:?}"))
+            .borrow();
+        assert_eq!(
+            map_get(&cutoff, "modulatable").map(|value| value.clone()),
+            Some(Value::Bool(true)),
+            "bus effect target params should retain mod metadata"
+        );
+        let targets = map_get(&cutoff, "mod-targets").expect("cutoff should expose mod targets");
+        let Value::List(targets) = &*targets else {
+            panic!("cutoff mod-targets should be a list: {targets:?}");
+        };
+        assert_eq!(targets.len(), sequencer::voice_modulator::SLOT_COUNT);
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_lays_out_modulator_panel_controls() {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -23790,6 +24403,22 @@ mod tests {
                 .find_map(|child| find_node_by_stable_key(child, key))
         }
 
+        fn find_bus_mod_input<'a>(
+            node: &'a LayoutNode,
+            bus_id: f64,
+            input: f64,
+        ) -> Option<&'a LayoutNode> {
+            if node.props.get("dest-kind") == Some(&Value::String("bus".to_string()))
+                && node.props.get("dest") == Some(&Value::Number(bus_id))
+                && node.props.get("input") == Some(&Value::Number(input))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_bus_mod_input(child, bus_id, input))
+        }
+
         fn find_descendant_button_by_text<'a>(
             node: &'a LayoutNode,
             text: &str,
@@ -23885,22 +24514,48 @@ mod tests {
                 ),
                 (
                     "mod-routes",
-                    test_list(vec![Value::Map({
-                        let mut map = std::collections::HashMap::new();
-                        map.insert(
-                            "source".to_string(),
-                            Rc::new(RefCell::new(Value::Number(0.0))),
-                        );
-                        map.insert(
-                            "dest".to_string(),
-                            Rc::new(RefCell::new(Value::Number(1.0))),
-                        );
-                        map.insert(
-                            "input".to_string(),
-                            Rc::new(RefCell::new(Value::Number(2.0))),
-                        );
-                        map
-                    })]),
+                    test_list(vec![
+                        Value::Map({
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(
+                                "source".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map.insert(
+                                "dest-kind".to_string(),
+                                Rc::new(RefCell::new(Value::String("track".to_string()))),
+                            );
+                            map.insert(
+                                "dest".to_string(),
+                                Rc::new(RefCell::new(Value::Number(1.0))),
+                            );
+                            map.insert(
+                                "input".to_string(),
+                                Rc::new(RefCell::new(Value::Number(2.0))),
+                            );
+                            map
+                        }),
+                        Value::Map({
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(
+                                "source".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map.insert(
+                                "dest-kind".to_string(),
+                                Rc::new(RefCell::new(Value::String("bus".to_string()))),
+                            );
+                            map.insert(
+                                "dest".to_string(),
+                                Rc::new(RefCell::new(Value::Number(2.0))),
+                            );
+                            map.insert(
+                                "input".to_string(),
+                                Rc::new(RefCell::new(Value::Number(1.0))),
+                            );
+                            map
+                        }),
+                    ]),
                 ),
                 ("selected-mod-routes", test_list(vec![])),
                 (
@@ -23960,6 +24615,53 @@ mod tests {
                         Value::String("Bus A".to_string()),
                         Value::String("Bus B".to_string()),
                     ]),
+                ),
+                (
+                    "bus-ids",
+                    test_list(vec![
+                        Value::Number(0.0),
+                        Value::Number(1.0),
+                        Value::Number(2.0),
+                    ]),
+                ),
+                (
+                    "groups",
+                    test_list(vec![Value::Map({
+                        let mut map = std::collections::HashMap::new();
+                        map.insert("id".to_string(), Rc::new(RefCell::new(Value::Number(7.0))));
+                        map.insert(
+                            "name".to_string(),
+                            Rc::new(RefCell::new(Value::String("Group 1".to_string()))),
+                        );
+                        map.insert(
+                            "color".to_string(),
+                            Rc::new(RefCell::new(test_list(vec![
+                                Value::Number(0.9),
+                                Value::Number(0.45),
+                                Value::Number(0.15),
+                            ]))),
+                        );
+                        map.insert(
+                            "bus-id".to_string(),
+                            Rc::new(RefCell::new(Value::Number(2.0))),
+                        );
+                        map.insert(
+                            "anchor".to_string(),
+                            Rc::new(RefCell::new(Value::Number(0.0))),
+                        );
+                        map.insert(
+                            "collapsed".to_string(),
+                            Rc::new(RefCell::new(Value::Bool(false))),
+                        );
+                        map.insert(
+                            "members".to_string(),
+                            Rc::new(RefCell::new(test_list(vec![
+                                Value::Number(0.0),
+                                Value::Number(1.0),
+                            ]))),
+                        );
+                        map
+                    })]),
                 ),
                 (
                     "bus-volumes",
@@ -24380,6 +25082,34 @@ mod tests {
         };
         assert_eq!(sources.len(), 1);
         assert_eq!(*sources[0].borrow(), Value::Number(0.0));
+        let group_ext2 = find_bus_mod_input(&layout, 2.0, 1.0).expect("group bus Ext2 mod in port");
+        assert!(
+            group_ext2.rect.width > 0.0 && group_ext2.rect.height > 0.0,
+            "group mod-port Ext2 should have finite visible rect: {:?}",
+            group_ext2.rect
+        );
+        assert_eq!(
+            group_ext2.props.get("dest-kind"),
+            Some(&Value::String("bus".to_string())),
+            "group mod input should identify a bus destination"
+        );
+        assert_eq!(
+            group_ext2.props.get("dest"),
+            Some(&Value::Number(2.0)),
+            "group mod input should carry the backing bus id"
+        );
+        let Value::List(group_sources) = group_ext2
+            .props
+            .get("connected-sources")
+            .expect("group Ext2 input should expose connected sources")
+        else {
+            panic!(
+                "group Ext2 connected-sources prop should be a list: {:?}",
+                group_ext2.props.get("connected-sources")
+            );
+        };
+        assert_eq!(group_sources.len(), 1);
+        assert_eq!(*group_sources[0].borrow(), Value::Number(0.0));
         assert!(
             mod_out.rect.width > 0.0
                 && mod_out.rect.height > 0.0

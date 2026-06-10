@@ -924,6 +924,103 @@ fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
     }
 }
 
+fn release_track_active_voices(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    release_sample: u64,
+) {
+    if track_idx >= MAX_TRACKS || track_idx >= data.state.active_track_count() {
+        return;
+    }
+    data.chop_state[track_idx].remaining = 0;
+    data.gate_off_state[track_idx].pending.clear();
+    data.active_keyboard_notes[track_idx] = [None; MAX_VOICES];
+
+    let instrument_type = InstrumentType::from_runtime_flag(
+        data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+    );
+    if instrument_type == InstrumentType::Modulator {
+        let lid = data.state.runtime.modulator_lids[track_idx].load(Ordering::Acquire);
+        if lid != 0 {
+            unsafe {
+                set_modulator_gate(data.lg.0, lid, 0.0);
+            }
+        }
+        return;
+    }
+
+    if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
+        let free_patch =
+            track_custom_run_mode(&data.state, track_idx) == CustomInstrumentRunMode::FreePatch;
+        let lids: Vec<u64> = data.custom_engine_pools[engine_id].voices
+            [..data.custom_engine_pools[engine_id].num_voices]
+            .iter()
+            .filter(|voice| voice.active && voice.assigned_track == Some(track_idx))
+            .map(|voice| voice.logical_id)
+            .collect();
+        for lid in lids {
+            if free_patch {
+                data.custom_engine_pools[engine_id].release_free_patch_voice_by_logical_id(lid);
+            } else {
+                data.custom_engine_pools[engine_id]
+                    .release_voice_by_logical_id(lid, release_sample);
+            }
+            cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
+            unsafe {
+                send_custom_note_off(data.lg.0, lid);
+            }
+        }
+        return;
+    }
+
+    let active: Vec<(u64, i32)> = data.voice_pools[track_idx].voices
+        [..data.voice_pools[track_idx].num_voices]
+        .iter()
+        .filter(|voice| voice.active && voice.logical_id != 0)
+        .map(|voice| (voice.logical_id, voice.gatepitch_id))
+        .collect();
+    for (lid, gatepitch_id) in active {
+        data.voice_pools[track_idx].release_voice_by_logical_id(lid);
+        cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
+        unsafe {
+            if gatepitch_id > 0 {
+                send_custom_note_off(data.lg.0, gatepitch_id as u64);
+            }
+            params_push_wrapper(
+                data.lg.0,
+                ParamMsg {
+                    idx: PARAM_GATE_SAMPLES,
+                    logical_id: lid,
+                    fvalue: 0.0,
+                },
+            );
+        }
+    }
+}
+
+fn enforce_mute_group_for_winning_track(
+    data: &mut AudioCallbackData,
+    winning_track: usize,
+    release_sample: u64,
+) {
+    if winning_track >= data.state.active_track_count() {
+        return;
+    }
+    let group = data.state.pattern.track_params[winning_track].get_mute_group();
+    if group == 0 {
+        return;
+    }
+    let num_tracks = data.state.active_track_count().min(MAX_TRACKS);
+    for track_idx in 0..num_tracks {
+        if track_idx == winning_track {
+            continue;
+        }
+        if data.state.pattern.track_params[track_idx].get_mute_group() == group {
+            release_track_active_voices(data, track_idx, release_sample);
+        }
+    }
+}
+
 /// Send a trigger to the sampler with the given per-step params, gate length, and explicit transpose.
 unsafe fn send_trigger(
     lg: *mut LiveGraph,
@@ -2044,6 +2141,80 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
     }
 }
 
+fn scheduled_trigger_track(event: &ScheduledEvent) -> Option<usize> {
+    match &event.kind {
+        ScheduledEventKind::ResolvedTrigger { track, .. }
+        | ScheduledEventKind::NetworkTrigger { track, .. } => Some(*track),
+        ScheduledEventKind::InstrumentParams { .. } | ScheduledEventKind::EffectParams { .. } => {
+            None
+        }
+    }
+}
+
+fn mute_group_winner_for_track(
+    track: usize,
+    group: u8,
+    batch: &[TimedEvent],
+    track_mute_groups: impl Fn(usize) -> u8,
+) -> usize {
+    batch
+        .iter()
+        .filter_map(|event| scheduled_trigger_track(&event.event))
+        .filter(|&candidate| track_mute_groups(candidate) == group)
+        .max()
+        .unwrap_or(track)
+}
+
+fn dispatch_scheduled_event_batch(
+    data: &mut AudioCallbackData,
+    batch: Vec<TimedEvent>,
+    release_sample: u64,
+) {
+    let mut winning_group_tracks = Vec::new();
+    for event in &batch {
+        let Some(track) = scheduled_trigger_track(&event.event) else {
+            continue;
+        };
+        if track >= data.state.active_track_count() {
+            continue;
+        }
+        let group = data.state.pattern.track_params[track].get_mute_group();
+        if group == 0 {
+            continue;
+        }
+        let winner = mute_group_winner_for_track(track, group, &batch, |candidate| {
+            data.state
+                .pattern
+                .track_params
+                .get(candidate)
+                .map(|params| params.get_mute_group())
+                .unwrap_or(0)
+        });
+        if winner == track && !winning_group_tracks.contains(&track) {
+            winning_group_tracks.push(track);
+        }
+    }
+
+    for &track in &winning_group_tracks {
+        enforce_mute_group_for_winning_track(data, track, release_sample);
+    }
+
+    for event in batch {
+        let dispatch = match scheduled_trigger_track(&event.event) {
+            Some(track) if track < data.state.active_track_count() => {
+                let group = data.state.pattern.track_params[track].get_mute_group();
+                group == 0 || winning_group_tracks.contains(&track)
+            }
+            Some(_) => false,
+            None => true,
+        };
+        if !dispatch {
+            continue;
+        }
+        dispatch_scheduled_event(data, event.event);
+    }
+}
+
 fn render_chunk(data: &mut AudioCallbackData, output: &mut [f32]) {
     if output.is_empty() {
         return;
@@ -2187,14 +2358,13 @@ unsafe fn dispatch_bus_effect_params_at_step(
             if !value.is_finite() {
                 continue;
             }
-            crate::audiograph::params_push_wrapper(
-                lg,
-                crate::audiograph::ParamMsg {
-                    idx,
-                    logical_id,
-                    fvalue: value,
-                },
-            );
+            let span = slot
+                .param_node_spans
+                .get(param_idx)
+                .copied()
+                .unwrap_or(1)
+                .max(1);
+            push_param_span(lg, logical_id, idx, span, value);
         }
     }
 }
@@ -3013,6 +3183,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             }
         } else {
             // Note-on: allocate voice and trigger
+            enforce_mute_group_for_winning_track(data, kt.track, block_start_sample);
             let resolved_transpose = resolve_live_keyboard_transpose(
                 &data.state,
                 data.accumulator_states[kt.track],
@@ -3574,11 +3745,23 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             if event.sample_time > dispatch_horizon {
                 break;
             }
-            let event = data.events_heap.pop().unwrap().0;
-            if event.sample_time < current_sample {
-                data.late_scheduled_events += 1;
+            let sample_time = event.sample_time;
+            let mut batch = Vec::new();
+            while let Some(std::cmp::Reverse(next)) = data.events_heap.peek() {
+                if next.event.pattern_epoch != current_pattern_epoch {
+                    let _ = data.events_heap.pop();
+                    continue;
+                }
+                if next.sample_time != sample_time {
+                    break;
+                }
+                let event = data.events_heap.pop().unwrap().0;
+                if event.sample_time < current_sample {
+                    data.late_scheduled_events += 1;
+                }
+                batch.push(event);
             }
-            dispatch_scheduled_event(data, event.event);
+            dispatch_scheduled_event_batch(data, batch, sample_time.max(current_sample));
         }
 
         let next_sample = data
@@ -3975,14 +4158,18 @@ mod tests {
     use super::{
         bus_gate_target_at, free_patch_transport_route_cache_is_fresh,
         free_patch_transport_route_target, instrument_sound_fingerprint,
-        resolve_live_keyboard_transpose, resolved_chord_transpose, sampler_warp_runtime,
-        select_output_channels, select_output_config, swing_delay_samples,
+        mute_group_winner_for_track, resolve_live_keyboard_transpose, resolved_chord_transpose,
+        sampler_warp_runtime, select_output_channels, select_output_config, swing_delay_samples,
         track_accepts_scheduled_trigger, CustomEnginePool, FreePatchTransportRouteState,
         FreePatchTransportRouteTarget, GateOffTracker, OutputDeviceConfig, OutputFormatRange,
         FALLBACK_SAMPLE_RATE,
     };
-    use crate::accumulator::AccumulatorRuntimeState;
+    use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
     use crate::analysis::{pack_ptr, OnsetTableShared};
+    use crate::scheduled_event::{
+        ScheduledChordData, ScheduledEvent, ScheduledEventKind, ScheduledInstrumentParams,
+        TimedEvent,
+    };
     use crate::sequencer::{
         CustomInstrumentRunMode, InstrumentType, SequencerState, SwingResolution,
     };
@@ -4167,6 +4354,72 @@ mod tests {
         ];
 
         assert_eq!(select_output_config(48_000, 2, ranges), None);
+    }
+
+    fn test_timed_trigger(seq: u64, track: usize) -> TimedEvent {
+        TimedEvent {
+            sample_time: 128,
+            seq,
+            event: ScheduledEvent {
+                pattern_epoch: 1,
+                sample_time: 128,
+                kind: ScheduledEventKind::ResolvedTrigger {
+                    track,
+                    step: 0,
+                    samples_per_step: 1024.0,
+                    resolved: ResolvedStep {
+                        duration: 1.0,
+                        velocity: 1.0,
+                        speed: 1.0,
+                        aux_a: 0.0,
+                        aux_b: 0.0,
+                        transpose: 0.0,
+                        pan: 0.0,
+                        chop: 1.0,
+                    },
+                    chord: ScheduledChordData {
+                        count: 0,
+                        notes: [0.0; crate::voice::MAX_VOICES],
+                        durations: [0.0; crate::voice::MAX_VOICES],
+                        delays: [0.0; crate::voice::MAX_VOICES],
+                        step_transpose: 0.0,
+                    },
+                    effect_params: Vec::new(),
+                    instrument_params: ScheduledInstrumentParams::new(),
+                    instrument_fingerprint: 0,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn mute_group_same_sample_uses_highest_track_as_winner() {
+        let batch = vec![test_timed_trigger(0, 0), test_timed_trigger(1, 2)];
+
+        let winner = mute_group_winner_for_track(0, 1, &batch, |track| match track {
+            0 | 2 => 1,
+            _ => 0,
+        });
+
+        assert_eq!(winner, 2);
+    }
+
+    #[test]
+    fn mute_group_winner_ignores_off_and_other_groups() {
+        let batch = vec![
+            test_timed_trigger(0, 0),
+            test_timed_trigger(1, 1),
+            test_timed_trigger(2, 2),
+        ];
+
+        let winner = mute_group_winner_for_track(0, 1, &batch, |track| match track {
+            0 => 1,
+            1 => 0,
+            2 => 2,
+            _ => 0,
+        });
+
+        assert_eq!(winner, 0);
     }
 
     #[test]

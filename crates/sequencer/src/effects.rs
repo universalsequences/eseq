@@ -989,7 +989,7 @@ mod tests {
         let desc = EffectDescriptor::builtin_str8_delay();
         let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
-            names,
+            &names[..16],
             vec![
                 "enabled",
                 "wet",
@@ -1009,6 +1009,14 @@ mod tests {
                 "mod phase",
             ]
         );
+        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(
+            desc.instrument_modulators
+                .iter()
+                .map(|modulator| (modulator.slot, modulator.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Mod 1"), (2, "Mod 2"), (3, "Mod 3"), (4, "Mod 4")]
+        );
         assert_eq!(desc.params[1].default, 0.5);
         assert_eq!(desc.params[3].default, 1.0);
         assert_eq!(desc.params[4].default, 6.0);
@@ -1024,6 +1032,98 @@ mod tests {
             ParamKind::Enum { labels } => assert_eq!(labels[6], "1/4"),
             other => panic!("right div should be enum, got {other:?}"),
         }
+
+        let target_names = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| {
+                (
+                    desc.params[target.base_param_idx].name.as_str(),
+                    target.modulator_slot,
+                    desc.params[target.depth_param_idx].name.as_str(),
+                    target.depth_min,
+                    target.depth_max,
+                    target.depth_unit.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target_names,
+            vec![
+                (
+                    "left time",
+                    1,
+                    "mod time slot 1 amt",
+                    -1000.0,
+                    1000.0,
+                    Some("ms")
+                ),
+                (
+                    "left time",
+                    2,
+                    "mod time slot 2 amt",
+                    -1000.0,
+                    1000.0,
+                    Some("ms")
+                ),
+                (
+                    "left time",
+                    3,
+                    "mod time slot 3 amt",
+                    -1000.0,
+                    1000.0,
+                    Some("ms")
+                ),
+                (
+                    "left time",
+                    4,
+                    "mod time slot 4 amt",
+                    -1000.0,
+                    1000.0,
+                    Some("ms")
+                ),
+                ("wet", 1, "mod wet slot 1 amt", -1.0, 1.0, Some("%")),
+                ("wet", 2, "mod wet slot 2 amt", -1.0, 1.0, Some("%")),
+                ("wet", 3, "mod wet slot 3 amt", -1.0, 1.0, Some("%")),
+                ("wet", 4, "mod wet slot 4 amt", -1.0, 1.0, Some("%")),
+                ("feedback", 1, "mod feedback slot 1 amt", -0.95, 0.95, None),
+                ("feedback", 2, "mod feedback slot 2 amt", -0.95, 0.95, None),
+                ("feedback", 3, "mod feedback slot 3 amt", -0.95, 0.95, None),
+                ("feedback", 4, "mod feedback slot 4 amt", -0.95, 0.95, None),
+                (
+                    "filter freq",
+                    1,
+                    "mod cutoff slot 1 amt",
+                    -4.0,
+                    4.0,
+                    Some("oct")
+                ),
+                (
+                    "filter freq",
+                    2,
+                    "mod cutoff slot 2 amt",
+                    -4.0,
+                    4.0,
+                    Some("oct")
+                ),
+                (
+                    "filter freq",
+                    3,
+                    "mod cutoff slot 3 amt",
+                    -4.0,
+                    4.0,
+                    Some("oct")
+                ),
+                (
+                    "filter freq",
+                    4,
+                    "mod cutoff slot 4 amt",
+                    -4.0,
+                    4.0,
+                    Some("oct")
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1671,11 +1771,16 @@ impl EffectDescriptor {
                 "1".to_string(),
             ]
         };
-        Self {
+        let mut desc = Self {
             name: "Str8 Delay".to_string(),
-            input_channels: 2,
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: Vec::new(),
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
             instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::str8_delay::STR8_DELAY_PARAM_ENABLED as u32, 1.0),
@@ -1882,7 +1987,122 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
             ],
-        }
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let time_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "left time")
+            .expect("built-in Str8 Delay left time param should exist");
+        let wet_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "wet")
+            .expect("built-in Str8 Delay wet param should exist");
+        let feedback_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "feedback")
+            .expect("built-in Str8 Delay feedback param should exist");
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "filter freq")
+            .expect("built-in Str8 Delay filter freq param should exist");
+
+        let mut append_depth_targets =
+            |base_param_idx: usize,
+             destination_name: &str,
+             depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+             depth_min: f32,
+             depth_max: f32,
+             depth_unit: Option<&str>| {
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: depth_min,
+                        max: depth_max,
+                        default: 0.0,
+                        kind: ParamKind::Continuous {
+                            unit: depth_unit.map(str::to_string),
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min,
+                            depth_max,
+                            depth_unit: depth_unit.map(str::to_string),
+                        });
+                }
+            };
+
+        append_depth_targets(
+            time_idx,
+            "time",
+            [
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_TIME_DEPTH_1,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_TIME_DEPTH_2,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_TIME_DEPTH_3,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_TIME_DEPTH_4,
+            ],
+            -1000.0,
+            1000.0,
+            Some("ms"),
+        );
+        append_depth_targets(
+            wet_idx,
+            "wet",
+            [
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_WET_DEPTH_1,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_WET_DEPTH_2,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_WET_DEPTH_3,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_WET_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            Some("%"),
+        );
+        append_depth_targets(
+            feedback_idx,
+            "feedback",
+            [
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_1,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_2,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_3,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_4,
+            ],
+            -0.95,
+            0.95,
+            None,
+        );
+        append_depth_targets(
+            cutoff_idx,
+            "cutoff",
+            [
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_1,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_2,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_3,
+                crate::str8_delay::STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_4,
+            ],
+            -4.0,
+            4.0,
+            Some("oct"),
+        );
+
+        desc
     }
 
     pub fn builtin_dj_mixer() -> Self {

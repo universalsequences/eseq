@@ -207,51 +207,72 @@
 (def mixer-v2-clear-delete-target ()
   (seq-clear-delete-target))
 
-(def mixer-v2-mod-route-exists-at (source dest input idx)
+(def mixer-v2-mod-route-dest-kind (route)
+  (let ((kind (get route :dest-kind)))
+    (if kind kind "track")))
+
+(def mixer-v2-mod-route-exists-at (source dest-kind dest input idx)
   (if (>= idx (len SEQ.mod-routes))
     false
     (let ((route (nth SEQ.mod-routes idx)))
       (or (and (= (get route :source) source)
+            (= (mixer-v2-mod-route-dest-kind route) dest-kind)
             (= (get route :dest) dest)
             (= (get route :input) input))
-        (mixer-v2-mod-route-exists-at source dest input (+ idx 1))))))
+        (mixer-v2-mod-route-exists-at source dest-kind dest input (+ idx 1))))))
 
 (def mixer-v2-mod-route-exists? (source dest input)
-  (mixer-v2-mod-route-exists-at source dest input 0))
+  (mixer-v2-mod-route-exists-at source "track" dest input 0))
 
-(def mixer-v2-mod-route-sources-at (dest input idx acc)
+(def mixer-v2-bus-mod-route-exists? (source bus-id input)
+  (mixer-v2-mod-route-exists-at source "bus" bus-id input 0))
+
+(def mixer-v2-mod-route-sources-at (dest-kind dest input idx acc)
   (if (>= idx (len SEQ.mod-routes))
     acc
     (let ((route (nth SEQ.mod-routes idx)))
-      (mixer-v2-mod-route-sources-at dest input (+ idx 1)
-        (if (and (= (get route :dest) dest)
+      (mixer-v2-mod-route-sources-at dest-kind dest input (+ idx 1)
+        (if (and (= (mixer-v2-mod-route-dest-kind route) dest-kind)
+              (= (get route :dest) dest)
               (= (get route :input) input))
           (append acc (list (get route :source)))
           acc)))))
 
 (def mixer-v2-mod-route-sources (dest input)
-  (mixer-v2-mod-route-sources-at dest input 0 (list)))
+  (mixer-v2-mod-route-sources-at "track" dest input 0 (list)))
+
+(def mixer-v2-bus-mod-route-sources (bus-id input)
+  (mixer-v2-mod-route-sources-at "bus" bus-id input 0 (list)))
 
 (def mixer-v2-clear-selected-mod-route ()
   (mixer-v2-clear-delete-target))
 
-(def mixer-v2-select-mod-route (source dest input)
+(def mixer-v2-select-mod-route-kind (source dest-kind dest input)
   (do
-    (seq-set-delete-target :mod-route (dict :source source :dest dest :input input))
-    (status (str "Selected mod route: track " (+ source 1) " out -> track " (+ dest 1) " Ext" (+ input 1)))))
+    (seq-set-delete-target :mod-route (dict :source source :dest-kind dest-kind :dest dest :input input))
+    (status (if (= dest-kind "bus")
+      (str "Selected mod route: track " (+ source 1) " out -> group Ext" (+ input 1))
+      (str "Selected mod route: track " (+ source 1) " out -> track " (+ dest 1) " Ext" (+ input 1))))))
 
-(def mixer-v2-selected-mod-sources-at (dest input idx acc)
+(def mixer-v2-select-mod-route (source dest input)
+  (mixer-v2-select-mod-route-kind source "track" dest input))
+
+(def mixer-v2-selected-mod-sources-at (dest-kind dest input idx acc)
   (if (>= idx (len SEQ.selected-mod-routes))
     acc
     (let ((route (nth SEQ.selected-mod-routes idx)))
-      (mixer-v2-selected-mod-sources-at dest input (+ idx 1)
-        (if (and (= (get route :dest) dest)
+      (mixer-v2-selected-mod-sources-at dest-kind dest input (+ idx 1)
+        (if (and (= (mixer-v2-mod-route-dest-kind route) dest-kind)
+              (= (get route :dest) dest)
               (= (get route :input) input))
           (append acc (list (get route :source)))
           acc)))))
 
 (def mixer-v2-selected-mod-sources (dest input)
-  (mixer-v2-selected-mod-sources-at dest input 0 (list)))
+  (mixer-v2-selected-mod-sources-at "track" dest input 0 (list)))
+
+(def mixer-v2-selected-bus-mod-sources (bus-id input)
+  (mixer-v2-selected-mod-sources-at "bus" bus-id input 0 (list)))
 
 (def mixer-v2-mod-out-click (track)
   (if (mixer-v2-track-mod-output? track)
@@ -276,13 +297,28 @@
       (if (mixer-v2-mod-route-exists? source track input)
         (status "Mod route already connected")
         (host-command "set-mod-route"
-          (dict :source source :dest track :input input))))))
+          (dict :source source :dest-kind "track" :dest track :input input))))))
+
+(def mixer-v2-connect-bus-mod-route (source bus-id input)
+  (do
+    (mixer-v2-clear-delete-target)
+    (if (mixer-v2-bus-mod-route-exists? source bus-id input)
+      (status "Mod route already connected")
+      (host-command "set-mod-route"
+        (dict :source source :dest-kind "bus" :dest bus-id :input input)))))
 
 (def mixer-v2-mod-in-click (track input)
   (if (< mixer-v2-pending-mod-source 0)
     false
     (do
       (mixer-v2-connect-mod-route mixer-v2-pending-mod-source track input)
+      (set! mixer-v2-pending-mod-source -1))))
+
+(def mixer-v2-bus-mod-in-click (bus-id input)
+  (if (< mixer-v2-pending-mod-source 0)
+    false
+    (do
+      (mixer-v2-connect-bus-mod-route mixer-v2-pending-mod-source bus-id input)
       (set! mixer-v2-pending-mod-source -1))))
 
 (defwidget mixer-v2-mod-port
@@ -426,6 +462,33 @@
             (mixer-v2-select-mod-route source dest input))
           :on-click |x y r| (mixer-v2-mod-in-click track input)
           :on-mouse-up |x y r| (mixer-v2-mod-in-click track input)))))))
+
+(def mixer-v2-bus-mod-port-row (bus-id)
+  (box :height 0.8 :width :fill
+    (h-stack :key (str "mixer-v2-bus-mod-ports-" bus-id)
+      :width 7.1 :height 0.1 :gap 0.42 :align :center
+      (each (range 0 4) |input|
+        (mixer-v2-mod-port
+          :key (str "mixer-v2-bus-mod-in-" bus-id "-" input)
+          :patch-port true
+          :direction :in
+          :dest-kind "bus"
+          :dest bus-id
+          :input input
+          :connected-sources (mixer-v2-bus-mod-route-sources bus-id input)
+          :selected-sources (mixer-v2-selected-bus-mod-sources bus-id input)
+          :active true
+          :pending false
+          :output false
+          :selected (> (len (mixer-v2-selected-bus-mod-sources bus-id input)) 0)
+          :on-patch-drop (lambda (source dest input)
+            (do
+              (mixer-v2-connect-bus-mod-route source bus-id input)
+              (set! mixer-v2-pending-mod-source -1)))
+          :on-cable-click (lambda (source dest input)
+            (mixer-v2-select-mod-route-kind source "bus" bus-id input))
+          :on-click |x y r| (mixer-v2-bus-mod-in-click bus-id input)
+          :on-mouse-up |x y r| (mixer-v2-bus-mod-in-click bus-id input))))))
 
 (defwidget mixer-v2-volume-triangle
   :width 1.35 :height 4.24
@@ -903,10 +966,11 @@
         ;; them selects the group's bus (mixer-v2-bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
-          (box  :width :fill :height 10.5
+          (box  :width :fill :height 9.55
             (mixer-v2-bus-meter-control bus-idx))
           (box :width 0.0 :height 0.0 :bg :transparent))
-        (box :height 0.3)
+        (mixer-v2-bus-mod-port-row (get group :bus-id))
+        (box :height 0.15)
         (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
           (h-stack :gap 0.2
             (button (if (get group :collapsed) "▸" "▾")

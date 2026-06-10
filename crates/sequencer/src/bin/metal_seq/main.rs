@@ -85,7 +85,7 @@ pub(crate) enum ActiveDeleteTarget {
     },
     ModRoute {
         source: usize,
-        dest: usize,
+        destination: sequencer::sequencer::ModDestination,
         input: usize,
     },
     FxEffect {
@@ -1523,6 +1523,21 @@ fn sync_all_expanded_step_viewports(
 
 fn sync_shared_track_collapsed(track_collapsed: &Arc<Mutex<Vec<bool>>>, app: &ui::App) {
     *track_collapsed.lock().unwrap() = app.track_collapsed.clone();
+}
+
+fn mod_route_destination_status_label(
+    app: &ui::App,
+    destination: sequencer::sequencer::ModDestination,
+) -> String {
+    match destination {
+        sequencer::sequencer::ModDestination::Track(track) => format!("track {}", track + 1),
+        sequencer::sequencer::ModDestination::Bus(bus_id) => app
+            .buses
+            .iter()
+            .find(|bus| bus.id == bus_id)
+            .map(|bus| bus.name.clone())
+            .unwrap_or_else(|| format!("bus {}", bus_id.0)),
+    }
 }
 
 struct UiInvalidationApplyCtx<'a> {
@@ -6802,6 +6817,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Value::Number(n) => Some(*n as usize),
                                 _ => None,
                             });
+                            let destination =
+                                match map.get("dest-kind").and_then(|cell| match &*cell.borrow() {
+                                    Value::String(kind) => Some(kind.clone()),
+                                    _ => None,
+                                }) {
+                                    Some(kind) if kind == "bus" => dest.map(|id| {
+                                        sequencer::sequencer::ModDestination::Bus(
+                                            sequencer::sequencer::BusId(id as u64),
+                                        )
+                                    }),
+                                    _ => dest.map(sequencer::sequencer::ModDestination::Track),
+                                };
                             let input = map
                                 .get("input")
                                 .and_then(|cell| match &*cell.borrow() {
@@ -6809,13 +6836,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => None,
                                 })
                                 .unwrap_or(0);
-                            if let (Some(source), Some(dest)) = (source, dest) {
-                                match app.graph_controller().set_mod_route(source, dest, input) {
+                            if let (Some(source), Some(destination)) = (source, destination) {
+                                match app.graph_controller().set_mod_route_to_destination(
+                                    source,
+                                    destination,
+                                    input,
+                                ) {
                                     Ok(()) => {
+                                        let dest_label =
+                                            mod_route_destination_status_label(&app, destination);
                                         let message = format!(
-                                            "Connected mod route: track {} out -> track {} Ext{}",
+                                            "Connected mod route: track {} out -> {} Ext{}",
                                             source + 1,
-                                            dest + 1,
+                                            dest_label,
                                             input + 1
                                         );
                                         eprintln!("[mod-route] {message}");
@@ -6828,9 +6861,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     Err(error) => {
                                         eprintln!(
-                                            "[mod-route] rejected connect {} -> {}: {}",
+                                            "[mod-route] rejected connect {} -> {:?}: {}",
                                             source + 1,
-                                            dest + 1,
+                                            destination,
                                             error
                                         );
                                         editor.handle_host_event(HostEvent::Status(error));
@@ -6849,6 +6882,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Value::Number(n) => Some(*n as usize),
                                 _ => None,
                             });
+                            let destination =
+                                match map.get("dest-kind").and_then(|cell| match &*cell.borrow() {
+                                    Value::String(kind) => Some(kind.clone()),
+                                    _ => None,
+                                }) {
+                                    Some(kind) if kind == "bus" => dest.map(|id| {
+                                        sequencer::sequencer::ModDestination::Bus(
+                                            sequencer::sequencer::BusId(id as u64),
+                                        )
+                                    }),
+                                    _ => dest.map(sequencer::sequencer::ModDestination::Track),
+                                };
                             let input = map
                                 .get("input")
                                 .and_then(|cell| match &*cell.borrow() {
@@ -6856,13 +6901,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => None,
                                 })
                                 .unwrap_or(0);
-                            if let (Some(source), Some(dest)) = (source, dest) {
-                                match app.graph_controller().delete_mod_route(source, dest, input) {
+                            if let (Some(source), Some(destination)) = (source, destination) {
+                                match app.graph_controller().delete_mod_route_to_destination(
+                                    source,
+                                    destination,
+                                    input,
+                                ) {
                                     Ok(()) => {
+                                        let dest_label =
+                                            mod_route_destination_status_label(&app, destination);
                                         let message = format!(
-                                            "Disconnected mod route: track {} out -> track {} Ext{}",
+                                            "Disconnected mod route: track {} out -> {} Ext{}",
                                             source + 1,
-                                            dest + 1,
+                                            dest_label,
                                             input + 1
                                         );
                                         eprintln!("[mod-route] {message}");
@@ -6875,9 +6926,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     Err(error) => {
                                         eprintln!(
-                                            "[mod-route] rejected disconnect {} -> {}: {}",
+                                            "[mod-route] rejected disconnect {} -> {:?}: {}",
                                             source + 1,
-                                            dest + 1,
+                                            destination,
                                             error
                                         );
                                         editor.handle_host_event(HostEvent::Status(error));
@@ -7612,21 +7663,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(bus_idx), Some(slot_idx), Some(param_idx), Some(value)) =
                                 (bus_idx, slot_idx, param_idx, value)
                             {
-                                if let Some(bus) = app.buses.get_mut(bus_idx) {
-                                    if let Some(slot) = bus.effect_slots.get_mut(slot_idx) {
-                                        let steps: Vec<usize> = selected_steps
-                                            .lock()
-                                            .unwrap()
-                                            .iter()
-                                            .copied()
-                                            .collect();
-                                        for step in steps {
-                                            if step < slot.plocks.len()
-                                                && param_idx < slot.plocks[step].len()
-                                            {
-                                                slot.plocks[step][param_idx] = Some(value);
-                                            }
-                                        }
+                                let steps: Vec<usize> =
+                                    selected_steps.lock().unwrap().iter().copied().collect();
+                                let mut result = Ok(());
+                                for step in steps {
+                                    if let Err(error) = app.set_bus_effect_plock(
+                                        bus_idx, slot_idx, step, param_idx, value,
+                                    ) {
+                                        result = Err(error);
+                                        break;
+                                    }
+                                }
+                                match result {
+                                    Ok(()) => {
                                         app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
                                         let rt = editor.runtime_mut();
@@ -7636,6 +7685,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error setting bus effect p-lock: {error}"),
+                                    )),
                                 }
                             }
                         }
@@ -7740,22 +7792,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(selected_idx) = app.bus_effect_param_option_index(
                                     bus_idx, slot_idx, param_idx, &label,
                                 ) {
-                                    if let Some(bus) = app.buses.get_mut(bus_idx) {
-                                        if let Some(slot) = bus.effect_slots.get_mut(slot_idx) {
-                                            let steps: Vec<usize> = selected_steps
-                                                .lock()
-                                                .unwrap()
-                                                .iter()
-                                                .copied()
-                                                .collect();
-                                            for step in steps {
-                                                if step < slot.plocks.len()
-                                                    && param_idx < slot.plocks[step].len()
-                                                {
-                                                    slot.plocks[step][param_idx] =
-                                                        Some(selected_idx as f32);
-                                                }
-                                            }
+                                    let steps: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    let mut result = Ok(());
+                                    for step in steps {
+                                        if let Err(error) = app.set_bus_effect_plock(
+                                            bus_idx,
+                                            slot_idx,
+                                            step,
+                                            param_idx,
+                                            selected_idx as f32,
+                                        ) {
+                                            result = Err(error);
+                                            break;
+                                        }
+                                    }
+                                    match result {
+                                        Ok(()) => {
                                             app.publish_bus_gate_runtime();
                                             *bus_state.lock().unwrap() = app.buses.clone();
                                             let rt = editor.runtime_mut();
@@ -7764,6 +7817,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             editor.refresh_runtime_side_effects();
                                             fx_epoch.fetch_add(1, Ordering::Relaxed);
                                             ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(error) => {
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Error setting bus effect p-lock option: {error}"
+                                            )))
                                         }
                                     }
                                 }

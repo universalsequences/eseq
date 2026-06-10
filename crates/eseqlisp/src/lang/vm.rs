@@ -4120,9 +4120,7 @@ impl VM {
                     let (result, len_read) = match cell.as_ref() {
                         Some(cell) => match &*cell.borrow() {
                             Value::List(items) => (Value::Number(items.len() as f64), true),
-                            Value::String(s) => {
-                                (Value::Number(s.chars().count() as f64), false)
-                            }
+                            Value::String(s) => (Value::Number(s.chars().count() as f64), false),
                             _ => (Value::Number(0.0), false),
                         },
                         None => (Value::Number(0.0), false),

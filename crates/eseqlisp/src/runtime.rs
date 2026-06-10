@@ -2009,7 +2009,11 @@ impl Runtime {
     ) -> ReactiveSetResult {
         // Fast path: unchanged writes skip the subscriber lookup and clones
         // below. Hot sync paths issue thousands of no-op sets per frame.
-        if !trace_ui_enabled() && self.reactive_registry.is_unchanged(namespace, field, &value) {
+        if !trace_ui_enabled()
+            && self
+                .reactive_registry
+                .is_unchanged(namespace, field, &value)
+        {
             return ReactiveSetResult {
                 changed: false,
                 effects_dirty: false,

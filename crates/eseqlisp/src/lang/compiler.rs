@@ -74,12 +74,12 @@ pub enum OpCode {
     EffectEnd(u32),
     SubtreeBegin,
     SubtreeEnd,
-    LoadReactive(usize, usize),  // namespace idx, field idx
+    LoadReactive(usize, usize),    // namespace idx, field idx
     LoadReactiveNth(usize, usize), // namespace idx, field idx; pops list index from stack
     LoadReactiveLen(usize, usize), // namespace idx, field idx; pushes list length
-    StoreReactive(usize, usize), // namespace idx, field idx
-    GetField(usize),             // pop a map, push map[strings[idx]]
-    EmitTree,                    // pop widget tree from stack and route it to the runtime
+    StoreReactive(usize, usize),   // namespace idx, field idx
+    GetField(usize),               // pop a map, push map[strings[idx]]
+    EmitTree,                      // pop widget tree from stack and route it to the runtime
     Return,
     Jump(usize),
     JumpIfFalse(usize),

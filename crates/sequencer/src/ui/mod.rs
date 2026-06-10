@@ -619,6 +619,7 @@ pub struct BusNodeIds {
     pub merge_id: i32,
     pub gate_id: i32,
     pub volume_id: i32,
+    pub mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT],
 }
 
 #[derive(Clone)]

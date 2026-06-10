@@ -2,6 +2,17 @@
 (def fx-track-bus-send-field (bus)
   (str "tp-bus-" bus "-send"))
 
+(def fx-mute-group-value (label)
+  (if (= label "1") 1
+    (if (= label "2") 2
+      (if (= label "3") 3
+        (if (= label "4") 4
+          (if (= label "5") 5
+            (if (= label "6") 6
+              (if (= label "7") 7
+                (if (= label "8") 8
+                  0)))))))))
+
 (def fx-track-bus-send-control (send)
   (v-stack :align :center :gap 0.25
     (h-stack :gap 0.25 :align :baseline
@@ -167,7 +178,16 @@
           (dropdown :value SEQ.tp-fts
             :options SEQ.fts-options
             :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
-            :width 7.0 :height 1.25 :font-size 9)))
+            :width 7.0 :height 1.25 :font-size 9))
+        (v-stack :align :center :gap 0.30
+          (label "mute grp" :font-size 8 :color :dim :bg :transparent)
+          (dropdown :value SEQ.tp-mute-group
+            :options SEQ.mute-group-options
+            :on-change (lambda (v)
+              (do
+                (cool-off-follow)
+                (seq-set-track-param :mute-group (fx-mute-group-value v))))
+            :width 5.4 :height 1.25 :font-size 9)))
       (h-stack :gap 0.55 :align :center
         (v-stack :align :center :gap 0.30
           (label "swg res" :font-size 8 :color :dim :bg :transparent)

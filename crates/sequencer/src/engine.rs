@@ -211,6 +211,22 @@ fn init_engine_parts(
         }
     }
 
+    let mix_mod_in_clip_ids = std::array::from_fn(|input| {
+        let name = CString::new(format!("mix_mod_in{}_clip", input + 1)).unwrap();
+        unsafe {
+            audiograph::add_node(
+                lg,
+                crate::track_modulator::mod_in_clip_vtable(),
+                crate::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
+                name.as_ptr(),
+                1,
+                1,
+                std::ptr::null(),
+                0,
+            )
+        }
+    });
+
     let mut default_bus_nodes = vec![BusNodeIds {
         id: BusId::MIX,
         left_id: bus_l_id,
@@ -218,6 +234,7 @@ fn init_engine_parts(
         merge_id: mix_merge_id,
         gate_id: mix_gate_id,
         volume_id: mix_volume_id,
+        mod_in_clip_ids: mix_mod_in_clip_ids,
     }];
     for (id, label) in [(BusId::DEFAULT_A, "bus_A"), (BusId::DEFAULT_B, "bus_B")] {
         let left_name = CString::new(format!("{label}_L")).unwrap();
@@ -285,6 +302,21 @@ fn init_engine_parts(
             merge_id,
             gate_id,
             volume_id,
+            mod_in_clip_ids: std::array::from_fn(|input| {
+                let name = CString::new(format!("{label}_mod_in{}_clip", input + 1)).unwrap();
+                unsafe {
+                    audiograph::add_node(
+                        lg,
+                        crate::track_modulator::mod_in_clip_vtable(),
+                        crate::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
+                        name.as_ptr(),
+                        1,
+                        1,
+                        std::ptr::null(),
+                        0,
+                    )
+                }
+            }),
         });
     }
     let bus_gate_runtime = Arc::new(Mutex::new(

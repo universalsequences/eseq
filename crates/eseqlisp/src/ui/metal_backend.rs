@@ -6858,6 +6858,8 @@ fragment float4 waveform_frag(
     struct ModPatchPort {
         direction: ModPatchPortDirection,
         track: usize,
+        dest_kind: String,
+        dest: usize,
         input: usize,
         active: bool,
         pending: bool,
@@ -6877,17 +6879,34 @@ fragment float4 waveform_frag(
         out: &mut Vec<ModPatchPort>,
     ) {
         if layout_node_bool_prop(node, "patch-port") {
-            if let (Some(direction), Some(track)) = (
-                mod_patch_port_direction(node),
-                layout_node_usize_prop(node, "track"),
-            ) {
+            if let Some(direction) = mod_patch_port_direction(node) {
+                let track = layout_node_usize_prop(node, "track");
+                let dest_kind =
+                    layout_node_string_prop(node, "dest-kind").unwrap_or_else(|| "track".into());
+                let dest = layout_node_usize_prop(node, "dest").or(track);
+                let Some(track_or_dest) = track.or(dest) else {
+                    for child in &node.children {
+                        collect_mod_patch_ports(
+                            child,
+                            col_off,
+                            row_off,
+                            cell_w,
+                            cell_h,
+                            visible_scissor,
+                            out,
+                        );
+                    }
+                    return;
+                };
                 let center_col = col_off + node.rect.col + node.rect.width * 0.5;
                 let center_row = row_off + node.rect.row + node.rect.height * 0.5;
                 let center_px = (center_col * cell_w, center_row * cell_h);
                 if center_px.0.is_finite() && center_px.1.is_finite() {
                     out.push(ModPatchPort {
                         direction,
-                        track,
+                        track: track.unwrap_or(track_or_dest),
+                        dest_kind,
+                        dest: dest.unwrap_or(track_or_dest),
                         input: layout_node_usize_prop(node, "input").unwrap_or(0),
                         active: layout_node_bool_prop(node, "active"),
                         pending: layout_node_bool_prop(node, "pending"),
@@ -6930,6 +6949,13 @@ fragment float4 waveform_frag(
             Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => {
                 Some(*value as usize)
             }
+            _ => None,
+        }
+    }
+
+    fn layout_node_string_prop(node: &LayoutNode, key: &str) -> Option<String> {
+        match node.props.get(key) {
+            Some(Value::String(value)) | Some(Value::Keyword(value)) => Some(value.clone()),
             _ => None,
         }
     }
@@ -7112,7 +7138,7 @@ fragment float4 waveform_frag(
             .filter(|port| {
                 port.direction == ModPatchPortDirection::In
                     && port.active
-                    && port.track != source_track
+                    && !(port.dest_kind == "track" && port.dest == source_track)
             })
             .min_by(|a, b| {
                 let da = squared_distance_px(a.center_px, cursor_px);

@@ -307,6 +307,10 @@ pub fn is_source_param(node_param_idx: u32) -> bool {
     node_param_idx >= MOD_PARAM_BASE
 }
 
+pub fn is_envelope_source_param_value(node_param_idx: u32, value: f32) -> bool {
+    is_source_param(node_param_idx) && source_type_label(value.round().max(0.0) as usize) == "env"
+}
+
 fn sync_labels() -> Vec<String> {
     SyncDivision::ALL
         .iter()

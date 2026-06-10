@@ -16864,6 +16864,25 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_custom_effect_modulator_inputs_are_manifest_modulators() {
+        let source = r#"
+            (def input_l (in 1 @name Left))
+            (def input_r (in 2 @name Right))
+            (def in3 (in 3 @modulator 1))
+            (param xyz @default 0.25 @min 0.0 @max 1.0 @mod true @mod-mode additive)
+            (out (* input_l (mod xyz)) 1 @name Left)
+            (out (* input_r (mod xyz)) 2 @name Right)
+        "#;
+
+        let compiled = super::compile_and_load(source, 44_100)
+            .expect("effect with unnamed modulator input should compile");
+
+        assert_eq!(compiled.manifest.modulators.len(), 1);
+        assert_eq!(compiled.manifest.modulators[0].slot, 1);
+        assert_eq!(compiled.manifest.modulators[0].input_channel, 2);
+    }
+
+    #[test]
     fn spectral_cumsum_soothe_amount_zero_full_wet_preserves_stereo_energy() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("effects/spectral-cumsum-soothe/dsp.lisp");

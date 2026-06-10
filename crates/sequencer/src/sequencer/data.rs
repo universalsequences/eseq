@@ -118,9 +118,15 @@ impl CustomInstrumentRunMode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ModDestination {
+    Track(usize),
+    Bus(BusId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ModConnection {
     pub source_track: usize,
-    pub dest_track: usize,
+    pub destination: ModDestination,
     pub dest_input: usize,
 }
 
@@ -681,6 +687,7 @@ pub struct TrackParams {
     pub accum_limit: AtomicU32,
     pub accum_mode: AtomicU32,
     pub fts_scale: AtomicU32,
+    pub mute_group: AtomicU32,
 }
 
 impl TrackParams {
@@ -709,6 +716,7 @@ impl TrackParams {
             accum_limit: AtomicU32::new(48.0_f32.to_bits()),
             accum_mode: AtomicU32::new(0),
             fts_scale: AtomicU32::new(0),
+            mute_group: AtomicU32::new(0),
         }
     }
 
@@ -893,6 +901,13 @@ impl TrackParams {
     pub fn set_fts_scale(&self, idx: usize) {
         self.fts_scale.store(idx as u32, Ordering::Relaxed);
     }
+    pub fn get_mute_group(&self) -> u8 {
+        self.mute_group.load(Ordering::Relaxed).min(8) as u8
+    }
+    pub fn set_mute_group(&self, group: u8) {
+        self.mute_group
+            .store(group.min(8) as u32, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -935,6 +950,7 @@ pub struct TrackParamsSnapshot {
     pub accum_limit: f32,
     pub accum_mode: u32,
     pub fts_scale: usize,
+    pub mute_group: u8,
 }
 
 impl Default for TrackParamsSnapshot {
@@ -963,6 +979,7 @@ impl Default for TrackParamsSnapshot {
             accum_limit: 48.0,
             accum_mode: 0,
             fts_scale: 0,
+            mute_group: 0,
         }
     }
 }

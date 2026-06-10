@@ -7,7 +7,7 @@ use crate::graph::ProjectGraphOverrides;
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    PatternSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
+    ModDestination, PatternSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
     TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
@@ -293,9 +293,19 @@ pub struct ProjectPattern {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectModConnection {
     pub source_track: usize,
-    pub dest_track: usize,
+    #[serde(default)]
+    pub destination: Option<ProjectModDestination>,
+    #[serde(default)]
+    pub dest_track: Option<usize>,
     #[serde(default)]
     pub dest_input: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id")]
+pub enum ProjectModDestination {
+    Track(usize),
+    Bus(u64),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -338,6 +348,8 @@ pub struct ProjectTrackParams {
     pub accum_mode: u32,
     #[serde(default)]
     pub fts_scale: usize,
+    #[serde(default)]
+    pub mute_group: u8,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -540,6 +552,7 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
+            mute_group: value.mute_group.min(8),
         }
     }
 }
@@ -574,6 +587,7 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
+            mute_group: value.mute_group.min(8),
         }
     }
 }
@@ -731,9 +745,14 @@ impl From<ProjectCustomInstrumentRunMode> for CustomInstrumentRunMode {
 
 impl From<ModConnection> for ProjectModConnection {
     fn from(value: ModConnection) -> Self {
+        let destination = match value.destination {
+            ModDestination::Track(track) => ProjectModDestination::Track(track),
+            ModDestination::Bus(bus) => ProjectModDestination::Bus(bus.0),
+        };
         Self {
             source_track: value.source_track,
-            dest_track: value.dest_track,
+            destination: Some(destination),
+            dest_track: None,
             dest_input: value.dest_input,
         }
     }
@@ -741,9 +760,14 @@ impl From<ModConnection> for ProjectModConnection {
 
 impl From<ProjectModConnection> for ModConnection {
     fn from(value: ProjectModConnection) -> Self {
+        let destination = match value.destination {
+            Some(ProjectModDestination::Track(track)) => ModDestination::Track(track),
+            Some(ProjectModDestination::Bus(bus)) => ModDestination::Bus(BusId(bus)),
+            None => ModDestination::Track(value.dest_track.unwrap_or(0)),
+        };
         Self {
             source_track: value.source_track,
-            dest_track: value.dest_track,
+            destination,
             dest_input: value.dest_input,
         }
     }
@@ -1346,6 +1370,7 @@ mod tests {
                         accum_limit: 24.0,
                         accum_mode: 2,
                         fts_scale: 0,
+                        mute_group: 3,
                     },
                     ProjectTrackParams {
                         gate: false,
@@ -1371,6 +1396,7 @@ mod tests {
                         accum_limit: 48.0,
                         accum_mode: 0,
                         fts_scale: 0,
+                        mute_group: 0,
                     },
                 ],
                 effect_slots: vec![vec![], vec![]],
@@ -1435,7 +1461,8 @@ mod tests {
                 ],
                 mod_connections: vec![ProjectModConnection {
                     source_track: 0,
-                    dest_track: 1,
+                    destination: Some(ProjectModDestination::Track(1)),
+                    dest_track: None,
                     dest_input: 2,
                 }],
                 neural_networks: {
@@ -1548,11 +1575,13 @@ mod tests {
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);
         assert_eq!(restored.patterns[0].track_params[0].accum_mode, 2);
+        assert_eq!(restored.patterns[0].track_params[0].mute_group, 3);
         assert_eq!(
             restored.patterns[0].mod_connections,
             vec![ProjectModConnection {
                 source_track: 0,
-                dest_track: 1,
+                destination: Some(ProjectModDestination::Track(1)),
+                dest_track: None,
                 dest_input: 2,
             }]
         );
@@ -1744,6 +1773,7 @@ mod tests {
 
         let project: ProjectFile = serde_json::from_str(json).expect("deserialize legacy project");
 
+        assert_eq!(project.patterns[0].track_params[0].mute_group, 0);
         assert!(project.patterns[0].instrument_run_modes.is_empty());
     }
 
@@ -1755,6 +1785,23 @@ mod tests {
         assert!(json.contains("\"plocks_sparse\""));
         assert!(json.contains("\"step\":0"));
         assert!(!json.contains("\"plocks\":[[null"));
+    }
+
+    #[test]
+    fn project_mod_connection_roundtrip_preserves_bus_destination() {
+        let connection = ModConnection {
+            source_track: 2,
+            destination: ModDestination::Bus(BusId(77)),
+            dest_input: 3,
+        };
+
+        let saved = ProjectModConnection::from(connection);
+        assert_eq!(
+            saved.destination,
+            Some(ProjectModDestination::Bus(77)),
+            "project route should store an explicit bus destination"
+        );
+        assert_eq!(ModConnection::from(saved), connection);
     }
 
     #[test]

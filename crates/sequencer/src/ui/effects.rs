@@ -1639,6 +1639,18 @@ impl App {
             .map(|nodes| nodes.mod_in_clip_ids)
     }
 
+    fn bus_effect_ext_mod_input_nodes(
+        &self,
+        bus_idx: usize,
+    ) -> Option<[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]> {
+        let bus_id = self.buses.get(bus_idx)?.id;
+        self.graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == bus_id)
+            .map(|nodes| nodes.mod_in_clip_ids)
+    }
+
     fn current_effect_modulator_node(&self, track: usize, slot_idx: usize) -> Option<i32> {
         self.state
             .pattern
@@ -2473,6 +2485,7 @@ impl App {
         } else {
             Some(self.create_effect_modulator_node(&desc.name, slot_id)?)
         };
+        let ext_mod_inputs = self.bus_effect_ext_mod_input_nodes(bus_idx);
         unsafe {
             if let Some(old_id) = existing {
                 lisp_host::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
@@ -2490,7 +2503,12 @@ impl App {
                 succ_inputs,
             );
             if let Some(mod_id) = modulator_node_id {
-                self.connect_effect_modulator_for_descriptor(mod_id, node_id, &desc, None)?;
+                self.connect_effect_modulator_for_descriptor(
+                    mod_id,
+                    node_id,
+                    &desc,
+                    ext_mod_inputs.as_ref(),
+                )?;
             }
         }
         let bus = self
@@ -2551,6 +2569,7 @@ impl App {
             .and_then(|bus| bus.effect_slots.get(slot_idx))
             .map(|slot| slot.modulator_node_id as i32)
             .filter(|node_id| *node_id > 0);
+        let ext_mod_inputs = self.bus_effect_ext_mod_input_nodes(bus_idx);
         let node_ids = unsafe {
             lisp_host::add_effect_to_chain_at(
                 self.graph.lg.0,
@@ -2563,7 +2582,7 @@ impl App {
                 succ_inputs,
                 existing,
                 existing_modulator,
-                None,
+                ext_mod_inputs.as_ref(),
             )
         }?;
         let desc = self.build_bus_effect_descriptor(name, &result.manifest);
@@ -2667,6 +2686,59 @@ impl App {
         param_idx: usize,
         value: f32,
     ) -> Result<(), String> {
+        let (node_id, modulator_node_id, node_param_idx, node_param_span, stored_value) = {
+            let bus = self
+                .buses
+                .get_mut(bus_idx)
+                .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+            let desc = bus
+                .effect_descriptors
+                .get(slot_idx)
+                .ok_or_else(|| format!("Bus effect slot {} out of range", slot_idx + 1))?;
+            let param = desc
+                .params
+                .get(param_idx)
+                .ok_or_else(|| format!("Bus effect param {} out of range", param_idx + 1))?;
+            if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+                return Err(
+                    "Group/bus effect modulation does not support envelope sources".to_string(),
+                );
+            }
+            let slot = bus
+                .effect_slots
+                .get_mut(slot_idx)
+                .ok_or_else(|| format!("Bus effect slot {} out of range", slot_idx + 1))?;
+            let stored_value = value.clamp(param.min, param.max);
+            if param_idx < slot.defaults.len() {
+                slot.defaults[param_idx] = stored_value;
+            }
+            (
+                slot.node_id,
+                slot.modulator_node_id,
+                param.node_param_idx,
+                param.node_param_span.max(1),
+                stored_value,
+            )
+        };
+        self.push_bus_effect_param_to_graph(
+            node_id,
+            modulator_node_id,
+            node_param_idx,
+            node_param_span,
+            stored_value,
+        );
+        self.sync_bus_effect_mod_active_defaults(bus_idx, slot_idx);
+        Ok(())
+    }
+
+    pub fn set_bus_effect_plock(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        step: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
         let bus = self
             .buses
             .get_mut(bus_idx)
@@ -2679,39 +2751,176 @@ impl App {
             .params
             .get(param_idx)
             .ok_or_else(|| format!("Bus effect param {} out of range", param_idx + 1))?;
+        if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+            return Err(
+                "Group/bus effect modulation does not support envelope sources".to_string(),
+            );
+        }
         let slot = bus
             .effect_slots
             .get_mut(slot_idx)
             .ok_or_else(|| format!("Bus effect slot {} out of range", slot_idx + 1))?;
-        if param_idx < slot.defaults.len() {
-            slot.defaults[param_idx] = value.clamp(param.min, param.max);
+        if step < slot.plocks.len() && param_idx < slot.plocks[step].len() {
+            slot.plocks[step][param_idx] = Some(value.clamp(param.min, param.max));
         }
-        let node_param_idx = param.node_param_idx;
+        self.sync_bus_effect_mod_active_plocks(bus_idx, step, slot_idx);
+        Ok(())
+    }
+
+    fn push_bus_effect_param_to_graph(
+        &self,
+        node_id: u32,
+        modulator_node_id: u32,
+        node_param_idx: u32,
+        node_param_span: u32,
+        value: f32,
+    ) {
         let Some((logical_id, node_param_idx)) =
             (if node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
-                (slot.modulator_node_id != 0).then_some((
-                    slot.modulator_node_id as u64,
+                (modulator_node_id != 0).then_some((
+                    modulator_node_id as u64,
                     node_param_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
                 ))
-            } else if slot.node_id != 0 && node_param_idx != u32::MAX {
-                Some((slot.node_id as u64, node_param_idx as u64))
+            } else if node_id != 0 && node_param_idx != u32::MAX {
+                Some((node_id as u64, node_param_idx as u64))
             } else {
                 None
             })
         else {
-            return Ok(());
+            return;
         };
         unsafe {
-            crate::audiograph::params_push_wrapper(
-                self.graph.lg.0,
-                crate::audiograph::ParamMsg {
-                    logical_id,
-                    idx: node_param_idx,
-                    fvalue: value.clamp(param.min, param.max),
-                },
+            for lane in 0..node_param_span.max(1) as u64 {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        logical_id,
+                        idx: node_param_idx + lane,
+                        fvalue: value,
+                    },
+                );
+            }
+        }
+    }
+
+    fn sync_bus_effect_mod_active_defaults(&mut self, bus_idx: usize, slot_idx: usize) {
+        let Some(updates) = self.buses.get(bus_idx).and_then(|bus| {
+            let desc = bus.effect_descriptors.get(slot_idx)?;
+            let slot = bus.effect_slots.get(slot_idx)?;
+            let mut active_indices = desc
+                .instrument_modulation_targets
+                .iter()
+                .filter_map(|target| target.active_param_idx)
+                .collect::<Vec<_>>();
+            active_indices.sort_unstable();
+            active_indices.dedup();
+            Some(
+                active_indices
+                    .into_iter()
+                    .filter_map(|active_param_idx| {
+                        let param = desc.params.get(active_param_idx)?;
+                        let active = desc
+                            .instrument_modulation_targets
+                            .iter()
+                            .filter(|target| target.active_param_idx == Some(active_param_idx))
+                            .any(|target| {
+                                slot.defaults
+                                    .get(target.depth_param_idx)
+                                    .copied()
+                                    .unwrap_or(0.0)
+                                    .abs()
+                                    > f32::EPSILON
+                            });
+                        Some((
+                            active_param_idx,
+                            param.node_param_idx,
+                            param.node_param_span.max(1),
+                            active,
+                        ))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }) else {
+            return;
+        };
+        let Some((node_id, modulator_node_id)) = self.buses.get_mut(bus_idx).and_then(|bus| {
+            let slot = bus.effect_slots.get_mut(slot_idx)?;
+            for (active_param_idx, _, _, active) in &updates {
+                if *active_param_idx < slot.defaults.len() {
+                    slot.defaults[*active_param_idx] = if *active { 1.0 } else { 0.0 };
+                }
+            }
+            Some((slot.node_id, slot.modulator_node_id))
+        }) else {
+            return;
+        };
+        for (_, node_param_idx, node_param_span, active) in updates {
+            self.push_bus_effect_param_to_graph(
+                node_id,
+                modulator_node_id,
+                node_param_idx,
+                node_param_span,
+                if active { 1.0 } else { 0.0 },
             );
         }
-        Ok(())
+    }
+
+    fn sync_bus_effect_mod_active_plocks(&mut self, bus_idx: usize, step: usize, slot_idx: usize) {
+        let Some(updates) = self.buses.get(bus_idx).and_then(|bus| {
+            let desc = bus.effect_descriptors.get(slot_idx)?;
+            let slot = bus.effect_slots.get(slot_idx)?;
+            let mut active_indices = desc
+                .instrument_modulation_targets
+                .iter()
+                .filter_map(|target| target.active_param_idx)
+                .collect::<Vec<_>>();
+            active_indices.sort_unstable();
+            active_indices.dedup();
+            Some(
+                active_indices
+                    .into_iter()
+                    .map(|active_param_idx| {
+                        let active = desc
+                            .instrument_modulation_targets
+                            .iter()
+                            .filter(|target| target.active_param_idx == Some(active_param_idx))
+                            .any(|target| {
+                                slot.plocks
+                                    .get(step)
+                                    .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
+                                    .copied()
+                                    .flatten()
+                                    .unwrap_or_else(|| {
+                                        slot.defaults
+                                            .get(target.depth_param_idx)
+                                            .copied()
+                                            .unwrap_or(0.0)
+                                    })
+                                    .abs()
+                                    > f32::EPSILON
+                            });
+                        (active_param_idx, active)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }) else {
+            return;
+        };
+        let Some(slot) = self
+            .buses
+            .get_mut(bus_idx)
+            .and_then(|bus| bus.effect_slots.get_mut(slot_idx))
+        else {
+            return;
+        };
+        if step >= slot.plocks.len() {
+            return;
+        }
+        for (active_param_idx, active) in updates {
+            if active_param_idx < slot.plocks[step].len() {
+                slot.plocks[step][active_param_idx] = Some(if active { 1.0 } else { 0.0 });
+            }
+        }
     }
 
     fn resolve_bus_effect_slot_wiring(
@@ -2781,7 +2990,13 @@ impl App {
             .params
             .get(param_idx)
             .and_then(|p| match &p.kind {
-                ParamKind::Enum { labels } => labels.iter().position(|item| item == label),
+                ParamKind::Enum { labels } => {
+                    if crate::voice_modulator::is_source_param(p.node_param_idx) && label == "env" {
+                        None
+                    } else {
+                        labels.iter().position(|item| item == label)
+                    }
+                }
                 _ => None,
             })
     }
@@ -2813,6 +3028,12 @@ impl App {
                 }
                 continue;
             }
+            if crate::voice_modulator::is_envelope_source_param_value(
+                param.node_param_idx,
+                slot.defaults[param_idx],
+            ) {
+                continue;
+            }
             let (logical_id, node_param_idx) =
                 if param.node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
                     if slot.modulator_node_id == 0 {
@@ -2826,14 +3047,16 @@ impl App {
                     (slot.node_id as u64, param.node_param_idx as u64)
                 };
             unsafe {
-                crate::audiograph::params_push_wrapper(
-                    self.graph.lg.0,
-                    crate::audiograph::ParamMsg {
-                        logical_id,
-                        idx: node_param_idx,
-                        fvalue: slot.defaults[param_idx],
-                    },
-                );
+                for lane in 0..param.node_param_span.max(1) as u64 {
+                    crate::audiograph::params_push_wrapper(
+                        self.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            logical_id,
+                            idx: node_param_idx + lane,
+                            fvalue: slot.defaults[param_idx],
+                        },
+                    );
+                }
             }
         }
     }

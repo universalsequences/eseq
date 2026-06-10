@@ -39,7 +39,23 @@ const STATE_HP_Z1_R: usize = 32;
 const STATE_HP_Z2_R: usize = 33;
 const STATE_LP_Z1_R: usize = 34;
 const STATE_LP_Z2_R: usize = 35;
-const STATE_BUF_OFFSET: usize = 36;
+const STATE_MOD_TIME_DEPTH_1: usize = 36;
+const STATE_MOD_TIME_DEPTH_2: usize = 37;
+const STATE_MOD_TIME_DEPTH_3: usize = 38;
+const STATE_MOD_TIME_DEPTH_4: usize = 39;
+const STATE_MOD_WET_DEPTH_1: usize = 40;
+const STATE_MOD_WET_DEPTH_2: usize = 41;
+const STATE_MOD_WET_DEPTH_3: usize = 42;
+const STATE_MOD_WET_DEPTH_4: usize = 43;
+const STATE_MOD_FEEDBACK_DEPTH_1: usize = 44;
+const STATE_MOD_FEEDBACK_DEPTH_2: usize = 45;
+const STATE_MOD_FEEDBACK_DEPTH_3: usize = 46;
+const STATE_MOD_FEEDBACK_DEPTH_4: usize = 47;
+const STATE_MOD_CUTOFF_DEPTH_1: usize = 48;
+const STATE_MOD_CUTOFF_DEPTH_2: usize = 49;
+const STATE_MOD_CUTOFF_DEPTH_3: usize = 50;
+const STATE_MOD_CUTOFF_DEPTH_4: usize = 51;
+const STATE_BUF_OFFSET: usize = 52;
 const STATE_BUF_R_OFFSET: usize = STATE_BUF_OFFSET + MAX_DELAY_SAMPLES;
 const STATE_END: usize = STATE_BUF_OFFSET + MAX_DELAY_SAMPLES * 2;
 
@@ -62,6 +78,22 @@ pub const STR8_DELAY_PARAM_MOD_RATE: u64 = STATE_MOD_RATE as u64;
 pub const STR8_DELAY_PARAM_MOD_AMOUNT: u64 = STATE_MOD_AMOUNT as u64;
 pub const STR8_DELAY_PARAM_MOD_PHASE: u64 = STATE_MOD_PHASE as u64;
 pub const STR8_DELAY_PARAM_BPM: u64 = STATE_BPM as u64;
+pub const STR8_DELAY_PARAM_MOD_TIME_DEPTH_1: u64 = STATE_MOD_TIME_DEPTH_1 as u64;
+pub const STR8_DELAY_PARAM_MOD_TIME_DEPTH_2: u64 = STATE_MOD_TIME_DEPTH_2 as u64;
+pub const STR8_DELAY_PARAM_MOD_TIME_DEPTH_3: u64 = STATE_MOD_TIME_DEPTH_3 as u64;
+pub const STR8_DELAY_PARAM_MOD_TIME_DEPTH_4: u64 = STATE_MOD_TIME_DEPTH_4 as u64;
+pub const STR8_DELAY_PARAM_MOD_WET_DEPTH_1: u64 = STATE_MOD_WET_DEPTH_1 as u64;
+pub const STR8_DELAY_PARAM_MOD_WET_DEPTH_2: u64 = STATE_MOD_WET_DEPTH_2 as u64;
+pub const STR8_DELAY_PARAM_MOD_WET_DEPTH_3: u64 = STATE_MOD_WET_DEPTH_3 as u64;
+pub const STR8_DELAY_PARAM_MOD_WET_DEPTH_4: u64 = STATE_MOD_WET_DEPTH_4 as u64;
+pub const STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_1: u64 = STATE_MOD_FEEDBACK_DEPTH_1 as u64;
+pub const STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_2: u64 = STATE_MOD_FEEDBACK_DEPTH_2 as u64;
+pub const STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_3: u64 = STATE_MOD_FEEDBACK_DEPTH_3 as u64;
+pub const STR8_DELAY_PARAM_MOD_FEEDBACK_DEPTH_4: u64 = STATE_MOD_FEEDBACK_DEPTH_4 as u64;
+pub const STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_1: u64 = STATE_MOD_CUTOFF_DEPTH_1 as u64;
+pub const STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_2: u64 = STATE_MOD_CUTOFF_DEPTH_2 as u64;
+pub const STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_3: u64 = STATE_MOD_CUTOFF_DEPTH_3 as u64;
+pub const STR8_DELAY_PARAM_MOD_CUTOFF_DEPTH_4: u64 = STATE_MOD_CUTOFF_DEPTH_4 as u64;
 
 const SYNC_BEATS: [f32; 11] = [
     0.125,
@@ -233,6 +265,9 @@ unsafe extern "C" fn str8_delay_init(
     *s.add(STATE_HP_Z2_R) = 0.0;
     *s.add(STATE_LP_Z1_R) = 0.0;
     *s.add(STATE_LP_Z2_R) = 0.0;
+    for i in STATE_MOD_TIME_DEPTH_1..STATE_BUF_OFFSET {
+        *s.add(i) = 0.0;
+    }
     for i in STATE_BUF_OFFSET..STATE_END {
         *s.add(i) = 0.0;
     }
@@ -249,6 +284,7 @@ unsafe extern "C" fn str8_delay_process(
     let nf = nframes as usize;
     let in0 = *inp.add(0);
     let in1 = *inp.add(1);
+    let mod_inputs = [*inp.add(2), *inp.add(3), *inp.add(4), *inp.add(5)];
     let out0 = *out.add(0);
     let out1 = *out.add(1);
 
@@ -290,6 +326,30 @@ unsafe extern "C" fn str8_delay_process(
     let target_filter_width = (*s.add(STATE_FILTER_Q)).clamp(0.25, 6.0);
     let mod_rate = (*s.add(STATE_MOD_RATE)).clamp(0.01, 20.0);
     let mod_phase_offset = *s.add(STATE_MOD_PHASE);
+    let mod_time_depths = [
+        *s.add(STATE_MOD_TIME_DEPTH_1),
+        *s.add(STATE_MOD_TIME_DEPTH_2),
+        *s.add(STATE_MOD_TIME_DEPTH_3),
+        *s.add(STATE_MOD_TIME_DEPTH_4),
+    ];
+    let mod_wet_depths = [
+        *s.add(STATE_MOD_WET_DEPTH_1),
+        *s.add(STATE_MOD_WET_DEPTH_2),
+        *s.add(STATE_MOD_WET_DEPTH_3),
+        *s.add(STATE_MOD_WET_DEPTH_4),
+    ];
+    let mod_feedback_depths = [
+        *s.add(STATE_MOD_FEEDBACK_DEPTH_1),
+        *s.add(STATE_MOD_FEEDBACK_DEPTH_2),
+        *s.add(STATE_MOD_FEEDBACK_DEPTH_3),
+        *s.add(STATE_MOD_FEEDBACK_DEPTH_4),
+    ];
+    let mod_cutoff_depths = [
+        *s.add(STATE_MOD_CUTOFF_DEPTH_1),
+        *s.add(STATE_MOD_CUTOFF_DEPTH_2),
+        *s.add(STATE_MOD_CUTOFF_DEPTH_3),
+        *s.add(STATE_MOD_CUTOFF_DEPTH_4),
+    ];
 
     let mut smooth_wet = *s.add(STATE_SMOOTH_WET);
     let mut smooth_feedback = *s.add(STATE_SMOOTH_FEEDBACK);
@@ -329,16 +389,28 @@ unsafe extern "C" fn str8_delay_process(
         let lfo_l = (lfo_phase * std::f32::consts::TAU).sin();
         let lfo_r = ((lfo_phase + mod_phase_offset).fract() * std::f32::consts::TAU).sin();
         let depth = smooth_mod_amount.clamp(0.0, 1.0) * 0.25;
-        let delay_l =
-            (smooth_left * (1.0 + lfo_l * depth)).clamp(1.0, (MAX_DELAY_SAMPLES - 1) as f32);
-        let delay_r =
-            (smooth_right * (1.0 + lfo_r * depth)).clamp(1.0, (MAX_DELAY_SAMPLES - 1) as f32);
+        let time_mod_samples = mod_inputs
+            .iter()
+            .zip(mod_time_depths)
+            .map(|(input, depth_ms)| (*input.add(i)).clamp(0.0, 1.0) * depth_ms * sr / 1000.0)
+            .sum::<f32>();
+        let delay_l = ((smooth_left + time_mod_samples) * (1.0 + lfo_l * depth))
+            .clamp(1.0, (MAX_DELAY_SAMPLES - 1) as f32);
+        let delay_r = ((smooth_right + time_mod_samples) * (1.0 + lfo_r * depth))
+            .clamp(1.0, (MAX_DELAY_SAMPLES - 1) as f32);
 
         let delayed_l = read_delay(buf_l as *const f32, write_pos_l, delay_l);
         let delayed_r = read_delay(buf_r as *const f32, write_pos_r, delay_r);
+        let cutoff_octaves = mod_inputs
+            .iter()
+            .zip(mod_cutoff_depths)
+            .map(|(input, depth)| (*input.add(i)).clamp(0.0, 1.0) * depth)
+            .sum::<f32>();
+        let mod_filter_freq =
+            (smooth_filter_freq * 2.0_f32.powf(cutoff_octaves)).clamp(20.0, 20_000.0);
         let filtered_l = passband_sample(
             delayed_l,
-            smooth_filter_freq,
+            mod_filter_freq,
             smooth_filter_width,
             sr,
             &mut hp_z1_l,
@@ -348,7 +420,7 @@ unsafe extern "C" fn str8_delay_process(
         );
         let filtered_r = passband_sample(
             delayed_r,
-            smooth_filter_freq,
+            mod_filter_freq,
             smooth_filter_width,
             sr,
             &mut hp_z1_r,
@@ -359,10 +431,21 @@ unsafe extern "C" fn str8_delay_process(
 
         let input_l = *in0.add(i);
         let input_r = *in1.add(i);
-        *buf_l.add(write_pos_l) = input_l + filtered_l * smooth_feedback;
-        *buf_r.add(write_pos_r) = input_r + filtered_r * smooth_feedback;
+        let feedback_mod = mod_inputs
+            .iter()
+            .zip(mod_feedback_depths)
+            .map(|(input, depth)| (*input.add(i)).clamp(0.0, 1.0) * depth)
+            .sum::<f32>();
+        let feedback = (smooth_feedback + feedback_mod).clamp(0.0, 0.95);
+        *buf_l.add(write_pos_l) = input_l + filtered_l * feedback;
+        *buf_r.add(write_pos_r) = input_r + filtered_r * feedback;
 
-        let wet = smooth_wet.clamp(0.0, 1.0);
+        let wet_mod = mod_inputs
+            .iter()
+            .zip(mod_wet_depths)
+            .map(|(input, depth)| (*input.add(i)).clamp(0.0, 1.0) * depth)
+            .sum::<f32>();
+        let wet = (smooth_wet + wet_mod).clamp(0.0, 1.0);
         *out0.add(i) = input_l * (1.0 - wet) + filtered_l * wet;
         *out1.add(i) = input_r * (1.0 - wet) + filtered_r * wet;
 
@@ -396,5 +479,145 @@ pub fn str8_delay_vtable() -> NodeVTable {
         init: Some(str8_delay_init),
         reset: None,
         migrate: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        str8_delay_init, str8_delay_process, STATE_ENABLED, STATE_FEEDBACK, STATE_FILTER_FREQ,
+        STATE_LEFT_SYNC, STATE_LEFT_TIME_MS, STATE_MOD_CUTOFF_DEPTH_1, STATE_MOD_FEEDBACK_DEPTH_1,
+        STATE_MOD_TIME_DEPTH_1, STATE_MOD_WET_DEPTH_1, STATE_RIGHT_SYNC, STATE_RIGHT_TIME_MS,
+        STATE_SMOOTH_FEEDBACK, STATE_SMOOTH_FILTER_FREQ, STATE_SMOOTH_LEFT_SAMPLES,
+        STATE_SMOOTH_RIGHT_SAMPLES, STATE_SMOOTH_WET, STATE_WET, STR8_DELAY_STATE_SIZE,
+    };
+    use std::ffi::c_void;
+
+    const SAMPLE_RATE: i32 = 48_000;
+
+    fn render(mut state: Vec<f32>, mod1_value: f32, frames: usize) -> Vec<f32> {
+        let mut left = vec![0.0_f32; frames];
+        left[0] = 1.0;
+        let mut right = left.clone();
+        let mut mod1 = vec![mod1_value; frames];
+        let mut mod2 = vec![0.0; frames];
+        let mut mod3 = vec![0.0; frames];
+        let mut mod4 = vec![0.0; frames];
+        let inputs = [
+            left.as_mut_ptr(),
+            right.as_mut_ptr(),
+            mod1.as_mut_ptr(),
+            mod2.as_mut_ptr(),
+            mod3.as_mut_ptr(),
+            mod4.as_mut_ptr(),
+        ];
+        let mut out_l = vec![0.0; frames];
+        let mut out_r = vec![0.0; frames];
+        let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+
+        unsafe {
+            str8_delay_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                frames as i32,
+                state.as_mut_ptr().cast::<c_void>(),
+                std::ptr::null_mut(),
+            );
+        }
+
+        out_l
+    }
+
+    fn initialized_state(delay_ms: f32, wet: f32, feedback: f32, cutoff_hz: f32) -> Vec<f32> {
+        let mut state = vec![0.0_f32; STR8_DELAY_STATE_SIZE];
+        unsafe {
+            str8_delay_init(
+                state.as_mut_ptr().cast::<c_void>(),
+                SAMPLE_RATE,
+                64,
+                std::ptr::null(),
+            );
+        }
+        let delay_samples = delay_ms * SAMPLE_RATE as f32 / 1000.0;
+        state[STATE_ENABLED] = 1.0;
+        state[STATE_LEFT_SYNC] = 0.0;
+        state[STATE_RIGHT_SYNC] = 0.0;
+        state[STATE_LEFT_TIME_MS] = delay_ms;
+        state[STATE_RIGHT_TIME_MS] = delay_ms;
+        state[STATE_WET] = wet;
+        state[STATE_SMOOTH_WET] = wet;
+        state[STATE_FEEDBACK] = feedback;
+        state[STATE_SMOOTH_FEEDBACK] = feedback;
+        state[STATE_FILTER_FREQ] = cutoff_hz;
+        state[STATE_SMOOTH_FILTER_FREQ] = cutoff_hz;
+        state[STATE_SMOOTH_LEFT_SAMPLES] = delay_samples;
+        state[STATE_SMOOTH_RIGHT_SAMPLES] = delay_samples;
+        state
+    }
+
+    fn diff_rms(a: &[f32], b: &[f32]) -> f32 {
+        let sum = a
+            .iter()
+            .zip(b.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>();
+        (sum / a.len() as f32).sqrt()
+    }
+
+    fn peak_index(samples: &[f32]) -> usize {
+        samples
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+            .map(|(idx, _)| idx)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn host_modulation_inputs_affect_str8_delay_time_wet_feedback_and_cutoff() {
+        let mut wet_state = initialized_state(1.0, 0.0, 0.0, 1140.0);
+        wet_state[STATE_MOD_WET_DEPTH_1] = 1.0;
+        let dry = render(wet_state.clone(), 0.0, 256);
+        let wet_modulated = render(wet_state, 1.0, 256);
+        assert!(
+            diff_rms(&dry, &wet_modulated) > 0.05,
+            "wet modulation should change dry/wet mix"
+        );
+
+        let mut feedback_state = initialized_state(1.0, 1.0, 0.0, 1140.0);
+        feedback_state[STATE_MOD_FEEDBACK_DEPTH_1] = 0.9;
+        let no_feedback = render(feedback_state.clone(), 0.0, 384);
+        let feedback_modulated = render(feedback_state, 1.0, 384);
+        let tail_start = 110;
+        let no_feedback_tail = no_feedback[tail_start..]
+            .iter()
+            .map(|sample| sample.abs())
+            .sum::<f32>();
+        let feedback_tail = feedback_modulated[tail_start..]
+            .iter()
+            .map(|sample| sample.abs())
+            .sum::<f32>();
+        assert!(
+            feedback_tail > no_feedback_tail + 0.01,
+            "feedback modulation should add repeat energy"
+        );
+
+        let mut time_state = initialized_state(20.0, 1.0, 0.0, 1140.0);
+        time_state[STATE_MOD_TIME_DEPTH_1] = -15.0;
+        let base_time = render(time_state.clone(), 0.0, 1400);
+        let modulated_time = render(time_state, 1.0, 1400);
+        assert!(
+            peak_index(&modulated_time) + 300 < peak_index(&base_time),
+            "negative delay-time modulation should move the echo earlier"
+        );
+
+        let mut cutoff_state = initialized_state(1.0, 1.0, 0.0, 300.0);
+        cutoff_state[STATE_MOD_CUTOFF_DEPTH_1] = 4.0;
+        let low_cutoff = render(cutoff_state.clone(), 0.0, 256);
+        let high_cutoff = render(cutoff_state, 1.0, 256);
+        assert!(
+            diff_rms(&low_cutoff, &high_cutoff) > 0.001,
+            "cutoff modulation should change filtered delay tone"
+        );
     }
 }

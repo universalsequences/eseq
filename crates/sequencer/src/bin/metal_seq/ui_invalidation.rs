@@ -192,6 +192,7 @@ pub(crate) enum TrackParamInvalidation {
     Gate,
     Poly,
     MaxPolyphony,
+    MuteGroup,
     Timebase,
     SwingResolution,
     Fts,

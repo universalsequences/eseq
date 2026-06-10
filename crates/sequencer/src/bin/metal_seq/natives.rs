@@ -125,11 +125,17 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
                 .ok_or_else(|| "mod-route delete target expects :source".to_string())?;
             let dest = value_number_field(payload, "dest")
                 .ok_or_else(|| "mod-route delete target expects :dest".to_string())?;
+            let destination = match value_string_field(payload, "dest-kind").as_deref() {
+                Some("bus") => sequencer::sequencer::ModDestination::Bus(
+                    sequencer::sequencer::BusId(dest as u64),
+                ),
+                _ => sequencer::sequencer::ModDestination::Track(dest),
+            };
             let input = value_number_field(payload, "input")
                 .ok_or_else(|| "mod-route delete target expects :input".to_string())?;
             Ok(ActiveDeleteTarget::ModRoute {
                 source,
-                dest,
+                destination,
                 input,
             })
         }
@@ -223,7 +229,7 @@ mod delete_target_tests {
             .expect("mod route target"),
             ActiveDeleteTarget::ModRoute {
                 source: 0,
-                dest: 3,
+                destination: sequencer::sequencer::ModDestination::Track(3),
                 input: 1,
             }
         );
@@ -685,6 +691,12 @@ pub(crate) fn init_runtime(
                     ),
                 ),
                 (
+                    "tp-mute-group",
+                    Value::String(mute_group_label(
+                        state.pattern.track_params[0].get_mute_group(),
+                    )),
+                ),
+                (
                     "tp-accumulator",
                     Value::String(selected_accumulator_name(&app, 0)),
                 ),
@@ -701,6 +713,7 @@ pub(crate) fn init_runtime(
                 ),
                 ("accumulator-options", build_accumulator_options(&app)),
                 ("fts-options", build_fts_options()),
+                ("mute-group-options", build_mute_group_options()),
                 ("accum-mode-options", build_accum_mode_options()),
                 (
                     "available-builtin-effects",
@@ -1069,7 +1082,7 @@ pub(crate) fn init_runtime(
             }
             ActiveDeleteTarget::ModRoute {
                 source,
-                dest,
+                destination,
                 input,
             } => {
                 if current_buffer != "*mixer*" {
@@ -1077,7 +1090,7 @@ pub(crate) fn init_runtime(
                 }
                 let route_exists = st.current_mod_connections().iter().any(|route| {
                     route.source_track == source
-                        && route.dest_track == dest
+                        && route.destination == destination
                         && route.dest_input == input
                 });
                 if !route_exists {
@@ -1093,8 +1106,22 @@ pub(crate) fn init_runtime(
                     Rc::new(RefCell::new(Value::Number(source as f64))),
                 );
                 map.insert(
+                    "dest-kind".to_string(),
+                    Rc::new(RefCell::new(match destination {
+                        sequencer::sequencer::ModDestination::Track(_) => {
+                            Value::String("track".to_string())
+                        }
+                        sequencer::sequencer::ModDestination::Bus(_) => {
+                            Value::String("bus".to_string())
+                        }
+                    })),
+                );
+                map.insert(
                     "dest".to_string(),
-                    Rc::new(RefCell::new(Value::Number(dest as f64))),
+                    Rc::new(RefCell::new(Value::Number(match destination {
+                        sequencer::sequencer::ModDestination::Track(track) => track as f64,
+                        sequencer::sequencer::ModDestination::Bus(bus) => bus.0 as f64,
+                    }))),
                 );
                 map.insert(
                     "input".to_string(),
@@ -2553,6 +2580,13 @@ pub(crate) fn init_runtime(
                 (
                     TrackParamInvalidation::MaxPolyphony,
                     Ok(Value::Number(tp.get_max_polyphony() as f64)),
+                )
+            }
+            "mute-group" => {
+                tp.set_mute_group((*val).round().clamp(0.0, 8.0) as u8);
+                (
+                    TrackParamInvalidation::MuteGroup,
+                    Ok(Value::Number(tp.get_mute_group() as f64)),
                 )
             }
             other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),
