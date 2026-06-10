@@ -1118,6 +1118,10 @@ fn sync_single_step_structural_bindings(
     if track >= app.tracks.len() || step >= MAX_STEPS {
         return false;
     }
+    // Direct per-step writes bypass the per-track lane digest used by
+    // sync_all_track_step_binding_fields; invalidate it so the next full sync
+    // rewrites this track.
+    let _ = rt.set_reactive("SEQ", &track_step_binding_rev_field(track), Value::Nil);
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
@@ -1176,6 +1180,7 @@ fn sync_track_duration_span_binding_fields(
     track: usize,
     start_step: usize,
 ) -> bool {
+    let _ = rt.set_reactive("SEQ", &track_step_binding_rev_field(track), Value::Nil);
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
@@ -1201,6 +1206,7 @@ fn sync_step_selection_bindings(
     current_track_idx: usize,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
 ) -> bool {
+    let _ = rt.set_reactive("SEQ", &track_step_binding_rev_field(track), Value::Nil);
     let selected = selected_steps.lock().unwrap();
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
@@ -4087,8 +4093,16 @@ mod tests {
 
         let started = Instant::now();
         app.graph_controller().apply_sample_ids(&sample_ids);
+        let apply_ids_only = started.elapsed();
         app.graph_controller().sync_current_pattern_mod_routes();
         apply_samples_elapsed = started.elapsed();
+        if std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "[apply-samples-trace] apply_ids_ms={:.3} mod_routes_ms={:.3}",
+                duration_ms(apply_ids_only),
+                duration_ms(apply_samples_elapsed - apply_ids_only)
+            );
+        }
 
         let started = Instant::now();
         app.push_all_restored_defaults();
@@ -4212,6 +4226,19 @@ mod tests {
             .expect("scene switch should produce an invalidation trace");
         let mut reactive_hot = trace.reactive_exec_timings.clone();
         reactive_hot.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        if std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "[project-92-scene-switch-fields] dirty_fields={:?}",
+                trace.dirty_fields
+            );
+            for (label, elapsed) in &reactive_hot {
+                eprintln!(
+                    "[project-92-scene-switch-exec] {:.3}ms {}",
+                    duration_ms(*elapsed),
+                    label
+                );
+            }
+        }
         let reactive_hot = reactive_hot
             .into_iter()
             .take(6)

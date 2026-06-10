@@ -474,6 +474,11 @@ pub struct GraphState {
     pub instrument_descriptors: Vec<EffectDescriptor>,
     pub record_armed: Vec<bool>,
     pub keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
+    /// Cross-track mod routes currently connected in the audiograph, stored as
+    /// (source mod_out node id, dest mod_in_clip node id). Owned exclusively by
+    /// GraphController::sync_current_pattern_mod_routes so scene switches can
+    /// diff instead of disconnecting every possible track pair.
+    pub applied_mod_routes: Vec<(i32, i32)>,
 }
 
 impl GraphState {
@@ -1186,6 +1191,7 @@ impl App {
                 instrument_descriptors: Vec::new(),
                 record_armed: Vec::new(),
                 keyboard_tx,
+                applied_mod_routes: Vec::new(),
             },
         };
         app.ensure_bus_pattern_bank_len(1);

@@ -206,16 +206,7 @@ impl TrackPatternData {
         state.pattern.patterns[track].store_bits(self.track_bits);
         state.pattern.neural_reset_patterns[track].store_bits(self.neural_reset_bits);
 
-        for step in 0..MAX_STEPS {
-            let params = self
-                .step_data
-                .get(step)
-                .copied()
-                .unwrap_or_else(Self::default_step_params);
-            for param in StepParam::ALL {
-                state.pattern.step_data[track].set(step, param, params[param.index()]);
-            }
-        }
+        state.pattern.step_data[track].store_rows_clamped(&self.step_data);
 
         let tp = &state.pattern.track_params[track];
         let snap = &self.track_params;
@@ -578,6 +569,42 @@ impl ProjectScenes {
 
     pub fn scene_count(&self) -> usize {
         self.scenes.len().max(1)
+    }
+
+    /// Sample ids for a scene without cloning the full track pattern data.
+    pub fn scene_sample_ids(&self, scene_idx: usize) -> Option<Vec<(i32, String, u32)>> {
+        let scene = self.scenes.get(scene_idx)?;
+        Some(
+            (0..self.track_pools.len())
+                .map(|track| {
+                    scene
+                        .cells
+                        .get(track)
+                        .copied()
+                        .flatten()
+                        .and_then(|id| self.track_pools[track].get(id))
+                        .map(|data| data.sample_id.clone())
+                        .unwrap_or((-1, String::new(), 44_100))
+                })
+                .collect(),
+        )
+    }
+
+    /// Metadata-only view of a scene (no track pattern data is cloned).
+    pub fn scene_metadata(
+        &self,
+        scene_idx: usize,
+    ) -> Option<(
+        Vec<ModConnection>,
+        Vec<ProjectNeuralNetwork>,
+        Vec<ProjectGraphOverrides>,
+    )> {
+        let scene = self.scenes.get(scene_idx)?;
+        Some((
+            scene.mod_connections.clone(),
+            scene.neural_networks.clone(),
+            scene.graph_overrides.clone(),
+        ))
     }
 
     pub fn scene_snapshot(&self, scene_idx: usize) -> Option<PatternSnapshot> {
@@ -1244,37 +1271,48 @@ impl PatternSnapshot {
         let mut inst_types = Vec::with_capacity(num_tracks);
         let mut instrument_run_modes = Vec::with_capacity(num_tracks);
 
+        let scene_trace = {
+            static SCENE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *SCENE_TRACE
+                .get_or_init(|| std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1"))
+        };
+        let mut steps_elapsed = std::time::Duration::ZERO;
+        let mut effects_elapsed = std::time::Duration::ZERO;
+        let mut midi_elapsed = std::time::Duration::ZERO;
+        let mut instrument_elapsed = std::time::Duration::ZERO;
+        let mut rest_elapsed = std::time::Duration::ZERO;
         for t in 0..num_tracks {
             track_bits.push(state.pattern.patterns[t].load_bits());
             neural_reset_bits.push(state.pattern.neural_reset_patterns[t].load_bits());
 
-            let mut steps = Vec::with_capacity(MAX_STEPS);
-            for s in 0..MAX_STEPS {
-                let mut params = [0.0f32; NUM_PARAMS];
-                for p in StepParam::ALL {
-                    params[p.index()] = state.pattern.step_data[t].get(s, p);
-                }
-                steps.push(params);
-            }
-            step_data.push(steps);
+            let started = Instant::now();
+            step_data.push(state.pattern.step_data[t].load_rows());
+            steps_elapsed += started.elapsed();
 
             let tp = &state.pattern.track_params[t];
             track_params.push(capture_track_params_snapshot(tp));
 
+            let started = Instant::now();
             let chain: Vec<EffectSlotSnapshot> = state.pattern.effect_chains[t]
                 .iter()
                 .map(EffectSlotSnapshot::capture)
                 .collect();
             effect_slots.push(chain);
+            effects_elapsed += started.elapsed();
+            let started = Instant::now();
             midi_fx_slots.push(
                 state.pattern.midi_fx_slots[t]
                     .iter()
                     .map(EffectSlotSnapshot::capture)
                     .collect(),
             );
+            midi_elapsed += started.elapsed();
+            let started = Instant::now();
             instrument_slots.push(EffectSlotSnapshot::capture(
                 &state.pattern.instrument_slots[t],
             ));
+            instrument_elapsed += started.elapsed();
+            let rest_started = Instant::now();
             instrument_base_note_offsets.push(f32::from_bits(
                 state.pattern.instrument_base_note_offsets[t].load(Ordering::Relaxed),
             ));
@@ -1316,6 +1354,17 @@ impl PatternSnapshot {
             instrument_run_modes.push(CustomInstrumentRunMode::from_runtime_flag(
                 state.pattern.instrument_run_modes[t].load(Ordering::Relaxed),
             ));
+            rest_elapsed += rest_started.elapsed();
+        }
+        if scene_trace {
+            eprintln!(
+                "[capture-trace] steps={:.3}ms effects={:.3}ms midi={:.3}ms instrument={:.3}ms rest={:.3}ms",
+                steps_elapsed.as_secs_f64() * 1000.0,
+                effects_elapsed.as_secs_f64() * 1000.0,
+                midi_elapsed.as_secs_f64() * 1000.0,
+                instrument_elapsed.as_secs_f64() * 1000.0,
+                rest_elapsed.as_secs_f64() * 1000.0,
+            );
         }
 
         Self {
@@ -2817,14 +2866,7 @@ impl SequencerState {
             .scenes
             .lock()
             .unwrap()
-            .scene_snapshot(current_pattern)
-            .map(|snapshot| {
-                (
-                    snapshot.mod_connections.clone(),
-                    snapshot.neural_networks.clone(),
-                    snapshot.graph_overrides.clone(),
-                )
-            })
+            .scene_metadata(current_pattern)
             .unwrap_or_default()
     }
 
@@ -3614,10 +3656,7 @@ impl SequencerState {
             profile.restore_tracks = started.elapsed();
 
             let started = Instant::now();
-            let sample_ids = scenes
-                .scene_snapshot(scene_idx)
-                .map(|snapshot| snapshot.sample_ids)
-                .unwrap_or_default();
+            let sample_ids = scenes.scene_sample_ids(scene_idx).unwrap_or_default();
             profile.collect_sample_ids = started.elapsed();
 
             let started = Instant::now();

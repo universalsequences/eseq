@@ -564,6 +564,43 @@ impl StepData {
         let idx = step * NUM_PARAMS + param.index();
         self.data[idx].store(clamped.to_bits(), Ordering::Relaxed);
     }
+
+    /// Bulk read of every step's params in one flat pass (avoids the
+    /// per-element call overhead of `get` in hot snapshot paths).
+    pub fn load_rows(&self) -> Vec<[f32; NUM_PARAMS]> {
+        let mut rows = Vec::with_capacity(MAX_STEPS);
+        for step in 0..MAX_STEPS {
+            let base = step * NUM_PARAMS;
+            let mut params = [0.0f32; NUM_PARAMS];
+            for (offset, slot) in params.iter_mut().enumerate() {
+                *slot = f32::from_bits(self.data[base + offset].load(Ordering::Relaxed));
+            }
+            rows.push(params);
+        }
+        rows
+    }
+
+    /// Bulk write of step params with the same clamping as `set`. Missing
+    /// rows are filled with parameter defaults.
+    pub fn store_rows_clamped(&self, rows: &[[f32; NUM_PARAMS]]) {
+        for step in 0..MAX_STEPS {
+            let base = step * NUM_PARAMS;
+            match rows.get(step) {
+                Some(params) => {
+                    for (offset, param) in StepParam::ALL.iter().enumerate() {
+                        let clamped = params[offset].clamp(param.min(), param.max());
+                        self.data[base + offset].store(clamped.to_bits(), Ordering::Relaxed);
+                    }
+                }
+                None => {
+                    for (offset, param) in StepParam::ALL.iter().enumerate() {
+                        self.data[base + offset]
+                            .store(param.default_value().to_bits(), Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub struct TrackPattern {

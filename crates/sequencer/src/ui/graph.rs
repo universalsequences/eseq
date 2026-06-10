@@ -230,29 +230,8 @@ impl App {
 impl GraphController<'_> {
     pub fn sync_current_pattern_mod_routes(&mut self) {
         let track_count = self.app.tracks.len();
-        for source in 0..track_count {
-            let Some(source_nodes) = self.app.graph.track_node_ids.get(source) else {
-                continue;
-            };
-            for dest in 0..track_count {
-                let Some(dest_nodes) = self.app.graph.track_node_ids.get(dest) else {
-                    continue;
-                };
-                for input in 0..EXT_MOD_INPUT_COUNT {
-                    unsafe {
-                        crate::audiograph::graph_disconnect(
-                            self.app.graph.lg.0,
-                            source_nodes.mod_out_id,
-                            0,
-                            dest_nodes.mod_in_clip_ids[input],
-                            0,
-                        );
-                    }
-                }
-            }
-        }
-
         let connections = self.app.state.current_mod_connections();
+        let mut desired: Vec<(i32, i32)> = Vec::with_capacity(connections.len());
         for connection in connections {
             if connection.source_track >= track_count
                 || connection.dest_track >= track_count
@@ -268,11 +247,45 @@ impl GraphController<'_> {
             let source_id = self.app.graph.track_node_ids[connection.source_track].mod_out_id;
             let dest_id = self.app.graph.track_node_ids[connection.dest_track].mod_in_clip_ids
                 [connection.dest_input];
-            unsafe {
-                crate::audiograph::graph_connect(self.app.graph.lg.0, source_id, 0, dest_id, 0);
+            if !desired.contains(&(source_id, dest_id)) {
+                desired.push((source_id, dest_id));
             }
         }
-        self.app.state.publish_scheduler_snapshot();
+
+        let applied = std::mem::take(&mut self.app.graph.applied_mod_routes);
+        let mut changed = false;
+        for (source_id, dest_id) in &applied {
+            if !desired.contains(&(*source_id, *dest_id)) {
+                changed = true;
+                unsafe {
+                    crate::audiograph::graph_disconnect(
+                        self.app.graph.lg.0,
+                        *source_id,
+                        0,
+                        *dest_id,
+                        0,
+                    );
+                }
+            }
+        }
+        for (source_id, dest_id) in &desired {
+            if !applied.contains(&(*source_id, *dest_id)) {
+                changed = true;
+                unsafe {
+                    crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        *source_id,
+                        0,
+                        *dest_id,
+                        0,
+                    );
+                }
+            }
+        }
+        self.app.graph.applied_mod_routes = desired;
+        if changed {
+            self.app.state.publish_scheduler_snapshot();
+        }
     }
 
     pub fn set_mod_route(
@@ -1088,6 +1101,7 @@ impl GraphController<'_> {
         self.app.track_collapsed.clear();
         self.app.sampler_paths.clear();
         self.app.graph.track_node_ids.clear();
+        self.app.graph.applied_mod_routes.clear();
         self.app.graph.track_buffer_ids.clear();
         self.app.graph.track_sample_rates.clear();
         self.app.graph.track_voice_lids.clear();

@@ -75,6 +75,8 @@ pub enum OpCode {
     SubtreeBegin,
     SubtreeEnd,
     LoadReactive(usize, usize),  // namespace idx, field idx
+    LoadReactiveNth(usize, usize), // namespace idx, field idx; pops list index from stack
+    LoadReactiveLen(usize, usize), // namespace idx, field idx; pushes list length
     StoreReactive(usize, usize), // namespace idx, field idx
     GetField(usize),             // pop a map, push map[strings[idx]]
     EmitTree,                    // pop widget tree from stack and route it to the runtime
@@ -1047,6 +1049,15 @@ impl Compiler {
         self.scopes.last_mut().unwrap()
     }
 
+    /// True when `name` resolves to a local or upvalue somewhere in the scope
+    /// chain (i.e. a builtin like `nth` has been shadowed). Read-only variant
+    /// of resolve_symbol that never captures upvalues.
+    fn symbol_is_locally_bound(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| {
+            scope.symbols.iter().any(|s| s == name) || scope.upvalues.iter().any(|s| s == name)
+        })
+    }
+
     fn resolve_symbol(&mut self, name: &str) -> SymbolResolution {
         if let Some(idx) = self.get_scope_mut().symbols.iter().position(|s| *s == name) {
             return SymbolResolution::Local(idx);
@@ -1322,6 +1333,35 @@ impl Compiler {
                     return Err(CompilerError::InvalidArg);
                 }
                 return self.compile_expression(&expanded);
+            }
+        }
+
+        // Indexed reactive reads — (nth SEQ.field idx) and (len SEQ.field) —
+        // compile to dedicated opcodes so the reactive DAG can record
+        // per-index dependencies and skip subtree reruns when untouched
+        // elements of a list change.
+        if let Some(Expression::Symbol(head)) = list.first()
+            && ((head == "nth" && list.len() == 3) || (head == "len" && list.len() == 2))
+            && let Some(Expression::Symbol(target)) = list.get(1)
+            && !self.symbol_is_locally_bound(head)
+            && !self.derived_bindings.contains_key(target)
+        {
+            let parts: Vec<&str> = target.splitn(2, '.').collect();
+            if parts.len() == 2
+                && !parts[0].is_empty()
+                && !parts[1].is_empty()
+                && !parts[1].contains('.')
+                && self.reactive_namespaces.contains(parts[0])
+            {
+                let ns_idx = self.use_string_constant(parts[0]);
+                let field_idx = self.use_string_constant(parts[1]);
+                if head == "nth" {
+                    self.compile_expression(&list[2])?;
+                    self.emit(OpCode::LoadReactiveNth(ns_idx, field_idx));
+                } else {
+                    self.emit(OpCode::LoadReactiveLen(ns_idx, field_idx));
+                }
+                return Ok(());
             }
         }
 

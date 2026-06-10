@@ -2863,6 +2863,9 @@ pub struct SlotPLockData {
     id_logical_ids: Vec<AtomicU64>,
     id_node_param_indices: Vec<AtomicU32>,
     max_params: usize,
+    /// Number of non-NaN cells. Lets snapshot capture/restore and per-step
+    /// plock masks take O(1) fast paths for the common plock-free slot.
+    plock_count: AtomicU32,
 }
 
 impl SlotPLockData {
@@ -2877,11 +2880,40 @@ impl SlotPLockData {
             id_logical_ids,
             id_node_param_indices,
             max_params,
+            plock_count: AtomicU32::new(0),
         }
     }
 
     fn index(&self, step: usize, param_idx: usize) -> usize {
         step * self.max_params + param_idx
+    }
+
+    pub fn has_any_plock(&self) -> bool {
+        self.plock_count.load(Ordering::Relaxed) > 0
+    }
+
+    /// Adjust plock_count for a cell transitioning between old and new bits.
+    fn note_cell_transition(&self, old_bits: u32, new_bits: u32) {
+        let old_set = !f32::from_bits(old_bits).is_nan();
+        let new_set = !f32::from_bits(new_bits).is_nan();
+        if !old_set && new_set {
+            self.plock_count.fetch_add(1, Ordering::Relaxed);
+        } else if old_set && !new_set {
+            self.plock_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Clear every plock value and param id.
+    pub fn clear_all(&self) {
+        if !self.has_any_plock() {
+            return;
+        }
+        for idx in 0..self.data.len() {
+            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        }
+        self.plock_count.store(0, Ordering::Relaxed);
     }
 
     pub fn get(&self, step: usize, param_idx: usize) -> Option<f32> {
@@ -2901,7 +2933,8 @@ impl SlotPLockData {
     pub fn set(&self, step: usize, param_idx: usize, val: f32) {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
-            self.data[idx].store(val.to_bits(), Ordering::Relaxed);
+            let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+            self.note_cell_transition(old_bits, val.to_bits());
             self.id_logical_ids[idx].store(0, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
@@ -2910,7 +2943,8 @@ impl SlotPLockData {
     pub fn set_with_id(&self, step: usize, param_idx: usize, val: f32, param_id: ParamNodeId) {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
-            self.data[idx].store(val.to_bits(), Ordering::Relaxed);
+            let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+            self.note_cell_transition(old_bits, val.to_bits());
             self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
         }
@@ -2937,7 +2971,8 @@ impl SlotPLockData {
         for p in 0..self.max_params {
             let idx = self.index(step, p);
             if idx < self.data.len() {
-                self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+                let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+                self.note_cell_transition(old_bits, NAN_BITS);
                 self.id_logical_ids[idx].store(0, Ordering::Relaxed);
                 self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
             }
@@ -2947,13 +2982,145 @@ impl SlotPLockData {
     pub fn clear_param(&self, step: usize, param_idx: usize) {
         let idx = self.index(step, param_idx);
         if idx < self.data.len() {
-            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
+            let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+            self.note_cell_transition(old_bits, NAN_BITS);
             self.id_logical_ids[idx].store(0, Ordering::Relaxed);
             self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
+    /// Bulk capture of all step plock values and param ids in one flat pass.
+    /// Equivalent to calling `get`/`get_id` for every (step, param) but
+    /// without the per-element call overhead.
+    pub fn capture_rows(
+        &self,
+        num_params: usize,
+    ) -> (Vec<Vec<Option<f32>>>, Vec<Vec<Option<ParamNodeId>>>) {
+        if !self.has_any_plock() {
+            // No plocks anywhere: empty row sets denote "all None" and avoid
+            // allocating MAX_STEPS * num_params Options per slot.
+            return (Vec::new(), Vec::new());
+        }
+        let read_np = num_params.min(self.max_params);
+        let mut plocks = Vec::with_capacity(MAX_STEPS);
+        let mut plock_param_ids = Vec::with_capacity(MAX_STEPS);
+        for step in 0..MAX_STEPS {
+            let base = step * self.max_params;
+            let mut row = vec![None; num_params];
+            let mut id_row = vec![None; num_params];
+            for p in 0..read_np {
+                let idx = base + p;
+                let val = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+                if !val.is_nan() {
+                    row[p] = Some(val);
+                }
+                let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+                if logical_id != 0 {
+                    let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+                    if node_param_idx != u32::MAX {
+                        id_row[p] = Some(ParamNodeId {
+                            logical_id,
+                            node_param_idx,
+                        });
+                    }
+                }
+            }
+            plocks.push(row);
+            plock_param_ids.push(id_row);
+        }
+        (plocks, plock_param_ids)
+    }
+
+    /// Bulk restore matching EffectSlotSnapshot::restore semantics: values
+    /// present in the snapshot rows are written (with their param ids), `None`
+    /// entries are cleared, and steps/params missing from the snapshot are
+    /// left untouched.
+    pub fn restore_rows(
+        &self,
+        plocks: &[Vec<Option<f32>>],
+        plock_param_ids: &[Vec<Option<ParamNodeId>>],
+        num_params: usize,
+    ) {
+        if plocks.is_empty() {
+            // Empty row set means "no plocks at all" (see capture_rows).
+            self.clear_all();
+            return;
+        }
+        // Cheap pre-scan over the snapshot (plain memory, no atomics): when the
+        // snapshot carries no values and the slot has none either, the cell
+        // writes below would all be no-ops.
+        if !self.has_any_plock()
+            && !plocks
+                .iter()
+                .any(|row| row.iter().any(|value| value.is_some()))
+        {
+            return;
+        }
+        let np = num_params.min(self.max_params);
+        for (step, row) in plocks.iter().enumerate().take(MAX_STEPS) {
+            let base = step * self.max_params;
+            let id_row = plock_param_ids.get(step);
+            for p in 0..np.min(row.len()) {
+                let idx = base + p;
+                match row[p] {
+                    Some(val) => {
+                        let param_id = id_row.and_then(|ids| ids.get(p)).copied().flatten();
+                        let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+                        self.note_cell_transition(old_bits, val.to_bits());
+                        match param_id {
+                            Some(param_id) => {
+                                self.id_logical_ids[idx]
+                                    .store(param_id.logical_id, Ordering::Relaxed);
+                                self.id_node_param_indices[idx]
+                                    .store(param_id.node_param_idx, Ordering::Relaxed);
+                            }
+                            None => {
+                                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    None => {
+                        let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+                        self.note_cell_transition(old_bits, NAN_BITS);
+                        self.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                        self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+
+    /// OR a per-step "has any plock" bit into `mask` (one bit per step) in a
+    /// single flat scan.
+    pub fn or_step_plock_mask(&self, mask: &mut [u64; MAX_STEPS / 64], num_params: usize) {
+        if !self.has_any_plock() {
+            return;
+        }
+        let np = num_params.min(self.max_params);
+        if np == 0 {
+            return;
+        }
+        for step in 0..MAX_STEPS {
+            let word = step / 64;
+            let bit = 1u64 << (step % 64);
+            if mask[word] & bit != 0 {
+                continue;
+            }
+            let base = step * self.max_params;
+            for p in 0..np {
+                if !f32::from_bits(self.data[base + p].load(Ordering::Relaxed)).is_nan() {
+                    mask[word] |= bit;
+                    break;
+                }
+            }
+        }
+    }
+
     pub fn step_has_any_plock(&self, step: usize, num_params: usize) -> bool {
+        if !self.has_any_plock() {
+            return false;
+        }
         for p in 0..num_params.min(self.max_params) {
             let idx = self.index(step, p);
             if idx < self.data.len() {
@@ -3412,18 +3579,7 @@ impl EffectSlotSnapshot {
             defaults.push(slot.defaults.get(i));
         }
 
-        let mut plocks = Vec::with_capacity(MAX_STEPS);
-        let mut plock_param_ids = Vec::with_capacity(MAX_STEPS);
-        for s in 0..MAX_STEPS {
-            let mut step_plocks = Vec::with_capacity(np);
-            let mut step_param_ids = Vec::with_capacity(np);
-            for i in 0..np {
-                step_plocks.push(slot.plocks.get(s, i));
-                step_param_ids.push(slot.plocks.get_id(s, i));
-            }
-            plocks.push(step_plocks);
-            plock_param_ids.push(step_param_ids);
-        }
+        let (plocks, plock_param_ids) = slot.plocks.capture_rows(np);
 
         let mut param_node_indices = Vec::with_capacity(np);
         let mut param_node_spans = Vec::with_capacity(np);
@@ -3474,30 +3630,8 @@ impl EffectSlotSnapshot {
             }
         }
 
-        for s in 0..MAX_STEPS {
-            if s < self.plocks.len() {
-                for i in 0..np {
-                    if i < self.plocks[s].len() {
-                        match self.plocks[s][i] {
-                            Some(val) => {
-                                if let Some(param_id) = self
-                                    .plock_param_ids
-                                    .get(s)
-                                    .and_then(|step| step.get(i))
-                                    .copied()
-                                    .flatten()
-                                {
-                                    slot.plocks.set_with_id(s, i, val, param_id);
-                                } else {
-                                    slot.plocks.set(s, i, val);
-                                }
-                            }
-                            None => slot.plocks.clear_param(s, i),
-                        }
-                    }
-                }
-            }
-        }
+        slot.plocks
+            .restore_rows(&self.plocks, &self.plock_param_ids, np);
     }
 
     pub fn new_default(desc: &EffectDescriptor, node_id: u32) -> Self {

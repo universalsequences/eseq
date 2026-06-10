@@ -158,6 +158,15 @@ impl ReactiveRegistry {
         Value::Map(map)
     }
 
+    /// Cheap unchanged check used by Runtime::set_reactive to skip the full
+    /// set pipeline (subscriber lookup, value clones) for no-op writes.
+    pub fn is_unchanged(&self, namespace: &str, field: &str, value: &Value) -> bool {
+        self.namespaces
+            .get(namespace)
+            .and_then(|namespace_entry| namespace_entry.fields.get(field))
+            .is_some_and(|current| current == value)
+    }
+
     pub fn set(
         &mut self,
         namespace: &str,
@@ -177,6 +186,18 @@ impl ReactiveRegistry {
                 registered: true,
                 ..ReactiveSetOutcome::default()
             };
+        }
+        {
+            static SCENE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *SCENE_TRACE
+                .get_or_init(|| std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1"))
+            {
+                eprintln!(
+                    "[reactive-set-changed] {namespace}.{field} changed_indices={:?} had_previous={}",
+                    changed_indices,
+                    previous.is_some()
+                );
+            }
         }
 
         let key = ReactiveBindingKey::field(namespace, field);

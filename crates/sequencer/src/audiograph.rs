@@ -167,12 +167,15 @@ extern "C" {
 static PARAM_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 fn param_trace_enabled() -> bool {
-    std::env::var("ESEQ_AUDIOGRAPH_PARAM_TRACE")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0"
-        })
-        .unwrap_or(false)
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ESEQ_AUDIOGRAPH_PARAM_TRACE")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0"
+            })
+            .unwrap_or(false)
+    })
 }
 
 pub unsafe fn params_push_wrapper(lg: *mut LiveGraph, m: ParamMsg) -> bool {

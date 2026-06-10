@@ -5590,6 +5590,8 @@ impl Editor {
     }
 
     pub fn refresh_runtime_side_effects(&mut self) {
+        let scene_trace = std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1");
+        let trace_started = std::time::Instant::now();
         self.last_layout_refresh_timings.clear();
         self.lisp_bindings = self.default_lisp_bindings.clone();
         self.lisp_bindings.extend(self.runtime.lisp_bindings());
@@ -5787,8 +5789,19 @@ impl Editor {
             }
         }
 
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] pre-widget-trees={:.3}ms",
+                trace_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let widget_trees_started = std::time::Instant::now();
         let mut inactive_buffers_to_refresh: HashMap<usize, Option<Vec<u64>>> = HashMap::new();
         let mut active_subtree_replacements = Vec::<EditorSubtreeReplacement>::new();
+        let mut inactive_subtree_batches: HashMap<
+            usize,
+            (Option<BufferId>, Vec<(u64, Value, Vec<ReactiveFieldKey>)>),
+        > = HashMap::new();
         self.sync_active_buffer_widget_snapshot_from_runtime();
         for pending in self.runtime.take_pending_buffer_widget_trees() {
             match pending {
@@ -5944,56 +5957,138 @@ impl Editor {
                         });
                         continue;
                     }
-                    let replaced = {
-                        let buffer = &mut self.buffers[buffer_idx];
-                        let replaced = buffer.replace_widget_subtree(
-                            subtree_root_id,
-                            tree.deep_clone(),
-                            source_buffer_id,
-                            reactive_dependencies.clone(),
-                        );
-                        if replaced {
-                            buffer.view_mode = ViewMode::UiOnly;
-                        }
-                        replaced
-                    };
-                    if replaced {
-                        inactive_buffers_to_refresh
-                            .entry(buffer_idx)
-                            .or_insert_with(|| Some(Vec::new()))
-                            .as_mut()
-                            .map(|roots| roots.push(subtree_root_id));
-                    }
-                    self.trace_ui_tree_event_with(
-                        &buffer_name,
-                        if replaced {
-                            "applied-subtree"
-                        } else {
-                            "missed-subtree"
-                        },
-                        || {
-                            format!(
-                                "root={subtree_root_id} after={}",
-                                debug_widget_tree_summary(
-                                    self.buffers[buffer_idx].widget_tree.as_ref()
-                                )
-                            )
-                        },
-                    );
+                    // Pending subtree trees are freshly built by
+                    // annotate_widget_tree_stable_ids, so they can be adopted
+                    // without another deep clone. Batch them per buffer so the
+                    // snapshot merge/re-index runs once per buffer instead of
+                    // once per subtree.
+                    inactive_subtree_batches
+                        .entry(buffer_idx)
+                        .or_insert_with(|| (source_buffer_id, Vec::new()))
+                        .1
+                        .push((subtree_root_id, tree, reactive_dependencies));
                 }
             }
         }
+        for (buffer_idx, (source_buffer_id, replacements)) in inactive_subtree_batches {
+            let buffer_name = self.buffers[buffer_idx].name.clone();
+            let batch_applied = {
+                let buffer = &mut self.buffers[buffer_idx];
+                buffer.replace_widget_subtrees(&replacements, source_buffer_id)
+            };
+            if batch_applied {
+                self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
+                if let Some(roots) = inactive_buffers_to_refresh
+                    .entry(buffer_idx)
+                    .or_insert_with(|| Some(Vec::new()))
+                    .as_mut()
+                {
+                    roots.extend(replacements.iter().map(|(root_id, _, _)| *root_id));
+                }
+                self.trace_ui_tree_event_with(&buffer_name, "applied-subtree", || {
+                    format!(
+                        "roots={:?} after={}",
+                        replacements
+                            .iter()
+                            .map(|(root_id, _, _)| *root_id)
+                            .collect::<Vec<_>>(),
+                        debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref())
+                    )
+                });
+                continue;
+            }
+            // The batch merge is all-or-nothing; fall back to applying each
+            // subtree individually so valid roots still land when one is stale.
+            for (subtree_root_id, tree, reactive_dependencies) in replacements {
+                let replaced = {
+                    let buffer = &mut self.buffers[buffer_idx];
+                    let replaced = buffer.replace_widget_subtree(
+                        subtree_root_id,
+                        tree,
+                        source_buffer_id,
+                        reactive_dependencies,
+                    );
+                    if replaced {
+                        buffer.view_mode = ViewMode::UiOnly;
+                    }
+                    replaced
+                };
+                if replaced {
+                    inactive_buffers_to_refresh
+                        .entry(buffer_idx)
+                        .or_insert_with(|| Some(Vec::new()))
+                        .as_mut()
+                        .map(|roots| roots.push(subtree_root_id));
+                }
+                self.trace_ui_tree_event_with(
+                    &buffer_name,
+                    if replaced {
+                        "applied-subtree"
+                    } else {
+                        "missed-subtree"
+                    },
+                    || {
+                        format!(
+                            "root={subtree_root_id} after={}",
+                            debug_widget_tree_summary(
+                                self.buffers[buffer_idx].widget_tree.as_ref()
+                            )
+                        )
+                    },
+                );
+            }
+        }
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] pending-loop={:.3}ms",
+                widget_trees_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let flush_started = std::time::Instant::now();
         self.flush_active_subtree_replacements(&mut active_subtree_replacements);
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] active-flush={:.3}ms",
+                flush_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let inactive_started = std::time::Instant::now();
         for (buffer_idx, subtree_roots) in inactive_buffers_to_refresh {
             match subtree_roots {
                 Some(subtree_roots) => {
+                    let per_buffer = std::time::Instant::now();
+                    let root_count = subtree_roots.len();
                     self.refresh_inactive_tile_layouts_for_buffer_subtrees(
                         buffer_idx,
                         &subtree_roots,
                     );
+                    if scene_trace {
+                        eprintln!(
+                            "[side-effects-trace] inactive-subtrees buffer={} roots={} {:.3}ms",
+                            self.buffers[buffer_idx].name,
+                            root_count,
+                            per_buffer.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
                 }
-                None => self.refresh_inactive_tile_layouts_for_buffer(buffer_idx),
+                None => {
+                    let per_buffer = std::time::Instant::now();
+                    self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+                    if scene_trace {
+                        eprintln!(
+                            "[side-effects-trace] inactive-full buffer={} {:.3}ms",
+                            self.buffers[buffer_idx].name,
+                            per_buffer.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                }
             }
+        }
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] inactive-refresh-total={:.3}ms",
+                inactive_started.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         // Process set-buffer-mode-for (after buffer creation so targets exist)
@@ -6143,6 +6238,12 @@ impl Editor {
         }
 
         self.sync_layout_to_active_leaf();
+        if scene_trace {
+            eprintln!(
+                "[side-effects-trace] total={:.3}ms",
+                trace_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
     }
 
     /// Choose which buffer to display in a newly split tile.

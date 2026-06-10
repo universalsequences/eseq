@@ -246,6 +246,55 @@ struct RegisteredSubtreeOwner {
     callable: Value,
 }
 
+/// Sentinel "index" recorded when a dependent reads a list's length.
+pub const LEN_READ_SENTINEL: usize = usize::MAX;
+
+/// How a reactive source value changed, used to filter dependents by ReadScope.
+enum ValueChange {
+    Full,
+    Indices(Vec<usize>),
+}
+
+/// None = unchanged. For list-to-list updates, reports the changed element
+/// indices (plus LEN_READ_SENTINEL when the length changed); any other shape
+/// change is Full.
+fn value_change_scope(old: &Value, new: &Value) -> Option<ValueChange> {
+    match (old, new) {
+        (Value::List(old_items), Value::List(new_items)) => {
+            let mut changed = Vec::new();
+            let max_len = old_items.len().max(new_items.len());
+            for index in 0..max_len {
+                match (old_items.get(index), new_items.get(index)) {
+                    (Some(old_item), Some(new_item)) => {
+                        if *old_item.borrow() != *new_item.borrow() {
+                            changed.push(index);
+                        }
+                    }
+                    _ => changed.push(index),
+                }
+            }
+            if old_items.len() != new_items.len() {
+                changed.push(LEN_READ_SENTINEL);
+            }
+            if changed.is_empty() {
+                None
+            } else {
+                Some(ValueChange::Indices(changed))
+            }
+        }
+        _ => (old != new).then_some(ValueChange::Full),
+    }
+}
+
+/// Which part of a reactive source a dependent actually read.
+#[derive(Clone, Debug)]
+pub enum ReadScope {
+    /// Whole-value read: any change re-dirties the dependent.
+    All,
+    /// Indexed reads of a list source (may include LEN_READ_SENTINEL).
+    Indices(HashSet<usize>),
+}
+
 #[derive(Clone)]
 pub struct ReactiveDag {
     pub nodes: HashMap<NodeId, ReactiveNode>,
@@ -254,6 +303,15 @@ pub struct ReactiveDag {
     pub next_id: NodeId,
     namespace_field_sources: HashMap<String, HashMap<String, NodeId>>,
     local_state_sources: HashMap<String, NodeId>,
+    /// dependent -> set of dependencies (reverse of `edges`); lets
+    /// clear_dependencies_of/remove_node avoid scanning every edge.
+    reverse_edges: HashMap<NodeId, HashSet<NodeId>>,
+    /// subtree_root_id -> effect node owning that subtree.
+    subtree_effects: HashMap<u64, NodeId>,
+    /// parent subtree_root_id -> effect nodes registered under it.
+    subtree_children: HashMap<u64, HashSet<NodeId>>,
+    /// dependent -> (dependency -> read scope). Missing entries mean All.
+    dependency_scopes: HashMap<NodeId, HashMap<NodeId, ReadScope>>,
 }
 
 pub fn format_lisp_value(value: &Value) -> String {
@@ -1683,6 +1741,10 @@ impl ReactiveDag {
             next_id: 0,
             namespace_field_sources: HashMap::new(),
             local_state_sources: HashMap::new(),
+            reverse_edges: HashMap::new(),
+            subtree_effects: HashMap::new(),
+            subtree_children: HashMap::new(),
+            dependency_scopes: HashMap::new(),
         }
     }
 
@@ -1692,40 +1754,104 @@ impl ReactiveDag {
         id
     }
 
+    fn index_subtree_effect_node(&mut self, node: &ReactiveNode) {
+        let ReactiveNode::Effect {
+            id,
+            subtree_root_id,
+            parent_subtree_root_id,
+            ..
+        } = node
+        else {
+            return;
+        };
+        if let Some(root_id) = subtree_root_id {
+            self.subtree_effects.insert(*root_id, *id);
+        }
+        if let (Some(_), Some(parent_root_id)) = (subtree_root_id, parent_subtree_root_id) {
+            self.subtree_children
+                .entry(*parent_root_id)
+                .or_default()
+                .insert(*id);
+        }
+    }
+
+    fn unindex_subtree_effect_node(&mut self, node: &ReactiveNode) {
+        let ReactiveNode::Effect {
+            id,
+            subtree_root_id,
+            parent_subtree_root_id,
+            ..
+        } = node
+        else {
+            return;
+        };
+        if let Some(root_id) = subtree_root_id
+            && self.subtree_effects.get(root_id) == Some(id)
+        {
+            self.subtree_effects.remove(root_id);
+        }
+        if let Some(parent_root_id) = parent_subtree_root_id
+            && let Some(children) = self.subtree_children.get_mut(parent_root_id)
+        {
+            children.remove(id);
+            if children.is_empty() {
+                self.subtree_children.remove(parent_root_id);
+            }
+        }
+    }
+
     pub fn add_node(&mut self, node: ReactiveNode) {
         let id = match &node {
             ReactiveNode::Source { id, .. }
             | ReactiveNode::Derived { id, .. }
             | ReactiveNode::Effect { id, .. } => *id,
         };
-        if let Some(source) = self.nodes.get(&id).and_then(|node| match node {
-            ReactiveNode::Source { source, .. } => Some(source.clone()),
-            _ => None,
-        }) {
-            self.unindex_source_node(&source, id);
+        if let Some(existing) = self.nodes.remove(&id) {
+            if let ReactiveNode::Source { source, .. } = &existing {
+                self.unindex_source_node(source, id);
+            }
+            self.unindex_subtree_effect_node(&existing);
         }
         if let ReactiveNode::Source { source, .. } = &node {
             self.index_source_node(source, id);
         }
+        self.index_subtree_effect_node(&node);
         self.nodes.insert(id, node);
     }
 
     pub fn remove_node(&mut self, id: NodeId) {
-        if let Some(ReactiveNode::Source { source, .. }) = self.nodes.remove(&id) {
-            self.unindex_source_node(&source, id);
+        if let Some(node) = self.nodes.remove(&id) {
+            if let ReactiveNode::Source { source, .. } = &node {
+                self.unindex_source_node(source, id);
+            }
+            self.unindex_subtree_effect_node(&node);
         }
-        self.edges.remove(&id);
         self.dirty_nodes.remove(&id);
-        for dependents in self.edges.values_mut() {
-            dependents.remove(&id);
+        self.dependency_scopes.remove(&id);
+        if let Some(dependents) = self.edges.remove(&id) {
+            for dependent in dependents {
+                if let Some(dependencies) = self.reverse_edges.get_mut(&dependent) {
+                    dependencies.remove(&id);
+                }
+                if let Some(scopes) = self.dependency_scopes.get_mut(&dependent) {
+                    scopes.remove(&id);
+                }
+            }
         }
-        for node in self.nodes.values_mut() {
-            match node {
-                ReactiveNode::Source { dependents, .. }
-                | ReactiveNode::Derived { dependents, .. } => {
+        if let Some(dependencies) = self.reverse_edges.remove(&id) {
+            for dependency in dependencies {
+                if let Some(dependents) = self.edges.get_mut(&dependency) {
                     dependents.remove(&id);
                 }
-                ReactiveNode::Effect { .. } => {}
+                if let Some(node) = self.nodes.get_mut(&dependency) {
+                    match node {
+                        ReactiveNode::Source { dependents, .. }
+                        | ReactiveNode::Derived { dependents, .. } => {
+                            dependents.remove(&id);
+                        }
+                        ReactiveNode::Effect { .. } => {}
+                    }
+                }
             }
         }
     }
@@ -1816,10 +1942,15 @@ impl ReactiveDag {
     }
 
     pub fn clear_dependencies_of(&mut self, id: NodeId) {
-        for (dependency, dependents) in self.edges.iter_mut() {
-            if dependents.remove(&id)
-                && let Some(node) = self.nodes.get_mut(dependency)
-            {
+        self.dependency_scopes.remove(&id);
+        let Some(dependencies) = self.reverse_edges.remove(&id) else {
+            return;
+        };
+        for dependency in dependencies {
+            if let Some(dependents) = self.edges.get_mut(&dependency) {
+                dependents.remove(&id);
+            }
+            if let Some(node) = self.nodes.get_mut(&dependency) {
                 match node {
                     ReactiveNode::Source { dependents, .. }
                     | ReactiveNode::Derived { dependents, .. } => {
@@ -1832,7 +1963,36 @@ impl ReactiveDag {
     }
 
     pub fn add_edge(&mut self, dependency: NodeId, dependent: NodeId) {
+        self.insert_edge(dependency, dependent);
+        // Whole-value read: overrides any narrower indexed scope.
+        self.dependency_scopes
+            .entry(dependent)
+            .or_default()
+            .insert(dependency, ReadScope::All);
+    }
+
+    /// Record a dependency that only read `index` of a list source (or its
+    /// length, via LEN_READ_SENTINEL). Whole-value reads of the same source
+    /// keep their `All` scope.
+    pub fn add_edge_indexed(&mut self, dependency: NodeId, dependent: NodeId, index: usize) {
+        self.insert_edge(dependency, dependent);
+        let scope = self
+            .dependency_scopes
+            .entry(dependent)
+            .or_default()
+            .entry(dependency)
+            .or_insert_with(|| ReadScope::Indices(HashSet::new()));
+        if let ReadScope::Indices(indices) = scope {
+            indices.insert(index);
+        }
+    }
+
+    fn insert_edge(&mut self, dependency: NodeId, dependent: NodeId) {
         self.edges.entry(dependency).or_default().insert(dependent);
+        self.reverse_edges
+            .entry(dependent)
+            .or_default()
+            .insert(dependency);
         if let Some(node) = self.nodes.get_mut(&dependency) {
             match node {
                 ReactiveNode::Source { dependents, .. }
@@ -1842,6 +2002,42 @@ impl ReactiveDag {
                 ReactiveNode::Effect { .. } => {}
             }
         }
+    }
+
+    pub fn dependency_scope(&self, dependent: NodeId, dependency: NodeId) -> Option<&ReadScope> {
+        self.dependency_scopes
+            .get(&dependent)
+            .and_then(|scopes| scopes.get(&dependency))
+    }
+
+    /// Depth of a subtree root in the registered subtree tree (roots with no
+    /// parent are depth 0). Used to order dirty subtree effects ancestors-first.
+    pub fn subtree_depth(&self, subtree_root_id: u64) -> usize {
+        let mut depth = 0usize;
+        let mut current = subtree_root_id;
+        let mut guard = 0usize;
+        while guard < 256 {
+            let parent = self
+                .subtree_effects
+                .get(&current)
+                .and_then(|node_id| self.nodes.get(node_id))
+                .and_then(|node| match node {
+                    ReactiveNode::Effect {
+                        parent_subtree_root_id,
+                        ..
+                    } => *parent_subtree_root_id,
+                    _ => None,
+                });
+            match parent {
+                Some(parent_root_id) if parent_root_id != current => {
+                    depth += 1;
+                    current = parent_root_id;
+                    guard += 1;
+                }
+                _ => break,
+            }
+        }
+        depth
     }
 
     fn index_source_node(&mut self, source: &ReactiveSource, id: NodeId) {
@@ -1974,18 +2170,18 @@ impl ReactiveDag {
                 continue;
             }
 
-            for (id, node) in &self.nodes {
-                let ReactiveNode::Effect {
+            let Some(children) = self.subtree_children.get(&parent_root_id) else {
+                continue;
+            };
+            for id in children {
+                let Some(ReactiveNode::Effect {
                     subtree_root_id: Some(current_root_id),
-                    parent_subtree_root_id: Some(current_parent_root_id),
                     ..
-                } = node
+                }) = self.nodes.get(id)
                 else {
                     continue;
                 };
-
-                if *current_parent_root_id == parent_root_id && *current_root_id != subtree_root_id
-                {
+                if *current_root_id != subtree_root_id {
                     ids.push(*id);
                     stack.push(*current_root_id);
                 }
@@ -2017,13 +2213,7 @@ impl ReactiveDag {
     }
 
     pub fn effect_id_for_subtree_root(&self, subtree_root_id: u64) -> Option<NodeId> {
-        self.nodes.iter().find_map(|(id, node)| match node {
-            ReactiveNode::Effect {
-                subtree_root_id: Some(current_root_id),
-                ..
-            } if *current_root_id == subtree_root_id => Some(*id),
-            _ => None,
-        })
+        self.subtree_effects.get(&subtree_root_id).copied()
     }
 }
 
@@ -2934,13 +3124,46 @@ impl VM {
             ..
         }) = self.dag.nodes.get_mut(&source_id)
         {
-            if *current_value == value {
+            let Some(change) = value_change_scope(current_value, &value) else {
                 return;
-            }
+            };
             *current_value = value.deep_clone();
             let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
             for dependent in dependents {
-                self.dag.mark_dirty(dependent);
+                let affected = match (&change, self.dag.dependency_scope(dependent, source_id)) {
+                    (_, None) | (_, Some(ReadScope::All)) => true,
+                    (ValueChange::Full, _) => true,
+                    (ValueChange::Indices(changed), Some(ReadScope::Indices(read))) => {
+                        changed.iter().any(|index| read.contains(index))
+                    }
+                };
+                if affected {
+                    static SCENE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *SCENE_TRACE
+                        .get_or_init(|| std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1"))
+                    {
+                        let source_label = match self.dag.nodes.get(&source_id) {
+                            Some(ReactiveNode::Source { source, .. }) => format!("{source:?}"),
+                            _ => format!("node:{source_id}"),
+                        };
+                        let dependent_label = match self.dag.nodes.get(&dependent) {
+                            Some(ReactiveNode::Effect {
+                                subtree_root_id,
+                                stable_key,
+                                ..
+                            }) => {
+                                format!("effect root={subtree_root_id:?} key={stable_key:?}")
+                            }
+                            Some(ReactiveNode::Derived { .. }) => format!("derived:{dependent}"),
+                            _ => format!("node:{dependent}"),
+                        };
+                        eprintln!(
+                            "[mark-dirty] source={source_label} -> {dependent_label} scope={:?}",
+                            self.dag.dependency_scope(dependent, source_id)
+                        );
+                    }
+                    self.dag.mark_dirty(dependent);
+                }
             }
         }
     }
@@ -2981,10 +3204,26 @@ impl VM {
         self.reactive_exec_timings.clear();
         let result = (|| -> Result<(), VMError> {
             loop {
-                let sorted = self.dag.topo_sort_dirty();
+                let mut sorted = self.dag.topo_sort_dirty();
                 if sorted.is_empty() {
                     break;
                 }
+                // Run ancestor subtrees before descendants: rerunning a parent
+                // re-renders (and re-registers) its dirty descendants, so any
+                // descendant that already ran would be wasted work. Stable sort
+                // keeps the topological order among unrelated nodes.
+                sorted.sort_by_key(|node_id| match self.dag.nodes.get(node_id) {
+                    Some(ReactiveNode::Derived { .. }) => 0usize,
+                    Some(ReactiveNode::Effect {
+                        subtree_root_id: None,
+                        ..
+                    }) => 1,
+                    Some(ReactiveNode::Effect {
+                        subtree_root_id: Some(root_id),
+                        ..
+                    }) => 2 + self.dag.subtree_depth(*root_id),
+                    _ => 0,
+                });
 
                 let mut progressed = false;
                 for node_id in sorted {
@@ -3035,6 +3274,7 @@ impl VM {
                                     label.clone().or_else(|| Some(format!("node:{node_id}")));
                                 error
                             })?;
+                            let render_elapsed = started.elapsed();
                             let mut path = Vec::new();
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
@@ -3043,6 +3283,20 @@ impl VM {
                                 None,
                                 &mut path,
                             );
+                            {
+                                static SCENE_TRACE: std::sync::OnceLock<bool> =
+                                    std::sync::OnceLock::new();
+                                if *SCENE_TRACE.get_or_init(|| {
+                                    std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1")
+                                }) {
+                                    eprintln!(
+                                        "[subtree-render-split] root={} render_ms={:.3} annotate_ms={:.3}",
+                                        root_id,
+                                        render_elapsed.as_secs_f64() * 1000.0,
+                                        (started.elapsed() - render_elapsed).as_secs_f64() * 1000.0,
+                                    );
+                                }
+                            }
                             let mut reactive_dependencies = self
                                 .current_subtree_reactive_reads
                                 .get(&root_id)
@@ -3795,6 +4049,94 @@ impl VM {
                         self.dag.add_edge(source_id, ctx_id);
                     }
                     stack.push(result);
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::LoadReactiveNth(ns_idx, field_idx) => {
+                    let namespace = self.chunks[self.current_chunk].strings[ns_idx].clone();
+                    let field = self.chunks[self.current_chunk].strings[field_idx].clone();
+                    let Some(index_value) = stack.pop() else {
+                        return Err(VMError::StackUnderflow);
+                    };
+                    self.record_reactive_read(&namespace, &field);
+                    let Some(global_idx) =
+                        self.global_names.iter().position(|name| name == &namespace)
+                    else {
+                        return Err(VMError::UnknownVariable(namespace));
+                    };
+                    let Some(Some(val)) = self.globals.get(global_idx) else {
+                        return Err(self.unknown_global(global_idx));
+                    };
+                    let cell = match &*val.borrow() {
+                        Value::Map(map) => map.get(&field).cloned(),
+                        _ => return Err(VMError::IncorrectType),
+                    };
+                    let index = match &*index_value.borrow() {
+                        Value::Number(idx) if *idx >= 0.0 => Some(*idx as usize),
+                        _ => None,
+                    };
+                    // Same semantics as the `nth` native: (List, Number >= 0)
+                    // returns the element (or Nil out of range); anything else
+                    // is Nil.
+                    let (result, read_index) = match (cell.as_ref(), index) {
+                        (Some(cell), Some(idx)) => match &*cell.borrow() {
+                            Value::List(items) => (
+                                items
+                                    .get(idx)
+                                    .map(|item| item.borrow().clone())
+                                    .unwrap_or(Value::Nil),
+                                Some(idx),
+                            ),
+                            _ => (Value::Nil, None),
+                        },
+                        _ => (Value::Nil, None),
+                    };
+                    if let Some(ctx_id) = self.tracking_stack.last().copied() {
+                        let source_id = self.get_or_create_source_node(&namespace, &field);
+                        match read_index {
+                            Some(idx) => self.dag.add_edge_indexed(source_id, ctx_id, idx),
+                            None => self.dag.add_edge(source_id, ctx_id),
+                        }
+                    }
+                    stack.push(Rc::new(RefCell::new(result)));
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::LoadReactiveLen(ns_idx, field_idx) => {
+                    let namespace = self.chunks[self.current_chunk].strings[ns_idx].clone();
+                    let field = self.chunks[self.current_chunk].strings[field_idx].clone();
+                    self.record_reactive_read(&namespace, &field);
+                    let Some(global_idx) =
+                        self.global_names.iter().position(|name| name == &namespace)
+                    else {
+                        return Err(VMError::UnknownVariable(namespace));
+                    };
+                    let Some(Some(val)) = self.globals.get(global_idx) else {
+                        return Err(self.unknown_global(global_idx));
+                    };
+                    let cell = match &*val.borrow() {
+                        Value::Map(map) => map.get(&field).cloned(),
+                        _ => return Err(VMError::IncorrectType),
+                    };
+                    // Same semantics as the `len` native.
+                    let (result, len_read) = match cell.as_ref() {
+                        Some(cell) => match &*cell.borrow() {
+                            Value::List(items) => (Value::Number(items.len() as f64), true),
+                            Value::String(s) => {
+                                (Value::Number(s.chars().count() as f64), false)
+                            }
+                            _ => (Value::Number(0.0), false),
+                        },
+                        None => (Value::Number(0.0), false),
+                    };
+                    if let Some(ctx_id) = self.tracking_stack.last().copied() {
+                        let source_id = self.get_or_create_source_node(&namespace, &field);
+                        if len_read {
+                            self.dag
+                                .add_edge_indexed(source_id, ctx_id, LEN_READ_SENTINEL);
+                        } else {
+                            self.dag.add_edge(source_id, ctx_id);
+                        }
+                    }
+                    stack.push(Rc::new(RefCell::new(result)));
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::StoreReactive(ns_idx, field_idx) => {

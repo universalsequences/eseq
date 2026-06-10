@@ -226,6 +226,13 @@ pub(crate) fn track_step_active_field(track: usize, step: usize) -> String {
     format!("seq-track-step-active-{track}-{step}")
 }
 
+/// Registry field caching a hex digest of all four per-step binding lanes for
+/// a track. When it is unchanged, the per-step field writes are skipped
+/// entirely; single-step sync paths invalidate it by writing Nil.
+pub(crate) fn track_step_binding_rev_field(track: usize) -> String {
+    format!("seq-track-step-binding-rev-{track}")
+}
+
 pub(crate) fn track_step_duration_field(track: usize, step: usize) -> String {
     format!("seq-track-step-duration-{track}-{step}")
 }
@@ -775,6 +782,7 @@ pub(crate) fn sync_all_track_step_binding_fields(
     app: &ui::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    plock_masks: &[[u64; MAX_STEPS / 64]],
 ) {
     sync_all_track_step_binding_fields_inner(
         rt,
@@ -782,6 +790,7 @@ pub(crate) fn sync_all_track_step_binding_fields(
         app,
         current_track_idx,
         selected_steps,
+        plock_masks,
         None,
     );
 }
@@ -792,6 +801,7 @@ pub(crate) fn sync_all_track_step_binding_fields_profiled(
     app: &ui::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    plock_masks: &[[u64; MAX_STEPS / 64]],
 ) -> AllTrackStepBindingSyncProfile {
     let mut profile = AllTrackStepBindingSyncProfile::default();
     sync_all_track_step_binding_fields_inner(
@@ -800,6 +810,7 @@ pub(crate) fn sync_all_track_step_binding_fields_profiled(
         app,
         current_track_idx,
         selected_steps,
+        plock_masks,
         Some(&mut profile),
     );
     profile
@@ -811,21 +822,87 @@ fn sync_all_track_step_binding_fields_inner(
     app: &ui::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    plock_masks: &[[u64; MAX_STEPS / 64]],
     mut profile: Option<&mut AllTrackStepBindingSyncProfile>,
 ) {
+    const WORDS: usize = MAX_STEPS / 64;
     let total_started = profile.as_ref().map(|_| Instant::now());
     let selected = selected_steps.lock().unwrap();
     for track in 0..app.tracks.len() {
         let num_steps = state.pattern.track_params[track]
             .get_num_steps()
             .min(MAX_STEPS);
+
+        // Compute all four boolean lanes as bitmasks in one pass.
+        let pattern_bits = state.pattern.patterns[track].load_bits();
+        let plock_bits = plock_masks
+            .get(track)
+            .copied()
+            .unwrap_or_else(|| track_step_plock_mask(state, track, &app.graph.effect_descriptors));
+        let mut active_mask = [0u64; WORDS];
+        let mut duration_mask = [0u64; WORDS];
+        let mut plocked_mask = [0u64; WORDS];
+        let mut selected_mask = [0u64; WORDS];
+        let mut max_reach = f64::NEG_INFINITY;
         for step in 0..MAX_STEPS {
+            let word = step / 64;
+            let bit = 1u64 << (step % 64);
             let visible = step < num_steps;
+            let is_active = pattern_bits[word] & bit != 0;
+            if is_active {
+                // duration > (target - source) <=> source + duration > target;
+                // computed in f64 where both forms are exact.
+                let duration = state.pattern.step_data[track]
+                    .get(step, StepParam::Duration)
+                    .max(0.0) as f64;
+                let reach = step as f64 + duration;
+                if reach > max_reach {
+                    max_reach = reach;
+                }
+            }
+            if visible {
+                if is_active {
+                    active_mask[word] |= bit;
+                }
+                if max_reach > step as f64 {
+                    duration_mask[word] |= bit;
+                }
+                if plock_bits[word] & bit != 0 {
+                    plocked_mask[word] |= bit;
+                }
+                if track == current_track_idx && selected.contains(&step) {
+                    selected_mask[word] |= bit;
+                }
+            }
+        }
+
+        // Skip all per-step writes when this track's lanes are unchanged.
+        let mut rev = String::with_capacity(WORDS * 4 * 16 + 3);
+        for mask in [&active_mask, &duration_mask, &plocked_mask, &selected_mask] {
+            for word in mask.iter() {
+                use std::fmt::Write as _;
+                let _ = write!(rev, "{word:016x}");
+            }
+        }
+        let rev_changed = rt
+            .set_reactive(
+                "SEQ",
+                &track_step_binding_rev_field(track),
+                Value::String(rev),
+            )
+            .changed;
+        if !rev_changed {
+            continue;
+        }
+
+        for step in 0..MAX_STEPS {
+            let word = step / 64;
+            let bit = 1u64 << (step % 64);
             let started = profile.as_ref().map(|_| Instant::now());
             let result = rt.set_reactive(
                 "SEQ",
                 &track_step_active_field(track, step),
-                Value::Bool(visible && state.pattern.patterns[track].is_active(step)),
+                Value::Bool(active_mask[word] & bit != 0),
             );
             if let Some(profile) = profile.as_deref_mut() {
                 profile.active_elapsed += started.expect("profile timer").elapsed();
@@ -836,7 +913,7 @@ fn sync_all_track_step_binding_fields_inner(
             let result = rt.set_reactive(
                 "SEQ",
                 &track_step_duration_field(track, step),
-                Value::Bool(visible && track_step_duration_covered(state, track, step)),
+                Value::Bool(duration_mask[word] & bit != 0),
             );
             if let Some(profile) = profile.as_deref_mut() {
                 profile.duration_elapsed += started.expect("profile timer").elapsed();
@@ -847,10 +924,7 @@ fn sync_all_track_step_binding_fields_inner(
             let result = rt.set_reactive(
                 "SEQ",
                 &track_step_plocked_field(track, step),
-                Value::Bool(
-                    visible
-                        && track_step_has_plock(state, track, &app.graph.effect_descriptors, step),
-                ),
+                Value::Bool(plocked_mask[word] & bit != 0),
             );
             if let Some(profile) = profile.as_deref_mut() {
                 profile.plocked_elapsed += started.expect("profile timer").elapsed();
@@ -861,7 +935,7 @@ fn sync_all_track_step_binding_fields_inner(
             let result = rt.set_reactive(
                 "SEQ",
                 &track_step_selected_field(track, step),
-                Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
+                Value::Bool(selected_mask[word] & bit != 0),
             );
             if let Some(profile) = profile.as_deref_mut() {
                 profile.selected_elapsed += started.expect("profile timer").elapsed();
@@ -899,14 +973,20 @@ pub(crate) fn build_all_track_playheads_value(state: &Arc<SequencerState>, app: 
     Value::List(items)
 }
 
-pub(crate) fn build_all_track_step_has_plocks(state: &Arc<SequencerState>, app: &ui::App) -> Value {
-    let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
-        .map(|track| {
-            Rc::new(RefCell::new(build_step_has_plocks(
-                state,
-                track,
-                &app.graph.effect_descriptors,
-            )))
+pub(crate) fn build_all_track_step_has_plocks_from_masks(
+    plock_masks: &[[u64; MAX_STEPS / 64]],
+) -> Value {
+    let tracks: Vec<Rc<RefCell<Value>>> = plock_masks
+        .iter()
+        .map(|mask| {
+            let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
+                .map(|step| {
+                    Rc::new(RefCell::new(Value::Bool(
+                        mask[step / 64] & (1u64 << (step % 64)) != 0,
+                    )))
+                })
+                .collect();
+            Rc::new(RefCell::new(Value::List(items)))
         })
         .collect();
     Value::List(tracks)
@@ -1723,10 +1803,13 @@ fn sync_all_track_sequencer_state_inner(
     }
 
     let started = profile.as_ref().map(|_| Instant::now());
+    let plock_masks: Vec<[u64; MAX_STEPS / 64]> = (0..app.tracks.len())
+        .map(|track| track_step_plock_mask(state, track, &app.graph.effect_descriptors))
+        .collect();
     rt.set_reactive(
         "SEQ",
         "track-step-has-plocks",
-        build_all_track_step_has_plocks(state, app),
+        build_all_track_step_has_plocks_from_masks(&plock_masks),
     );
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_step_has_plocks = started.expect("profile timer").elapsed();
@@ -1819,9 +1902,17 @@ fn sync_all_track_sequencer_state_inner(
             app,
             current_track_idx,
             selected_steps,
+            &plock_masks,
         );
     } else {
-        sync_all_track_step_binding_fields(rt, state, app, current_track_idx, selected_steps);
+        sync_all_track_step_binding_fields(
+            rt,
+            state,
+            app,
+            current_track_idx,
+            selected_steps,
+            &plock_masks,
+        );
     }
 
     let started = profile.as_ref().map(|_| Instant::now());
@@ -6545,17 +6636,60 @@ pub(crate) fn build_step_has_plocks(
     track: usize,
     descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
 ) -> Value {
+    let mask = track_step_plock_mask(state, track, descriptors);
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|step| {
-            Rc::new(RefCell::new(Value::Bool(track_step_has_plock(
-                state,
-                track,
-                descriptors,
-                step,
-            ))))
+            Rc::new(RefCell::new(Value::Bool(
+                mask[step / 64] & (1u64 << (step % 64)) != 0,
+            )))
         })
         .collect();
     Value::List(items)
+}
+
+/// One bit per step: whether any effect/instrument/midi-fx/timebase/swing
+/// plock exists for that step. Single flat scan per slot instead of the
+/// per-(step, slot, param) probing done by track_step_has_plock.
+pub(crate) fn track_step_plock_mask(
+    state: &Arc<SequencerState>,
+    track: usize,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+) -> [u64; MAX_STEPS / 64] {
+    let mut mask = [0u64; MAX_STEPS / 64];
+    let chain = &state.pattern.effect_chains[track];
+    let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
+    for slot_idx in 0..num_slots {
+        if let Some(slot) = chain.get(slot_idx) {
+            let np = slot.num_params.load(Ordering::Relaxed) as usize;
+            slot.plocks.or_step_plock_mask(&mut mask, np);
+        }
+    }
+    for slot in &state.pattern.midi_fx_slots[track] {
+        let np = slot.num_params.load(Ordering::Relaxed) as usize;
+        slot.plocks.or_step_plock_mask(&mut mask, np);
+    }
+    let instrument_slot = &state.pattern.instrument_slots[track];
+    let instrument_np = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
+    instrument_slot
+        .plocks
+        .or_step_plock_mask(&mut mask, instrument_np);
+    let timebase_plocks = &state.pattern.timebase_plocks[track];
+    let swing_plocks = &state.pattern.swing_plocks[track];
+    let swing_resolution_plocks = &state.pattern.swing_resolution_plocks[track];
+    for step in 0..MAX_STEPS {
+        let word = step / 64;
+        let bit = 1u64 << (step % 64);
+        if mask[word] & bit != 0 {
+            continue;
+        }
+        if timebase_plocks.has_plock(step)
+            || swing_plocks.has_plock(step)
+            || swing_resolution_plocks.has_plock(step)
+        {
+            mask[word] |= bit;
+        }
+    }
+    mask
 }
 
 pub(crate) fn track_step_has_plock(

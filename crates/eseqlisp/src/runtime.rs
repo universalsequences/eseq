@@ -374,7 +374,8 @@ fn format_ui_invalidation_trace(
 }
 
 fn trace_ui_enabled() -> bool {
-    std::env::var_os("ESEQLISP_TRACE_UI").is_some()
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQLISP_TRACE_UI").is_some())
 }
 
 fn trace_ui_field_enabled(namespace: &str, field: &str) -> bool {
@@ -2006,6 +2007,15 @@ impl Runtime {
         field: &str,
         value: Value,
     ) -> ReactiveSetResult {
+        // Fast path: unchanged writes skip the subscriber lookup and clones
+        // below. Hot sync paths issue thousands of no-op sets per frame.
+        if !trace_ui_enabled() && self.reactive_registry.is_unchanged(namespace, field, &value) {
+            return ReactiveSetResult {
+                changed: false,
+                effects_dirty: false,
+                widgets_dirty: false,
+            };
+        }
         let trace = trace_ui_field_enabled(namespace, field);
         let previous = if trace {
             self.vm.global_value(namespace).and_then(|namespace_value| {
