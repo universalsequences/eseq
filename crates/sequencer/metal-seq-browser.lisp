@@ -283,9 +283,9 @@
       (selected (get tag :selected)))
     (button name
       :variant :ghost
-      :background-color (if selected :blue "#36373b")
-      :color (if selected :white "#9ea1a8")
-      :border-color :black
+      :background-color (if selected "#ecca6d" "#36373b")
+      :color (if selected :black "#9ea1a8")
+      :border-color (if selected "#effb6d" '(rgba 1 1 1 0.3))
       :height 1.02
       :padding 0.32
       :font-size 10.0
@@ -513,6 +513,7 @@
   (button label
     :variant (if (= sbrowser-tab name) :primary :ghost)
     :width 8.5
+    :border-color (if (= sbrowser-tab name) :primary '(rgba 1 1 1 0.5))    
     :height 1.25
     :font-size 8.8
     :on-click |x y r| (sbrowser-select-tab name)

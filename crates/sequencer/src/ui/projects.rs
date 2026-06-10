@@ -484,6 +484,9 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect(),
+        transport_phase_param_idx: desc
+            .transport_phase_param_idx()
+            .unwrap_or(crate::effects::NO_TRANSPORT_PHASE_PARAM),
         ir: slot.ir.clone(),
     };
     snapshot.recompute_modulation_active_params(desc);
@@ -1980,6 +1983,9 @@ impl App {
                                     .iter()
                                     .map(|p| p.node_param_span.max(1))
                                     .collect(),
+                                transport_phase_param_idx: sampler_desc
+                                    .transport_phase_param_idx()
+                                    .unwrap_or(crate::effects::NO_TRANSPORT_PHASE_PARAM),
                                 ir: None,
                             }
                         }
@@ -2234,6 +2240,7 @@ mod tests {
             plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
             param_node_indices,
             param_node_spans: vec![1; num_params],
+            transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: None,
         }
     }

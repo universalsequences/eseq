@@ -181,23 +181,23 @@
     :drop-meta (dict :kind "sampler-panel" :track (get inst :track))
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (sampler-panel-drop-sample event))
-    (v-stack :gap 0 :height :fill
-      (box :debug-name "sampler-header-box" :height fx-panel-header-height :padding 0 :v-align :center :h-align :start
-        (h-stack :gap 0.5 :align :center :width :fill
+    (v-stack :gap 0 :height :fill 
+      (box :debug-name "sampler-header-box" :height 1 :padding 0 :v-align :center :h-align :start
+        (h-stack :gap 0.5  :width :fill 
           (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param (get inst :synth)) false "sampler-enabled")
           (label "Sampler" :font-size 11 :color :white :bg :transparent)
           (instrument-synth-button)
-          (instrument-mods-toggle-button)))
+          (instrument-mods-toggle-button)
+	  ))
       (fx-panel-body "sampler-panel-content"
         (let ((body
                 (v-stack
                   (box :background-color :instrument-control-bg :corner-radius 10
-                    (v-stack :gap 0.01 :padding 0.15
-                      (box :height 0.1)
+                    (v-stack :gap 0.0 
                       (if (get inst :buffer)
                         (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                          (box :width 78 :height 4.85
+                          (box :width 78 :height 4.85 
                             (waveform
                               :height 4.85
                               :header-height 0.3

@@ -239,7 +239,6 @@
        :height :fill
        :background-color :black
        :corner-radius 10
-       :padding 0.25
     (h-stack :height :fill :gap 0.25 :align :stretch
       (instrument-mod-selector inst)
       (instrument-selected-mod-source-editor inst))))

@@ -4586,6 +4586,7 @@ mod tests {
             plock_param_ids: vec![vec![None, None]; MAX_STEPS],
             param_node_indices: vec![id as u32, id as u32 + 10],
             param_node_spans: vec![1, 1],
+            transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: None,
         }
     }
@@ -5595,6 +5596,7 @@ mod tests {
                     plock_param_ids: vec![vec![None]; MAX_STEPS],
                     param_node_indices: vec![0],
                     param_node_spans: vec![1],
+                    transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
                     ir: None,
                 }],
                 vec![EffectSlotSnapshot::new_empty()],

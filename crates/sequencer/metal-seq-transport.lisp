@@ -182,9 +182,9 @@
   :state (active)
   :shader
   (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
-        (muted-col (rgba 0.45 0.45 0.50 1.0))
+        (muted-col (rgba 0.25 0.25 0.20 1.0))
         (bg-col (if (= active 1)
-          (rgba 0.00 0.35 0.82 1.0)
+          (rgba 0.20 0.20 0.22 1.0)
           (rgba 0.18 0.18 0.20 1.0)))
         (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer

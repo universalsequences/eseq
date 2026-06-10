@@ -11,6 +11,7 @@ pub const MAX_SLOT_PARAMS: usize = 512;
 /// Number of fixed built-in effect slots. Built-ins are now ordinary inserts,
 /// so track effect chains start at slot 0.
 pub const BUILTIN_SLOT_COUNT: usize = 0;
+pub const NO_TRANSPORT_PHASE_PARAM: u32 = u32::MAX;
 
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
@@ -366,6 +367,7 @@ mod tests {
                 .collect(),
             param_node_indices: vec![15],
             param_node_spans: vec![1],
+            transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: None,
         };
         snapshot.plocks[3][0] = Some(0.9);
@@ -1134,10 +1136,7 @@ mod tests {
             &names[..7],
             &["enabled", "speed", "length", "loop", "sync", "div", "warp"]
         );
-        assert_eq!(
-            desc.input_channels,
-            2 + crate::voice_modulator::NUM_OUTPUTS
-        );
+        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
         assert_eq!(desc.instrument_modulators.len(), 4);
         // 5 modulatable targets × 4 slots
         assert_eq!(desc.instrument_modulation_targets.len(), 20);
@@ -1306,6 +1305,14 @@ pub struct EffectDescriptor {
 
 impl EffectDescriptor {
     pub const BUILTIN_INSERT_PREFIX: &'static str = "builtin:";
+
+    pub fn transport_phase_param_idx(&self) -> Option<u32> {
+        if self.name == "DJ Mixer" {
+            Some(crate::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32)
+        } else {
+            None
+        }
+    }
 
     pub fn enabled_param(node_param_idx: u32, default: f32) -> ParamDescriptor {
         ParamDescriptor {
@@ -3586,6 +3593,7 @@ pub struct EffectSlotState {
     pub num_params: AtomicU32,
     pub param_node_indices: Vec<AtomicU32>, // per-param: idx field for ParamMsg
     pub param_node_spans: Vec<AtomicU32>,   // per-param: contiguous DGen cells updated by idx
+    pub transport_phase_param_idx: AtomicU32,
 }
 
 impl EffectSlotState {
@@ -3612,6 +3620,10 @@ impl EffectSlotState {
             num_params: AtomicU32::new(num_params as u32),
             param_node_indices,
             param_node_spans,
+            transport_phase_param_idx: AtomicU32::new(
+                desc.transport_phase_param_idx()
+                    .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
+            ),
         }
     }
 
@@ -3681,6 +3693,7 @@ impl EffectSlotState {
             num_params: AtomicU32::new(0),
             param_node_indices: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(0)).collect(),
             param_node_spans: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(1)).collect(),
+            transport_phase_param_idx: AtomicU32::new(NO_TRANSPORT_PHASE_PARAM),
         }
     }
 
@@ -3700,6 +3713,11 @@ impl EffectSlotState {
             .store(modulator_node_id, Ordering::Relaxed);
         self.num_params
             .store(desc.params.len() as u32, Ordering::Relaxed);
+        self.transport_phase_param_idx.store(
+            desc.transport_phase_param_idx()
+                .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
+            Ordering::Relaxed,
+        );
         for (i, p) in desc.params.iter().enumerate() {
             self.defaults.set(i, p.default);
             if i < self.param_node_indices.len() {
@@ -3959,6 +3977,7 @@ pub struct EffectSlotSnapshot {
     pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
+    pub transport_phase_param_idx: u32,
     /// Convolution Reverb IR reference (sample hash/stem) carried through
     /// save/restore. None for every other effect.
     pub ir: Option<String>,
@@ -4002,6 +4021,7 @@ impl EffectSlotSnapshot {
             plock_param_ids,
             param_node_indices,
             param_node_spans,
+            transport_phase_param_idx: slot.transport_phase_param_idx.load(Ordering::Relaxed),
             ir: crate::conv_reverb::ir_ref_for(node_id as i32),
         }
     }
@@ -4011,6 +4031,8 @@ impl EffectSlotSnapshot {
         slot.modulator_node_id
             .store(self.modulator_node_id, Ordering::Relaxed);
         slot.num_params.store(self.num_params, Ordering::Relaxed);
+        slot.transport_phase_param_idx
+            .store(self.transport_phase_param_idx, Ordering::Relaxed);
         let np = self.num_params as usize;
 
         for i in 0..np {
@@ -4059,6 +4081,9 @@ impl EffectSlotSnapshot {
             plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; np]).collect(),
             param_node_indices,
             param_node_spans,
+            transport_phase_param_idx: desc
+                .transport_phase_param_idx()
+                .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
             ir: None,
         }
     }
@@ -4073,6 +4098,7 @@ impl EffectSlotSnapshot {
             plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             param_node_indices: Vec::new(),
             param_node_spans: Vec::new(),
+            transport_phase_param_idx: NO_TRANSPORT_PHASE_PARAM,
             ir: None,
         }
     }
@@ -4105,6 +4131,9 @@ impl EffectSlotSnapshot {
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect();
+        self.transport_phase_param_idx = desc
+            .transport_phase_param_idx()
+            .unwrap_or(NO_TRANSPORT_PHASE_PARAM);
         self.plocks = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
         self.plock_param_ids = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
 

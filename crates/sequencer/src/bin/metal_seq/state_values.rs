@@ -10763,6 +10763,22 @@ mod tests {
             .find_map(|child| find_layout_node_by_text(child, text))
     }
 
+    fn find_active_tab_button_by_text<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        text: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.widget_type == "button"
+            && matches!(node.props.get("text"), Some(Value::String(value)) if value == text)
+            && matches!(node.props.get("shape"), Some(Value::Keyword(shape)) if shape == "tab")
+            && matches!(node.props.get("active"), Some(Value::Number(active)) if *active != 0.0)
+        {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_active_tab_button_by_text(child, text))
+    }
+
     fn find_dropdown_by_value<'a>(
         node: &'a eseqlisp::layout::LayoutNode,
         value: &str,
@@ -20966,7 +20982,19 @@ mod tests {
             "selector must have a nonzero rect: {:?}",
             selector.rect
         );
-        assert!(find_layout_node_by_text(&layout, "Mod 1").is_some());
+        let mods_header_button = find_active_tab_button_by_text(&layout, "mods")
+            .expect("mods header button should render");
+        assert_eq!(mods_header_button.widget_type, "button");
+        assert_finite_nonzero_rect(mods_header_button, "instrument mods header button");
+        let mod1_button = find_layout_node_by_text(&layout, "Mod 1")
+            .expect("Mod 1 selector button should render");
+        assert_eq!(mod1_button.widget_type, "button");
+        assert_finite_nonzero_rect(mod1_button, "instrument Mod 1 selector button");
+        assert!(
+            !matches!(mod1_button.props.get("shape"), Some(Value::Keyword(shape)) if shape == "tab"),
+            "instrument Mod 1 selector should not use tab button shape: {:?}",
+            mod1_button.props.get("shape")
+        );
         let lfo_editor = find_layout_node_by_debug_name(&layout, "instrument-lfo-source-editor")
             .expect("selected LFO source editor should render");
         assert!(
@@ -22110,6 +22138,19 @@ mod tests {
             "effect mods black panel should use the available fixed effect panel height, got {:?}",
             control_panel.rect
         );
+        let mods_header_button = find_active_tab_button_by_text(&layout, "mods")
+            .expect("effect mods header button should render");
+        assert_eq!(mods_header_button.widget_type, "button");
+        assert_finite_nonzero_rect(mods_header_button, "effect mods header button");
+        let mod1_button = find_layout_node_by_text(&layout, "Mod 1")
+            .expect("effect Mod 1 selector button should render");
+        assert_eq!(mod1_button.widget_type, "button");
+        assert_finite_nonzero_rect(mod1_button, "effect Mod 1 selector button");
+        assert!(
+            !matches!(mod1_button.props.get("shape"), Some(Value::Keyword(shape)) if shape == "tab"),
+            "effect Mod 1 selector should not use tab button shape: {:?}",
+            mod1_button.props.get("shape")
+        );
         assert!(
             find_layout_node_by_debug_name(&layout, "effect-lfo-source-editor").is_some(),
             "selected LFO editor should render for effect-local Mod 1"
@@ -22549,7 +22590,12 @@ mod tests {
                 || node.children.iter().any(layout_has_double_click)
         }
 
-        fn test_mod_target(depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+        fn test_mod_target(
+            depth_idx: f64,
+            source_slot: f64,
+            depth: f64,
+            depth_value_field: &str,
+        ) -> Value {
             Value::Map(HashMap::from([
                 (
                     "depth-idx".to_string(),
@@ -22562,6 +22608,10 @@ mod tests {
                 (
                     "depth".to_string(),
                     Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-value-field".to_string(),
+                    Rc::new(RefCell::new(Value::String(depth_value_field.to_string()))),
                 ),
                 (
                     "depth-min".to_string(),
@@ -22602,6 +22652,66 @@ mod tests {
             }
         }
 
+        fn click_node(editor: &mut eseqlisp::Editor, node: &eseqlisp::layout::LayoutNode) {
+            let col = node.rect.col + node.rect.width * 0.5;
+            let row = node.rect.row + node.rect.height * 0.5;
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: col.floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                160,
+                18,
+                col,
+                row,
+            );
+            editor.refresh_runtime_side_effects();
+        }
+
+        fn assert_rgba_prop(node: &eseqlisp::layout::LayoutNode, prop: &str, expected: [f64; 4]) {
+            let value = node
+                .props
+                .get(prop)
+                .unwrap_or_else(|| panic!("missing {prop} on {}", node.widget_type));
+            let Value::List(items) = value else {
+                panic!("expected {prop} to be an rgba expression, got {value:?}");
+            };
+            assert_eq!(
+                items.len(),
+                5,
+                "rgba expression should have 5 items: {value:?}"
+            );
+            assert_eq!(*items[0].borrow(), Value::Symbol("rgba".to_string()));
+            for (idx, expected_component) in expected.into_iter().enumerate() {
+                let Value::Number(component) = *items[idx + 1].borrow() else {
+                    panic!("rgba component {idx} should be numeric: {value:?}");
+                };
+                assert!(
+                    (component - expected_component).abs() < 0.0001,
+                    "rgba component {idx} should be {expected_component}, got {component}: {value:?}"
+                );
+            }
+        }
+
+        fn assert_reactive_float_prop(
+            node: &eseqlisp::layout::LayoutNode,
+            prop: &str,
+            expected: f32,
+        ) {
+            let actual = eseqlisp::widget_render::get_f32_prop(&node.props, prop, f32::NAN);
+            assert!(
+                (actual - expected).abs() < 0.0001,
+                "{prop} should resolve to {expected}, got {actual} on {}",
+                node.widget_type
+            );
+        }
+
         let mut enabled = test_param_map("enabled", 0, 1.0, 0.0, 1.0);
         enabled.insert(
             "modulatable".to_string(),
@@ -22610,7 +22720,10 @@ mod tests {
         enabled.insert(
             "mod-targets".to_string(),
             Rc::new(RefCell::new(test_list(vec![test_mod_target(
-                40.0, 1.0, 1.0,
+                40.0,
+                1.0,
+                1.0,
+                "dj-enabled-depth",
             )]))),
         );
         let mut loop_param = test_param_map("loop", 3, 0.0, 0.0, 1.0);
@@ -22621,7 +22734,10 @@ mod tests {
         loop_param.insert(
             "mod-targets".to_string(),
             Rc::new(RefCell::new(test_list(vec![test_mod_target(
-                43.0, 1.0, 0.0,
+                43.0,
+                1.0,
+                0.0,
+                "dj-loop-depth",
             )]))),
         );
 
@@ -22709,6 +22825,8 @@ mod tests {
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
                 ("effects", test_list(vec![effect])),
+                ("dj-enabled-depth", Value::Number(1.0)),
+                ("dj-loop-depth", Value::Number(0.0)),
                 ("midi-effects", test_list(vec![])),
                 (
                     "instrument-panel",
@@ -22794,6 +22912,12 @@ mod tests {
         let enabled_button = find_layout_node_by_stable_key(&layout, "dj-mixer-param-0-mod-depth")
             .and_then(|node| find_layout_node_by_widget_type(node, "button"))
             .expect("On modulation depth should render as a button");
+        assert_rgba_prop(
+            enabled_button,
+            "active-background-color",
+            [0.0, 0.48, 0.95, 1.0],
+        );
+        assert_reactive_float_prop(enabled_button, "active", 1.0);
         let enabled_callback = enabled_button
             .props
             .get("on-click")
@@ -22806,6 +22930,33 @@ mod tests {
                 vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
             )
             .expect("toggle On modulation depth");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_effect_param(&commands[0], 40.0, 0.0);
+
+        assert_reactive_float_prop(loop_button, "active", 0.0);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "dj-loop-depth", Value::Number(1.0));
+        assert_reactive_float_prop(loop_button, "active", 1.0);
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "dj-enabled-depth", Value::Number(0.0));
+        assert_reactive_float_prop(enabled_button, "active", 0.0);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "dj-loop-depth", Value::Number(0.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "dj-enabled-depth", Value::Number(1.0));
+
+        click_node(&mut editor, loop_button);
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_effect_param(&commands[0], 43.0, 1.0);
+
+        click_node(&mut editor, enabled_button);
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1, "commands={commands:?}");
         assert_set_effect_param(&commands[0], 40.0, 0.0);

@@ -61,6 +61,25 @@ unsafe fn dispatch_voice_modulator_transport(lg: *mut LiveGraph, modulator_id: u
     );
 }
 
+unsafe fn dispatch_transport_phase(
+    lg: *mut LiveGraph,
+    logical_id: u64,
+    param_idx: u32,
+    beat_phase: f32,
+) {
+    if logical_id == 0 {
+        return;
+    }
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: param_idx as u64,
+            logical_id,
+            fvalue: beat_phase,
+        },
+    );
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OutputDeviceConfig {
     sample_rate: u32,
@@ -2500,6 +2519,48 @@ fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, block_start_s
     }
 }
 
+fn sync_dj_mixer_transport_phase(data: &mut AudioCallbackData, block_start_sample: u64) {
+    let playing = data.state.transport.playing.load(Ordering::Relaxed);
+    let bpm = data.state.transport.bpm.load(Ordering::Relaxed).max(1) as f64;
+    let total_beats = if playing {
+        block_start_sample as f64 * bpm / (data.sample_rate * 60.0)
+    } else {
+        0.0
+    };
+    let beat_phase = crate::dj_mixer::transport_beat_phase(total_beats);
+
+    for chain in &data.state.pattern.effect_chains {
+        for slot in chain {
+            let param_idx = slot.transport_phase_param_idx.load(Ordering::Relaxed);
+            if param_idx == crate::effects::NO_TRANSPORT_PHASE_PARAM {
+                continue;
+            }
+            let node_id = slot.node_id.load(Ordering::Relaxed);
+            if node_id == 0 {
+                continue;
+            }
+            unsafe {
+                dispatch_transport_phase(data.lg.0, node_id as u64, param_idx, beat_phase);
+            }
+        }
+    }
+
+    let Ok(gates) = data.bus_gate_runtime.try_lock() else {
+        return;
+    };
+    for gate in gates.iter() {
+        for slot in &gate.effect_slots {
+            let param_idx = slot.transport_phase_param_idx;
+            if param_idx == crate::effects::NO_TRANSPORT_PHASE_PARAM || slot.node_id == 0 {
+                continue;
+            }
+            unsafe {
+                dispatch_transport_phase(data.lg.0, slot.node_id as u64, param_idx, beat_phase);
+            }
+        }
+    }
+}
+
 fn interleaved_peak(output: &[f32], num_channels: usize) -> (f32, f32) {
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
@@ -3092,6 +3153,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let block_end_sample = block_start_sample + nframes as u64;
     sync_bus_gate_params(data, block_start_sample);
     sync_instrument_host_clock_params(data, block_start_sample);
+    sync_dj_mixer_transport_phase(data, block_start_sample);
 
     // Sync voice pools against current runtime bindings. Project loads can
     // replace tracks in-place, so growth-only sync leaves dead logical IDs.
@@ -4166,6 +4228,7 @@ mod tests {
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
     use crate::analysis::{pack_ptr, OnsetTableShared};
+    use crate::effects::{EffectDescriptor, EffectSlotSnapshot, EffectSlotState};
     use crate::scheduled_event::{
         ScheduledChordData, ScheduledEvent, ScheduledEventKind, ScheduledInstrumentParams,
         TimedEvent,
@@ -4173,6 +4236,27 @@ mod tests {
     use crate::sequencer::{
         CustomInstrumentRunMode, InstrumentType, SequencerState, SwingResolution,
     };
+
+    #[test]
+    fn dj_mixer_slots_carry_explicit_transport_phase_param() {
+        let dj = EffectDescriptor::builtin_dj_mixer();
+        let dj_slot = EffectSlotState::new(&dj, 42);
+        assert_eq!(
+            dj_slot.transport_phase_param_idx.load(Ordering::Relaxed),
+            crate::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32
+        );
+        assert_eq!(
+            EffectSlotSnapshot::capture(&dj_slot).transport_phase_param_idx,
+            crate::dj_mixer::DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE as u32
+        );
+
+        let str8 = EffectDescriptor::builtin_str8_delay();
+        let str8_slot = EffectSlotState::new(&str8, 43);
+        assert_eq!(
+            str8_slot.transport_phase_param_idx.load(Ordering::Relaxed),
+            crate::effects::NO_TRANSPORT_PHASE_PARAM
+        );
+    }
 
     #[test]
     fn output_config_prefers_system_default_sample_rate_over_44100() {

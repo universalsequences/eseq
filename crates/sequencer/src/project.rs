@@ -681,6 +681,7 @@ impl ProjectEffectSlot {
             plock_param_ids: self.plock_param_ids,
             param_node_indices: self.param_node_indices,
             param_node_spans: self.param_node_spans,
+            transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: self.ir,
         }
     }

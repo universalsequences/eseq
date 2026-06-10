@@ -20,18 +20,25 @@
 (def builtin-fx-dj-mixer-toggle-active? (fx p)
   (> (reactive-value (fx-param-value-for fx p)) 0.5))
 
+(def builtin-fx-dj-mixer-toggle-mod-mode? (fx p)
+  (and (param-mods-open? fx) (get p :modulatable)))
+
 (def builtin-fx-dj-mixer-toggle-button (fx p label-text)
   (param-mod-wrapper fx p (str "dj-mixer-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "dj-mixer-param-" (get p :idx) (param-control-key-mode fx p))
-      (let ((active (builtin-fx-dj-mixer-toggle-active? fx p)))
+      (let ((mod-mode (builtin-fx-dj-mixer-toggle-mod-mode? fx p)))
         (button label-text
           :width 5.6 :height 1.2 :padding 0 :font-size 11.0
-          :background-color (if active (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
-          :color (if active :black :dim)
+          :active (fx-param-value-for fx p)
+          :background-color :mixer-control-bg
+          :active-background-color (if mod-mode (rgba 0.00 0.48 0.95 1.0) (rgba 1.0 0.62 0.25 1.0))
+          :color :dim
+          :active-color (if mod-mode :white :black)
           :on-click |x y r|
-            (if (and (param-mods-open? fx) (get p :modulatable))
-              (param-set-control-value fx p (if active 0 1))
-              (fx-toggle-effect-value fx p)))))))
+            (let ((active (builtin-fx-dj-mixer-toggle-active? fx p)))
+              (if mod-mode
+                (param-set-control-value fx p (if active 0 1))
+                (fx-toggle-effect-value fx p))))))))
 
 (def builtin-fx-dj-mixer-sync-button (fx p)
   (button "Sync"

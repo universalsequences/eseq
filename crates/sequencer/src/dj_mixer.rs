@@ -37,6 +37,8 @@ const STATE_DIV: usize = 18;
 const STATE_WARP: usize = 19;
 const STATE_WARP_PHASE: usize = 20;
 const STATE_WET_GATE: usize = 21;
+const STATE_TRANSPORT_BEAT_PHASE: usize = 22;
+const STATE_PREV_SYNC_CYCLE: usize = 23;
 const STATE_MOD_ENABLED_DEPTH: usize = 24; // 4 slots
 const STATE_MOD_SPEED_DEPTH: usize = 28; // 4 slots
 const STATE_MOD_LENGTH_DEPTH: usize = 32; // 4 slots
@@ -57,6 +59,7 @@ pub const DJ_MIXER_PARAM_BPM: u64 = STATE_BPM as u64;
 pub const DJ_MIXER_PARAM_SYNC: u64 = STATE_SYNC as u64;
 pub const DJ_MIXER_PARAM_DIV: u64 = STATE_DIV as u64;
 pub const DJ_MIXER_PARAM_WARP: u64 = STATE_WARP as u64;
+pub const DJ_MIXER_PARAM_TRANSPORT_BEAT_PHASE: u64 = STATE_TRANSPORT_BEAT_PHASE as u64;
 
 pub const DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_1: u64 = STATE_MOD_ENABLED_DEPTH as u64;
 pub const DJ_MIXER_PARAM_MOD_ENABLED_DEPTH_2: u64 = STATE_MOD_ENABLED_DEPTH as u64 + 1;
@@ -124,12 +127,73 @@ fn free_loop_samples(length_sec: f32, sample_rate: f32) -> f32 {
 
 #[inline]
 fn synced_loop_samples(div: f32, bpm: f32, sample_rate: f32) -> f32 {
-    let idx = (div.round() as usize).min(SYNC_DIV_BEATS.len() - 1);
-    let beats = SYNC_DIV_BEATS[idx];
+    let beats = sync_div_beats(div);
     let sr = sample_rate.clamp(8_000.0, 192_000.0);
     (beats * 60.0 / bpm.clamp(20.0, 999.0) * sr)
         .floor()
         .clamp(2.0, (MAX_BUFFER_SAMPLES - 2) as f32)
+}
+
+#[inline]
+pub fn sync_div_beats(div: f32) -> f32 {
+    let idx = (div.round() as usize).min(SYNC_DIV_BEATS.len() - 1);
+    SYNC_DIV_BEATS[idx]
+}
+
+#[inline]
+fn transport_phase_cycle_beats() -> f32 {
+    *SYNC_DIV_BEATS.last().unwrap_or(&8.0)
+}
+
+#[inline]
+pub fn transport_beat_phase(total_beats: f64) -> f32 {
+    total_beats.rem_euclid(transport_phase_cycle_beats() as f64) as f32
+}
+
+#[inline]
+fn sync_cycle_index(beat_phase: f32, div_beats: f32) -> f32 {
+    (beat_phase.rem_euclid(transport_phase_cycle_beats()) / div_beats).floor()
+}
+
+#[inline]
+fn sync_phase_in_div(beat_phase: f32, div_beats: f32) -> f32 {
+    beat_phase.rem_euclid(div_beats)
+}
+
+#[inline]
+fn sync_samples_per_beat(bpm: f32, sample_rate: f32) -> f32 {
+    sample_rate.clamp(8_000.0, 192_000.0) * 60.0 / bpm.clamp(20.0, 999.0)
+}
+
+#[inline]
+fn sync_window_at_transport_phase(
+    write_pos: f32,
+    loop_samples: f32,
+    beat_phase: f32,
+    div_beats: f32,
+    bpm: f32,
+    sample_rate: f32,
+) -> (f32, f32, f32) {
+    let phase_samples =
+        sync_phase_in_div(beat_phase, div_beats) * sync_samples_per_beat(bpm, sample_rate);
+    let boundary_write_pos = wrap_pos(write_pos - phase_samples);
+    let loop_start = wrap_pos(boundary_write_pos - loop_samples);
+    (loop_start, boundary_write_pos, phase_samples)
+}
+
+#[inline]
+fn sync_read_pos_for_phase(
+    loop_start: f32,
+    loop_samples: f32,
+    phase_samples: f32,
+    speed: f32,
+) -> f32 {
+    let clamped_phase = phase_samples.clamp(0.0, loop_samples - 1.0);
+    if speed < 0.0 {
+        wrap_pos(loop_start + loop_samples - 1.0 - clamped_phase)
+    } else {
+        wrap_pos(loop_start + clamped_phase)
+    }
 }
 
 #[inline]
@@ -187,6 +251,7 @@ unsafe extern "C" fn dj_mixer_init(
     *s.add(STATE_BPM) = 120.0;
     *s.add(STATE_DIV) = 4.0;
     *s.add(STATE_WET_GATE) = 1.0;
+    *s.add(STATE_PREV_SYNC_CYCLE) = -1.0;
     for i in STATE_BUF_L..STATE_END {
         *s.add(i) = 0.0;
     }
@@ -220,12 +285,18 @@ unsafe extern "C" fn dj_mixer_process(
     let bpm = finite_or(*s.add(STATE_BPM), 120.0).clamp(20.0, 999.0);
     let sync = *s.add(STATE_SYNC) > 0.5;
     let div = finite_or(*s.add(STATE_DIV), 4.0).clamp(0.0, (SYNC_DIV_BEATS.len() - 1) as f32);
+    let div_beats = sync_div_beats(div);
+    let mut transport_beat_phase = finite_or(*s.add(STATE_TRANSPORT_BEAT_PHASE), 0.0)
+        .rem_euclid(transport_phase_cycle_beats());
+    let transport_beat_inc = if sync { bpm / (60.0 * sr) } else { 0.0 };
+    let mut prev_sync_cycle = finite_or(*s.add(STATE_PREV_SYNC_CYCLE), -1.0);
     let warp_base = finite_or(*s.add(STATE_WARP), 0.0).clamp(0.0, 1.0);
     let mut warp_phase = finite_or(*s.add(STATE_WARP_PHASE), 0.0).rem_euclid(1.0);
     let mut wet_gate = finite_or(*s.add(STATE_WET_GATE), 1.0).clamp(0.0, 1.0);
     let gate_k = 1.0 - (-1.0 / (sr * GATE_SMOOTH_TAU_SEC)).exp();
 
-    let depth = |base: usize, slot: usize| -> f32 { unsafe { finite_or(*s.add(base + slot), 0.0) } };
+    let depth =
+        |base: usize, slot: usize| -> f32 { unsafe { finite_or(*s.add(base + slot), 0.0) } };
     let enabled_depths = [
         depth(STATE_MOD_ENABLED_DEPTH, 0),
         depth(STATE_MOD_ENABLED_DEPTH, 1),
@@ -315,13 +386,15 @@ unsafe extern "C" fn dj_mixer_process(
         let eff_loop = (loop_base + mod_loop) > 0.5;
         let loop_active = eff_enabled && eff_loop;
         let eff_warp = (warp_base + mod_warp).clamp(0.0, 1.0);
+        let current_sync_cycle = sync_cycle_index(transport_beat_phase, div_beats);
+        let sync_boundary_crossed =
+            sync && prev_sync_cycle >= 0.0 && current_sync_cycle != prev_sync_cycle;
 
         // Warp: read-speed wobble whose rate scales with depth — gentle
         // tape warble at low settings, seasick mangling near 1.
         let warp_rate_hz = 0.3 + eff_warp * 5.7;
         warp_phase = (warp_phase + warp_rate_hz / sr).rem_euclid(1.0);
-        let warp_offset =
-            eff_warp * 0.6 * (warp_phase * std::f32::consts::TAU).sin();
+        let warp_offset = eff_warp * 0.6 * (warp_phase * std::f32::consts::TAU).sin();
         let speed = (base_speed + mod_speed + warp_offset).clamp(-2.0, 2.0);
 
         // Length modulation is in octaves around the base (free or synced) length.
@@ -331,18 +404,53 @@ unsafe extern "C" fn dj_mixer_process(
         loop_samples = loop_samples.clamp(2.0, (MAX_BUFFER_SAMPLES - 2) as f32);
 
         if loop_active && !prev_loop {
-            loop_start = wrap_pos(write_pos - loop_samples);
-            loop_end = write_pos;
-            read_pos = if speed < 0.0 {
-                wrap_pos(loop_end - 1.0)
+            if sync {
+                let (locked_start, locked_end, phase_samples) = sync_window_at_transport_phase(
+                    write_pos,
+                    loop_samples,
+                    transport_beat_phase,
+                    div_beats,
+                    bpm,
+                    sr,
+                );
+                loop_start = locked_start;
+                loop_end = locked_end;
+                read_pos = sync_read_pos_for_phase(loop_start, loop_samples, phase_samples, speed);
             } else {
-                loop_start
-            };
+                loop_start = wrap_pos(write_pos - loop_samples);
+                loop_end = write_pos;
+                read_pos = if speed < 0.0 {
+                    wrap_pos(loop_end - 1.0)
+                } else {
+                    loop_start
+                };
+            }
             xfade_remaining = 0.0;
             xfade_total = 0.0;
             xfade_old_read_pos = read_pos;
         }
         prev_loop = loop_active;
+
+        if sync && sync_boundary_crossed {
+            let (locked_start, locked_end, phase_samples) = sync_window_at_transport_phase(
+                write_pos,
+                loop_samples,
+                transport_beat_phase,
+                div_beats,
+                bpm,
+                sr,
+            );
+            loop_start = locked_start;
+            loop_end = locked_end;
+            start_xfade(
+                &mut read_pos,
+                &mut xfade_old_read_pos,
+                &mut xfade_remaining,
+                &mut xfade_total,
+                sync_read_pos_for_phase(loop_start, loop_samples, phase_samples, speed),
+                loop_samples,
+            );
+        }
 
         if !loop_active {
             *buf_l.add(write_pos as usize) = input_l;
@@ -429,6 +537,12 @@ unsafe extern "C" fn dj_mixer_process(
                 loop_end = write_pos;
             }
         }
+
+        prev_sync_cycle = current_sync_cycle;
+        if sync {
+            transport_beat_phase = (transport_beat_phase + transport_beat_inc)
+                .rem_euclid(transport_phase_cycle_beats());
+        }
     }
 
     *s.add(STATE_SAMPLE_RATE) = sr;
@@ -444,6 +558,8 @@ unsafe extern "C" fn dj_mixer_process(
     *s.add(STATE_XFADE_OLD_READ_POS) = xfade_old_read_pos;
     *s.add(STATE_WARP_PHASE) = warp_phase;
     *s.add(STATE_WET_GATE) = wet_gate;
+    *s.add(STATE_TRANSPORT_BEAT_PHASE) = transport_beat_phase;
+    *s.add(STATE_PREV_SYNC_CYCLE) = prev_sync_cycle;
 }
 
 pub fn dj_mixer_vtable() -> NodeVTable {
@@ -641,6 +757,35 @@ mod tests {
             (smoothed - 24_000.0).abs() < 100.0,
             "expected ~24000, got {smoothed}"
         );
+    }
+
+    #[test]
+    fn sync_transport_phase_wraps_to_two_bar_cycle() {
+        assert_eq!(transport_beat_phase(0.0), 0.0);
+        assert_eq!(transport_beat_phase(8.0), 0.0);
+        assert_eq!(transport_beat_phase(9.5), 1.5);
+    }
+
+    #[test]
+    fn sync_loop_engage_anchors_to_transport_division_boundary() {
+        let sample_rate = 8_000;
+        let mut state = init_state(sample_rate);
+        let ramp: Vec<f32> = (0..12_000).map(|i| i as f32).collect();
+        process_block(&mut state, &ramp, &ramp);
+
+        state[STATE_SYNC] = 1.0;
+        state[STATE_DIV] = 2.0; // 1/4 note = 4000 samples at 120 BPM.
+        state[STATE_BPM] = 120.0;
+        state[STATE_LOOP_SAMPLES_SMOOTH] = synced_loop_samples(2.0, 120.0, sample_rate as f32);
+        state[STATE_TRANSPORT_BEAT_PHASE] = 0.125; // 500 samples after the beat boundary.
+        state[STATE_LOOP] = 1.0;
+
+        let silence = [0.0];
+        process_block(&mut state, &silence, &silence);
+
+        assert_eq!(state[STATE_LOOP_START], 7_500.0);
+        assert_eq!(state[STATE_LOOP_END], 11_500.0);
+        assert_eq!(state[STATE_READ_POS], 8_001.0);
     }
 
     #[test]

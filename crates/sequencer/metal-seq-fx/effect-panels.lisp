@@ -22,7 +22,7 @@
   (subtree :key subtree-key
     (box :width 1.55 :height 1.35 :v-align :start :h-align :center :padding 0
       (v-stack :gap 0 :align :center
-        (box :width 1.55 :height 0.14)
+        (box :width 1.55 :height 0.04)
         (if p
           (fx-enabled-dot
             :active (fx-param-value p)
@@ -121,8 +121,24 @@
       :color (if active :white :dim)
       :bg :transparent)))
 
+(def instrument-header-tab-button (text active width click)
+     (v-stack (box :height 0.1)
+  (button text
+	  :width (* 1.5 width)
+    :height 3.2
+    :padding 0.05
+    :font-size 11
+    :shape :tab
+    :active (if active 1 0)
+    :background-color :transparent
+    :active-background-color :black
+    :color :dim
+    :active-color :white
+    :border-color :transparent
+    :on-click click)))
+
 (def instrument-synth-button ()
-  (instrument-header-button "synth" (and (= instrument-panel-tab 0) (not instrument-mods-open)) 4.5
+  (instrument-header-tab-button "synth" (and (= instrument-panel-tab 0) (not instrument-mods-open)) 4.5
     (lambda (info) (do (set! instrument-panel-tab 0) (set! instrument-mods-open false)))))
 
 (def instrument-toggle-mods-view ()
@@ -131,7 +147,7 @@
     (set! instrument-mods-open (not instrument-mods-open))))
 
 (def instrument-mods-toggle-button ()
-  (instrument-header-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
+  (instrument-header-tab-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
     (lambda (info) (instrument-toggle-mods-view))))
 
 (def effect-toggle-mods-view (fx)
@@ -150,5 +166,5 @@
         (set! effect-mods-bus bus)))))
 
 (def effect-mods-toggle-button (fx)
-  (instrument-header-button "mods" (effect-mods-active? fx) 4.0
+  (instrument-header-tab-button "mods" (effect-mods-active? fx) 4.0
     (lambda (info) (effect-toggle-mods-view fx))))

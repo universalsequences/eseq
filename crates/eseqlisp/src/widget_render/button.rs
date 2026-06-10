@@ -4,8 +4,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MouseEventOutcome,
-    WidgetDefinition, WidgetEvent, label::label_text_row, ndc_bounds, resolve_named_color,
-    styled_cell,
+    WidgetDefinition, WidgetEvent, get_f32_prop, label::label_text_row, ndc_bounds,
+    resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
 use crate::layout::{
@@ -47,6 +47,22 @@ fn prop_text(props: &HashMap<String, Value>) -> String {
     }
 }
 
+fn button_is_active(props: &HashMap<String, Value>) -> bool {
+    match props.get("active") {
+        Some(Value::Bool(active)) => *active,
+        Some(Value::Number(active)) => *active != 0.0,
+        Some(Value::ReactiveRef { .. }) => get_f32_prop(props, "active", 0.0) != 0.0,
+        _ => false,
+    }
+}
+
+fn button_is_active_tab(props: &HashMap<String, Value>) -> bool {
+    matches!(
+        props.get("shape"),
+        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "tab"
+    ) && button_is_active(props)
+}
+
 fn variant_bg(props: &HashMap<String, Value>) -> Color {
     let default = match variant(props) {
         ButtonVariant::Primary => theme::BUTTON_PRIMARY_BG(),
@@ -54,6 +70,11 @@ fn variant_bg(props: &HashMap<String, Value>) -> Color {
         ButtonVariant::Ghost => theme::BUTTON_GHOST_BG(),
         ButtonVariant::Danger => theme::BUTTON_DANGER_BG(),
     };
+    if button_is_active(props)
+        && let Some(active_bg) = props.get("active-background-color")
+    {
+        return theme::parse_color_value(active_bg).unwrap_or(default);
+    }
     resolve_named_color(props, "background-color", default)
 }
 
@@ -64,6 +85,11 @@ fn variant_fg(props: &HashMap<String, Value>) -> Color {
         ButtonVariant::Ghost => theme::BUTTON_GHOST_FG(),
         ButtonVariant::Danger => theme::BUTTON_DANGER_FG(),
     };
+    if button_is_active(props)
+        && let Some(active_fg) = props.get("active-color")
+    {
+        return theme::parse_color_value(active_fg).unwrap_or(default);
+    }
     resolve_named_color(props, "color", default)
 }
 
@@ -184,17 +210,43 @@ float button_surface_rounded_rect(float2 p, float2 size, float radius)
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
 }
 
-float button_surface_smooth(float2 p, float2 size, float radius, float edge_min, float edge_max)
+float button_surface_tab(float2 p, float2 size, float radius)
 {
-    return smoothstep(edge_min, edge_max, button_surface_rounded_rect(p, size, radius));
+    float top_splay = min(size.x * 0.20, 0.22);
+    float top_half_width = max(size.x - top_splay, 0.001);
+    float t = smoothstep(-size.y + radius * 1.40, size.y, p.y);
+    float half_width = mix(top_half_width, size.x, t);
+    float2 q = float2(abs(p.x) - half_width, abs(p.y) - size.y);
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+
+    float2 top_left = p - float2(-top_half_width + radius, -size.y + radius);
+    float2 top_right = p - float2(top_half_width - radius, -size.y + radius);
+    float top_left_d = length(top_left) - radius;
+    float top_right_d = length(top_right) - radius;
+    d = (p.x < -top_half_width + radius && p.y < -size.y + radius) ? top_left_d : d;
+    d = (p.x > top_half_width - radius && p.y < -size.y + radius) ? top_right_d : d;
+    return d;
 }
 
-float3 button_surface_normal(float2 p, float2 size, float radius, float eps)
+float button_surface_distance(float2 p, float2 size, float radius, float shape)
 {
-    float right = button_surface_smooth(p + float2(eps, 0.0), size, radius, -0.10, 0.92);
-    float left = button_surface_smooth(p - float2(eps, 0.0), size, radius, -0.10, 0.92);
-    float down = button_surface_smooth(p + float2(0.0, eps), size, radius, -0.10, 0.92);
-    float up = button_surface_smooth(p - float2(0.0, eps), size, radius, -0.10, 0.92);
+    if (shape > 0.5) {
+        return button_surface_tab(p, size, radius);
+    }
+    return button_surface_rounded_rect(p, size, radius);
+}
+
+float button_surface_smooth(float2 p, float2 size, float radius, float edge_min, float edge_max)
+{
+    return smoothstep(edge_min, edge_max, button_surface_distance(p, size, radius, 0.0));
+}
+
+float3 button_surface_normal(float2 p, float2 size, float radius, float shape, float eps)
+{
+    float right = smoothstep(-0.10, 0.92, button_surface_distance(p + float2(eps, 0.0), size, radius, shape));
+    float left = smoothstep(-0.10, 0.92, button_surface_distance(p - float2(eps, 0.0), size, radius, shape));
+    float down = smoothstep(-0.10, 0.92, button_surface_distance(p + float2(0.0, eps), size, radius, shape));
+    float up = smoothstep(-0.10, 0.92, button_surface_distance(p - float2(0.0, eps), size, radius, shape));
     return normalize(float3((right - left) / (2.0 * eps), (down - up) / (2.0 * eps), 1.0));
 }
 
@@ -203,10 +255,11 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float aspect = max(in.aspect, 0.001);
     float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
     float2 size = float2(aspect, 1.0);
+    float shape = in.uniform_a.x;
 
     float r = in.corner_radius > 0.0 ? in.corner_radius : 0.75;
     r = min(r, min(aspect, 1.0));
-    float d = button_surface_rounded_rect(p, size, r);
+    float d = button_surface_distance(p, size, r, shape);
 
     float edge = fwidth(d) * 1.2;
     float mask = smoothstep(edge, -edge, d);
@@ -215,12 +268,12 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float px = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
     float border_width = 1.35 * px;
     float2 inner_size = max(size - float2(border_width), float2(0.001));
-    float inner_d = button_surface_rounded_rect(p, inner_size, max(r - border_width, 0.0));
+    float inner_d = button_surface_distance(p, inner_size, max(r - border_width, 0.0), shape);
     float inner_edge = fwidth(inner_d) * 1.2;
     float inner_mask = smoothstep(inner_edge, -inner_edge, inner_d);
     float border_mask = clamp(mask - inner_mask, 0.0, 1.0);
 
-    float3 normal = button_surface_normal(p, size, r, max(px * 1.5, 0.004));
+    float3 normal = button_surface_normal(p, size, r, shape, max(px * 1.5, 0.004));
     float3 view_dir = float3(0.0, 0.0, 1.0);
     float3 key_light = normalize(float3(-0.72, -0.92, 1.30));
     float3 bounce_light = normalize(float3(0.82, 0.78, 1.10));
@@ -256,6 +309,10 @@ impl WidgetDefinition for ButtonWidget {
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["text", "width", "height", "font-size", "padding"]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["active"]
     }
 
     fn measure(
@@ -386,7 +443,16 @@ impl WidgetDefinition for ButtonWidget {
                     value_t: 0.0,
                     orientation: 0.0,
                     itime: viewport.time_seconds,
-                    uniform_a: [0.0; 4],
+                    uniform_a: [
+                        if button_is_active_tab(&node.props) {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        0.0,
+                        0.0,
+                        0.0,
+                    ],
                     uniform_b: [0.0; 4],
                     color_a: bg.to_rgba(),
                     color_b: button_border(&node.props).to_rgba(),
@@ -590,5 +656,129 @@ mod tests {
         assert_eq!(instance.color_b, [0.4, 0.5, 0.6, 0.7]);
         assert_eq!(instance.color_c, [0.8, 0.85, 0.9, 0.2]);
         assert_eq!(instance.color_d, [0.0, 0.0, 0.0, 0.3]);
+    }
+
+    #[test]
+    fn active_is_bindable_but_not_size_affecting() {
+        assert_eq!(BUTTON_WIDGET.bindable_props(), &["active"]);
+        assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"active"));
+    }
+
+    #[test]
+    fn tab_shape_is_not_size_affecting_or_bindable() {
+        assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"shape"));
+        assert!(!BUTTON_WIDGET.bindable_props().contains(&"shape"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn active_tab_button_sets_tab_shape_flag() {
+        let node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Mod 1".to_string())),
+            ("shape".to_string(), Value::Keyword("tab".to_string())),
+            ("active".to_string(), Value::Bool(true)),
+        ]));
+
+        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let instance = prims
+            .iter()
+            .find_map(|prim| match prim {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    is_background: true,
+                } if widget_type == "button" => Some(instance),
+                _ => None,
+            })
+            .expect("button background");
+
+        assert_eq!(instance.uniform_a[0], 1.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn inactive_tab_button_uses_normal_shape_flag() {
+        let node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Mod 1".to_string())),
+            ("shape".to_string(), Value::Keyword("tab".to_string())),
+            ("active".to_string(), Value::Bool(false)),
+        ]));
+
+        let prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let instance = prims
+            .iter()
+            .find_map(|prim| match prim {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    is_background: true,
+                } if widget_type == "button" => Some(instance),
+                _ => None,
+            })
+            .expect("button background");
+
+        assert_eq!(instance.uniform_a[0], 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn button_metal_resolves_reactive_active_colors_at_draw_time() {
+        let slot = crate::reactive::reactive_float_slot("BUTTON_TEST", "active");
+        crate::reactive::write_float_slot("BUTTON_TEST", "active", 0.0);
+        let node = test_button_node(HashMap::from([
+            ("text".to_string(), Value::String("Loop".to_string())),
+            (
+                "active".to_string(),
+                Value::ReactiveRef {
+                    namespace: "BUTTON_TEST".to_string(),
+                    field: "active".to_string(),
+                    index: None,
+                    kind: crate::vm::BindingKind::Float,
+                    slot,
+                },
+            ),
+            (
+                "background-color".to_string(),
+                color_value(0.1, 0.2, 0.3, 1.0),
+            ),
+            (
+                "active-background-color".to_string(),
+                color_value(0.0, 0.48, 0.95, 1.0),
+            ),
+            ("color".to_string(), Value::Keyword("dim".to_string())),
+            (
+                "active-color".to_string(),
+                Value::Keyword("white".to_string()),
+            ),
+        ]));
+
+        let inactive_prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let inactive_bg = inactive_prims
+            .iter()
+            .find_map(|prim| match prim {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    is_background: true,
+                } if widget_type == "button" => Some(instance.color_a),
+                _ => None,
+            })
+            .expect("button background");
+        assert_eq!(inactive_bg, [0.1, 0.2, 0.3, 1.0]);
+
+        crate::reactive::write_float_slot("BUTTON_TEST", "active", 1.0);
+        let active_prims = ButtonWidget.build_metal_primitives("button", &node, test_viewport());
+        let active_bg = active_prims
+            .iter()
+            .find_map(|prim| match prim {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    is_background: true,
+                } if widget_type == "button" => Some(instance.color_a),
+                _ => None,
+            })
+            .expect("button background");
+        assert_eq!(active_bg, [0.0, 0.48, 0.95, 1.0]);
     }
 }

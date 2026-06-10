@@ -6,7 +6,7 @@
       (modulator-panel inst)
       (box
         (v-stack :debug-name "instrument-panel-vstack" :gap 0 :height :fill
-          (box :debug-name "instrument-header-box" :height fx-panel-header-height :padding 0 :v-align :center :h-align :start :width :fill
+          (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :center :h-align :start :width :fill
             (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center :width :fill
               (fx-panel-header-leading-spacer)
               (fx-enabled-toggle (enabled-param (get inst :synth)) false "instrument-enabled")
@@ -17,11 +17,12 @@
                 (instrument-mods-toggle-button))
               (box :flex 1 :height 0.15)
               (v-stack 
-                (box :width 1 :height 0.15)
                 (button "edit" 
                   :background-color :black
+		  :height 0.75
                   :debug-name "instrument-edit-button" 
-                  :font-size 11  
+                  :font-size 10  
+		  :border-color :transparent
                   :on-click |x y r|
                   (host-command "enter-edit-instrument"
                     (dict :name SEQ.sidebar-instrument-name))

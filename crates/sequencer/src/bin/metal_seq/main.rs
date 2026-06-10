@@ -948,7 +948,7 @@ struct AgentEffectFinalizeResult {
     effect_name: String,
 }
 
-fn sync_after_agent_instrument_apply(
+fn sync_after_instrument_track_apply(
     app: &mut ui::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
@@ -1034,6 +1034,7 @@ fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     for buffer_name in [
         "*metal*",
         "*sequencer*",
+        "*samples*",
         "*mixer*",
         "*track*",
         "*fx*",
@@ -2274,7 +2275,7 @@ fn ensure_agent_instrument_stub_track(
             )
             .map_err(|error| format!("Failed to refresh agent stub track: {error}"))?;
             reload_custom_instrument_ui(editor);
-            sync_after_agent_instrument_apply(
+            sync_after_instrument_track_apply(
                 app,
                 editor,
                 state,
@@ -2322,7 +2323,7 @@ fn ensure_agent_instrument_stub_track(
         )
         .map_err(|error| format!("Failed to record agent stub message: {error}"))?;
 
-    sync_after_agent_instrument_apply(
+    sync_after_instrument_track_apply(
         app,
         editor,
         state,
@@ -2437,7 +2438,7 @@ fn apply_agent_draft_to_owned_instrument(
         eprintln!("[agent-ui] accepted conv={conv_id} but failed to record success: {error}");
     }
 
-    sync_after_agent_instrument_apply(
+    sync_after_instrument_track_apply(
         app,
         editor,
         state,
@@ -2713,7 +2714,7 @@ fn apply_agent_draft_to_effect_slot(
         )
         .map_err(|error| format!("Failed to record effect apply message: {error}"))?;
 
-    sync_after_agent_instrument_apply(
+    sync_after_instrument_track_apply(
         app,
         editor,
         state,
@@ -2827,7 +2828,7 @@ fn finalize_agent_instrument(
         )
         .map_err(|error| format!("Failed to record finalize message: {error}"))?;
 
-    sync_after_agent_instrument_apply(
+    sync_after_instrument_track_apply(
         app,
         editor,
         state,
@@ -2923,7 +2924,7 @@ fn finalize_agent_effect(
                 },
             )
             .map_err(|error| format!("Failed to update effect artifact target: {error}"))?;
-        sync_after_agent_instrument_apply(
+        sync_after_instrument_track_apply(
             app,
             editor,
             state,
@@ -5075,7 +5076,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     "add-track-modulator" => match app.graph_controller().add_modulator_track() {
                         Ok(idx) => {
-                            sync_after_agent_instrument_apply(
+                            sync_after_instrument_track_apply(
                                 &mut app,
                                 &mut editor,
                                 &state,
@@ -10617,7 +10618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         };
                         let _ = app.force_instrument_enabled(draft_track);
-                        sync_after_agent_instrument_apply(
+                        sync_after_instrument_track_apply(
                             &mut app,
                             &mut editor,
                             &state,
@@ -11210,6 +11211,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 continue;
                                             }
                                         };
+                                    sync_after_instrument_track_apply(
+                                        &mut app,
+                                        &mut editor,
+                                        &state,
+                                        track,
+                                        &current_track,
+                                        &mut track_names,
+                                        &track_pan_ids,
+                                        &record_armed,
+                                        &selected_steps,
+                                        &accumulator_names,
+                                        &cached_track_peak_levels,
+                                        &cached_bus_peak_levels,
+                                        &ui_epoch,
+                                        lg_raw,
+                                    );
                                     let buf_name = format!("*instrument-patcher:{inst_name}*");
                                     editor.remove_buffer_by_name(&buf_name);
                                     editor.create_scratch_buffer(
@@ -11279,6 +11296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
+                                    refresh_visible_track_topology_layouts(&mut editor);
                                 }
                             }
                         }
