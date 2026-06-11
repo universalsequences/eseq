@@ -5,10 +5,10 @@
 (def ui-accent-green () (rgba 0.30 0.82 0.48 1.0))
 (def ui-accent-violet () (rgba 0.62 0.45 0.95 1.0))
 
-(def ui-lego-gap () 0.25)
+(def ui-lego-gap () 0.06125)
 (def ui-lego-small-h () 1.95)
 (def ui-lego-medium-h () 4.08)
-(def ui-lego-dense-h () 3.08)
+(def ui-lego-dense-h () 3.38)
 (def ui-lego-full-h ()
   (+ (ui-lego-medium-h) (ui-lego-small-h) (ui-lego-small-h)
      (ui-lego-gap) (ui-lego-gap)))
@@ -55,7 +55,7 @@
 (def ui-lego-panel-s (height section surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
-       :corner-radius 7
+       :corner-radius 12
        :border-width 1
        :padding 0.18
        :on-click (ui-section-select-callback section)
@@ -254,7 +254,7 @@
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
-            :width width :height 2.62
+            :width width :height 2.82
             :value-align :center
             :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
@@ -283,7 +283,7 @@
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
 	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
-            :width width :height 2.62
+            :width width :height 3.12
             :value-align :center
 	    :arc-color accent
             :on-change (custom-ui-param-change-callback-s section p))))
@@ -402,7 +402,7 @@
             (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
-              :bg-color :instrument-control-bg
+              :bg-color '(rgba 0.1 0.1 0.1 1) ;:instrument-control-bg
               :text-color accent
               :chevron-color accent
               :badge-color (rgba 0.16 0.17 0.20 1.0)
@@ -693,25 +693,27 @@
 (def ui-lego-panel-x-s (section width height surface border-color stripe-color body)
   (box :width width :height height
        :background-color surface
-       :corner-radius 7
+       :corner-radius 22
        :border-width 1
        :border-color border-color
        :padding 0.18
        :on-click (ui-section-select-callback section)
-    (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+    (h-stack :width :fill :height :fill :gap 0.24 :align :center
       (if stripe-color
-        (box :width 0.26 :height :fill :background-color stripe-color :corner-radius 2)
+        (box :width 0.26 :height (* height 0.6) :background-color stripe-color :corner-radius 2)
         (box :width 0.02 :height 0.1))
       (box :flex 1 :height :fill :padding 0.04 body))))
 
 ;; Solid colored tab block (Ableton-style source tag like "1" / "2" / "N").
 (def ui-lego-tab-s (section text width height color text-color)
-  (box :width width :height height
+  (button text :width width :height height
+       :font-size 8.8 :color text-color
        :background-color color
        :corner-radius 3
        :h-align :center :v-align :center
        :on-click (ui-section-select-callback section)
-    (label text :font-size 8.8 :color text-color :bg :transparent)))
+   ; (label text :font-size 8.8 :color text-color :bg :transparent)
+    ))
 
 ;; Accent text header with underline — alternative to ui-lego-badge-s.
 (def ui-lego-header-s (section title width accent)

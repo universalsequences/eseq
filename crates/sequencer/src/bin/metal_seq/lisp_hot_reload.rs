@@ -6,6 +6,10 @@ use std::time::{Duration, Instant};
 use eseqlisp::{Editor, ReloadReport};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
+use super::custom_ui::{
+    custom_ui_source_paths, is_generated_custom_ui_source_path, reload_custom_instrument_ui,
+};
+
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(150);
 
 #[derive(Debug)]
@@ -150,12 +154,30 @@ fn is_reload_event(kind: &EventKind) -> bool {
     !matches!(kind, EventKind::Access(_))
 }
 
+pub(crate) fn watched_lisp_paths(editor: &Editor) -> Vec<PathBuf> {
+    let mut paths = editor
+        .runtime()
+        .lisp_source_paths()
+        .into_iter()
+        .filter(|path| !is_generated_custom_ui_source_path(path))
+        .collect::<Vec<_>>();
+    paths.extend(custom_ui_source_paths());
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, paths: Vec<PathBuf>) -> bool {
     eprintln!(
         "metal_seq: Lisp hot reload observed changes: {}",
         format_paths(&paths)
     );
     let mut reload_paths = Vec::new();
+    let custom_ui_paths = custom_ui_source_paths()
+        .into_iter()
+        .map(|path| watch_path(&path))
+        .collect::<BTreeSet<_>>();
+    let mut custom_ui_changed = false;
     for path in paths {
         if has_dirty_open_buffer(editor, &path) {
             eprintln!(
@@ -179,23 +201,50 @@ pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, paths: Vec<Path
             )));
             continue;
         }
-        reload_paths.push(path);
+        if custom_ui_paths.contains(&watch_path(&path)) {
+            custom_ui_changed = true;
+        } else {
+            reload_paths.push(path);
+        }
     }
-    if reload_paths.is_empty() {
+
+    let mut success = true;
+    let normal_lisp_changed = !reload_paths.is_empty();
+    if normal_lisp_changed {
+        eprintln!(
+            "metal_seq: Lisp hot reload evaluating: {}",
+            format_paths(&reload_paths)
+        );
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor
+            .runtime_mut()
+            .reload_paths_transactional(reload_paths, overlays);
+        success &= report.success;
+        log_reload_report(&report);
+        editor.process_lisp_reload_report(report);
+    }
+
+    if custom_ui_changed {
+        eprintln!("metal_seq: Lisp hot reload rebuilding custom instrument/effect UI");
+        let custom_success = reload_custom_instrument_ui(editor);
+        success &= custom_success;
+        if custom_success {
+            editor.handle_host_event(eseqlisp::HostEvent::Status(
+                "Custom instrument/effect UI hot reload succeeded".to_string(),
+            ));
+        } else {
+            editor.handle_host_event(eseqlisp::HostEvent::Status(
+                "Custom instrument/effect UI hot reload failed; kept previous definitions"
+                    .to_string(),
+            ));
+        }
+        editor.mark_needs_redraw();
+    }
+
+    if !normal_lisp_changed && !custom_ui_changed {
         eprintln!("metal_seq: Lisp hot reload has no eligible paths");
         return false;
     }
-    eprintln!(
-        "metal_seq: Lisp hot reload evaluating: {}",
-        format_paths(&reload_paths)
-    );
-    let overlays = editor.snapshot_file_backed_sources();
-    let report = editor
-        .runtime_mut()
-        .reload_paths_transactional(reload_paths, overlays);
-    let success = report.success;
-    log_reload_report(&report);
-    editor.process_lisp_reload_report(report);
     success
 }
 
@@ -472,5 +521,25 @@ mod tests {
             r#"(def hot-label "unsaved")"#
         );
         assert!(editor.active_buffer().dirty);
+    }
+
+    #[test]
+    fn watched_lisp_paths_include_custom_instrument_and_effect_ui_sources() {
+        let editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let watched = watched_lisp_paths(&editor)
+            .into_iter()
+            .map(|path| watch_path(&path))
+            .collect::<BTreeSet<_>>();
+
+        for path in [
+            PathBuf::from("instruments/bass/korg1/ui.lisp"),
+            PathBuf::from("effects/sidechain/ui.lisp"),
+        ] {
+            assert!(
+                watched.contains(&watch_path(&path)),
+                "hot reload watch list should include {}",
+                path.display()
+            );
+        }
     }
 }

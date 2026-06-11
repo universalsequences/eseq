@@ -69,7 +69,7 @@
       :fx-panel-header-bg '(0.130 0.160 0.198)
       :fx-panel-header-selected-bg '(0.18 0.31 0.52)
       :fx-panel-border   '(0.18 0.22 0.28)
-      :instrument-panel-bg '(0.095 0.120 0.150)
+      :instrument-panel-bg '(0.130 0.160 0.198)
       :instrument-control-bg '(0.026 0.035 0.046)
       :instrument-group-bg '(0.078 0.100 0.128)
       :instrument-group-selected-bg '(0.075 0.112 0.112)

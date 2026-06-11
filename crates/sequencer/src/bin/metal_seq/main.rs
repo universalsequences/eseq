@@ -4509,9 +4509,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
     let mut soft_step_param_edit = SoftStepParamEdit::default();
-    let mut lisp_hot_reload_watcher =
-        LispHotReloadWatcher::start(editor.runtime().lisp_source_paths());
+    let mut lisp_hot_reload_watcher = LispHotReloadWatcher::start(watched_lisp_paths(&editor));
     let mut lisp_hot_reload_source_revision = editor.runtime().lisp_source_revision();
+    let mut last_lisp_hot_reload_path_scan = Instant::now();
 
     // Inline editor session state (instrument/effect creation/editing)
     let mut editor_buffer_name: Option<String> = None;
@@ -4592,9 +4592,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(watcher) = lisp_hot_reload_watcher.as_mut() {
             let source_revision = editor.runtime().lisp_source_revision();
-            if source_revision != lisp_hot_reload_source_revision {
-                watcher.set_watched_paths(editor.runtime().lisp_source_paths());
+            if source_revision != lisp_hot_reload_source_revision
+                || last_lisp_hot_reload_path_scan.elapsed() >= Duration::from_secs(1)
+            {
+                watcher.set_watched_paths(watched_lisp_paths(&editor));
                 lisp_hot_reload_source_revision = source_revision;
+                last_lisp_hot_reload_path_scan = Instant::now();
             }
             let changed_paths = watcher.poll_ready_paths();
             if !changed_paths.is_empty()

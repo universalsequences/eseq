@@ -875,7 +875,7 @@
       :padding 0.45
       :on-click (lambda (event) (mixer-v2-select-bus i))
       (v-stack :gap 0.25
-        (box :height 2.8)
+        (box :height 2.6)
         (h-stack :gap 0.45 :align :center
           (box :width 3.0 :height 3.6)
           (mixer-v2-bus-meter-control i))

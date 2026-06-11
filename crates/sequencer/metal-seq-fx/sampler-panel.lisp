@@ -189,43 +189,44 @@
           (label "Sampler" :font-size 11 :color :white :bg :transparent)
           (instrument-synth-button)
           (instrument-mods-toggle-button)
-	  ))
+          	  ))
       (fx-panel-body "sampler-panel-content"
         (let ((body
-                (v-stack
-                  (box :background-color :instrument-control-bg :corner-radius 10
-                    (v-stack :gap 0.0 
-                      (if (get inst :buffer)
-                        (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                          (box :width 78 :height 4.85 
-                            (waveform
-                              :height 4.85
-                              :header-height 0.3
-                              :ruler-font-size 8
-                              :ruler-color :dim
-                              :ruler-bg :black
-                              :grid-major-color :black
-                              :grid-minor-color :black
-                              :bg :instrument-control-bg
-                              :focusable true
-                              :marker-selection true
-                              :active-marker sampler-active-marker
-                              :marker-color :dim
-                              :active-marker-color :widget-knob-filled
-                              :waveform-color :yellow
-                              :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
-                              :buffer (get inst :buffer)
-                              :view-start sampler-view-start
-                              :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
-                              :cursor-time sampler-cursor-time
-                              :playhead-time (bind-seq "sampler-playhead")
-                              :selection-start (bind-seq (get inst :start-time-field))
-                              :selection-end (bind-seq (get inst :end-time-field))
-                              :time-ruler (dict :mode :seconds)
-                              :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
-                        (box :width 70 :height 4.85 :h-align :center :v-align :center
-                          (label "No sample" :font-size 12 :color :dim :bg :transparent)))
-                      (sampler-param-knobs (get inst :synth) inst))))))
+              (v-stack
+                (box :background-color :instrument-control-bg :corner-radius 10
+                  (v-stack :gap 0.0 
+                    (box :height 0.3)
+                    (if (get inst :buffer)
+                      (subtree :key (str "sampler-waveform-" (get inst :buffer))
+                        (box :width 78 :height 4.85 
+                          (waveform
+                            :height 4.85
+                            :header-height 0.3
+                            :ruler-font-size 8
+                            :ruler-color :dim
+                            :ruler-bg :black
+                            :grid-major-color :black
+                            :grid-minor-color :black
+                            :bg :instrument-control-bg
+                            :focusable true
+                            :marker-selection true
+                            :active-marker sampler-active-marker
+                            :marker-color :dim
+                            :active-marker-color :widget-knob-filled
+                            :waveform-color :yellow
+                            :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
+                            :buffer (get inst :buffer)
+                            :view-start sampler-view-start
+                            :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
+                            :cursor-time sampler-cursor-time
+                            :playhead-time (bind-seq "sampler-playhead")
+                            :selection-start (bind-seq (get inst :start-time-field))
+                            :selection-end (bind-seq (get inst :end-time-field))
+                            :time-ruler (dict :mode :seconds)
+                            :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
+                      (box :width 70 :height 4.85 :h-align :center :v-align :center
+                        (label "No sample" :font-size 12 :color :dim :bg :transparent)))
+                    (sampler-param-knobs (get inst :synth) inst))))))
           (if instrument-mods-open
             (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
               (instrument-mod-control-panel inst)
