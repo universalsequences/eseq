@@ -44,9 +44,9 @@
 
 ; ---- operator params (A is the always-carrier, D the deepest modulator) ----
 (param opa_on @default 1 @min 0 @max 1)
-(param opa_wave @default 0 @min 0 @max 6)
-(param opa_coarse @default 1 @min 0 @max 32)
-(param opa_fine @default 0 @min -1 @max 1)
+(param opa_wave @default 0 @min 0 @max 7)
+(param opa_coarse @default 1 @min 0 @max 32 @mod true @mod-mode additive @mod-depth-min -8 @mod-depth-max 8)
+(param opa_fine @default 0 @min -1 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
 (param opa_fixed @default 0 @min 0 @max 1)
 (param opa_freq_hz @default 440 @min 0.1 @max 20000 @unit Hz)
 (param opa_level_db @default -6 @min -60 @max 0 @unit dB @mod true @mod-mode additive @mod-depth-min -24 @mod-depth-max 24 @mod-unit dB)
@@ -57,9 +57,9 @@
 (param opa_release @default 150 @min 1 @max 20000 @unit ms)
 
 (param opb_on @default 1 @min 0 @max 1)
-(param opb_wave @default 0 @min 0 @max 6)
-(param opb_coarse @default 1 @min 0 @max 32)
-(param opb_fine @default 0 @min -1 @max 1)
+(param opb_wave @default 0 @min 0 @max 7)
+(param opb_coarse @default 1 @min 0 @max 32 @mod true @mod-mode additive @mod-depth-min -8 @mod-depth-max 8)
+(param opb_fine @default 0 @min -1 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
 (param opb_fixed @default 0 @min 0 @max 1)
 (param opb_freq_hz @default 440 @min 0.1 @max 20000 @unit Hz)
 (param opb_level_db @default -60 @min -60 @max 0 @unit dB @mod true @mod-mode additive @mod-depth-min -24 @mod-depth-max 24 @mod-unit dB)
@@ -70,9 +70,9 @@
 (param opb_release @default 150 @min 1 @max 20000 @unit ms)
 
 (param opc_on @default 1 @min 0 @max 1)
-(param opc_wave @default 0 @min 0 @max 6)
-(param opc_coarse @default 1 @min 0 @max 32)
-(param opc_fine @default 0 @min -1 @max 1)
+(param opc_wave @default 0 @min 0 @max 7)
+(param opc_coarse @default 1 @min 0 @max 32 @mod true @mod-mode additive @mod-depth-min -8 @mod-depth-max 8)
+(param opc_fine @default 0 @min -1 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
 (param opc_fixed @default 0 @min 0 @max 1)
 (param opc_freq_hz @default 440 @min 0.1 @max 20000 @unit Hz)
 (param opc_level_db @default -60 @min -60 @max 0 @unit dB @mod true @mod-mode additive @mod-depth-min -24 @mod-depth-max 24 @mod-unit dB)
@@ -83,9 +83,9 @@
 (param opc_release @default 150 @min 1 @max 20000 @unit ms)
 
 (param opd_on @default 1 @min 0 @max 1)
-(param opd_wave @default 0 @min 0 @max 6)
-(param opd_coarse @default 1 @min 0 @max 32)
-(param opd_fine @default 0 @min -1 @max 1)
+(param opd_wave @default 0 @min 0 @max 7)
+(param opd_coarse @default 1 @min 0 @max 32 @mod true @mod-mode additive @mod-depth-min -8 @mod-depth-max 8)
+(param opd_fine @default 0 @min -1 @max 1 @mod true @mod-mode additive @mod-depth-min -1 @mod-depth-max 1)
 (param opd_fixed @default 0 @min 0 @max 1)
 (param opd_freq_hz @default 440 @min 0.1 @max 20000 @unit Hz)
 (param opd_level_db @default -60 @min -60 @max 0 @unit dB @mod true @mod-mode additive @mod-depth-min -24 @mod-depth-max 24 @mod-unit dB)
@@ -94,6 +94,35 @@
 (param opd_decay @default 800 @min 1 @max 20000 @unit ms)
 (param opd_sustain @default 1 @min 0 @max 1)
 (param opd_release @default 150 @min 1 @max 20000 @unit ms)
+
+; ---- user-drawn waveform: 16 additive partial levels (wave option "user") ----
+(param partial_1 @default 1 @min 0 @max 1)
+(param partial_2 @default 0 @min 0 @max 1)
+(param partial_3 @default 0 @min 0 @max 1)
+(param partial_4 @default 0 @min 0 @max 1)
+(param partial_5 @default 0 @min 0 @max 1)
+(param partial_6 @default 0 @min 0 @max 1)
+(param partial_7 @default 0 @min 0 @max 1)
+(param partial_8 @default 0 @min 0 @max 1)
+(param partial_9 @default 0 @min 0 @max 1)
+(param partial_10 @default 0 @min 0 @max 1)
+(param partial_11 @default 0 @min 0 @max 1)
+(param partial_12 @default 0 @min 0 @max 1)
+(param partial_13 @default 0 @min 0 @max 1)
+(param partial_14 @default 0 @min 0 @max 1)
+(param partial_15 @default 0 @min 0 @max 1)
+(param partial_16 @default 0 @min 0 @max 1)
+(param user_norm @default 1 @min 0 @max 1)
+
+; ---- per-envelope mode (normal / loop / beat-sync) ----
+(param opa_env_mode @default 0 @min 0 @max 2)
+(param opb_env_mode @default 0 @min 0 @max 2)
+(param opc_env_mode @default 0 @min 0 @max 2)
+(param opd_env_mode @default 0 @min 0 @max 2)
+(param penv_mode @default 0 @min 0 @max 2)
+(param fenv_mode @default 0 @min 0 @max 2)
+(param env_loop_rate_hz @default 4 @min 0.1 @max 40 @unit Hz)
+(param env_sync_div @default 2 @min 0 @max 5)
 
 ; ---- FM router ----
 (param algorithm @default 0 @min 0 @max 10)
@@ -157,13 +186,32 @@
 (def spread_semis (* rnd_det spread spread 0.5))
 (def note_hz (* base_pitch (semi_ratio (+ transpose spread_semis))))
 
+; ---- envelope retrigger pulses (loop = free Hz, sync = transport beat div) ----
+(def gate_on (gt gate 0.5))
+(def loop_ph (retrig_phasor env_loop_rate_hz trigger))
+(make-history loop_ph_prev_hist)
+(def loop_prev_ph (read-history loop_ph_prev_hist))
+(def loop_pulse (* (lt loop_ph loop_prev_ph) gate_on))
+(write-history loop_ph_prev_hist loop_ph)
+; clock is a 0..1 transport bar phase; div = retriggers per bar
+(def sync_div (selector (+ (clip (round env_sync_div) 0 5) 1) 1 2 4 8 16 32))
+(def sync_ph (wrap (* clock sync_div) 0 1))
+(make-history sync_ph_prev_hist)
+(def sync_prev_ph (read-history sync_ph_prev_hist))
+(def sync_pulse (* (lt sync_ph sync_prev_ph) gate_on))
+(write-history sync_ph_prev_hist sync_ph)
+
+(defmacro env_trig (mode)
+  (def m (clip (round mode) 0 2))
+  (clip (+ trigger (* (eq m 1) loop_pulse) (* (eq m 2) sync_pulse)) 0 1))
+
 ; ---- envelopes ----
-(def env_a (adsr gate trigger opa_attack opa_decay opa_sustain opa_release))
-(def env_b (adsr gate trigger opb_attack opb_decay opb_sustain opb_release))
-(def env_c (adsr gate trigger opc_attack opc_decay opc_sustain opc_release))
-(def env_d (adsr gate trigger opd_attack opd_decay opd_sustain opd_release))
-(def penv (adsr gate trigger penv_attack penv_decay penv_sustain penv_release))
-(def fenv (adsr gate trigger fenv_attack fenv_decay fenv_sustain fenv_release))
+(def env_a (adsr gate (env_trig opa_env_mode) opa_attack opa_decay opa_sustain opa_release))
+(def env_b (adsr gate (env_trig opb_env_mode) opb_attack opb_decay opb_sustain opb_release))
+(def env_c (adsr gate (env_trig opc_env_mode) opc_attack opc_decay opc_sustain opc_release))
+(def env_d (adsr gate (env_trig opd_env_mode) opd_attack opd_decay opd_sustain opd_release))
+(def penv (adsr gate (env_trig penv_mode) penv_attack penv_decay penv_sustain penv_release))
+(def fenv (adsr gate (env_trig fenv_mode) fenv_attack fenv_decay fenv_sustain fenv_release))
 
 ; ---- LFO ----
 (def lfo_freq (clip (gswitch (gte lfo_mode 0.5)
@@ -191,21 +239,31 @@
 (def pitch_mod_ratio (semi_ratio (+ (* penv (clip (mod penv_amount) -48 48))
                                     (* lfo lfo_to_pitch))))
 
-; ---- operator frequency: ratio (coarse+fine) or fixed Hz ----
-(defmacro op_freq (coarse fine fixed fixed_hz)
-  (def c (clip (round coarse) 0 32))
-  (def cbase (gswitch (lt c 0.5) 0.5 c))
-  (def ratio (max 0.0625 (+ cbase fine)))
+; ---- operator frequency: ratio (coarse+fine, both host-modulatable) or fixed Hz ----
+; (mod ...) must read the literal param symbol, so coarse/fine reads stay
+; outside the macro and pre-resolved values are passed in.
+(def crs_a (clip (round (mod opa_coarse)) 0 32))
+(def crs_b (clip (round (mod opb_coarse)) 0 32))
+(def crs_c (clip (round (mod opc_coarse)) 0 32))
+(def crs_d (clip (round (mod opd_coarse)) 0 32))
+(def fin_a (clip (mod opa_fine) -1 1))
+(def fin_b (clip (mod opb_fine) -1 1))
+(def fin_c (clip (mod opc_fine) -1 1))
+(def fin_d (clip (mod opd_fine) -1 1))
+
+(defmacro op_freq (crs fin fixed fixed_hz)
+  (def cbase (gswitch (lt crs 0.5) 0.5 crs))
+  (def ratio (max 0.0625 (+ cbase fin)))
   (clip (* (gswitch (gte fixed 0.5)
                     (clip fixed_hz 0.1 20000)
                     (* note_hz ratio))
            pitch_mod_ratio)
         0.0 (* samplerate 0.45)))
 
-(def f_a (op_freq opa_coarse opa_fine opa_fixed opa_freq_hz))
-(def f_b (op_freq opb_coarse opb_fine opb_fixed opb_freq_hz))
-(def f_c (op_freq opc_coarse opc_fine opc_fixed opc_freq_hz))
-(def f_d (op_freq opd_coarse opd_fine opd_fixed opd_freq_hz))
+(def f_a (op_freq crs_a fin_a opa_fixed opa_freq_hz))
+(def f_b (op_freq crs_b fin_b opb_fixed opb_freq_hz))
+(def f_c (op_freq crs_c fin_c opc_fixed opc_freq_hz))
+(def f_d (op_freq crs_d fin_d opd_fixed opd_freq_hz))
 
 ; ---- algorithm edge gains (alg 0..10), signals flow D -> C -> B -> A ----
 (def alg1 (+ (clip (round algorithm) 0 10) 1))
@@ -247,19 +305,51 @@
 (def mamp_d (* act_d (dbamp (clip (+ lvl_d fm_drive) -60 12))))
 
 ; ---- operator core ----
-; waveforms: sine, sine 4-bit, sine 8-bit, triangle, saw, square, noise
+; user-drawn waveform normalization (shared across ops)
+(def psum_sq (+ (* partial_1 partial_1) (* partial_2 partial_2)
+                (* partial_3 partial_3) (* partial_4 partial_4)
+                (* partial_5 partial_5) (* partial_6 partial_6)
+                (* partial_7 partial_7) (* partial_8 partial_8)
+                (* partial_9 partial_9) (* partial_10 partial_10)
+                (* partial_11 partial_11) (* partial_12 partial_12)
+                (* partial_13 partial_13) (* partial_14 partial_14)
+                (* partial_15 partial_15) (* partial_16 partial_16)))
+(def ugain (gswitch (gte user_norm 0.5) (/ 1.0 (pow (max psum_sq 0.0625) 0.5)) 1.0))
+
+(defmacro user_wave (pm)
+  (def w2pi (* pm twopi))
+  (* ugain
+     (+ (* partial_1 (sin w2pi))
+        (* partial_2 (sin (* w2pi 2)))
+        (* partial_3 (sin (* w2pi 3)))
+        (* partial_4 (sin (* w2pi 4)))
+        (* partial_5 (sin (* w2pi 5)))
+        (* partial_6 (sin (* w2pi 6)))
+        (* partial_7 (sin (* w2pi 7)))
+        (* partial_8 (sin (* w2pi 8)))
+        (* partial_9 (sin (* w2pi 9)))
+        (* partial_10 (sin (* w2pi 10)))
+        (* partial_11 (sin (* w2pi 11)))
+        (* partial_12 (sin (* w2pi 12)))
+        (* partial_13 (sin (* w2pi 13)))
+        (* partial_14 (sin (* w2pi 14)))
+        (* partial_15 (sin (* w2pi 15)))
+        (* partial_16 (sin (* w2pi 16))))))
+
+; waveforms: sine, sine 4-bit, sine 8-bit, triangle, saw, square, noise, user
 (defmacro op_wave_sel (widx pm f)
   (def s (sin (* pm twopi)))
   (def s4 (* (round (* s 7.5)) 0.13333334))
   (def s8 (* (round (* s 63.5)) 0.015748031))
-  (selector (+ (clip (round widx) 0 6) 1)
+  (selector (+ (clip (round widx) 0 7) 1)
     s
     s4
     s8
     (triangle pm)
     (polyblep_saw pm f)
     (polyblep_pulse pm 0.5 f)
-    (noise)))
+    (noise)
+    (user_wave pm)))
 
 ; phase-modulated operator with self-feedback on its previous amped output
 (defmacro fm_op (widx f fm_rad fb_gain amp)

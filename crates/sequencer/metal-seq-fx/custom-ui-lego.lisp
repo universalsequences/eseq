@@ -8,7 +8,7 @@
 (def ui-lego-gap () 0.06125)
 (def ui-lego-small-h () 1.95)
 (def ui-lego-medium-h () 4.08)
-(def ui-lego-dense-h () 3.38)
+(def ui-lego-dense-h () 3.8)
 (def ui-lego-full-h ()
   (+ (ui-lego-medium-h) (ui-lego-small-h) (ui-lego-small-h)
      (ui-lego-gap) (ui-lego-gap)))
@@ -55,7 +55,7 @@
 (def ui-lego-panel-s (height section surface body)
   (box :width (ui-lego-col-w) :height height
        :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
-       :corner-radius 12
+       :corner-radius 8 
        :border-width 1
        :padding 0.18
        :on-click (ui-section-select-callback section)
@@ -693,7 +693,7 @@
 (def ui-lego-panel-x-s (section width height surface border-color stripe-color body)
   (box :width width :height height
        :background-color surface
-       :corner-radius 22
+       :corner-radius 16
        :border-width 1
        :border-color border-color
        :padding 0.18
@@ -728,7 +728,7 @@
     (if p
       (custom-ui-param-mod-wrapper p (str "custom-ui-lego-vfader-mod-" (custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-vfader-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
-          (vslider :width width :height height
+          (vslider :width 0.1 :height height
             :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p)
             :origin (custom-ui-param-control-min p)
             :value (custom-ui-param-value p)
@@ -743,7 +743,7 @@
   (let ((p (custom-ui-current-param name)))
     (if p
       (v-stack :width width :gap 0.10 :align :center
-        (ui-lego-vfader-s section name 1.05 fader-height accent)
+        (ui-lego-vfader-s section name 0.7 fader-height accent)
         (number-picker :value (custom-ui-param-value p)
           :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
           :unit unit
@@ -776,6 +776,61 @@
                   (custom-ui-set-param-in-scope scope p
                     (+ (get p :min) (mod (+ idx 1) n)))))))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+;; ---------------------------------------------------------------------------
+;; Mode-driven center-panel pieces: a section click (any panel's on-click or a
+;; ui-lego-mode-tab-s) sets custom-ui-selected-section; the instrument
+;; dispatches on it to swap center views.
+;; ---------------------------------------------------------------------------
+
+;; Selection-aware surface: brighter color when the section drives the center.
+(def ui-lego-sel-surface (section selected-surface surface)
+  (if (= custom-ui-selected-section section) selected-surface surface))
+
+;; Mode tab (Ableton's little filled selector box): accent-filled when its
+;; section is selected, dark with accent text otherwise. Click selects.
+(def ui-lego-mode-tab-s (section text width height accent)
+  (ui-lego-tab-s section text width height
+    (if (= custom-ui-selected-section section) accent (rgba 0.13 0.135 0.15 1.0))
+    (if (= custom-ui-selected-section section) :black accent)))
+
+;; Accent-tinted detail ADSR body — panel-less, for composing inside a larger
+;; continuous surface (mode-driven center panels).
+(def ui-detail-adsr-body-x-s (section title accent attack decay sustain release)
+  (let ((scope (custom-ui-current-scope)))
+      (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+        (adsr-editor
+          :attack (ui-param-bound-value attack 5)
+          :decay (ui-param-bound-value decay 120)
+          :sustain (ui-param-bound-value sustain 0.7)
+          :release (ui-param-bound-value release 120)
+          :width 13.2 :height :fill
+          :background-color :instrument-control-bg
+          :on-change (lambda (env)
+            (do
+              (custom-ui-select-section-in-scope scope section)
+              (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
+              (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
+              (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
+              (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+        (v-stack :width 8.2 :height :fill :gap 0.10 :align :start
+          (ui-lego-badge-dark title 7.7 accent)
+          (h-stack :gap 0.14 :align :start
+            (ui-lego-micro-num-s section attack "atk" 3.7 0 "ms" accent)
+            (ui-lego-micro-num-s section decay "dec" 3.7 0 "ms" accent))
+          (h-stack :gap 0.14 :align :start
+            (ui-lego-micro-num-s section sustain "sus" 3.7 2 false accent)
+            (ui-lego-micro-num-s section release "rel" 3.7 0 "ms" accent))))))
+
+;; Accent-tinted detail ADSR — like ui-detail-adsr-s but with a custom accent
+;; so per-mode views keep their identity color.
+(def ui-detail-adsr-x-s (section title accent attack decay sustain release)
+  (ui-readout-panel-medium-s section
+    (ui-detail-adsr-body-x-s section title accent attack decay sustain release)))
+
+;; Hairline divider for sectioning a continuous panel.
+(def ui-lego-divider ()
+  (box :width :fill :height 0.05 :background-color (rgba 1.0 1.0 1.0 0.07) :corner-radius 1))
 
 ;; On/off chip: filled with accent when on, dark when off. Click toggles.
 (def ui-lego-chip-toggle-s (section name text width accent)

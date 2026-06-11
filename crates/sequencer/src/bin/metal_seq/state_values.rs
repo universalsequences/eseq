@@ -22144,8 +22144,12 @@ mod tests {
                 Value::Map(test_param_map("filter_freq", 3, 12000.0, 20.0, 18000.0)),
                 Value::Map(test_param_map("lfo_rate_hz", 4, 5.0, 0.01, 40.0)),
                 Value::Map(test_param_map("penv_amount", 5, 0.0, -48.0, 48.0)),
-                Value::Map(test_param_map("fenv_attack", 6, 1.0, 0.1, 10000.0)),
+                Value::Map(test_param_map("opa_attack", 6, 5.0, 0.1, 10000.0)),
                 Value::Map(test_param_map("volume_db", 7, -12.0, -36.0, 6.0)),
+                Value::Map(test_param_map("shaper_wet", 8, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("penv_mode", 9, 0.0, 0.0, 2.0)),
+                Value::Map(test_param_map("opa_env_mode", 10, 0.0, 0.0, 2.0)),
+                Value::Map(test_param_map("env_sync_div", 11, 2.0, 0.0, 5.0)),
             ]))),
         );
 
@@ -22227,8 +22231,12 @@ mod tests {
             "filter_freq",
             "lfo_rate_hz",
             "penv_amount",
-            "fenv_attack",
+            "opa_attack",
             "volume_db",
+            "shaper_wet",
+            "penv_mode",
+            "opa_env_mode",
+            "env_sync_div",
         ] {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));

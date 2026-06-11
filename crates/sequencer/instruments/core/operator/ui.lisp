@@ -1,7 +1,8 @@
-;; Operator — FM character: gold/teal/coral/violet per-operator identity,
-;; tabbed op panels with level faders, dual ADSR detail switchers,
-;; filter+shaper column, LFO / pitch utility strips
-;; (built on the ui-lego-panel-x / tab / fader pieces).
+;; Operator — FM character: gold/teal/coral/violet per-operator identity.
+;; Mode-driven center panel (Ableton Operator style): clicking an op panel,
+;; the filter panel, or a center tab (A/B/C/D/FILT/WAVE) swaps the center
+;; view — envelope detail on top, context sub-panel (oscillator / filter env
+;; / user-wave partials) below, tab strip at the bottom.
 
 (def opx-gold   () (rgba 1.00 0.76 0.30 1.0))
 (def opx-teal   () (rgba 0.36 0.86 0.80 1.0))
@@ -13,6 +14,13 @@
 (def opx-surf-warm () (rgba 0.094 0.086 0.066 1.0))
 (def opx-surf-cool () (rgba 0.140 0.146 0.150 1.0))
 (def opx-surf-dark () (rgba 0.055 0.058 0.064 1.0))
+
+;; selected section's panel goes transparent (Ableton-style: the rack
+;; background shows through); unselected panels keep their darker surface
+(def opx-warm-surface (section)
+  (ui-lego-sel-surface section :transparent (opx-surf-warm)))
+(def opx-cool-surface (section)
+  (ui-lego-sel-surface section :transparent (opx-surf-cool)))
 
 (def opx-bord-warm () (rgba 0.44 0.32 0.10 0.060))
 (def opx-bord-cool () (rgba 0.14 0.36 0.34 0.060))
@@ -29,7 +37,13 @@
   (box :width :fill :height :fill :v-align :center body))
 
 (def opx-wave-options ()
-  '("sine" "sin4b" "sin8b" "tri" "saw" "sqr" "noise"))
+  '("sine" "sin4b" "sin8b" "tri" "saw" "sqr" "noise" "user"))
+
+(def opx-env-mode-options ()
+  '("norm" "loop" "sync"))
+
+(def opx-sync-div-options ()
+  '("1/1" "1/2" "1/4" "1/8" "1/16" "1/32"))
 
 (def opx-fixed-options ()
   '("ratio" "fixed"))
@@ -55,38 +69,27 @@
 (def opx-shaper-options ()
   '("soft" "hard" "fold" "digi"))
 
-;; one operator panel: tab letter, wave/vel row, ratio-or-fixed row,
-;; coarse+fine knobs, level fader (level = carrier volume AND FM index)
-(def opx-op-block (section tab-text accent
-                   wave-p coarse-p fine-p fixed-p freq-p level-p vel-p)
-  (opx-panel-dense section (opx-surf-warm) (opx-bord-warm) accent
-    (h-stack :width :fill :height :fill :gap 0.30 :align :center
-      (v-stack :width 9.6 :gap 0.18 :align :start
-        (h-stack :gap 0.20 :align :end
-          (box :width 1.3 :height 1.18 :v-align :end
-            (ui-lego-tab-s section tab-text 1.3 0.92 accent :black))
-          (ui-lego-micro-option-s section wave-p "wave" 4.6 (opx-wave-options) accent)
-          (ui-lego-micro-num-s section vel-p "vel" 2.8 2 false (opx-cream)))
-        (h-stack :gap 0.20 :align :start
-          (ui-lego-micro-option-s section fixed-p "mode" 3.4 (opx-fixed-options) (opx-cream))
-          (ui-lego-micro-num-s section freq-p "fixed hz" 4.8 1 "Hz" (opx-cream))))
-      (h-stack :gap 0.10 :align :start
-        (ui-lego-knob-s section coarse-p "coarse" 3.7 accent 0)
-        (ui-lego-knob-s section fine-p "fine" 3.7 (opx-cream) 2))
+;; one operator panel — slim: tab letter, coarse+fine knobs, level fader.
+;; Wave / ratio-fixed / vel live in the center oscillator view for the
+;; selected op. Click anywhere on the panel to drive the center view.
+(def opx-op-block (section tab-text accent coarse-p fine-p level-p)
+  (opx-panel-dense section (opx-warm-surface section) (opx-bord-warm) accent
+    (h-stack :width :fill :height :fill :gap 0.50 :align :center
+      (box :width 1.4 :height :fill :v-align :center
+        (ui-lego-tab-s section tab-text 1.4 1.05 accent :black))
+      (h-stack :gap 0.14 :align :start
+        (ui-lego-knob-s section coarse-p "coarse" 4.2 accent 0)
+        (ui-lego-knob-s section fine-p "fine" 4.2 (opx-cream) 2))
       (ui-lego-fader-s section level-p 2.3 1.95 accent 1 false))))
 
 (def opx-opa-block ()
-  (opx-op-block 0 "A" (opx-gold)
-    "opa_wave" "opa_coarse" "opa_fine" "opa_fixed" "opa_freq_hz" "opa_level_db" "opa_vel"))
+  (opx-op-block 0 "A" (opx-gold) "opa_coarse" "opa_fine" "opa_level_db"))
 (def opx-opb-block ()
-  (opx-op-block 1 "B" (opx-teal)
-    "opb_wave" "opb_coarse" "opb_fine" "opb_fixed" "opb_freq_hz" "opb_level_db" "opb_vel"))
+  (opx-op-block 1 "B" (opx-teal) "opb_coarse" "opb_fine" "opb_level_db"))
 (def opx-opc-block ()
-  (opx-op-block 2 "C" (opx-coral)
-    "opc_wave" "opc_coarse" "opc_fine" "opc_fixed" "opc_freq_hz" "opc_level_db" "opc_vel"))
+  (opx-op-block 2 "C" (opx-coral) "opc_coarse" "opc_fine" "opc_level_db"))
 (def opx-opd-block ()
-  (opx-op-block 3 "D" (opx-violet)
-    "opd_wave" "opd_coarse" "opd_fine" "opd_fixed" "opd_freq_hz" "opd_level_db" "opd_vel"))
+  (opx-op-block 3 "D" (opx-violet) "opd_coarse" "opd_fine" "opd_level_db"))
 
 ;; FM router: algorithm + FM drive + feedback
 (def opx-algo-block ()
@@ -104,40 +107,169 @@
     (opx-small-row
       (h-stack :gap 0.42 :align :end
         (ui-lego-header-s 2 "OPS" 2.6 (opx-cream))
-        (ui-lego-micro-option-s 2 "opa_on" "A" 3.0 (opx-onoff-options) (opx-gold))
-        (ui-lego-micro-option-s 2 "opb_on" "B" 3.0 (opx-onoff-options) (opx-teal))
-        (ui-lego-micro-option-s 2 "opc_on" "C" 3.0 (opx-onoff-options) (opx-coral))
-        (ui-lego-micro-option-s 2 "opd_on" "D" 3.0 (opx-onoff-options) (opx-violet))))))
-
-;; envelope detail switchers: click op A/B or C/D panels to swap
-(def opx-env-ab-detail ()
-  (ui-detail-adsr-switch-s
-    0 "OP A ENV" "opa_attack" "opa_decay" "opa_sustain" "opa_release"
-    1 "OP B ENV" "opb_attack" "opb_decay" "opb_sustain" "opb_release"))
-
-(def opx-env-cd-detail ()
-  (ui-detail-adsr-switch-s
-    2 "OP C ENV" "opc_attack" "opc_decay" "opc_sustain" "opc_release"
-    3 "OP D ENV" "opd_attack" "opd_decay" "opd_sustain" "opd_release"))
+        (ui-lego-micro-option-s 2 "opa_on" "A" 4.0 (opx-onoff-options) (opx-gold))
+        (ui-lego-micro-option-s 2 "opb_on" "B" 4.0 (opx-onoff-options) (opx-teal))
+        (ui-lego-micro-option-s 2 "opc_on" "C" 4.0 (opx-onoff-options) (opx-coral))
+        (ui-lego-micro-option-s 2 "opd_on" "D" 4.0 (opx-onoff-options) (opx-violet))))))
 
 (def opx-global-block ()
-  (opx-panel-small 0 (opx-surf-cool) (opx-bord-dark) false
+  (opx-panel-small 4 (opx-surf-cool) (opx-bord-dark) false
     (opx-small-row
       (h-stack :gap 0.22 :align :end
-        (ui-lego-header-s 0 "GLB" 2.4 (opx-cream))
+        (ui-lego-header-s 4 "GLB" 2.4 (opx-cream))
         (box :width 0.8)
-        (ui-lego-micro-base-note-s 0 4.0 (opx-cream))
-        (ui-lego-micro-num-s 0 "glide_ms" "glide" 3.6 0 "ms" (opx-cream))
-        (ui-lego-micro-num-s 0 "volume_db" "vol" 4.4 1 "dB" (opx-gold))
-        (ui-lego-micro-num-s 0 "tone" "tone" 3.4 2 false (opx-cream))))))
+        (ui-lego-micro-base-note-s 4 4.0 (opx-cream))
+        (ui-lego-micro-num-s 4 "glide_ms" "glide" 3.6 0 "ms" (opx-cream))
+        (ui-lego-micro-num-s 4 "volume_db" "vol" 4.4 1 "dB" (opx-gold))
+        (ui-lego-micro-num-s 4 "tone" "tone" 3.4 2 false (opx-cream))))))
 
-(def opx-env-column ()
-  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap)
-    (opx-env-ab-detail)
-    (opx-env-cd-detail)))
+;; ---------------------------------------------------------------------------
+;; Center column — mode-driven detail (selected section picks the view)
+;; ---------------------------------------------------------------------------
+
+;; envelope detail: ADSR editor + value readouts, accent-tinted per mode
+(def opx-env-detail (section title accent attack decay sustain release)
+  (ui-detail-adsr-body-x-s section title accent attack decay sustain release))
+
+;; user-drawn waveform detail: 16 packed partial faders (draw the spectrum;
+;; select wave "user" on any operator to play it)
+(def opx-partial-fader (name)
+  (ui-lego-vfader-s 5 name 1.28 2.05 (opx-gold)))
+
+(def opx-partials-detail ()
+    (v-stack :width :fill :height :fill :gap 0.10 :align :center
+      (ui-lego-header-s 5 "USER WAVE — PARTIALS 1-16" 14.0 (opx-gold))
+      (h-stack :gap 0.0 :align :start
+        (opx-partial-fader "partial_1")
+        (opx-partial-fader "partial_2")
+        (opx-partial-fader "partial_3")
+        (opx-partial-fader "partial_4")
+        (opx-partial-fader "partial_5")
+        (opx-partial-fader "partial_6")
+        (opx-partial-fader "partial_7")
+        (opx-partial-fader "partial_8")
+        (opx-partial-fader "partial_9")
+        (opx-partial-fader "partial_10")
+        (opx-partial-fader "partial_11")
+        (opx-partial-fader "partial_12")
+        (opx-partial-fader "partial_13")
+        (opx-partial-fader "partial_14")
+        (opx-partial-fader "partial_15")
+        (opx-partial-fader "partial_16"))))
+
+(def opx-center-detail ()
+  (if (= custom-ui-selected-section 5)
+    (opx-partials-detail)
+    (if (= custom-ui-selected-section 4)
+      (opx-env-detail 4 "FILTER ENV" (opx-ice)
+        "fenv_attack" "fenv_decay" "fenv_sustain" "fenv_release")
+      (if (= custom-ui-selected-section 3)
+        (opx-env-detail 3 "OP D ENV" (opx-violet)
+          "opd_attack" "opd_decay" "opd_sustain" "opd_release")
+        (if (= custom-ui-selected-section 2)
+          (opx-env-detail 2 "OP C ENV" (opx-coral)
+            "opc_attack" "opc_decay" "opc_sustain" "opc_release")
+          (if (= custom-ui-selected-section 1)
+            (opx-env-detail 1 "OP B ENV" (opx-teal)
+              "opb_attack" "opb_decay" "opb_sustain" "opb_release")
+            (opx-env-detail 0 "OP A ENV" (opx-gold)
+              "opa_attack" "opa_decay" "opa_sustain" "opa_release")))))))
+
+;; oscillator sub-view for the selected op: wave / ratio-fixed / vel / env mode
+(def opx-osc-sub (section letter accent wave-p fixed-p freq-p vel-p envmode-p)
+  (box :width :fill :height 2.55
+    (v-stack :width :fill :gap 0.18 :align :start
+      (h-stack :gap 0.54 :align :end
+        (ui-lego-header-s section (str "OSC " letter) 3.4 accent)
+	(box :width 0.2)
+        (ui-lego-micro-option-s section wave-p "wave" 4.6 (opx-wave-options) accent)
+        (ui-lego-micro-num-s section vel-p "vel" 2.8 2 false (opx-cream)))
+      (h-stack :gap 0.24 :align :end
+        (ui-lego-micro-option-s section fixed-p "mode" 4.5 (opx-fixed-options) (opx-cream))
+        (ui-lego-micro-num-s section freq-p "fixed hz" 4.8 1 "Hz" (opx-cream))
+        (ui-lego-micro-option-s section envmode-p "env" 4.7 (opx-env-mode-options) accent)
+        (ui-lego-micro-num-s section "env_loop_rate_hz" "loop" 4.0 1 "Hz" (opx-teal))
+        (ui-lego-micro-option-s section "env_sync_div" "sync" 4.2 (opx-sync-div-options) (opx-teal))))))
+
+;; filter-envelope sub-view: amount + mode (+ shared loop/sync clocks)
+(def opx-filterenv-sub ()
+  (box :width :fill :height 2.55
+    (v-stack :width :fill :gap 0.18 :align :start
+      (h-stack :gap 0.24 :align :end
+        (ui-lego-header-s 4 "FILTER ENV" 6.4 (opx-ice))
+        (ui-lego-micro-num-s 4 "fenv_amt" "env amt" 3.6 1 false (opx-ice))
+        (ui-lego-micro-option-s 4 "fenv_mode" "mode" 5.3 (opx-env-mode-options) (opx-ice)))
+      (h-stack :gap 1.54 :align :end
+        (ui-lego-micro-num-s 4 "env_loop_rate_hz" "loop" 3.4 1 "Hz" (opx-teal))
+        (ui-lego-micro-option-s 4 "env_sync_div" "sync" 4.5 (opx-sync-div-options) (opx-teal))))))
+
+;; user-wave sub-view: normalize toggle
+(def opx-userwave-sub ()
+  (box :width :fill :height 2.55
+    (v-stack :width :fill :gap 0.18 :align :start
+      (h-stack :gap 1.42 :align :end
+        (ui-lego-header-s 5 "USER WAVE" 6.5 (opx-gold))
+        (ui-lego-micro-option-s 5 "user_norm" "normalize" 4.0 (opx-onoff-options) (opx-gold)))
+      (label "set wave 'user' on an operator to hear it" :font-size 8.0 :color :dim :bg :transparent))))
+
+(def opx-center-sub ()
+  (if (= custom-ui-selected-section 5)
+    (opx-userwave-sub)
+    (if (= custom-ui-selected-section 4)
+      (opx-filterenv-sub)
+      (if (= custom-ui-selected-section 3)
+        (opx-osc-sub 3 "D" (opx-violet) "opd_wave" "opd_fixed" "opd_freq_hz" "opd_vel" "opd_env_mode")
+        (if (= custom-ui-selected-section 2)
+          (opx-osc-sub 2 "C" (opx-coral) "opc_wave" "opc_fixed" "opc_freq_hz" "opc_vel" "opc_env_mode")
+          (if (= custom-ui-selected-section 1)
+            (opx-osc-sub 1 "B" (opx-teal) "opb_wave" "opb_fixed" "opb_freq_hz" "opb_vel" "opb_env_mode")
+            (opx-osc-sub 0 "A" (opx-gold) "opa_wave" "opa_fixed" "opa_freq_hz" "opa_vel" "opa_env_mode")))))))
+
+;; mode tabs: filled with accent when selected (Ableton's little filled box)
+(def opx-mode-tab (section text width accent)
+  (ui-lego-mode-tab-s section text width 0.98 accent))
+
+(def opx-mode-tabs ()
+  (box :width :fill :height 1.30 :v-align :center
+    (h-stack :gap 0.30 :align :center
+      (opx-mode-tab 0 "A" 2.6 (opx-gold))
+      (opx-mode-tab 1 "B" 2.6 (opx-teal))
+      (opx-mode-tab 2 "C" 2.6 (opx-coral))
+      (opx-mode-tab 3 "D" 2.6 (opx-violet))
+      (opx-mode-tab 4 "FILT" 4.2 (opx-ice))
+      (opx-mode-tab 5 "WAVE" 4.2 (opx-gold)))))
+
+;; accent of whichever mode drives the center view (stripe color)
+(def opx-center-accent ()
+  (if (= custom-ui-selected-section 5) (opx-gold)
+    (if (= custom-ui-selected-section 4) (opx-ice)
+      (if (= custom-ui-selected-section 3) (opx-violet)
+        (if (= custom-ui-selected-section 2) (opx-coral)
+          (if (= custom-ui-selected-section 1) (opx-teal)
+            (opx-gold)))))))
+
+(def opx-center-height ()
+  (+ (* 2.0 (ui-lego-dense-h)) (ui-lego-small-h) (* 2.0 (ui-lego-gap))))
+
+;; one continuous center panel: detail view / context sub-view / mode tabs,
+;; separated by hairline dividers
+(def opx-center-column ()
+  (ui-lego-panel-x-s custom-ui-selected-section
+    (ui-lego-col-w) (opx-center-height)
+    (opx-surf-dark) (opx-bord-dark) (opx-center-accent)
+    (v-stack :width :fill :height :fill :gap 0.16
+      (box :width :fill :height 3.7 (opx-center-detail))
+      (ui-lego-divider)
+      (box :width :fill :height 2.55 (opx-center-sub))
+      (ui-lego-divider)
+      (opx-mode-tabs))))
+
+;; ---------------------------------------------------------------------------
+;; Right side — filter / shaper / global, LFO + pitch strips
+;; ---------------------------------------------------------------------------
 
 (def opx-filter-block ()
-  (opx-panel-dense 4 (opx-surf-cool) (opx-bord-cool) (opx-ice)
+  (opx-panel-dense 4 (opx-cool-surface 4) (opx-bord-cool) (opx-ice)
     (h-stack :width :fill :height :fill :gap 0.30 :align :center
       (v-stack :width 9.4 :gap 0.18 :align :start
         (h-stack :gap 0.22 :align :end
@@ -156,18 +288,11 @@
   (opx-panel-dense 4 (opx-surf-cool) (opx-bord-cool) (opx-coral)
     (h-stack :width :fill :height :fill :gap 0.30 :align :center
       (v-stack :width 9.4 :gap 0.18 :align :start
-        (h-stack :gap 0.22 :align :end
-          (ui-lego-header-s 4 "SHAPER" 4.2 (opx-coral))
-          (ui-lego-micro-option-s 4 "shaper_type" "curve" 4.4 (opx-shaper-options) (opx-coral)))
-        (h-stack :gap 0.16 :align :start
-          (ui-lego-micro-num-s 4 "fenv_attack" "fA" 2.2 0 false (opx-ice))
-          (ui-lego-micro-num-s 4 "fenv_decay" "fD" 2.2 0 false (opx-ice))
-          (ui-lego-micro-num-s 4 "fenv_sustain" "fS" 2.0 2 false (opx-ice))
-          (ui-lego-micro-num-s 4 "fenv_release" "fR" 2.2 0 false (opx-ice))))
+        (ui-lego-header-s 4 "SHAPER" 4.2 (opx-coral))
+        (ui-lego-micro-option-s 4 "shaper_type" "curve" 4.4 (opx-shaper-options) (opx-coral)))
       (h-stack :gap 0.10 :align :start
         (ui-lego-knob-s 4 "shaper_drive_db" "drive" 3.7 (opx-coral) 1)
-        (ui-lego-knob-s 4 "shaper_wet" "wet" 3.7 (opx-coral) 2)
-        (ui-lego-knob-s 4 "fenv_amt" "env" 3.7 (opx-ice) 1)))))
+        (ui-lego-knob-s 4 "shaper_wet" "wet" 3.7 (opx-coral) 2)))))
 
 (def opx-lfo-strip ()
   (opx-panel-strip 5 (opx-surf-cool) (opx-bord-cool) (opx-violet)
@@ -189,7 +314,9 @@
   (opx-panel-strip 5 (opx-surf-cool) (opx-bord-warm) (opx-gold)
     (v-stack :width :fill :gap 0.08 :align :center
       (ui-lego-header-s 5 "PITCH" 5.6 (opx-gold))
-      (ui-lego-micro-num-s 5 "penv_amount" "env amt" 5.6 1 "st" (opx-gold))
+      (h-stack
+        (ui-lego-micro-num-s 5 "penv_amount" "env amt" 5.6 1 "st" (opx-gold))
+        (ui-lego-micro-option-s 5 "penv_mode" "env mode" 5.6 (opx-env-mode-options) (opx-gold)))
       (h-stack
         (ui-lego-micro-num-s 5 "penv_attack" "A" 5.6 0 "ms" (opx-gold))
         (ui-lego-micro-num-s 5 "penv_decay" "D" 5.6 0 "ms" (opx-gold)))
@@ -211,7 +338,7 @@
       (opx-opc-block)
       (opx-opd-block)
       (opx-ops-block))
-    (opx-env-column)
+    (opx-center-column)
     (ui-lego-column
       (opx-filter-block)
       (opx-shaper-block)

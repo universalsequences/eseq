@@ -40,7 +40,7 @@
 (defstate seq-patcher-source-buffer "")
 (defstate seq-registered-step-tabs '())
 
-(def lower-fx-layout-height 10.5)
+(def lower-fx-layout-height 11.5)
 
 (def seq-step-tab-buffer (tab)
   (nth tab 1))

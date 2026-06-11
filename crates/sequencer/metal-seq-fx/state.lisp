@@ -23,7 +23,7 @@
 (def custom-ui-current-kind "instrument")
 
 ;; Matches a standard built-in FX panel with four parameter rows.
-(def fx-fixed-panel-height 9.9)
+(def fx-fixed-panel-height 10.8)
 (def fx-panel-header-height 0.75)
 (def fx-panel-body-padding 0.25)
 (def fx-panel-body-top-spacer-height 0.16)
