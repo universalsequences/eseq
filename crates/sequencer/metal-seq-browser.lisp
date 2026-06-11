@@ -285,9 +285,9 @@
       (selected (get tag :selected)))
     (button name
       :variant :ghost
-      :background-color (if selected "#ecca6d" "#36373b")
+      :background-color (if selected "#ecca6d" '(rgba 1 1 1 1 0.01))
       :color (if selected :black "#9ea1a8")
-      :border-color (if selected "#effb6d" '(rgba 1 1 1 0.3))
+      :border-color (if selected "#effb6d" '(rgba 1 1 1 0.2))
       :height 1.02
       :padding 0.32
       :font-size 10.0

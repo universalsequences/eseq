@@ -18,7 +18,6 @@ use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
 use crate::vm::Value;
 
-use super::autocomplete_macros_for_state;
 use super::display::{node_display_label, preview};
 use super::geometry::{
     connection_cable_edit_points, connection_endpoints, node_resize_handle_centers,
@@ -114,7 +113,7 @@ pub(super) fn build_metal_primitives_for_patcher(
             let patch = active_patcher_patch(&root_patch, &interaction_state);
             let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
             let autocomplete_macros =
-                autocomplete_macros_for_state(node, &interaction_state, &view_key);
+                super::autocomplete_macros_for_patch(&node.props, Some(&patch));
             sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
             let content_size = patch_content_size(&patch);
             if pan_uninitialized && patcher_fit_enabled(&node.props) {

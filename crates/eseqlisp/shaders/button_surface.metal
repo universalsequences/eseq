@@ -60,7 +60,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (mask < 0.002) { discard_fragment(); }
 
     float px = max(max(fwidth(p.x), fwidth(p.y)), 0.001);
-    float border_width = 1.35 * px;
+    float border_width = 1.00 * px;
     float2 inner_size = max(size - float2(border_width), float2(0.001));
     float inner_d = button_surface_distance(p, inner_size, max(r - border_width, 0.0), shape);
     float inner_edge = fwidth(inner_d) * 1.2;

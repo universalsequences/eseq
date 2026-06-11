@@ -253,6 +253,7 @@
             :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
+	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
             :width width :height 2.62
             :value-align :center
             :on-change (custom-ui-param-change-callback p))))
@@ -281,8 +282,10 @@
             :selected-mod-slot (custom-ui-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
+	    :track-color '(rgba 0.4, 0.4, 0.4, 1)
             :width width :height 2.62
             :value-align :center
+	    :arc-color accent
             :on-change (custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
@@ -348,6 +351,12 @@
             (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
+              :bg-color :instrument-control-bg
+              :text-color accent
+              :chevron-color accent
+              :badge-color (rgba 0.16 0.17 0.20 1.0)
+              :border-color accent
+              :border-width 0.05
               :width width :height 0.78 :font-size 8.0
               :on-change (lambda (v)
                 (custom-ui-set-param-in-scope
@@ -367,6 +376,12 @@
             (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
+              :bg-color :instrument-control-bg
+              :text-color accent
+              :chevron-color accent
+              :badge-color (rgba 0.16 0.17 0.20 1.0)
+              :border-color accent
+              :border-width 0.05
               :width width :height 0.78 :font-size 8.0
               :on-change (lambda (v)
                 (do
@@ -387,6 +402,12 @@
             (dropdown :value-index (custom-ui-param-value p)
               :value-index-offset (get p :min)
               :options options
+              :bg-color :instrument-control-bg
+              :text-color accent
+              :chevron-color accent
+              :badge-color (rgba 0.16 0.17 0.20 1.0)
+              :border-color (rgba 1.0 1.0 1.0 0.2) 
+              :border-width 0.05
               :width width :height 0.92 :font-size 8.6
               :on-change (lambda (v)
                 (do
@@ -661,3 +682,113 @@
   (if (= custom-ui-selected-section section-b)
     (ui-adsr-c title-b attack-b decay-b sustain-b release-b)
     (ui-adsr-c title-a attack-a decay-a sustain-a release-a)))
+
+;; ---------------------------------------------------------------------------
+;; Character variants — parametric pieces for giving an instrument its own
+;; visual identity instead of the uniform badge+dropdown look.
+;; ---------------------------------------------------------------------------
+
+;; Fully parametric panel: custom surface + border colors and an optional
+;; accent stripe down the left edge. stripe-color may be false for no stripe.
+(def ui-lego-panel-x-s (section width height surface border-color stripe-color body)
+  (box :width width :height height
+       :background-color surface
+       :corner-radius 7
+       :border-width 1
+       :border-color border-color
+       :padding 0.18
+       :on-click (ui-section-select-callback section)
+    (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+      (if stripe-color
+        (box :width 0.26 :height :fill :background-color stripe-color :corner-radius 2)
+        (box :width 0.02 :height 0.1))
+      (box :flex 1 :height :fill :padding 0.04 body))))
+
+;; Solid colored tab block (Ableton-style source tag like "1" / "2" / "N").
+(def ui-lego-tab-s (section text width height color text-color)
+  (box :width width :height height
+       :background-color color
+       :corner-radius 3
+       :h-align :center :v-align :center
+       :on-click (ui-section-select-callback section)
+    (label text :font-size 8.8 :color text-color :bg :transparent)))
+
+;; Accent text header with underline — alternative to ui-lego-badge-s.
+(def ui-lego-header-s (section title width accent)
+  (box :width width :height 1.18 :v-align :end :on-click (ui-section-select-callback section)
+    (v-stack :width width :gap 0.14 :align :start
+      (label title :font-size 9.2 :width width :color accent :bg :transparent)
+      (box :width width :height 0.10 :background-color accent :corner-radius 1))))
+
+;; Param-bound vertical fader.
+(def ui-lego-vfader-s (section name width height accent)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (custom-ui-param-mod-wrapper p (str "custom-ui-lego-vfader-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-vfader-" (custom-ui-scope-name) (custom-ui-param-control-key-mode p) "-" name)
+          (vslider :width width :height height
+            :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p)
+            :origin (custom-ui-param-control-min p)
+            :value (custom-ui-param-value p)
+            :color :white
+            :fill accent
+            :dot-color (rgba 0.16 0.16 0.18 1.0)
+            :on-change (custom-ui-param-change-callback-s section p))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+;; Fader cell: vertical fader with an editable value readout under it.
+(def ui-lego-fader-s (section name width fader-height accent decimals unit)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (v-stack :width width :gap 0.10 :align :center
+        (ui-lego-vfader-s section name 1.05 fader-height accent)
+        (number-picker :value (custom-ui-param-value p)
+          :min (custom-ui-param-control-min p) :max (custom-ui-param-control-max p) :decimals decimals
+          :unit unit
+          :noui true :font-size 8.6
+          :text-color accent :edit-color :yellow
+          :text-align :center
+          :width width :height 0.46
+          :on-change (custom-ui-param-change-callback-s section p)))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+;; Click-to-cycle chip: shows the current option, click advances (wraps).
+;; For 2-3 option params where a dropdown is overkill.
+(def ui-lego-chip-cycle-s (section name labels width accent)
+  (let ((p (custom-ui-current-param name))
+        (scope (custom-ui-current-scope)))
+    (if p
+      ;; the value is read concretely, so it must be part of the subtree key
+      ;; for the chip to rebuild when the param changes
+      (let ((idx (round (- (reactive-value (custom-ui-param-value p)) (get p :min))))
+            (n (length labels)))
+        (subtree :key (str "custom-ui-lego-chip-cycle-" (custom-ui-scope-name) "-" name "-" idx)
+          (box :width width :height 1.18 :v-align :end
+            (button (nth labels idx)
+              :width width :height 0.92 :padding 0 :font-size 8.8
+              :background-color :instrument-control-bg
+              :color accent
+              :on-click (lambda (x y r)
+                (do
+                  (custom-ui-select-section-in-scope scope section)
+                  (custom-ui-set-param-in-scope scope p
+                    (+ (get p :min) (mod (+ idx 1) n)))))))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+;; On/off chip: filled with accent when on, dark when off. Click toggles.
+(def ui-lego-chip-toggle-s (section name text width accent)
+  (let ((p (custom-ui-current-param name))
+        (scope (custom-ui-current-scope)))
+    (if p
+      (let ((on (> (reactive-value (custom-ui-param-value p)) 0.5)))
+        (subtree :key (str "custom-ui-lego-chip-toggle-" (custom-ui-scope-name) "-" name "-" (if on 1 0))
+          (box :width width :height 1.18 :v-align :end
+            (button text
+              :width width :height 0.92 :padding 0 :font-size 8.8
+              :background-color (if on accent :instrument-control-bg)
+              :color (if on :black :dim)
+              :on-click (lambda (x y r)
+                (do
+                  (custom-ui-select-section-in-scope scope section)
+                  (custom-ui-set-param-in-scope scope p (if on 0 1))))))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))

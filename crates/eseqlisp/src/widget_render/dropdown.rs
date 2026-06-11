@@ -684,6 +684,21 @@ impl WidgetDefinition for DropdownWidget {
             emit_rounded_rect(&mut prims, ring_rect, ring_color, viewport, true, 0.0);
         }
 
+        // ── Border (only when border-color is set; default is no border) ──
+        if node.props.contains_key("border-color") {
+            let border_color =
+                resolve_named_color(&node.props, "border-color", theme::DROPDOWN_RING());
+            let bw_v = get_f32_prop(&node.props, "border-width", 0.08);
+            let bw_h = bw_v * viewport.cell_h / viewport.cell_w;
+            let border_rect = Rect {
+                row: node.rect.row - bw_v,
+                col: node.rect.col - bw_h,
+                width: node.rect.width + bw_h * 2.0,
+                height: node.rect.height + bw_v * 2.0,
+            };
+            emit_rounded_rect(&mut prims, border_rect, border_color, viewport, true, 0.0);
+        }
+
         // ── Background ──
         emit_rounded_rect(&mut prims, node.rect, bg_color, viewport, true, 0.0);
 

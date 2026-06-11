@@ -1360,30 +1360,100 @@ fn patcher_layout_payload(node: &LayoutNode) -> Value {
     }
 }
 
-fn defmacro_library_for_props(
-    props: &HashMap<String, Value>,
-) -> Option<crate::defmacro_library::DefmacroLibrary> {
-    let root = prop_str(props, "defmacro-library-root")
+fn defmacro_library_root_for_props(props: &HashMap<String, Value>) -> Option<PathBuf> {
+    prop_str(props, "defmacro-library-root")
         .map(PathBuf::from)
-        .or_else(crate::defmacro_library::default_library_root)?;
-    match crate::defmacro_library::DefmacroLibrary::load_available(&root) {
-        Ok((library, errors)) => {
-            for error in errors {
-                eprintln!(
-                    "failed to load defmacro library package from '{}': {error}",
-                    root.display()
-                );
-            }
-            Some(library)
+        .or_else(crate::defmacro_library::default_library_root)
+}
+
+struct LibraryCacheEntry {
+    fingerprint: u64,
+    library: Rc<DefmacroLibrary>,
+}
+
+thread_local! {
+    static DEFMACRO_LIBRARY_CACHE: RefCell<HashMap<PathBuf, LibraryCacheEntry>> =
+        RefCell::new(HashMap::new());
+    static PATCH_LOAD_CACHE: RefCell<HashMap<PatchCacheKey, PatchCacheEntry>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Cheap content stamp for a library root: hashes file names and mtimes one
+/// level deep so edits to package sources invalidate the cache without
+/// re-reading any file contents.
+fn defmacro_library_fingerprint(root: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let stamp_entry = |path: &Path, hasher: &mut std::collections::hash_map::DefaultHasher| {
+        path.hash(hasher);
+        if let Ok(meta) = std::fs::metadata(path)
+            && let Ok(modified) = meta.modified()
+        {
+            modified.hash(hasher);
         }
-        Err(error) => {
-            eprintln!(
-                "failed to load defmacro library '{}': {error}",
-                root.display()
-            );
-            None
+    };
+    if let Ok(entries) = std::fs::read_dir(root) {
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        paths.sort();
+        for path in paths {
+            stamp_entry(&path, &mut hasher);
+            if path.is_dir()
+                && let Ok(children) = std::fs::read_dir(&path)
+            {
+                let mut child_paths: Vec<PathBuf> =
+                    children.flatten().map(|entry| entry.path()).collect();
+                child_paths.sort();
+                for child in child_paths {
+                    stamp_entry(&child, &mut hasher);
+                }
+            }
         }
     }
+    hasher.finish()
+}
+
+fn cached_defmacro_library(root: &Path) -> (u64, Rc<DefmacroLibrary>) {
+    DEFMACRO_LIBRARY_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let fingerprint = defmacro_library_fingerprint(root);
+        if let Some(entry) = cache.get(root)
+            && entry.fingerprint == fingerprint
+        {
+            return (fingerprint, Rc::clone(&entry.library));
+        }
+        let library = match crate::defmacro_library::DefmacroLibrary::load_available(root) {
+            Ok((library, errors)) => {
+                for error in errors {
+                    eprintln!(
+                        "failed to load defmacro library package from '{}': {error}",
+                        root.display()
+                    );
+                }
+                library
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to load defmacro library '{}': {error}",
+                    root.display()
+                );
+                DefmacroLibrary::empty(root)
+            }
+        };
+        let library = Rc::new(library);
+        cache.insert(
+            root.to_path_buf(),
+            LibraryCacheEntry {
+                fingerprint,
+                library: Rc::clone(&library),
+            },
+        );
+        (fingerprint, library)
+    })
+}
+
+fn defmacro_library_for_props(props: &HashMap<String, Value>) -> Option<Rc<DefmacroLibrary>> {
+    let root = defmacro_library_root_for_props(props)?;
+    Some(cached_defmacro_library(&root).1)
 }
 
 fn parse_patch_source_for_props(
@@ -2440,10 +2510,16 @@ fn autocomplete_macros_for_state(
     state: &state::PatcherInteractionState,
     view_key: &str,
 ) -> Vec<MacroPatch> {
-    let mut macros = debug_patch_for_state(node, state, view_key)
-        .map(|patch| patch.macros)
-        .unwrap_or_default();
-    if let Some(library) = defmacro_library_for_props(&node.props) {
+    let patch = debug_patch_for_state(node, state, view_key);
+    autocomplete_macros_for_patch(&node.props, patch.as_ref())
+}
+
+pub(super) fn autocomplete_macros_for_patch(
+    props: &HashMap<String, Value>,
+    patch: Option<&Patch>,
+) -> Vec<MacroPatch> {
+    let mut macros = patch.map(|patch| patch.macros.clone()).unwrap_or_default();
+    if let Some(library) = defmacro_library_for_props(props) {
         let existing = macros
             .iter()
             .map(|macro_patch| macro_patch.name.clone())
@@ -2516,6 +2592,24 @@ fn toggle_selected_cable_segmented(
     true
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct PatchCacheKey {
+    path: PathBuf,
+    effect_intent: bool,
+    library_root: Option<PathBuf>,
+}
+
+struct PatchCacheEntry {
+    source_mtime: Option<std::time::SystemTime>,
+    sidecar_mtime: Option<std::time::SystemTime>,
+    library_fingerprint: u64,
+    patch: Patch,
+}
+
+fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
+}
+
 pub(super) fn load_patch_from_props(
     props: &HashMap<String, Value>,
 ) -> Result<(PathBuf, Patch), String> {
@@ -2523,11 +2617,48 @@ pub(super) fn load_patch_from_props(
         .or_else(|| prop_str(props, "file"))
         .ok_or_else(|| "patcher requires :path".to_string())?;
     let path = PathBuf::from(path);
+    let intent = patcher_intent_from_props(props);
+    let library_root = defmacro_library_root_for_props(props);
+    let library_fingerprint = library_root
+        .as_deref()
+        .map(|root| cached_defmacro_library(root).0)
+        .unwrap_or(0);
+    let key = PatchCacheKey {
+        path: path.clone(),
+        effect_intent: intent == PatcherIntent::Effect,
+        library_root,
+    };
+    let source_mtime = file_mtime(&path);
+    let sidecar_mtime = file_mtime(&sidecar::sidecar_path_for_source(&path));
+    let cached = PATCH_LOAD_CACHE.with(|cache| {
+        cache.borrow().get(&key).and_then(|entry| {
+            (source_mtime.is_some()
+                && entry.source_mtime == source_mtime
+                && entry.sidecar_mtime == sidecar_mtime
+                && entry.library_fingerprint == library_fingerprint)
+                .then(|| entry.patch.clone())
+        })
+    });
+    if let Some(patch) = cached {
+        return Ok((path, patch));
+    }
     let source = std::fs::read_to_string(&path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    let intent = patcher_intent_from_props(props);
     let mut patch = parse_patch_source_for_props(&source, intent, props)?;
     sidecar::apply_or_materialize(&path, &mut patch)?;
+    // apply_or_materialize may have just written the sidecar; stamp after it ran.
+    let sidecar_mtime = file_mtime(&sidecar::sidecar_path_for_source(&path));
+    PATCH_LOAD_CACHE.with(|cache| {
+        cache.borrow_mut().insert(
+            key,
+            PatchCacheEntry {
+                source_mtime,
+                sidecar_mtime,
+                library_fingerprint,
+                patch: patch.clone(),
+            },
+        );
+    });
     Ok((path, patch))
 }
 
