@@ -18,11 +18,11 @@
               (box :flex 1 :height 0.15)
               (v-stack 
                 (button "edit" 
-                  :background-color :black
+                  :background-color '(rgba 0.0 0.0 0.0 0.3)
 		  :height 0.75
                   :debug-name "instrument-edit-button" 
                   :font-size 10  
-		  :border-color :transparent
+		  :border-color '(rgba 0.1 0.1 0.1 0.8)
                   :on-click |x y r|
                   (host-command "enter-edit-instrument"
                     (dict :name SEQ.sidebar-instrument-name))
