@@ -617,6 +617,18 @@ vertex WidgetVaryings widget_vert(
             compile_widget_shader_source_with_metal(None, shader_src)
         }
 
+        #[test]
+        fn wavetable_shader_compiles_with_metal() {
+            let Some(device) = MTLCreateSystemDefaultDevice() else {
+                return; // headless CI without a Metal device
+            };
+            let src_ns = NSString::from_str(WAVETABLE_SHADER_SRC);
+            device
+                .newLibraryWithSource_options_error(&src_ns, None)
+                .map(|_| ())
+                .unwrap_or_else(|err| panic!("wavetable shader failed to compile: {err:?}"));
+        }
+
         fn prop_text_run(text: &str) -> widget_render::MetalProportionalTextPrimitive {
             widget_render::MetalProportionalTextPrimitive {
                 row: 2.0,
@@ -728,6 +740,162 @@ vertex WidgetVaryings widget_vert(
             compile_widget_shader_with_metal(&output.shader_source).unwrap();
         }
     }
+
+
+    const WAVETABLE_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct WavetableInstance {
+    packed_float2 ndc_min;
+    packed_float2 ndc_max;
+    float widget_px_w;
+    float widget_px_h;
+    uint frame_len;
+    uint set_base;
+    uint waves_in_set;
+    float wave_pos;
+    float warp;
+    float fold;
+    packed_float4 selected_color;
+    packed_float4 inactive_color;
+    packed_float4 bg_color;
+};
+
+struct WavetableVaryings {
+    float4 position [[position]];
+    float2 uv;
+    float widget_px_w [[flat]];
+    float widget_px_h [[flat]];
+    uint frame_len [[flat]];
+    uint set_base [[flat]];
+    uint waves_in_set [[flat]];
+    float wave_pos [[flat]];
+    float warp [[flat]];
+    float fold [[flat]];
+    float4 selected_color [[flat]];
+    float4 inactive_color [[flat]];
+    float4 bg_color [[flat]];
+};
+
+vertex WavetableVaryings wavetable_vert(
+    uint vid [[vertex_id]],
+    device const WavetableInstance* instances [[buffer(0)]])
+{
+    float2 corners[6] = {
+        float2(0, 0), float2(0, 1), float2(1, 0),
+        float2(1, 0), float2(0, 1), float2(1, 1)
+    };
+    float2 corner = corners[vid];
+    WavetableInstance inst = instances[0];
+    float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
+
+    WavetableVaryings out;
+    out.position = float4(ndc, 0.0, 1.0);
+    out.uv = corner; // uv.y is up: (0,0) = bottom-left of the widget
+    out.widget_px_w = inst.widget_px_w;
+    out.widget_px_h = inst.widget_px_h;
+    out.frame_len = inst.frame_len;
+    out.set_base = inst.set_base;
+    out.waves_in_set = inst.waves_in_set;
+    out.wave_pos = inst.wave_pos;
+    out.warp = inst.warp;
+    out.fold = inst.fold;
+    out.selected_color = inst.selected_color;
+    out.inactive_color = inst.inactive_color;
+    out.bg_color = inst.bg_color;
+    return out;
+}
+
+// Mobius phase bend — keep in sync with the wavetable dsp.lisp warp math.
+float wt_warp_phase(float p, float warp) {
+    float k = 1.0 + 6.0 * warp;
+    return (k * p) / (1.0 + (k - 1.0) * p);
+}
+
+// Triangle wavefolder — keep in sync with the wavetable dsp.lisp fold math.
+float wt_fold(float y, float fold) {
+    float g = 1.0 + 6.0 * fold;
+    float v = fmod(y * g + 1.0, 4.0);
+    if (v < 0.0) { v += 4.0; }
+    return 1.0 - fabs(v - 2.0);
+}
+
+float wt_sample(device const float* bank, uint base, uint frame_len,
+                float phase, float warp, float fold)
+{
+    float p = wt_warp_phase(clamp(phase, 0.0, 1.0), warp);
+    float pos = p * float(frame_len);
+    uint i0 = min(uint(pos), frame_len - 1);
+    uint i1 = (i0 + 1) % frame_len;
+    float y = mix(bank[base + i0], bank[base + i1], pos - float(i0));
+    return wt_fold(y, fold);
+}
+
+fragment float4 wavetable_frag(
+    WavetableVaryings in [[stage_in]],
+    device const float* bank [[buffer(1)]])
+{
+    const float PAD_X = 0.03;
+    const float PAD_Y = 0.10;
+
+    uint n = max(in.waves_in_set, 1u);
+    float plot_h = 1.0 - PAD_Y * 2.0;
+    float amp_half = plot_h / float(max(n, 2u)) * 0.85;
+    float plot_px_w = in.widget_px_w * (1.0 - PAD_X * 2.0);
+
+    float u = (in.uv.x - PAD_X) / (1.0 - PAD_X * 2.0);
+    bool in_plot = u >= 0.0 && u <= 1.0;
+    u = clamp(u, 0.0, 1.0);
+    float du = max(fwidth(u), 1e-5);
+
+    float4 col = in.bg_color;
+
+    if (in_plot && in.frame_len >= 2u) {
+        // ── inactive waves: wave 0 at the bottom, last at the top ──
+        float inactive_acc = 0.0;
+        for (uint w = 0; w < min(n, 64u); w++) {
+            float t = n > 1u ? float(w) / float(n - 1u) : 0.5;
+            float rowc = PAD_Y + plot_h * t;
+            uint base = (in.set_base + w) * in.frame_len;
+            float s0 = wt_sample(bank, base, in.frame_len, u, in.warp, in.fold);
+            float s1 = wt_sample(bank, base, in.frame_len, u + du, in.warp, in.fold);
+            float y0_px = (rowc + s0 * amp_half) * in.widget_px_h;
+            float dy_px = in.uv.y * in.widget_px_h - y0_px;
+            float slope = (s1 - s0) * amp_half * in.widget_px_h / (du * plot_px_w);
+            float d = fabs(dy_px) / sqrt(1.0 + slope * slope);
+            inactive_acc = max(inactive_acc, 1.0 - smoothstep(0.45, 1.35, d));
+        }
+        col.rgb = mix(col.rgb, in.inactive_color.rgb, inactive_acc * in.inactive_color.a);
+        col.a = max(col.a, inactive_acc * in.inactive_color.a);
+
+        // ── selected wave: morph-interpolated at the fractional position ──
+        float pos = clamp(in.wave_pos, 0.0, float(n - 1u));
+        uint w0 = uint(pos);
+        uint w1 = min(w0 + 1u, n - 1u);
+        float ft = pos - float(w0);
+        float t = n > 1u ? pos / float(n - 1u) : 0.5;
+        float rowc = PAD_Y + plot_h * t;
+        uint b0 = (in.set_base + w0) * in.frame_len;
+        uint b1 = (in.set_base + w1) * in.frame_len;
+        float s0 = mix(wt_sample(bank, b0, in.frame_len, u, in.warp, in.fold),
+                       wt_sample(bank, b1, in.frame_len, u, in.warp, in.fold), ft);
+        float s1 = mix(wt_sample(bank, b0, in.frame_len, u + du, in.warp, in.fold),
+                       wt_sample(bank, b1, in.frame_len, u + du, in.warp, in.fold), ft);
+        float y0_px = (rowc + s0 * amp_half) * in.widget_px_h;
+        float dy_px = in.uv.y * in.widget_px_h - y0_px;
+        float slope = (s1 - s0) * amp_half * in.widget_px_h / (du * plot_px_w);
+        float d = fabs(dy_px) / sqrt(1.0 + slope * slope);
+        // soft dark halo behind the selected line so it reads over the grays
+        float halo = 1.0 - smoothstep(1.2, 3.2, d);
+        col.rgb = mix(col.rgb, in.bg_color.rgb, halo * 0.65);
+        float line = 1.0 - smoothstep(0.85, 2.0, d);
+        col.rgb = mix(col.rgb, in.selected_color.rgb, line * in.selected_color.a);
+        col.a = max(col.a, line * in.selected_color.a);
+    }
+    return col;
+}
+"#;
 
     const WAVEFORM_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
@@ -1370,6 +1538,24 @@ fragment float4 waveform_frag(
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    struct WavetableInstance {
+        ndc_min: [f32; 2],
+        ndc_max: [f32; 2],
+        widget_px_w: f32,
+        widget_px_h: f32,
+        frame_len: u32,
+        set_base: u32,
+        waves_in_set: u32,
+        wave_pos: f32,
+        warp: f32,
+        fold: f32,
+        selected_color: [f32; 4],
+        inactive_color: [f32; 4],
+        bg_color: [f32; 4],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     struct PatchCableInstance {
         ndc_min: [f32; 2],
         ndc_max: [f32; 2],
@@ -1681,6 +1867,19 @@ fragment float4 waveform_frag(
                 is_background.hash(hasher);
                 hash_widget_instance(widget_type, instance, hasher);
             }
+            widget_render::MetalPrimitive::Wavetable(wavetable) => {
+                9u8.hash(hasher);
+                hash_rect(wavetable.rect, hasher);
+                wavetable.bank_key.hash(hasher);
+                wavetable.set_base.hash(hasher);
+                wavetable.waves_in_set.hash(hasher);
+                hash_f32(wavetable.wave_pos, hasher);
+                hash_f32(wavetable.warp, hasher);
+                hash_f32(wavetable.fold, hasher);
+                hash_color(wavetable.selected_color, hasher);
+                hash_color(wavetable.inactive_color, hasher);
+                hash_color(wavetable.bg_color, hasher);
+            }
             widget_render::MetalPrimitive::PatchCable(_)
             | widget_render::MetalPrimitive::Waveform(_)
             | widget_render::MetalPrimitive::Image(_)
@@ -1738,9 +1937,11 @@ fragment float4 waveform_frag(
         sdf_widget_pipeline_sources: HashMap<String, String>,
         sdf_widget_pipeline_registry_generation: u64,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        wavetable_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         image_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         patch_cable_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
+        wavetable_buffers: HashMap<String, Retained<ProtocolObject<dyn MTLBuffer>>>,
         image_textures: HashMap<PathBuf, ImageTextureResource>,
         image_decode_tx: mpsc::Sender<ImageDecodeJob>,
         image_decode_rx: mpsc::Receiver<ImageDecodeResult>,
@@ -1859,9 +2060,11 @@ fragment float4 waveform_frag(
                 sdf_widget_pipeline_sources: HashMap::new(),
                 sdf_widget_pipeline_registry_generation: 0,
                 waveform_pipeline: None,
+                wavetable_pipeline: None,
                 image_pipeline: None,
                 patch_cable_pipeline: None,
                 waveform_buffers: HashMap::new(),
+                wavetable_buffers: HashMap::new(),
                 image_textures: HashMap::new(),
                 image_decode_tx,
                 image_decode_rx,
@@ -2724,6 +2927,19 @@ fragment float4 waveform_frag(
                     );
                 }
 
+                if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                    let wavetables = collect_wavetable_primitives(seg_prims);
+                    self.draw_wavetable_primitives(
+                        enc,
+                        &wavetable_pipeline,
+                        &wavetables,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                }
+
                 for (widget_type, instances) in &fg_runs {
                     let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                         continue;
@@ -2974,6 +3190,20 @@ fragment float4 waveform_frag(
                             enc,
                             &waveform_pipeline,
                             &waveforms,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
+
+                    if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                        let wavetables =
+                            collect_wavetable_primitives(&offset_prims[segment_range.clone()]);
+                        self.draw_wavetable_primitives(
+                            enc,
+                            &wavetable_pipeline,
+                            &wavetables,
                             cell_w,
                             cell_h,
                             vp_w,
@@ -3271,6 +3501,19 @@ fragment float4 waveform_frag(
                     &enc,
                     &waveform_pipeline,
                     &waveform_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                let wavetable_primitives = collect_wavetable_primitives(&primitive_scene);
+                self.draw_wavetable_primitives(
+                    &enc,
+                    &wavetable_pipeline,
+                    &wavetable_primitives,
                     cell_w,
                     cell_h,
                     vp_w,
@@ -3816,6 +4059,93 @@ fragment float4 waveform_frag(
                         0,
                     );
                     enc.setFragmentBuffer_offset_atIndex(Some(&waveform_buffer), 0, 1);
+                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+                }
+                self.stats.note_draw_command();
+            }
+        }
+
+        fn ensure_wavetable_buffer(
+            &mut self,
+            bank_key: &str,
+            data: &std::sync::Arc<Vec<f32>>,
+        ) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
+            if let Some(buffer) = self.wavetable_buffers.get(bank_key) {
+                return Some(buffer.clone());
+            }
+            let buffer = unsafe {
+                self.device.newBufferWithBytes_length_options(
+                    NonNull::new(data.as_ptr() as *mut _)?,
+                    std::mem::size_of_val(data.as_slice()),
+                    MTLResourceOptions(0),
+                )
+            }?;
+            self.wavetable_buffers
+                .insert(bank_key.to_string(), buffer.clone());
+            Some(buffer)
+        }
+
+        fn draw_wavetable_primitives(
+            &mut self,
+            enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+            pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+            primitives: &[widget_render::MetalWavetablePrimitive],
+            cell_w: f32,
+            cell_h: f32,
+            vp_w: f32,
+            vp_h: f32,
+        ) {
+            for primitive in primitives {
+                let expected = (primitive.set_base + primitive.waves_in_set) as usize
+                    * primitive.frame_len as usize;
+                if primitive.frame_len < 2
+                    || primitive.waves_in_set == 0
+                    || primitive.data.len() < expected
+                {
+                    continue;
+                }
+                let Some(bank_buffer) =
+                    self.ensure_wavetable_buffer(&primitive.bank_key, &primitive.data)
+                else {
+                    continue;
+                };
+                let ndc_min = [
+                    (primitive.rect.col * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - ((primitive.rect.row + primitive.rect.height) * cell_h / vp_h) * 2.0,
+                ];
+                let ndc_max = [
+                    ((primitive.rect.col + primitive.rect.width) * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - (primitive.rect.row * cell_h / vp_h) * 2.0,
+                ];
+                let instance = WavetableInstance {
+                    ndc_min,
+                    ndc_max,
+                    widget_px_w: primitive.rect.width * cell_w,
+                    widget_px_h: primitive.rect.height * cell_h,
+                    frame_len: primitive.frame_len,
+                    set_base: primitive.set_base,
+                    waves_in_set: primitive.waves_in_set,
+                    wave_pos: primitive.wave_pos,
+                    warp: primitive.warp,
+                    fold: primitive.fold,
+                    selected_color: primitive.selected_color.to_rgba(),
+                    inactive_color: primitive.inactive_color.to_rgba(),
+                    bg_color: primitive.bg_color.to_rgba(),
+                };
+                let Some(instance_upload) =
+                    self.upload_arena
+                        .upload_one(&self.device, &instance, &mut self.stats)
+                else {
+                    continue;
+                };
+                enc.setRenderPipelineState(pipeline);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(
+                        Some(&instance_upload.buffer),
+                        instance_upload.offset,
+                        0,
+                    );
+                    enc.setFragmentBuffer_offset_atIndex(Some(&bank_buffer), 0, 1);
                     enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
                 }
                 self.stats.note_draw_command();
@@ -5243,6 +5573,40 @@ fragment float4 waveform_frag(
                     .map_err(|_| BackendError::MetalError)?,
             );
 
+            let wavetable_src = NSString::from_str(WAVETABLE_SHADER_SRC);
+            let wavetable_lib = self
+                .device
+                .newLibraryWithSource_options_error(&wavetable_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+            let wavetable_vert = wavetable_lib
+                .newFunctionWithName(&NSString::from_str("wavetable_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let wavetable_frag = wavetable_lib
+                .newFunctionWithName(&NSString::from_str("wavetable_frag"))
+                .ok_or(BackendError::MetalError)?;
+            let wavetable_desc = MTLRenderPipelineDescriptor::new();
+            wavetable_desc.setVertexFunction(Some(&wavetable_vert));
+            wavetable_desc.setFragmentFunction(Some(&wavetable_frag));
+            let wavetable_attach =
+                unsafe { wavetable_desc.colorAttachments().objectAtIndexedSubscript(0) };
+            wavetable_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            wavetable_attach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                wavetable_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                wavetable_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wavetable_attach.setRgbBlendOperation(MTLBlendOperation::Add);
+                wavetable_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                wavetable_attach
+                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wavetable_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+            self.wavetable_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&wavetable_desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
             Ok(())
         }
 
@@ -5671,6 +6035,19 @@ fragment float4 waveform_frag(
                     &enc,
                     &waveform_pipeline,
                     &waveform_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                let wavetable_primitives = collect_wavetable_primitives(&primitive_scene);
+                self.draw_wavetable_primitives(
+                    &enc,
+                    &wavetable_pipeline,
+                    &wavetable_primitives,
                     cell_w,
                     cell_h,
                     vp_w,
@@ -6670,6 +7047,7 @@ fragment float4 waveform_frag(
                 widget_render::MetalPrimitive::PatchCable(_) => {}
                 widget_render::MetalPrimitive::Circle(_) => {}
                 widget_render::MetalPrimitive::Waveform(_) => {}
+                widget_render::MetalPrimitive::Wavetable(_) => {}
                 widget_render::MetalPrimitive::Image(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
                 widget_render::MetalPrimitive::PushClipRect(_)
@@ -6751,6 +7129,20 @@ fragment float4 waveform_frag(
             .filter_map(
                 |primitive| match widget_render::innermost_primitive(primitive) {
                     widget_render::MetalPrimitive::Waveform(waveform) => Some(waveform.clone()),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    fn collect_wavetable_primitives(
+        primitives: &[widget_render::MetalPrimitive],
+    ) -> Vec<widget_render::MetalWavetablePrimitive> {
+        primitives
+            .iter()
+            .filter_map(
+                |primitive| match widget_render::innermost_primitive(primitive) {
+                    widget_render::MetalPrimitive::Wavetable(wavetable) => Some(wavetable.clone()),
                     _ => None,
                 },
             )
@@ -8360,6 +8752,12 @@ fragment float4 waveform_frag(
                 }
                 widget_render::MetalPrimitive::Waveform(w)
             }
+            widget_render::MetalPrimitive::Wavetable(mut w) => {
+                if reaches_right(w.rect.col + w.rect.width) {
+                    w.rect.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::Wavetable(w)
+            }
             widget_render::MetalPrimitive::Image(mut i) => {
                 if reaches_right(i.rect.col + i.rect.width) {
                     i.rect.width += extra_cols;
@@ -8471,6 +8869,11 @@ fragment float4 waveform_frag(
                 w.rect.col += col_off;
                 w.rect.row += row_off;
                 widget_render::MetalPrimitive::Waveform(w)
+            }
+            widget_render::MetalPrimitive::Wavetable(mut w) => {
+                w.rect.col += col_off;
+                w.rect.row += row_off;
+                widget_render::MetalPrimitive::Wavetable(w)
             }
             widget_render::MetalPrimitive::Image(mut i) => {
                 i.rect.col += col_off;

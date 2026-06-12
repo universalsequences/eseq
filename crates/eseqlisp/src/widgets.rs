@@ -40,6 +40,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "timeline",
         "transport-clock",
         "waveform",
+        "wavetable-viewer",
         "scroll",
         "tree",
     ] {

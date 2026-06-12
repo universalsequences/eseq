@@ -1116,6 +1116,10 @@ impl App {
                 crate::str8_delay::str8_delay_vtable(),
                 crate::str8_delay::STR8_DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Space Echo" => (
+                crate::space_echo::space_echo_vtable(),
+                crate::space_echo::SPACE_ECHO_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             "DJ Mixer" => (
                 crate::dj_mixer::dj_mixer_vtable(),
                 crate::dj_mixer::DJ_MIXER_STATE_SIZE * std::mem::size_of::<f32>(),
@@ -1131,6 +1135,10 @@ impl App {
             "Compressor" => (
                 crate::compressor::compressor_vtable(),
                 crate::compressor::COMPRESSOR_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
+            "OTT" => (
+                crate::ott::ott_vtable(),
+                crate::ott::OTT_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
             "Limiter" => (
                 crate::limiter::limiter_vtable(),
@@ -1297,6 +1305,7 @@ impl App {
                     let idx = match desc.name.as_str() {
                         "Delay" => crate::delay::DELAY_PARAM_BPM,
                         "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
+                        "Space Echo" => crate::space_echo::SPACE_ECHO_PARAM_BPM,
                         "Filter" => crate::filter::FILTER_PARAM_BPM,
                         "DJ Mixer" => crate::dj_mixer::DJ_MIXER_PARAM_BPM,
                         _ => continue,
@@ -1335,6 +1344,7 @@ impl App {
                     let idx = match desc.name.as_str() {
                         "Delay" => crate::delay::DELAY_PARAM_BPM,
                         "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
+                        "Space Echo" => crate::space_echo::SPACE_ECHO_PARAM_BPM,
                         "Filter" => crate::filter::FILTER_PARAM_BPM,
                         "DJ Mixer" => crate::dj_mixer::DJ_MIXER_PARAM_BPM,
                         _ => continue,

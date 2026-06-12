@@ -7768,6 +7768,7 @@ mod tests {
             "metal-seq-builtin-fx-ui.lisp",
             "metal-seq-fx/builtin/filter-core.lisp",
             "metal-seq-fx/builtin/str8-delay.lisp",
+            "metal-seq-fx/builtin/space-echo.lisp",
             "metal-seq-fx/builtin/filter-panel.lisp",
             "metal-seq-fx/builtin/dynamics.lisp",
             "metal-seq-fx/builtin/tape.lisp",
@@ -11183,6 +11184,44 @@ mod tests {
             Value::Map(test_param_map("mod rate", 13, 0.5, 0.01, 20.0)),
             Value::Map(test_param_map("mod amount", 14, 0.0, 0.0, 1.0)),
             Value::Map(test_param_map("mod phase", 15, 0.5, 0.0, 1.0)),
+        ]
+    }
+
+    fn test_space_echo_params() -> Vec<Value> {
+        let divs = vec![
+            "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2", "1",
+        ];
+        let modes = vec![
+            "1: head 1",
+            "2: head 2",
+            "3: head 3",
+            "4: heads 1+2",
+            "5: heads 2+3",
+            "6: heads 1+2+3",
+            "7: head 1 + rev",
+            "8: head 2 + rev",
+            "9: head 3 + rev",
+            "10: heads 1+2 + rev",
+            "11: heads 2+3 + rev",
+            "12: reverb only",
+        ];
+        vec![
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map("mode", 1, 7.0, modes)),
+            Value::Map(test_param_map("repeat rate", 2, 0.5, 0.0, 1.0)),
+            Value::Map(test_param_map("sync", 3, 1.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map("sync div", 4, 6.0, divs)),
+            Value::Map(test_param_map("sync offset", 5, 0.0, -0.5, 0.5)),
+            Value::Map(test_param_map("intensity", 6, 0.45, 0.0, 1.0)),
+            Value::Map(test_param_map("bass", 7, 0.0, -1.0, 1.0)),
+            Value::Map(test_param_map("treble", 8, 0.0, -1.0, 1.0)),
+            Value::Map(test_param_map("echo volume", 9, 0.8, 0.0, 1.5)),
+            Value::Map(test_param_map("reverb volume", 10, 0.5, 0.0, 1.5)),
+            Value::Map(test_param_map("dry", 11, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("input drive", 12, 0.0, -12.0, 24.0)),
+            Value::Map(test_param_map("wow/flutter", 13, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("tape age", 14, 0.3, 0.0, 1.0)),
+            Value::Map(test_param_map("tension", 15, 0.5, 0.0, 1.0)),
         ]
     }
 
@@ -18386,6 +18425,90 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_space_echo_layout_contains_mode_grid_and_knobs() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Space Echo".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Space Echo",
+                        0,
+                        test_space_echo_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe space echo ui")
+            .expect("space echo ui probe value");
+        assert!(
+            value_contains_string(&ui_probe, "MODE SELECTOR"),
+            "space echo custom UI probe should contain the mode selector: {ui_probe:?}"
+        );
+        assert!(value_contains_string(&ui_probe, "intensity"));
+        assert!(value_contains_string(&ui_probe, "tension"));
+        assert!(value_contains_string(&ui_probe, "8: head 2 + rev"));
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("space echo fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(128, 20);
+        let layout = editor.widget_layout().expect("space echo fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Space Echo"),
+            "layout should contain the built-in Space Echo panel"
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_str8_delay_layout_contains_curve_and_offsets() {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -22237,6 +22360,163 @@ mod tests {
             "penv_mode",
             "opa_env_mode",
             "env_sync_div",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_wavetable_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let wavetable_ui = std::fs::read_to_string("instruments/core/wavetable/ui.lisp")
+            .expect("read wavetable ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/core/wavetable/ui.lisp".to_string(),
+            wavetable_ui,
+        )));
+        let mut wavetable_inst = test_instrument_map();
+        wavetable_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("osc1_set", 0, 0.0, 0.0, 19.0)),
+                Value::Map(test_param_map("osc1_wave", 1, 0.0, 0.0, 15.0)),
+                Value::Map(test_param_map("osc1_warp", 2, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("osc1_fold", 3, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("osc1_semi", 4, 0.0, -24.0, 24.0)),
+                Value::Map(test_param_map("osc1_detune", 5, 0.0, -50.0, 50.0)),
+                Value::Map(test_param_map("osc1_gain_db", 6, -6.0, -60.0, 6.0)),
+                Value::Map(test_param_map("osc2_on", 7, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("osc2_set", 8, 0.0, 0.0, 19.0)),
+                Value::Map(test_param_map("osc2_wave", 9, 0.0, 0.0, 15.0)),
+                Value::Map(test_param_map("filter_mode", 10, 0.0, 0.0, 2.0)),
+                Value::Map(test_param_map("cutoff", 11, 9000.0, 40.0, 16000.0)),
+                Value::Map(test_param_map("resonance", 12, 0.6, 0.5, 6.0)),
+                Value::Map(test_param_map("amp_attack_ms", 13, 3.0, 1.0, 8000.0)),
+                Value::Map(test_param_map("volume_db", 14, -8.0, -60.0, 6.0)),
+                Value::Map(test_param_map("vel_sens", 15, 0.6, 0.0, 1.0)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(wavetable_inst)]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load wavetable custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("wavetable fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("wavetable layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        let viewer = find_layout_node_by_widget_type(&layout, "wavetable-viewer")
+            .expect("wavetable viewer widget");
+        assert!(
+            viewer.rect.width > 10.0 && viewer.rect.height > 3.0,
+            "wavetable viewer should occupy visible space, got {:?}",
+            viewer.rect
+        );
+
+        for suffix in [
+            "osc1_set",
+            "osc1_wave",
+            "osc1_warp",
+            "osc1_fold",
+            "osc1_semi",
+            "osc1_detune",
+            "osc1_gain_db",
+            "osc2_on",
+            "osc2_set",
+            "filter_mode",
+            "cutoff",
+            "resonance",
+            "volume_db",
+            "vel_sens",
         ] {
             let node = find_stable_key_suffix(&layout, suffix)
                 .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));

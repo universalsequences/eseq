@@ -30,6 +30,7 @@ pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
 pub mod waveform;
+pub mod wavetable_viewer;
 pub mod wrap;
 
 use std::cell::RefCell;
@@ -495,6 +496,25 @@ pub struct MetalWaveformPrimitive {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
+pub struct MetalWavetablePrimitive {
+    pub rect: Rect,
+    /// Cache key for the GPU buffer (the bank file path).
+    pub bank_key: String,
+    /// Full bank data, wave-major; uploaded once per bank_key.
+    pub data: std::sync::Arc<Vec<f32>>,
+    pub frame_len: u32,
+    pub set_base: u32,
+    pub waves_in_set: u32,
+    pub wave_pos: f32,
+    pub warp: f32,
+    pub fold: f32,
+    pub selected_color: Color,
+    pub inactive_color: Color,
+    pub bg_color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub struct MetalImagePrimitive {
     pub widget_id: u64,
     pub rect: Rect,
@@ -565,6 +585,7 @@ pub enum MetalPrimitive {
     PatchCable(MetalPatchCablePrimitive),
     Circle(MetalCirclePrimitive),
     Waveform(MetalWaveformPrimitive),
+    Wavetable(MetalWavetablePrimitive),
     Image(MetalImagePrimitive),
     WidgetInstance {
         widget_type: String,
@@ -825,6 +846,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &timeline::TIMELINE_WIDGET,
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
+    &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
     &vstack::VSTACK_WIDGET,
     &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,
@@ -2085,6 +2107,7 @@ fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetVi
         }
         MetalPrimitive::Circle(c) => c.center[1] += dy,
         MetalPrimitive::Waveform(w) => w.rect.row += dy,
+        MetalPrimitive::Wavetable(w) => w.rect.row += dy,
         MetalPrimitive::Image(i) => i.rect.row += dy,
         MetalPrimitive::WidgetInstance { instance, .. } => {
             let ndc_dy = -(dy * viewport.cell_h / viewport.vp_h) * 2.0;
@@ -2375,6 +2398,21 @@ mod tests {
                     "waveform:{}:{}",
                     rect_token(waveform.rect),
                     waveform.sample_key
+                )
+            }
+            MetalPrimitive::Wavetable(wavetable) => {
+                format!(
+                    "wavetable:{}:{}:{}:{}:{:08x}:{:08x}:{:08x}:{}:{}:{}",
+                    rect_token(wavetable.rect),
+                    wavetable.bank_key,
+                    wavetable.set_base,
+                    wavetable.waves_in_set,
+                    wavetable.wave_pos.to_bits(),
+                    wavetable.warp.to_bits(),
+                    wavetable.fold.to_bits(),
+                    color_token(wavetable.selected_color),
+                    color_token(wavetable.inactive_color),
+                    color_token(wavetable.bg_color)
                 )
             }
             MetalPrimitive::Image(image) => {

@@ -5,6 +5,7 @@
 
 (load "metal-seq-fx/builtin/filter-core.lisp")
 (load "metal-seq-fx/builtin/str8-delay.lisp")
+(load "metal-seq-fx/builtin/space-echo.lisp")
 (load "metal-seq-fx/builtin/filter-panel.lisp")
 (load "metal-seq-fx/builtin/dynamics.lisp")
 (load "metal-seq-fx/builtin/tape.lisp")

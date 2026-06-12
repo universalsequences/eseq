@@ -15787,6 +15787,7 @@ mod tests {
         let source = super::load_midi_fx_library_source();
         assert!(source.contains("(def-midi-fx \"arp\""));
         assert!(source.contains("(def-midi-fx \"trigger-to-track\""));
+        assert!(source.contains("(def-midi-fx \"transpose-range\""));
     }
 
     #[test]
@@ -15829,6 +15830,115 @@ mod tests {
         assert_eq!(slot.num_params.load(Ordering::Relaxed), 6);
         assert_eq!(slot.defaults.get(0), 3.0);
         assert_eq!(slot.plocks.get(0, 0), Some(9.0));
+    }
+
+    #[test]
+    fn folder_midi_fx_transpose_range_wraps_notes_into_configured_octaves() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime.eval(&super::load_midi_fx_library_source()).unwrap();
+        let descriptors = runtime.midi_fx_descriptors();
+        let transpose_range_idx = descriptors
+            .iter()
+            .position(|desc| desc.name == "transpose-range")
+            .expect("transpose-range MIDI FX is registered");
+        let transpose_range_desc = descriptors
+            .get(transpose_range_idx)
+            .expect("transpose-range descriptor");
+        assert_eq!(transpose_range_desc.params.len(), 3);
+        assert_eq!(transpose_range_desc.params[0].name, "min");
+        assert_eq!(transpose_range_desc.params[1].name, "max");
+        assert_eq!(transpose_range_desc.params[2].name, "enabled");
+
+        let mut slot = EffectSlotSnapshot::new_default(transpose_range_desc, 0);
+        slot.defaults[0] = -12.0;
+        slot.defaults[1] = 12.0;
+
+        let output = runtime
+            .invoke_midi_fx(
+                transpose_range_idx,
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 4.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                Vec::new(),
+                Vec::new(),
+                0.0,
+                Some(vec![
+                    AccumulatorNoteSpan {
+                        transpose: -24.0,
+                        start_beats: 0.0,
+                        end_beats: 0.25,
+                    },
+                    AccumulatorNoteSpan {
+                        transpose: -13.0,
+                        start_beats: 0.25,
+                        end_beats: 0.5,
+                    },
+                    AccumulatorNoteSpan {
+                        transpose: 5.0,
+                        start_beats: 0.5,
+                        end_beats: 0.75,
+                    },
+                    AccumulatorNoteSpan {
+                        transpose: 13.0,
+                        start_beats: 0.75,
+                        end_beats: 1.0,
+                    },
+                    AccumulatorNoteSpan {
+                        transpose: 24.0,
+                        start_beats: 1.0,
+                        end_beats: 1.25,
+                    },
+                ]),
+                slot,
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        let notes = output
+            .emitted
+            .iter()
+            .map(|event| event.resolved.transpose)
+            .collect::<Vec<_>>();
+        let offsets = output
+            .emitted
+            .iter()
+            .map(|event| event.offset_beats)
+            .collect::<Vec<_>>();
+        let durations = output
+            .emitted
+            .iter()
+            .map(|event| event.resolved.duration)
+            .collect::<Vec<_>>();
+        assert!(output.suppressed);
+        assert_eq!(notes, vec![-12.0, -1.0, 5.0, 1.0, 12.0]);
+        assert_eq!(offsets, vec![0.0, 0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(durations, vec![1.0, 1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]

@@ -25,7 +25,7 @@
 (def in6 (in 6 @modulator 4))
 (def input (* 0.5 (+ in-l in-r)))
 
-(param decay  @min 0    @max 1 @default 0.55) ; tail length, ~0.25s .. 20s
+(param decay  @min 0    @max 1 @default 0.55 @mod true @mod-mode additive) ; tail length, ~0.25s .. 20s
 (param drift  @min -1   @max 1 @default 0.2)  ; cloud pitch drift, cubic, +/-12 semi/s
 (param bloom  @min 0    @max 1 @default 0.25) ; per-hop spectral diffusion
 (param haze   @min 0    @max 1 @default 0.3 @mod true @mod-mode additive)  ; phase random-walk: tonal -> airy
@@ -56,7 +56,7 @@
 (def freeze-h  (hop-hold (mod freeze) 512))
 (def width-h   (hop-hold width 512))
 (def drift-s   (hop-hold (exp (* -0.0080475 drift drift drift)) 512))
-(def rate-h    (hop-hold (* 0.3208 (exp (* -4.382 decay))) 512))
+(def rate-h    (hop-hold (* 0.3208 (exp (* -4.382 (mod decay)))) 512))
 (def damp6-h   (hop-hold (* 6 damp) 512))
 (def hazemod (mod haze))
 (def jitter-h  (hop-hold (* hazemod hazemod 3.5) 512))

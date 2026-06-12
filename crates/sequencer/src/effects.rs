@@ -859,11 +859,13 @@ mod tests {
                 "Filter",
                 "Delay",
                 "Str8 Delay",
+                "Space Echo",
                 "DJ Mixer",
                 "Reverb",
                 "444 Compressor",
                 "Glue Compressor",
                 "Compressor",
+                "OTT",
                 "Limiter",
                 "Tape"
             ]
@@ -984,6 +986,64 @@ mod tests {
                 ("cutoff", 4, "mod cutoff slot 4 amt", -4.0, 4.0, Some("oct")),
             ]
         );
+    }
+
+    #[test]
+    fn builtin_space_echo_exposes_re201_params() {
+        let desc = EffectDescriptor::builtin_space_echo();
+        let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            &names[..16],
+            vec![
+                "enabled",
+                "mode",
+                "repeat rate",
+                "sync",
+                "sync div",
+                "sync offset",
+                "intensity",
+                "bass",
+                "treble",
+                "echo volume",
+                "reverb volume",
+                "dry",
+                "input drive",
+                "wow/flutter",
+                "tape age",
+                "mod1_source",
+            ]
+        );
+        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(desc.instrument_modulators.len(), 4);
+        // Spring tension macro rides at the end (after the modulator params)
+        // so stored plock param indices stay stable.
+        let tension = desc.params.last().expect("space echo params");
+        assert_eq!(tension.name, "tension");
+        assert_eq!(tension.default, 0.5);
+        match &desc.params[1].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), 12);
+                assert_eq!(labels[11], "12: reverb only");
+            }
+            other => panic!("mode should be enum, got {other:?}"),
+        }
+        match &desc.params[4].kind {
+            ParamKind::Enum { labels } => assert_eq!(labels[6], "1/4"),
+            other => panic!("sync div should be enum, got {other:?}"),
+        }
+        let target_names: Vec<&str> = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| desc.params[target.base_param_idx].name.as_str())
+            .collect();
+        assert_eq!(target_names.len(), 16);
+        for name in ["repeat rate", "intensity", "echo volume", "reverb volume"] {
+            assert_eq!(
+                target_names.iter().filter(|n| **n == name).count(),
+                4,
+                "{name} should have 4 modulation slots"
+            );
+        }
     }
 
     #[test]
@@ -1334,11 +1394,13 @@ impl EffectDescriptor {
             "Filter",
             "Delay",
             "Str8 Delay",
+            "Space Echo",
             "DJ Mixer",
             "Reverb",
             "444 Compressor",
             "Glue Compressor",
             "Compressor",
+            "OTT",
             "Limiter",
             "Tape",
         ]
@@ -1379,11 +1441,13 @@ impl EffectDescriptor {
             "Filter" => Some(Self::builtin_filter()),
             "Delay" => Some(Self::builtin_delay()),
             "Str8 Delay" => Some(Self::builtin_str8_delay()),
+            "Space Echo" => Some(Self::builtin_space_echo()),
             "DJ Mixer" => Some(Self::builtin_dj_mixer()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
             "444 Compressor" => Some(Self::builtin_444_compressor()),
             "Glue Compressor" => Some(Self::builtin_glue_compressor()),
             "Compressor" => Some(Self::builtin_compressor()),
+            "OTT" => Some(Self::builtin_ott()),
             "Limiter" => Some(Self::builtin_limiter()),
             "Tape" => Some(Self::builtin_tape()),
             _ => None,
@@ -2121,6 +2185,372 @@ impl EffectDescriptor {
         desc
     }
 
+    /// Roland RE-201 Space Echo style multi-head tape delay + spring reverb.
+    pub fn builtin_space_echo() -> Self {
+        let sync_labels = || {
+            vec![
+                "1/32".to_string(),
+                "1/16".to_string(),
+                "1/16t".to_string(),
+                "1/8".to_string(),
+                "1/8t".to_string(),
+                "1/8.".to_string(),
+                "1/4".to_string(),
+                "1/4t".to_string(),
+                "1/4.".to_string(),
+                "1/2".to_string(),
+                "1".to_string(),
+            ]
+        };
+        let mode_labels = vec![
+            "1: head 1".to_string(),
+            "2: head 2".to_string(),
+            "3: head 3".to_string(),
+            "4: heads 1+2".to_string(),
+            "5: heads 2+3".to_string(),
+            "6: heads 1+2+3".to_string(),
+            "7: head 1 + rev".to_string(),
+            "8: head 2 + rev".to_string(),
+            "9: head 3 + rev".to_string(),
+            "10: heads 1+2 + rev".to_string(),
+            "11: heads 2+3 + rev".to_string(),
+            "12: reverb only".to_string(),
+        ];
+        let mut desc = Self {
+            name: "Space Echo".to_string(),
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                Self::enabled_param(crate::space_echo::SPACE_ECHO_PARAM_ENABLED as u32, 1.0),
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 11.0,
+                    default: 7.0,
+                    kind: ParamKind::Enum {
+                        labels: mode_labels,
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_MODE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "repeat rate".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_RATE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "sync".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_SYNC as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "sync div".to_string(),
+                    min: 0.0,
+                    max: 10.0,
+                    default: 6.0,
+                    kind: ParamKind::Enum {
+                        labels: sync_labels(),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_SYNC_DIV as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "sync offset".to_string(),
+                    min: -0.5,
+                    max: 0.5,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_SYNC_OFFSET as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "intensity".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.45,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_INTENSITY as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "bass".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_BASS as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "treble".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_TREBLE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "echo volume".to_string(),
+                    min: 0.0,
+                    max: 1.5,
+                    default: 0.8,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_ECHO_VOL as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "reverb volume".to_string(),
+                    min: 0.0,
+                    max: 1.5,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_REVERB_VOL as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "dry".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_DRY as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "input drive".to_string(),
+                    min: -12.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_INPUT_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "wow/flutter".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.35,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_WOW_FLUTTER as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "tape age".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.3,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_AGE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+            ],
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let rate_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "repeat rate")
+            .expect("built-in Space Echo repeat rate param should exist");
+        let intensity_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "intensity")
+            .expect("built-in Space Echo intensity param should exist");
+        let echo_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "echo volume")
+            .expect("built-in Space Echo echo volume param should exist");
+        let reverb_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "reverb volume")
+            .expect("built-in Space Echo reverb volume param should exist");
+
+        let mut append_depth_targets =
+            |base_param_idx: usize,
+             destination_name: &str,
+             depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+             depth_min: f32,
+             depth_max: f32,
+             depth_unit: Option<&str>| {
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: depth_min,
+                        max: depth_max,
+                        default: 0.0,
+                        kind: ParamKind::Continuous {
+                            unit: depth_unit.map(str::to_string),
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min,
+                            depth_max,
+                            depth_unit: depth_unit.map(str::to_string),
+                        });
+                }
+            };
+
+        append_depth_targets(
+            rate_idx,
+            "rate",
+            [
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_RATE_DEPTH_1,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_RATE_DEPTH_2,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_RATE_DEPTH_3,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_RATE_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            intensity_idx,
+            "intensity",
+            [
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_INTENSITY_DEPTH_1,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_INTENSITY_DEPTH_2,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_INTENSITY_DEPTH_3,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_INTENSITY_DEPTH_4,
+            ],
+            -1.0,
+            1.0,
+            None,
+        );
+        append_depth_targets(
+            echo_idx,
+            "echo",
+            [
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_ECHO_DEPTH_1,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_ECHO_DEPTH_2,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_ECHO_DEPTH_3,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_ECHO_DEPTH_4,
+            ],
+            -1.5,
+            1.5,
+            None,
+        );
+        append_depth_targets(
+            reverb_idx,
+            "reverb",
+            [
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_REVERB_DEPTH_1,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_REVERB_DEPTH_2,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_REVERB_DEPTH_3,
+                crate::space_echo::SPACE_ECHO_PARAM_MOD_REVERB_DEPTH_4,
+            ],
+            -1.5,
+            1.5,
+            None,
+        );
+
+        // Spring tension macro — appended last so existing projects' plock /
+        // mod param indices stay stable.
+        desc.params.push(ParamDescriptor {
+            name: "tension".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            kind: ParamKind::Continuous {
+                unit: Some("%".to_string()),
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_TENSION as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+
+        desc
+    }
+
     pub fn builtin_dj_mixer() -> Self {
         let mut desc = Self {
             name: "DJ Mixer".to_string(),
@@ -2688,6 +3118,172 @@ impl EffectDescriptor {
                     ui_metadata: None,
                 },
                 Self::enabled_param(crate::compressor::COMPRESSOR_PARAM_ENABLED as u32, 1.0),
+            ],
+        }
+    }
+
+    /// OTT-style 3-band upward+downward compressor.
+    pub fn builtin_ott() -> Self {
+        Self {
+            name: "OTT".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                ParamDescriptor {
+                    name: "depth".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_DEPTH as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "time".to_string(),
+                    min: 0.1,
+                    max: 2.5,
+                    default: 1.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::ott::OTT_PARAM_TIME as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "upward".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_UPWARD as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "downward".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_DOWNWARD as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "low gain".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_LOW_GAIN_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mid gain".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_MID_GAIN_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "high gain".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_HIGH_GAIN_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "xover low".to_string(),
+                    min: 40.0,
+                    max: 400.0,
+                    default: 100.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::ott::OTT_PARAM_XOVER_LOW_HZ as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "xover high".to_string(),
+                    min: 1000.0,
+                    max: 8000.0,
+                    default: 2500.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::ott::OTT_PARAM_XOVER_HIGH_HZ as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "input".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_INPUT_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "output".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::ott::OTT_PARAM_OUTPUT_DB as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                Self::enabled_param(crate::ott::OTT_PARAM_ENABLED as u32, 1.0),
             ],
         }
     }

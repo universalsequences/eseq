@@ -71,6 +71,8 @@ mod limiter;
 pub mod lisp_host;
 pub mod mixer_volume;
 pub mod neural;
+#[allow(dead_code)]
+mod ott;
 pub mod paths;
 pub mod project;
 pub mod recorder;
@@ -83,6 +85,9 @@ mod scheduled_event;
 mod scheduler;
 #[allow(dead_code)]
 pub mod sequencer;
+#[allow(dead_code)]
+mod space_echo;
+pub mod spring;
 #[allow(dead_code)]
 pub mod stereo_panner;
 #[allow(dead_code)]
