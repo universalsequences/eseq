@@ -7769,6 +7769,7 @@ mod tests {
             "metal-seq-fx/builtin/filter-core.lisp",
             "metal-seq-fx/builtin/str8-delay.lisp",
             "metal-seq-fx/builtin/space-echo.lisp",
+            "metal-seq-fx/builtin/dimension.lisp",
             "metal-seq-fx/builtin/filter-panel.lisp",
             "metal-seq-fx/builtin/dynamics.lisp",
             "metal-seq-fx/builtin/tape.lisp",
@@ -9350,6 +9351,65 @@ mod tests {
                 .eval_str("(len sbrowser-selected-tags)"),
             Ok(Some(Value::Number(2.0))),
             "switching sampler tracks should load the selected sample's tags"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_tab_switch_preserves_search_text() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"instruments\")")
+            .expect("select instruments tab");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-filter \"kick\")")
+            .expect("set browser search");
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-select-tab \"samples\")")
+            .expect("select samples tab");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("kick".to_string()))),
+            "switching tabs should preserve search text"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_leaving_samples_clears_sample_only_tags() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-filter \"kick\")")
+            .expect("set sample search");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-selected-tags (list \"kick\" \"808\"))")
+            .expect("seed selected tags");
+
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-select-tab \"instruments\")")
+            .expect("select instruments tab");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("kick".to_string()))),
+            "switching away from samples should preserve search text"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len sbrowser-selected-tags)"),
+            Ok(Some(Value::Number(0.0))),
+            "switching away from samples should clear sample-only tag filters"
         );
     }
 
@@ -11222,6 +11282,33 @@ mod tests {
             Value::Map(test_param_map("wow/flutter", 13, 0.35, 0.0, 1.0)),
             Value::Map(test_param_map("tape age", 14, 0.3, 0.0, 1.0)),
             Value::Map(test_param_map("tension", 15, 0.5, 0.0, 1.0)),
+        ]
+    }
+
+    fn test_dimension_params() -> Vec<Value> {
+        vec![
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("mode 1", 1, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("mode 2", 2, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("mode 3", 3, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("mode 4", 4, 0.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "dynamic color",
+                5,
+                1.0,
+                vec!["smooth", "default", "lf sat 1", "lf sat 2"],
+            )),
+            Value::Map(test_enum_param_map(
+                "lfo shape",
+                6,
+                0.0,
+                vec!["default", "sine", "ramp", "square", "triangle"],
+            )),
+            Value::Map(test_param_map("rate", 7, 1.0, 0.25, 4.0)),
+            Value::Map(test_param_map("depth", 8, 1.0, 0.0, 2.0)),
+            Value::Map(test_param_map("width", 9, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("tone", 10, 7200.0, 2000.0, 16000.0)),
+            Value::Map(test_param_map("mix", 11, 0.7, 0.0, 1.5)),
         ]
     }
 
@@ -18425,6 +18512,90 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_dimension_layout_contains_mode_buttons_and_knobs() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Dimension".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Dimension",
+                        0,
+                        test_dimension_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe dimension ui")
+            .expect("dimension ui probe value");
+        assert!(
+            value_contains_string(&ui_probe, "DIMENSION MODE"),
+            "dimension custom UI probe should contain the mode buttons: {ui_probe:?}"
+        );
+        assert!(value_contains_string(&ui_probe, "DYNAMIC COLOR"));
+        assert!(value_contains_string(&ui_probe, "lf sat 2"));
+        assert!(value_contains_string(&ui_probe, "depth"));
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("dimension fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(128, 20);
+        let layout = editor.widget_layout().expect("dimension fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Dimension"),
+            "layout should contain the built-in Dimension panel"
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_space_echo_layout_contains_mode_grid_and_knobs() {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -22119,8 +22290,8 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let drift_ui = std::fs::read_to_string("instruments/core/drift/ui.lisp")
-            .expect("read drift ui");
+        let drift_ui =
+            std::fs::read_to_string("instruments/core/drift/ui.lisp").expect("read drift ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/core/drift/ui.lisp".to_string(),
@@ -22250,8 +22421,8 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let operator_ui = std::fs::read_to_string("instruments/core/operator/ui.lisp")
-            .expect("read operator ui");
+        let operator_ui =
+            std::fs::read_to_string("instruments/core/operator/ui.lisp").expect("read operator ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/core/operator/ui.lisp".to_string(),
@@ -22289,7 +22460,10 @@ mod tests {
                 ("bus-names", test_list(vec![])),
                 ("effects", test_list(vec![])),
                 ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(operator_inst)])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(operator_inst)]),
+                ),
                 ("bus-effects", test_list(vec![])),
             ],
             true,
@@ -22327,7 +22501,9 @@ mod tests {
             .id;
         editor.set_active_buffer(fx_id);
         editor.set_layout_viewport(180, 18);
-        let layout = editor.widget_layout().expect("operator layout should build");
+        let layout = editor
+            .widget_layout()
+            .expect("operator layout should build");
 
         let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
             .expect("instrument panel layout node");
@@ -24874,6 +25050,42 @@ mod tests {
                 "instruments/emulations/prophet-6-emu/dsp.lisp",
                 "instruments/emulations/prophet-6-emu/ui.lisp",
                 vec!["osc1_shape", "filter_drive", "gain"],
+            ),
+            (
+                "drums/md-kick/",
+                "instruments/drums/md-kick/dsp.lisp",
+                "instruments/drums/md-kick/ui.lisp",
+                vec!["engine", "ptch", "dec"],
+            ),
+            (
+                "drums/md-snare/",
+                "instruments/drums/md-snare/dsp.lisp",
+                "instruments/drums/md-snare/ui.lisp",
+                vec!["engine", "snap", "clip"],
+            ),
+            (
+                "drums/md-hat/",
+                "instruments/drums/md-hat/dsp.lisp",
+                "instruments/drums/md-hat/ui.lisp",
+                vec!["engine", "gap", "dec"],
+            ),
+            (
+                "drums/md-cymbal/",
+                "instruments/drums/md-cymbal/dsp.lisp",
+                "instruments/drums/md-cymbal/ui.lisp",
+                vec!["engine", "rich", "dec"],
+            ),
+            (
+                "drums/md-tom/",
+                "instruments/drums/md-tom/dsp.lisp",
+                "instruments/drums/md-tom/ui.lisp",
+                vec!["engine", "ptch", "dec"],
+            ),
+            (
+                "drums/md-perc/",
+                "instruments/drums/md-perc/dsp.lisp",
+                "instruments/drums/md-perc/ui.lisp",
+                vec!["engine", "clpy", "hard"],
             ),
         ];
 
@@ -27557,7 +27769,8 @@ mod tests {
                 (def midi-fx-ui-param (fx name)
                   (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
                 (def fx-param-row (p fx key)
-                  (dict :param (get p :name) :key key))
+                  (v-stack :gap 0
+                    (label (get p :name) :font-size 9 :color :dim :bg :transparent)))
                 (def midi-fx-ui-param-control (name)
                   (let ((p (midi-fx-ui-param midi-fx-ui-current-fx name)))
                     (if p
@@ -27588,6 +27801,123 @@ mod tests {
             )
             .expect("render custom MIDI FX UI");
         assert!(!matches!(rendered, Some(Value::Bool(false)) | None));
+    }
+
+    #[test]
+    fn generated_spatial_harmonic_delay_ui_uses_local_helpers() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"
+                (def midi-fx-ui-current-fx false)
+                (def midi-fx-ui-current-name "")
+                (def midi-fx-ui-param (fx name)
+                  (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
+                (def fx-param-row (p fx key)
+                  (dict :param (get p :name) :key key))
+                (def fx-param-value-for (fx p) (get p :value))
+                (def param-control-min (fx p) (get p :min))
+                (def param-control-max (fx p) (get p :max))
+                (def param-base-value-prop (fx p) false)
+                (def param-base-min-prop (fx p) false)
+                (def param-base-max-prop (fx p) false)
+                (def param-control-key-mode (fx p) "-base")
+                (def param-set-control-value (fx p v) v)
+                (def midi-fx-ui-param-control (name)
+                  (let ((p (midi-fx-ui-param midi-fx-ui-current-fx name)))
+                    (if p
+                      (fx-param-row p midi-fx-ui-current-fx
+                        (str "custom-midi-fx-ui-" midi-fx-ui-current-name
+                             "-slot-" (get midi-fx-ui-current-fx :slot-idx) "-" name))
+                      false)))
+                "#,
+            )
+            .expect("load custom MIDI FX UI test helpers");
+
+        let custom_ui_source = build_custom_midi_fx_ui_source_with_overlay(None);
+        runtime
+            .eval_str(&custom_ui_source)
+            .expect("load custom MIDI FX UIs");
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["spatial-harmonic-delay".to_string()]);
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let spatial_fx = match build_midi_effects_value(&state, 0, &selected_steps) {
+            Value::List(items) => items
+                .first()
+                .expect("spatial harmonic delay should be present")
+                .borrow()
+                .clone(),
+            other => panic!("expected MIDI FX list, got {other:?}"),
+        };
+        match &spatial_fx {
+            Value::Map(map) => {
+                let params = map
+                    .get("params")
+                    .expect("spatial MIDI FX value should include params")
+                    .borrow();
+                assert!(
+                    format!("{params:?}").contains("delay-1"),
+                    "built MIDI FX params should include tap params: {params:?}"
+                );
+            }
+            other => panic!("expected spatial MIDI FX map, got {other:?}"),
+        }
+        let taps_value_field = value_param_string(&spatial_fx, "taps", "value-field")
+            .expect("taps param should expose a reactive value field");
+        runtime.register_reactive(
+            "SEQ",
+            vec![(taps_value_field.as_str(), Value::Number(3.0))],
+            true,
+        );
+        runtime.set_global_value("spatial-test-fx", spatial_fx);
+        let direct_lookup = runtime
+            .eval_str(r#"(midi-fx-ui-param spatial-test-fx "delay-1")"#)
+            .expect("lookup delay-1 param");
+        assert!(
+            !matches!(direct_lookup, Some(Value::Bool(false)) | None),
+            "direct MIDI FX param lookup should find delay-1"
+        );
+        let taps_range = runtime
+            .eval_str(
+                r#"(list
+                     (param-control-min spatial-test-fx
+                       (midi-fx-ui-param spatial-test-fx "taps"))
+                     (param-control-max spatial-test-fx
+                       (midi-fx-ui-param spatial-test-fx "taps")))"#,
+            )
+            .expect("lookup taps min/max")
+            .expect("taps min/max should evaluate");
+        assert_eq!(
+            format!("{taps_range:?}"),
+            "(0 6)",
+            "custom MIDI FX UI should see the taps picker range"
+        );
+
+        let rendered = runtime
+            .eval_str("(custom-midi-fx-ui spatial-test-fx)")
+            .expect("render spatial harmonic delay custom MIDI FX UI");
+        let rendered = rendered.expect("spatial harmonic delay should return a widget map");
+        let rendered_debug = format!("{rendered:?}");
+        assert!(
+            rendered_debug.contains("vel x") && rendered_debug.contains("number-picker"),
+            "tap helper controls should render table parameter rows: {rendered:?}"
+        );
+        assert!(
+            rendered_debug.contains("shd-delay-3") && !rendered_debug.contains("shd-delay-4"),
+            "tap rows should be generated from the selected tap count: {rendered:?}"
+        );
+
+        runtime.set_reactive("SEQ", &taps_value_field, Value::Number(5.0));
+        let rendered = runtime
+            .eval_str("(custom-midi-fx-ui spatial-test-fx)")
+            .expect("re-render spatial harmonic delay after taps change")
+            .expect("spatial harmonic delay should return a widget map after taps change");
+        let rendered_debug = format!("{rendered:?}");
+        assert!(
+            rendered_debug.contains("shd-delay-5") && !rendered_debug.contains("shd-delay-6"),
+            "tap rows should follow the live taps value: {rendered:?}"
+        );
     }
 
     #[test]

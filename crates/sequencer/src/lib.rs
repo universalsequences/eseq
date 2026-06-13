@@ -54,6 +54,8 @@ pub mod crash;
 #[allow(dead_code)]
 mod delay;
 #[allow(dead_code)]
+mod dimension;
+#[allow(dead_code)]
 mod dj_mixer;
 #[allow(dead_code)]
 mod dynamics;

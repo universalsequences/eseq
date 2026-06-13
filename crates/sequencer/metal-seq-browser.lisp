@@ -257,7 +257,6 @@
 
 (def sbrowser-select-tab (name)
   (set! sbrowser-tab name)
-  (set! sbrowser-filter "")
   (if (not (= name "samples"))
     (set! sbrowser-selected-tags (list))))
 

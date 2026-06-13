@@ -860,6 +860,7 @@ mod tests {
                 "Delay",
                 "Str8 Delay",
                 "Space Echo",
+                "Dimension",
                 "DJ Mixer",
                 "Reverb",
                 "444 Compressor",
@@ -1395,6 +1396,7 @@ impl EffectDescriptor {
             "Delay",
             "Str8 Delay",
             "Space Echo",
+            "Dimension",
             "DJ Mixer",
             "Reverb",
             "444 Compressor",
@@ -1442,6 +1444,7 @@ impl EffectDescriptor {
             "Delay" => Some(Self::builtin_delay()),
             "Str8 Delay" => Some(Self::builtin_str8_delay()),
             "Space Echo" => Some(Self::builtin_space_echo()),
+            "Dimension" => Some(Self::builtin_dimension()),
             "DJ Mixer" => Some(Self::builtin_dj_mixer()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
             "444 Compressor" => Some(Self::builtin_444_compressor()),
@@ -2547,6 +2550,255 @@ impl EffectDescriptor {
             host_control: None,
             ui_metadata: None,
         });
+
+        desc
+    }
+
+    /// Built-in Dimension chorus (Roland SDD-320 style): two antiphase
+    /// BBD-voiced delay lines with an inverted stereo crossmix, compander,
+    /// and band-limited wet path. No feedback anywhere.
+    pub fn builtin_dimension() -> Self {
+        let mut desc = Self {
+            name: "Dimension".to_string(),
+            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                Self::enabled_param(crate::dimension::DIMENSION_PARAM_ENABLED as u32, 1.0),
+                ParamDescriptor {
+                    name: "mode 1".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_BTN1 as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mode 2".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_BTN2 as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mode 3".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_BTN3 as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mode 4".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_BTN4 as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "dynamic color".to_string(),
+                    min: 0.0,
+                    max: 3.0,
+                    default: 1.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "smooth".to_string(),
+                            "default".to_string(),
+                            "lf sat 1".to_string(),
+                            "lf sat 2".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_COLOR as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "lfo shape".to_string(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "default".to_string(),
+                            "sine".to_string(),
+                            "ramp".to_string(),
+                            "square".to_string(),
+                            "triangle".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_SHAPE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "rate".to_string(),
+                    min: 0.25,
+                    max: 4.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("x".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_RATE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "depth".to_string(),
+                    min: 0.0,
+                    max: 2.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("x".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_DEPTH as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "width".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_WIDTH as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "tone".to_string(),
+                    min: 2000.0,
+                    max: 16000.0,
+                    default: 7200.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_TONE as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+                ParamDescriptor {
+                    name: "mix".to_string(),
+                    min: 0.0,
+                    max: 1.5,
+                    default: 0.7,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dimension::DIMENSION_PARAM_MIX as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                },
+            ],
+        };
+        desc.params
+            .extend(crate::voice_modulator::effect_param_descriptors());
+
+        let depth_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "depth")
+            .expect("built-in Dimension depth param should exist");
+        let mix_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "mix")
+            .expect("built-in Dimension mix param should exist");
+
+        let mut append_depth_targets = |base_param_idx: usize,
+                                        destination_name: &str,
+                                        depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+                                        depth_min: f32,
+                                        depth_max: f32| {
+            for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                let depth_param_idx = desc.params.len();
+                desc.params.push(ParamDescriptor {
+                    name: format!("mod {destination_name} slot {} amt", slot + 1),
+                    min: depth_min,
+                    max: depth_max,
+                    default: 0.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: node_param_idx as u32,
+                    node_param_span: 1,
+                    host_control: None,
+                    ui_metadata: None,
+                });
+                desc.instrument_modulation_targets
+                    .push(InstrumentModulationTarget {
+                        base_param_idx,
+                        source_param_idx: None,
+                        modulator_slot: slot + 1,
+                        depth_param_idx,
+                        active_param_idx: None,
+                        depth_min,
+                        depth_max,
+                        depth_unit: None,
+                    });
+            }
+        };
+
+        append_depth_targets(
+            depth_idx,
+            "depth",
+            [
+                crate::dimension::DIMENSION_PARAM_MOD_DEPTH_DEPTH_1,
+                crate::dimension::DIMENSION_PARAM_MOD_DEPTH_DEPTH_2,
+                crate::dimension::DIMENSION_PARAM_MOD_DEPTH_DEPTH_3,
+                crate::dimension::DIMENSION_PARAM_MOD_DEPTH_DEPTH_4,
+            ],
+            -2.0,
+            2.0,
+        );
+        append_depth_targets(
+            mix_idx,
+            "mix",
+            [
+                crate::dimension::DIMENSION_PARAM_MOD_MIX_DEPTH_1,
+                crate::dimension::DIMENSION_PARAM_MOD_MIX_DEPTH_2,
+                crate::dimension::DIMENSION_PARAM_MOD_MIX_DEPTH_3,
+                crate::dimension::DIMENSION_PARAM_MOD_MIX_DEPTH_4,
+            ],
+            -1.5,
+            1.5,
+        );
 
         desc
     }

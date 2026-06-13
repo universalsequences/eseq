@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "engine_name": "drums/md-tom/",
+  "source_file": "instruments/drums/md-tom/dsp.lisp",
+  "presets": [
+    {"id": "808 Tom Lo", "name": "808 Tom Lo", "base_note_offset": -12.0, "params": {"engine": 1, "ptch": -14, "dec": 760, "ramp": 18, "rdec": 70, "damp": 0.22, "distype": 0.08}},
+    {"id": "808 Tom Mid", "name": "808 Tom Mid", "base_note_offset": 0.0, "params": {"engine": 1, "ptch": -5, "dec": 520, "ramp": 16, "rdec": 55, "damp": 0.30, "distype": 0.10}},
+    {"id": "Conga", "name": "Conga", "base_note_offset": 7.0, "params": {"engine": 2, "ptch": 7, "dec": 360, "ramp": 8, "clic": 0.36, "distype": 0.22}},
+    {"id": "PI Rototom", "name": "PI Rototom", "base_note_offset": 0.0, "params": {"engine": 4, "dec": 720, "hard": 0.42, "tens": 0.68, "size": 0.38, "pos": 0.62, "skin_tune": 0.30}},
+    {"id": "EFM Lazer Tom", "name": "EFM Lazer Tom", "base_note_offset": 0.0, "params": {"engine": 3, "dec": 280, "ramp": 52, "rdec": 32, "mod_amt": 0.72, "mfrq": 420, "mdec": 38, "fb": 0.48}}
+  ]
+}

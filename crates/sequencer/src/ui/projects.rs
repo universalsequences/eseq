@@ -48,6 +48,17 @@ fn project_midi_fx_slot_into_synced_snapshot(
     }
 }
 
+fn restore_saved_bus_effect_slot_runtime_ids(
+    slot: &mut crate::effects::EffectSlotSnapshot,
+    saved_slot: crate::effects::EffectSlotSnapshot,
+) {
+    let live_node_id = slot.node_id;
+    let live_modulator_node_id = slot.modulator_node_id;
+    *slot = saved_slot;
+    slot.node_id = live_node_id;
+    slot.modulator_node_id = live_modulator_node_id;
+}
+
 fn slot_param_node_relative_idx(raw_idx: u32) -> Option<u32> {
     if raw_idx == u32::MAX {
         return None;
@@ -1620,9 +1631,7 @@ impl App {
                 .get_mut(bus_idx)
                 .and_then(|bus| bus.effect_slots.get_mut(slot_idx))
             {
-                let live_node_id = slot.node_id;
-                *slot = saved_slot;
-                slot.node_id = live_node_id;
+                restore_saved_bus_effect_slot_runtime_ids(slot, saved_slot);
             }
             self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
             // Restore a saved Convolution Reverb IR (the default was auto-loaded
@@ -2425,6 +2434,26 @@ mod tests {
             enabled.default = 0.0;
         }
         default_project_effect_slot(&desc)
+    }
+
+    #[test]
+    fn bus_effect_project_restore_preserves_live_modulator_node_id() {
+        let desc = EffectDescriptor::builtin_insert("Filter").expect("filter descriptor");
+        let mut live_slot =
+            crate::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 101, 202);
+        let mut saved_slot =
+            crate::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 0, 0);
+        saved_slot.defaults[0] = 0.0;
+        saved_slot.defaults[1] = 1.0;
+        saved_slot.plocks[3][1] = Some(0.0);
+
+        restore_saved_bus_effect_slot_runtime_ids(&mut live_slot, saved_slot);
+
+        assert_eq!(live_slot.node_id, 101);
+        assert_eq!(live_slot.modulator_node_id, 202);
+        assert_eq!(live_slot.defaults[0], 0.0);
+        assert_eq!(live_slot.defaults[1], 1.0);
+        assert_eq!(live_slot.plocks[3][1], Some(0.0));
     }
 
     #[test]

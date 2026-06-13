@@ -562,7 +562,10 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
             if let Expression::List(items) = &expr {
                 if matches!(items.first(), Some(Expression::Symbol(head)) if head == "def-midi-fx-ui")
                 {
-                    body = items.get(1).map(transform_midi_fx_ui_expr);
+                    body = items
+                        .get(1)
+                        .map(|expr| namespace_local_helpers(expr, &helper_names, &helper_prefix))
+                        .map(|expr| transform_midi_fx_ui_expr(&expr));
                     continue;
                 }
             }

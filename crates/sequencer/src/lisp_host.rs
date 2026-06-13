@@ -5394,6 +5394,14 @@ fn register_sequencer_natives_with_accumulators(
         move |_args, _ctx| eval_midi_fx_track(&fx_eval_for_track),
     );
 
+    let fx_eval_for_velocity = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-velocity",
+        "(fx-velocity)",
+        "Return the resolved velocity for the current MIDI FX event.",
+        move |_args, _ctx| eval_midi_fx_velocity(&fx_eval_for_velocity),
+    );
+
     let fx_eval_for_arp_emit_directed = Arc::clone(&accumulator_eval);
     runtime.register_native_with_docs(
         "fx-arp-emit-directed",
@@ -6987,6 +6995,18 @@ fn eval_midi_fx_track(accumulator_eval: &SharedAccumulatorEvalContext) -> Result
         return Err("fx-track is only available inside def-midi-fx".to_string());
     };
     Ok(EValue::Number(*track as f64))
+}
+
+fn eval_midi_fx_velocity(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    Ok(EValue::Number(eval.resolved.velocity as f64))
 }
 
 enum FxNoteField {
@@ -15786,6 +15806,9 @@ mod tests {
 
         let source = super::load_midi_fx_library_source();
         assert!(source.contains("(def-midi-fx \"arp\""));
+        assert!(source.contains("(def-midi-fx \"beat-repeat\""));
+        assert!(source.contains("(def-midi-fx \"quantizer\""));
+        assert!(source.contains("(def-midi-fx \"spatial-harmonic-delay\""));
         assert!(source.contains("(def-midi-fx \"trigger-to-track\""));
         assert!(source.contains("(def-midi-fx \"transpose-range\""));
     }
@@ -15825,6 +15848,29 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.role.as_deref()),
             Some("clock-rate")
+        );
+        let descriptors = runtime.midi_fx_descriptors();
+        let beat_repeat_desc = descriptors
+            .iter()
+            .find(|desc| desc.name == "beat-repeat")
+            .expect("beat-repeat descriptor");
+        assert_eq!(
+            beat_repeat_desc.params[0]
+                .ui_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.role.as_deref()),
+            Some("clock-rate")
+        );
+        let spatial_desc = descriptors
+            .iter()
+            .find(|desc| desc.name == "spatial-harmonic-delay")
+            .expect("spatial-harmonic-delay descriptor");
+        assert_eq!(
+            spatial_desc.params[0]
+                .ui_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.role.as_deref()),
+            None
         );
         assert_eq!(params.midi_fx_chain(), vec!["arp".to_string()]);
         assert_eq!(slot.num_params.load(Ordering::Relaxed), 6);
@@ -15939,6 +15985,178 @@ mod tests {
         assert_eq!(notes, vec![-12.0, -1.0, 5.0, 1.0, 12.0]);
         assert_eq!(offsets, vec![0.0, 0.25, 0.5, 0.75, 1.0]);
         assert_eq!(durations, vec![1.0, 1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn folder_midi_fx_spatial_harmonic_delay_emits_configured_taps_and_passes_source() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime.eval(&super::load_midi_fx_library_source()).unwrap();
+        let descriptors = runtime.midi_fx_descriptors();
+        let delay_idx = descriptors
+            .iter()
+            .position(|desc| desc.name == "spatial-harmonic-delay")
+            .expect("spatial-harmonic-delay MIDI FX is registered");
+        let delay_desc = descriptors
+            .get(delay_idx)
+            .expect("spatial-harmonic-delay descriptor");
+        assert_eq!(delay_desc.params.len(), 27);
+        assert_eq!(delay_desc.params[0].name, "rate");
+        assert_eq!(delay_desc.params[1].name, "taps");
+        assert_eq!(delay_desc.params[26].name, "enabled");
+
+        let mut slot = EffectSlotSnapshot::new_default(delay_desc, 0);
+        slot.defaults[1] = 2.0;
+        slot.defaults[2] = 1.0;
+        slot.defaults[3] = 0.0;
+        slot.defaults[4] = 0.5;
+        slot.defaults[5] = -0.5;
+        slot.defaults[6] = 2.0;
+        slot.defaults[7] = 12.0;
+        slot.defaults[8] = 0.25;
+        slot.defaults[9] = 0.5;
+
+        let output = runtime
+            .invoke_midi_fx(
+                delay_idx,
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 4.0,
+                    velocity: 0.8,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 5.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                Vec::new(),
+                Vec::new(),
+                0.0,
+                Some(vec![AccumulatorNoteSpan {
+                    transpose: 5.0,
+                    start_beats: 0.125,
+                    end_beats: 0.375,
+                }]),
+                slot,
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert!(!output.suppressed);
+        assert_eq!(output.resolved.transpose, 5.0);
+        assert_eq!(output.resolved.velocity, 0.8);
+        assert_eq!(output.emitted.len(), 2);
+
+        let first = &output.emitted[0];
+        assert_eq!(first.offset_beats, 0.375);
+        assert_eq!(first.resolved.transpose, 5.0);
+        assert!((first.resolved.velocity - 0.4).abs() < 1e-6);
+        assert_eq!(first.resolved.pan, -0.5);
+        assert_eq!(first.resolved.duration, 1.0);
+
+        let second = &output.emitted[1];
+        assert_eq!(second.offset_beats, 0.625);
+        assert_eq!(second.resolved.transpose, 17.0);
+        assert!((second.resolved.velocity - 0.2).abs() < 1e-6);
+        assert_eq!(second.resolved.pan, 0.5);
+        assert_eq!(second.resolved.duration, 1.0);
+    }
+
+    #[test]
+    fn folder_midi_fx_beat_repeat_suppresses_source_and_emits_clock_window_note() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime.eval(&super::load_midi_fx_library_source()).unwrap();
+        let descriptors = runtime.midi_fx_descriptors();
+        let repeat_idx = descriptors
+            .iter()
+            .position(|desc| desc.name == "beat-repeat")
+            .expect("beat-repeat MIDI FX is registered");
+        let repeat_desc = descriptors.get(repeat_idx).expect("beat-repeat descriptor");
+        assert_eq!(repeat_desc.params[0].name, "rate");
+        assert_eq!(
+            repeat_desc.params[0]
+                .ui_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.role.as_deref()),
+            Some("clock-rate")
+        );
+
+        let mut slot = EffectSlotSnapshot::new_default(repeat_desc, 0);
+        slot.defaults[0] = 4.0;
+        slot.defaults[1] = 0.5;
+        slot.defaults[2] = 0.75;
+
+        let output = runtime
+            .invoke_midi_fx(
+                repeat_idx,
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 1.0,
+                    velocity: 0.8,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 5.0,
+                    pan: 0.25,
+                    chop: 1.0,
+                },
+                Vec::new(),
+                Vec::new(),
+                0.0,
+                Some(vec![AccumulatorNoteSpan {
+                    transpose: 5.0,
+                    start_beats: 0.0,
+                    end_beats: 0.25,
+                }]),
+                slot,
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert!(output.suppressed);
+        assert_eq!(output.emitted.len(), 1);
+        let repeat = &output.emitted[0];
+        assert_eq!(repeat.offset_beats, 0.0);
+        assert_eq!(repeat.resolved.transpose, 5.0);
+        assert!((repeat.resolved.velocity - 0.6).abs() < 1e-6);
+        assert_eq!(repeat.resolved.pan, 0.25);
+        assert_eq!(repeat.resolved.duration, 0.5);
     }
 
     #[test]

@@ -1120,6 +1120,10 @@ impl App {
                 crate::space_echo::space_echo_vtable(),
                 crate::space_echo::SPACE_ECHO_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Dimension" => (
+                crate::dimension::dimension_vtable(),
+                crate::dimension::DIMENSION_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             "DJ Mixer" => (
                 crate::dj_mixer::dj_mixer_vtable(),
                 crate::dj_mixer::DJ_MIXER_STATE_SIZE * std::mem::size_of::<f32>(),
