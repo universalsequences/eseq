@@ -1,9 +1,16 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use std::time::Duration;
 
 use crate::layout::LayoutNode;
 use crossterm::event::Event;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackendEvent {
+    Terminal(Event),
+    FileDrop(Vec<PathBuf>),
+}
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -209,6 +216,9 @@ pub trait Backend {
     /// Returns the drawable area in (cols, rows) — used by build_render_frame
     /// to compute the visible line range and adjust scroll.
     fn viewport_size(&self) -> (usize, usize);
+    fn poll_backend_event(&mut self, timeout: Duration) -> Option<BackendEvent> {
+        self.poll_event(timeout).map(BackendEvent::Terminal)
+    }
     fn poll_event(&mut self, timeout: Duration) -> Option<Event>;
     fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError>;
 }

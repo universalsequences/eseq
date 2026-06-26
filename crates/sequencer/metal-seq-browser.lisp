@@ -260,6 +260,25 @@
   (if (not (= name "samples"))
     (set! sbrowser-selected-tags (list))))
 
+(def sbrowser-next-tab-name ()
+  (if (= sbrowser-tab "samples") "instruments"
+    (if (= sbrowser-tab "instruments") "audio-fx"
+      (if (= sbrowser-tab "audio-fx") "midi-fx"
+        (if (= sbrowser-tab "midi-fx") "presets"
+          (if (= sbrowser-tab "presets") "projects"
+            "samples"))))))
+
+(def sbrowser-next-tab ()
+  (sbrowser-select-tab (sbrowser-next-tab-name)))
+
+(def sbrowser-active-tree-key ()
+  (if (= sbrowser-tab "samples") "samples-tab-tree"
+    (if (= sbrowser-tab "instruments") "instruments-tab-tree"
+      (if (= sbrowser-tab "audio-fx") "audio-fx-tab-tree"
+        (if (= sbrowser-tab "midi-fx") "midi-fx-tab-tree"
+          (if (= sbrowser-tab "presets") "presets-tab-tree"
+            "projects-tab-tree"))))))
+
 (def sbrowser-list-contains? (items value)
   (> (len (filter (lambda (item) (= item value)) items)) 0))
 
@@ -598,7 +617,8 @@
                 :drag-type "sample"
                 :on-select (lambda (item) (sbrowser-select-sample item))
                 :on-cursor-change (lambda (item) (sbrowser-select-sample item))
-                :on-activate (lambda (item) (sbrowser-activate-sample item))))))))))
+                :on-activate (lambda (item) (sbrowser-activate-sample item))
+                :on-modified-activate (lambda (item) (sbrowser-add-track item))))))))))
 
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1
@@ -613,11 +633,13 @@
           :background-color :buffer-bg
           :items (sbrowser-create-items)
           :expand-all (not (= sbrowser-filter ""))
+          :focusable true
           :drag-type "instrument"
           :drop-types (list "instrument")
           :on-drop (lambda (event) (sbrowser-drop-instrument-on-folder event))
           :on-select (lambda (item) (sbrowser-focus-create-item item))
-          :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
+          :on-activate (lambda (item) (sbrowser-select-create-item item))
+          :on-modified-activate (lambda (item) (sbrowser-select-create-item item)))))))
 
 (def sbrowser-audio-fx-toolbar ()
   (box :width :fill :padding 0.25
@@ -649,7 +671,8 @@
               :drag-type "audio-effect"
               :on-select (lambda (item) (sbrowser-select-audio-effect item))
               :on-cursor-change (lambda (item) (sbrowser-select-audio-effect item))
-              :on-activate (lambda (item) (sbrowser-activate-audio-effect item)))))))))
+              :on-activate (lambda (item) (sbrowser-activate-audio-effect item))
+              :on-modified-activate (lambda (item) (sbrowser-activate-audio-effect item)))))))))
 
 (def sbrowser-midi-fx-panel ()
   (let ((items (seq-midi-effect-tree sbrowser-filter)))
@@ -667,7 +690,8 @@
             :drag-type "midi-effect"
             :on-select (lambda (item) (sbrowser-select-midi-effect item))
             :on-cursor-change (lambda (item) (sbrowser-select-midi-effect item))
-            :on-activate (lambda (item) (sbrowser-activate-midi-effect item))))))))
+            :on-activate (lambda (item) (sbrowser-activate-midi-effect item))
+            :on-modified-activate (lambda (item) (sbrowser-activate-midi-effect item))))))))
 
 (def sbrowser-presets-tab-panel ()
   (v-stack :key "presets-tab-panel" :width :fill :gap 0.22 :padding 0.25 :flex 1
@@ -685,6 +709,7 @@
                 :items items
                 :selected-label SEQ.sidebar-loaded-preset
                 :expand-all false
+                :focusable true
                 :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
                 :on-activate (lambda (item) (sbrowser-load-preset (get item :label))))))))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
@@ -719,6 +744,7 @@
               :items items
               :selected-label SEQ.current-project-name
               :expand-all false
+              :focusable true
               :on-select (lambda (item) (sbrowser-load-project (get item :label)))
               :on-activate (lambda (item) (sbrowser-load-project (get item :label))))))))))
 

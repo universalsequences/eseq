@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -779,6 +780,21 @@ pub fn ensure_projects_dir() -> std::io::Result<()> {
 }
 
 pub fn list_project_names() -> std::io::Result<Vec<String>> {
+    let mut items: Vec<String> = list_project_entries()?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    items.sort();
+    Ok(items)
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectListEntry {
+    pub name: String,
+    pub modified_at: Option<SystemTime>,
+}
+
+pub fn list_project_entries() -> std::io::Result<Vec<ProjectListEntry>> {
     let dir = projects_dir();
     if !dir.exists() {
         return Ok(Vec::new());
@@ -791,10 +807,17 @@ pub fn list_project_names() -> std::io::Result<Vec<String>> {
             continue;
         }
         if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-            items.push(stem.to_string());
+            let modified_at = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            items.push(ProjectListEntry {
+                name: stem.to_string(),
+                modified_at,
+            });
         }
     }
-    items.sort();
+    items.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(items)
 }
 

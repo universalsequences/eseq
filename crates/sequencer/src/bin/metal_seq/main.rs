@@ -19,6 +19,7 @@ mod lisp_hot_reload;
 mod natives;
 mod piano_roll;
 mod profile;
+mod sample_import_ui;
 mod sampler_monitor;
 mod state_values;
 mod ui_invalidation;
@@ -34,6 +35,7 @@ use lisp_hot_reload::*;
 use natives::*;
 use piano_roll::*;
 use profile::*;
+use sample_import_ui::*;
 use sampler_monitor::*;
 use state_values::*;
 use ui_invalidation::*;
@@ -49,7 +51,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::Event;
 
-use eseqlisp::backend::Backend;
+use eseqlisp::backend::{Backend, BackendEvent};
 use eseqlisp::editor::ViewMode;
 use eseqlisp::parser::{ASTParser, Expression, Parser};
 use eseqlisp::vm::Value;
@@ -4506,6 +4508,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_render_at = Instant::now() - idle_frame_interval;
     let mut stub_animation_cache = StubAnimationRenderCache::new();
     let mut pending_drag: Option<(Event, (f32, f32))> = None;
+    let mut sample_import_session: Option<SampleImportSession> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
     let mut soft_step_param_edit = SoftStepParamEdit::default();
@@ -4713,10 +4716,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Duration::from_millis(50)
         };
-        if let Some(event) = backend.poll_event(timeout) {
+        if let Some(event) = backend.poll_backend_event(timeout) {
             let event_started = Instant::now();
             match event {
-                Event::Key(raw_key) => {
+                BackendEvent::FileDrop(paths) => {
+                    match SampleImportSession::from_drop(paths, Path::new("samples.db")) {
+                        Ok(session) => {
+                            if session.is_empty() {
+                                editor.show_transient_message(
+                                    "No supported audio files found in dropped items",
+                                );
+                            } else {
+                                sample_import_session = Some(session);
+                                if let Some(session) = sample_import_session.as_ref() {
+                                    session.render_into_editor(&mut editor);
+                                }
+                                editor.show_transient_message("Sample import staged");
+                            }
+                        }
+                        Err(error) => {
+                            editor.show_transient_message(format!("Sample import failed: {error}"));
+                        }
+                    }
+                }
+                BackendEvent::Terminal(Event::Key(raw_key)) => {
+                    if editor.active_buffer().name == "*sample-import*" {
+                        let key = normalize_command_shortcuts(raw_key);
+                        if let Some(session) = sample_import_session.as_mut() {
+                            match session.handle_key(key) {
+                                ImportKeyOutcome::Handled => {
+                                    session.render_into_editor(&mut editor);
+                                    ui_loop_stats.note_event(event_started.elapsed());
+                                    continue;
+                                }
+                                ImportKeyOutcome::Cancel => {
+                                    sample_import_session = None;
+                                    switch_to_sequencer(&mut editor);
+                                    editor.show_transient_message("Sample import canceled");
+                                    ui_loop_stats.note_event(event_started.elapsed());
+                                    continue;
+                                }
+                                ImportKeyOutcome::Commit => {
+                                    let summary = session
+                                        .commit(Path::new("samples.db"), Path::new("samples"));
+                                    sample_import_session = None;
+                                    switch_to_sequencer(&mut editor);
+                                    match summary {
+                                        Ok(summary) => {
+                                            editor.show_transient_message(format!(
+                                                "Imported {} sample(s), skipped {} duplicate(s), {} failed",
+                                                summary.imported, summary.duplicates, summary.failed
+                                            ));
+                                            let _ = refresh_sample_browser_buffer(&mut editor);
+                                        }
+                                        Err(error) => {
+                                            editor.show_transient_message(format!(
+                                                "Sample import failed: {error}"
+                                            ));
+                                        }
+                                    }
+                                    ui_loop_stats.note_event(event_started.elapsed());
+                                    continue;
+                                }
+                                ImportKeyOutcome::Ignored => {}
+                            }
+                        }
+                    }
                     if handle_metal_command_shortcut_with_ui_epoch(
                         &mut editor,
                         &raw_key,
@@ -4838,7 +4903,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                Event::Mouse(mouse) => {
+                BackendEvent::Terminal(Event::Mouse(mouse)) => {
                     let (precise_col, precise_row) = backend
                         .take_last_precise_mouse()
                         .unwrap_or((mouse.column as f32, mouse.row as f32));
@@ -4855,7 +4920,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         backend.set_widget_cursor(editor.widget_cursor());
                     }
                 }
-                Event::Resize(_, _) => editor.mark_needs_redraw(),
+                BackendEvent::Terminal(Event::Resize(_, _)) => editor.mark_needs_redraw(),
                 _ => {}
             }
             ui_loop_stats.note_event(event_started.elapsed());

@@ -1113,16 +1113,25 @@ pub fn register_core_natives(vm: &mut VM) {
         reactive_float_ref("SEQ", field)
     });
 
-    vm.register_native("reactive-value", |args| {
+    vm.register_native_with_vm("reactive-value", |args, vm| {
         let Some(value) = args.first() else {
             return Value::Nil;
         };
         match value {
             Value::ReactiveRef {
                 kind: BindingKind::Float,
+                namespace,
+                field,
                 slot,
                 ..
-            } => Value::Number(crate::reactive::read_float_slot(slot)),
+            } => {
+                vm.record_reactive_read(namespace, field);
+                if let Some(ctx_id) = vm.tracking_stack.last().copied() {
+                    let source_id = vm.get_or_create_source_node(namespace, field);
+                    vm.dag.add_edge(source_id, ctx_id);
+                }
+                Value::Number(crate::reactive::read_float_slot(slot))
+            }
             other => other.clone(),
         }
     });

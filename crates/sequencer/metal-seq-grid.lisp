@@ -89,6 +89,19 @@
         (list (list label buffer))))
     (seq-refresh-step-tabs-if-present)))
 
+(def seq-select-main-step-tab-by-index (index)
+  (let ((tab-index (- index 1))
+        (tabs (seq-main-step-tabs)))
+    (if (and (>= tab-index 0) (< tab-index (len tabs)))
+      (let ((buffer (seq-step-tab-buffer (nth tabs tab-index))))
+        (do
+          (set! step-panel-buffer buffer)
+          (set! remembered-step-panel-buffer buffer)
+          (set-window-buffer buffer)
+          (seq-refresh-step-tabs-if-present)
+          true))
+      false)))
+
 ;; ── Script picker ──────────────────────────────────────────────────────────
 ;; Scripts can expose this lightweight contract. The picker resets it before each
 ;; load, then calls script-init-fn once after a successful load.
@@ -258,7 +271,9 @@
     (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
     (list :cols :gap 1
       0.78 (seq-main-step-tile-layout-spec)
-      0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))))
+      0.22 (list :rows :gap 1
+        0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)
+        0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44)))))
 
 (def seq-samples-sidebar-layout-spec ()
   (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42))
@@ -497,7 +512,7 @@
     SEQ.tp-num-steps))
 
 (def current-step ()
-  (min cursor-step (- (max 1 (cursor-num-steps)) 1)))
+  (mod cursor-step (max 1 (cursor-num-steps))))
 
 (def page-count ()
   (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
@@ -540,11 +555,13 @@
   (if (seq-has-selection?)
     (do
       (cool-off-follow)
+      (set! step-key-select-anchor nil)
       (if (seq-has-selected-bus?)
         (bus-shift-selected-steps -1)
         (seq-shift-selected-steps -1)))
     (do
       (cool-off-follow)
+      (set! step-key-select-anchor nil)
       (let ((num-steps (max 1 (cursor-num-steps))))
         (set-track-cursor-step
           (if (= (current-step) 0)
@@ -555,20 +572,50 @@
   (if (seq-has-selection?)
     (do
       (cool-off-follow)
+      (set! step-key-select-anchor nil)
       (if (seq-has-selected-bus?)
         (bus-shift-selected-steps 1)
         (seq-shift-selected-steps 1)))
     (do
       (cool-off-follow)
+      (set! step-key-select-anchor nil)
       (let ((num-steps (max 1 (cursor-num-steps))))
         (set-track-cursor-step
           (if (>= (current-step) (- num-steps 1))
             0
             (+ (current-step) 1)))))))
 
+(defstate step-key-select-anchor nil)
+
+(def cursor-select-step-range (start end)
+  (if (seq-has-selected-bus?)
+    (bus-select-step-range start end)
+    (seq-select-step-range start end)))
+
+(def cursor-select-move (direction)
+  (do
+    (cool-off-follow)
+    (let ((num-steps (max 1 (cursor-num-steps)))
+          (start (current-step)))
+      (let ((anchor (if (= step-key-select-anchor nil) start step-key-select-anchor))
+            (next (if (< direction 0)
+                    (if (= start 0) 0 (- start 1))
+                    (if (>= start (- num-steps 1)) (- num-steps 1) (+ start 1)))))
+        (do
+          (set! step-key-select-anchor anchor)
+          (set-track-cursor-step next)
+          (cursor-select-step-range anchor next))))))
+
+(def cursor-select-left ()
+  (cursor-select-move -1))
+
+(def cursor-select-right ()
+  (cursor-select-move 1))
+
 (def cursor-toggle ()
   (do
     (cool-off-follow)
+    (set! step-key-select-anchor nil)
     (if (seq-has-selected-bus?)
       (bus-toggle-step (bus-current-step))
       (seq-toggle-step (current-step)))))
@@ -599,6 +646,7 @@
 (def step-select-drag-start (step evt)
   (do
     (cool-off-follow)
+    (set! step-key-select-anchor nil)
     (set-track-cursor-step step)
     (set! step-click-pending nil)
     (set! step-drag-anchor step)

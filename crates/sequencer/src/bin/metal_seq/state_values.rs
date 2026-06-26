@@ -7828,6 +7828,19 @@ mod tests {
             .expect("load step gesture source");
     }
 
+    fn load_keyboard_step_selection_source(runtime: &mut Runtime) {
+        let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read metal-seq-grid.lisp");
+        let start = src
+            .find("(defstate step-key-select-anchor")
+            .expect("keyboard step selection source should define anchor");
+        let end = src
+            .find("(def cursor-toggle")
+            .expect("keyboard step selection source should precede cursor-toggle");
+        runtime
+            .eval_str(&src[start..end])
+            .expect("load keyboard step selection source");
+    }
+
     fn register_step_gesture_test_natives(
         runtime: &mut Runtime,
         steps: Arc<Mutex<Vec<bool>>>,
@@ -8067,6 +8080,114 @@ mod tests {
         );
         assert!(toggles.lock().unwrap().is_empty());
         assert_eq!(*moves.lock().unwrap(), vec![(2, 4)]);
+    }
+
+    #[test]
+    fn shift_arrow_step_selection_extends_from_keyboard_anchor() {
+        let ranges = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        let cursor = Arc::new(Mutex::new(2usize));
+        let mut runtime = Runtime::new();
+        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("seq-has-selected-bus?", |_args, _ctx| {
+            Ok(Value::Bool(false))
+        });
+        {
+            let cursor = cursor.clone();
+            runtime.register_native("current-step", move |_args, _ctx| {
+                Ok(Value::Number(*cursor.lock().unwrap() as f64))
+            });
+        }
+        runtime.register_native("cursor-num-steps", |_args, _ctx| Ok(Value::Number(8.0)));
+        {
+            let cursor = cursor.clone();
+            runtime.register_native("set-track-cursor-step", move |args, _ctx| {
+                let Some(Value::Number(step)) = args.first() else {
+                    return Err("set-track-cursor-step: expected step".into());
+                };
+                *cursor.lock().unwrap() = *step as usize;
+                Ok(Value::Number(*step))
+            });
+        }
+        {
+            let ranges = ranges.clone();
+            runtime.register_native("seq-select-step-range", move |args, _ctx| {
+                let (Some(Value::Number(start)), Some(Value::Number(end))) =
+                    (args.first(), args.get(1))
+                else {
+                    return Err("seq-select-step-range: expected start and end".into());
+                };
+                ranges
+                    .lock()
+                    .unwrap()
+                    .push((*start as usize, *end as usize));
+                Ok(Value::Nil)
+            });
+        }
+        load_keyboard_step_selection_source(&mut runtime);
+
+        runtime
+            .eval_str("(cursor-select-right)")
+            .expect("first shift-right");
+        runtime
+            .eval_str("(cursor-select-right)")
+            .expect("second shift-right");
+        runtime
+            .eval_str("(cursor-select-left)")
+            .expect("shift-left shrinks range");
+
+        assert_eq!(*cursor.lock().unwrap(), 3);
+        assert_eq!(*ranges.lock().unwrap(), vec![(2, 3), (2, 4), (2, 3)]);
+    }
+
+    #[test]
+    fn shift_arrow_step_selection_clamps_at_pattern_edges() {
+        let ranges = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        let cursor = Arc::new(Mutex::new(0usize));
+        let mut runtime = Runtime::new();
+        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("seq-has-selected-bus?", |_args, _ctx| {
+            Ok(Value::Bool(false))
+        });
+        {
+            let cursor = cursor.clone();
+            runtime.register_native("current-step", move |_args, _ctx| {
+                Ok(Value::Number(*cursor.lock().unwrap() as f64))
+            });
+        }
+        runtime.register_native("cursor-num-steps", |_args, _ctx| Ok(Value::Number(8.0)));
+        {
+            let cursor = cursor.clone();
+            runtime.register_native("set-track-cursor-step", move |args, _ctx| {
+                let Some(Value::Number(step)) = args.first() else {
+                    return Err("set-track-cursor-step: expected step".into());
+                };
+                *cursor.lock().unwrap() = *step as usize;
+                Ok(Value::Number(*step))
+            });
+        }
+        {
+            let ranges = ranges.clone();
+            runtime.register_native("seq-select-step-range", move |args, _ctx| {
+                let (Some(Value::Number(start)), Some(Value::Number(end))) =
+                    (args.first(), args.get(1))
+                else {
+                    return Err("seq-select-step-range: expected start and end".into());
+                };
+                ranges
+                    .lock()
+                    .unwrap()
+                    .push((*start as usize, *end as usize));
+                Ok(Value::Nil)
+            });
+        }
+        load_keyboard_step_selection_source(&mut runtime);
+
+        runtime
+            .eval_str("(cursor-select-left)")
+            .expect("shift-left at first step");
+
+        assert_eq!(*cursor.lock().unwrap(), 0);
+        assert_eq!(*ranges.lock().unwrap(), vec![(0, 0)]);
     }
 
     #[test]
@@ -14382,9 +14503,12 @@ mod tests {
                 continue;
             };
             match items.as_slice() {
-                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
-                    if form == "def" && name == "script-buffer-name" =>
-                {
+                [
+                    Expression::Symbol(form),
+                    Expression::Symbol(name),
+                    Expression::String(value),
+                    ..,
+                ] if form == "def" && name == "script-buffer-name" => {
                     script_buffer_name = Some(value.clone());
                 }
                 [Expression::Symbol(form), Expression::String(target), ..]
@@ -14515,6 +14639,25 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_main_layout_splits_step_and_track_sidebar() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let spec = editor
+            .runtime_mut()
+            .eval_str(r#"(seq-step-and-track-panel-layout-spec "*fx*")"#)
+            .expect("build step/track layout spec")
+            .expect("layout spec value");
+
+        assert!(
+            value_contains_string(&spec, "*step*"),
+            "main sequencer layout spec should include the step context panel: {spec:?}"
+        );
+        assert!(
+            value_contains_string(&spec, "*track*"),
+            "main sequencer layout spec should keep the track parameters panel: {spec:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_track_panel_lays_out_mute_group_dropdown() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.refresh_runtime_side_effects();
@@ -14537,6 +14680,273 @@ mod tests {
         let dropdown =
             find_dropdown_by_value(track_params_panel, "Off").expect("mute group dropdown");
         assert_finite_nonzero_rect(dropdown, "mute group dropdown");
+    }
+
+    #[test]
+    fn metal_seq_step_panel_lays_out_cursor_parameter_pickers() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str("(set-track-cursor-step 2)")
+            .expect("move cursor to third step");
+        editor.refresh_runtime_side_effects();
+
+        let step_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*step*")
+            .expect("step buffer should exist")
+            .id;
+        editor.set_active_buffer(step_id);
+        editor.set_layout_viewport(80, 16);
+        editor.refresh_visible_layouts_for_buffer_named("*step*");
+
+        let layout = editor.widget_layout().expect("step panel layout");
+        let step_params_panel = find_layout_node_by_debug_name(&layout, "step-parameters-panel")
+            .expect("step parameters panel");
+        let title = find_layout_node_by_text(step_params_panel, "step").expect("step title");
+        assert_finite_nonzero_rect(title, "step title");
+        let cursor_label =
+            find_layout_node_by_text(step_params_panel, "step 3").expect("cursor step label");
+        assert_finite_nonzero_rect(cursor_label, "cursor step label");
+
+        for (key, label, expected_min, expected_max) in [
+            ("fx-step-param-transpose", "transpose picker", -48.0, 48.0),
+            ("fx-step-param-velocity", "velocity picker", 0.0, 1.0),
+            ("fx-step-param-duration", "duration picker", 0.0, 128.0),
+        ] {
+            let picker =
+                find_layout_node_by_stable_key(step_params_panel, key).unwrap_or_else(|| {
+                    panic!("{label} should be present in the step parameters panel")
+                });
+            assert_finite_nonzero_rect(picker, label);
+            assert_eq!(
+                layout_prop_number(picker, "min"),
+                Some(expected_min),
+                "{label} min"
+            );
+            assert_eq!(
+                layout_prop_number(picker, "max"),
+                Some(expected_max),
+                "{label} max"
+            );
+            assert_eq!(
+                picker.props.get("text-color"),
+                Some(&Value::Keyword("white".to_string())),
+                "{label} should use neutral off-white text"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_step_panel_selected_edits_use_plock_path() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str("(set-track-cursor-step 2)")
+            .expect("move cursor to third step");
+        editor
+            .runtime_mut()
+            .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param-plock", move |args, _ctx| {
+                    let param = match args.first() {
+                        Some(Value::Keyword(param)) => param.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    let value = match args.get(1) {
+                        Some(Value::Number(value)) => *value,
+                        other => panic!("expected numeric p-lock value, got {other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("plock:{param}:{value}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param", move |args, _ctx| {
+                    calls.lock().unwrap().push(format!("step:{args:?}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        editor.refresh_runtime_side_effects();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_bool_list(&[
+                false, true, true, false, false, false, false, false, false, false, false, false,
+                false, false, false, false,
+            ]),
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(fx-step-selected-count)")
+                .expect("evaluate selected step count"),
+            Some(Value::Number(2.0)),
+            "step panel selection helper should see the synthetic selected steps"
+        );
+
+        let step_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*step*")
+            .expect("step buffer should exist")
+            .id;
+        editor.set_active_buffer(step_id);
+        editor.set_layout_viewport(80, 16);
+
+        let layout = editor.widget_layout().expect("step panel layout");
+        let transpose = find_layout_node_by_stable_key(&layout, "fx-step-param-transpose")
+            .expect("transpose picker");
+        editor
+            .runtime_mut()
+            .invoke(
+                transpose
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("transpose picker on-change"),
+                vec![Value::Number(7.4)],
+            )
+            .expect("change selected transpose");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["plock:transpose:7"],
+            "selected-step edits from the step panel should use the p-lock path"
+        );
+    }
+
+    #[test]
+    fn metal_seq_collapsed_cursor_is_gated_to_current_track() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &track_selected_field(0), Value::Bool(false));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", &track_selected_field(1), Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 40);
+
+        let layout = editor.widget_layout().expect("sequencer layout");
+        let inactive_track_cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-0-0")
+            .expect("inactive track step cell");
+        let current_track_cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-1-0")
+            .expect("current track step cell");
+
+        assert!(
+            layout_tree_has_reactive_prop_field(
+                inactive_track_cell,
+                "selected",
+                "SEQ",
+                &track_selected_field(0),
+            ),
+            "inactive track cursor wrapper should be gated by that track's selected binding"
+        );
+        assert!(
+            layout_tree_has_reactive_prop_field(
+                current_track_cell,
+                "selected",
+                "SEQ",
+                &track_selected_field(1),
+            ),
+            "current track cursor wrapper should be gated by that track's selected binding"
+        );
+    }
+
+    #[test]
+    fn metal_seq_track_selection_repaints_cursor_from_global_cursor() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-num-steps", test_number_list(&[16.0, 6.0]));
+
+        editor
+            .runtime_mut()
+            .eval_str("(set-track-cursor-step 8)")
+            .expect("set track 1 visual cursor");
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-step").unwrap(),
+            Some(Value::Number(8.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-cursor-step 0)")
+                .unwrap(),
+            Some(Value::Number(8.0))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (reactive-set "SEQ" "current-track" 1)
+                  (reactive-set "SEQ" "tp-num-steps" 6)
+                  (set-track-cursor-step 8))
+                "#,
+            )
+            .expect("move global cursor while editing track 2");
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-step").unwrap(),
+            Some(Value::Number(8.0))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(current-step)").unwrap(),
+            Some(Value::Number(2.0)),
+            "the edit/toggle target should use the same modulo projection as the visual cursor"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-cursor-step 1)")
+                .unwrap(),
+            Some(Value::Number(2.0)),
+            "track 2 visual cursor should be global cursor modulo that track's pattern length"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-select-track-for-edit 0)")
+            .expect("return to track 1");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-step").unwrap(),
+            Some(Value::Number(8.0)),
+            "track selection should not restore a stale per-track cursor into the global cursor"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-cursor-step 0)")
+                .unwrap(),
+            Some(Value::Number(8.0)),
+            "track 1 visual cursor should repaint from the global cursor when the track is selected"
+        );
     }
 
     #[test]
@@ -14851,6 +15261,21 @@ mod tests {
         ));
 
         editor.open_scratch_buffer("*editable*", "");
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("delete-count").unwrap(),
+            Some(Value::Number(2.0)),
+            "selected steps should be deleted even when an editable/source buffer tile is active"
+        );
+
+        selected_steps.lock().unwrap().clear();
         assert!(!handle_metal_command_shortcut(
             &mut editor,
             &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
@@ -24190,7 +24615,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
+            vec![
+                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
+            ]
         );
     }
 
@@ -24927,6 +25354,15 @@ mod tests {
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
+        fn collect_stable_keys(node: &eseqlisp::layout::LayoutNode, keys: &mut Vec<String>) {
+            if let Some(key) = &node.stable_key {
+                keys.push(key.clone());
+            }
+            for child in &node.children {
+                collect_stable_keys(child, keys);
+            }
+        }
+
         fn dsp_param_names(path: &str) -> Vec<String> {
             std::fs::read_to_string(path)
                 .unwrap_or_else(|error| panic!("read {path}: {error}"))
@@ -25173,7 +25609,11 @@ mod tests {
 
             for suffix in expected_suffixes {
                 let node = find_stable_key_suffix(&layout, suffix).unwrap_or_else(|| {
-                    panic!("{instrument_name} should render a control ending in {suffix}")
+                    let mut stable_keys = Vec::new();
+                    collect_stable_keys(&layout, &mut stable_keys);
+                    panic!(
+                        "{instrument_name} should render a control ending in {suffix}; rendered stable keys: {stable_keys:?}"
+                    )
                 });
                 assert!(
                     node.rect.width > 1.0
@@ -25187,6 +25627,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn machinedrum_custom_ui_engine_blocks_update_from_reactive_engine_value() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        fn dsp_param_names(path: &str) -> Vec<String> {
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim_start();
+                    line.strip_prefix("(param ")
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .map(str::to_string)
+                })
+                .collect()
+        }
+
+        fn md_hat_instrument_map() -> HashMap<String, Rc<RefCell<Value>>> {
+            let mut inst = test_instrument_map();
+            inst.insert(
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String("drums/md-hat/".to_string()))),
+            );
+            inst.insert(
+                "display-name".to_string(),
+                Rc::new(RefCell::new(Value::String("drums/md-hat".to_string()))),
+            );
+
+            let synth_params: Vec<Value> = std::iter::once(Value::Map(test_base_note_param_map(0)))
+                .chain(
+                    dsp_param_names("instruments/drums/md-hat/dsp.lisp")
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, name)| {
+                            let mut param = test_param_map(&name, idx + 1, 0.0, -10000.0, 10000.0);
+                            if name == "engine" {
+                                param.insert(
+                                    "value-field".to_string(),
+                                    Rc::new(RefCell::new(Value::String(
+                                        "md-hat-test-engine".to_string(),
+                                    ))),
+                                );
+                            }
+                            Value::Map(param)
+                        }),
+                )
+                .collect();
+            inst.insert(
+                "synth".to_string(),
+                Rc::new(RefCell::new(test_list(synth_params))),
+            );
+            inst
+        }
+
+        let ui =
+            std::fs::read_to_string("instruments/drums/md-hat/ui.lisp").expect("read md-hat ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "drums/md-hat/".to_string(),
+            "instruments/drums/md-hat/ui.lisp".to_string(),
+            ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("md-hat-test-engine", Value::Number(2.0)),
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(md_hat_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load md-hat custom UI");
+        editor
+            .runtime_mut()
+            .eval_str(&std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp"))
+            .expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("md-hat custom UI status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let initial_layout = editor.widget_layout().expect("initial md-hat layout");
+        assert!(
+            find_stable_key_suffix(&initial_layout, "mod_amt").is_some(),
+            "initial md-hat engine=2 reactive value should contain mod_amt"
+        );
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(reactive-set "SEQ" "md-hat-test-engine" 1)"#)
+            .expect("set md-hat engine reactively");
+        editor.refresh_runtime_side_effects();
+        let updated_layout = editor.widget_layout().expect("updated md-hat layout");
+        assert!(
+            find_stable_key_suffix(&updated_layout, "gap").is_some(),
+            "changing the engine value should rerender the TRX-HH engine block immediately"
+        );
+        assert!(
+            find_stable_key_suffix(&updated_layout, "mod_amt").is_none(),
+            "EFM-HH controls should leave the visible layout after switching back to TRX-HH"
+        );
     }
 
     #[test]

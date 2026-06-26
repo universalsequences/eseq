@@ -43,7 +43,7 @@ mod inner {
     };
 
     use crate::audio::sample::get_registered_sample;
-    use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
+    use crate::backend::{Backend, BackendError, BackendEvent, Color, RenderFrame, TiledRenderFrame};
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
     use crate::theme;
@@ -1977,6 +1977,7 @@ fragment float4 waveform_frag(
         pending_move: Option<Event>,
         pending_magnify: VecDeque<(f64, (f32, f32))>,
         pending_scroll: VecDeque<((f32, f32), (f32, f32))>,
+        pending_file_drops: VecDeque<Vec<PathBuf>>,
         suppress_scroll_until: Option<Instant>,
         modifiers: KeyModifiers,
         pressed_mouse_button: Option<MouseButton>,
@@ -2098,6 +2099,7 @@ fragment float4 waveform_frag(
                 pending_move: None,
                 pending_magnify: VecDeque::new(),
                 pending_scroll: VecDeque::new(),
+                pending_file_drops: VecDeque::new(),
                 suppress_scroll_until: None,
                 modifiers: KeyModifiers::NONE,
                 pressed_mouse_button: None,
@@ -5631,6 +5633,13 @@ fragment float4 waveform_frag(
             (cols, rows)
         }
 
+        fn poll_backend_event(&mut self, timeout: Duration) -> Option<BackendEvent> {
+            if let Some(paths) = self.pending_file_drops.pop_front() {
+                return Some(BackendEvent::FileDrop(paths));
+            }
+            self.poll_event(timeout).map(BackendEvent::Terminal)
+        }
+
         fn poll_event(&mut self, timeout: Duration) -> Option<Event> {
             if let Some(ev) = self.pending.pop_front() {
                 if matches!(ev, Event::Mouse(_)) {
@@ -5667,6 +5676,7 @@ fragment float4 waveform_frag(
                 .map(|a| (a.cell_w.max(1) as f64, a.cell_h.max(1) as f64))
                 .unwrap_or((8.0, 16.0));
             let wake_at = Instant::now() + timeout;
+            let mut dropped_paths = Vec::new();
             event_loop.pump_events(Some(timeout), |event, elwt| {
                 elwt.set_control_flow(if timeout.is_zero() {
                     ControlFlow::Poll
@@ -5699,6 +5709,9 @@ fragment float4 waveform_frag(
                     }
                     WindowEvent::RedrawRequested => {
                         pending.push_back(Event::Resize(0, 0));
+                    }
+                    WindowEvent::DroppedFile(path) => {
+                        dropped_paths.push(path);
                     }
                     WindowEvent::ModifiersChanged(mods) => {
                         *modifiers = winit_mods_to_crossterm(mods.state());
@@ -5814,6 +5827,9 @@ fragment float4 waveform_frag(
                     _ => {}
                 }
             });
+            if !dropped_paths.is_empty() {
+                self.pending_file_drops.push_back(dropped_paths);
+            }
             if let Some(ev) = self.pending.pop_front() {
                 if matches!(ev, Event::Mouse(_)) {
                     self.last_precise_mouse = Some(self.cursor_pos);

@@ -111,6 +111,71 @@
                  "no p-locks for selected steps")
           :font-size 9 :color :dim :bg :transparent)))))
 
+(def fx-step-selected-count ()
+  (len (filter (lambda (selected) selected) SEQ.selected-steps)))
+
+(def fx-step-selection-title ()
+  (let ((count (fx-step-selected-count)))
+    (if (> count 0)
+      (str count " steps")
+      (str "step " (+ (current-step) 1)))))
+
+(def fx-step-param-value (mode)
+  (let ((values (seqv-current-param-values mode))
+        (step (current-step)))
+    (if (< step (len values))
+      (nth values step)
+      0)))
+
+(def fx-step-set-param (mode value)
+  (do
+    (cool-off-follow)
+    (if (seq-has-selection?)
+      (seq-set-step-param-plock
+        (seqv-param-keyword mode)
+        (seqv-step-param-value mode value))
+      (seq-set-step-param
+        (current-step)
+        (seqv-param-keyword mode)
+        (seqv-step-param-value mode value)))))
+
+(def fx-step-param-min (mode)
+  (if (= mode 3) -48
+    (if (= mode 1) 0
+      (seqv-param-min mode))))
+
+(def fx-step-param-max (mode)
+  (if (= mode 3) 48
+    (if (= mode 1) 128
+      (seqv-param-max mode))))
+
+(def fx-step-param-picker (mode key width)
+  (v-stack :align :center :gap 0.24
+    (label (seqv-param-name mode) :font-size 8 :color :dim :bg :transparent)
+    (number-picker
+      :key (str "fx-step-param-" key)
+      :value (fx-step-param-value mode)
+      :min (fx-step-param-min mode)
+      :max (fx-step-param-max mode)
+      :decimals (seqv-param-decimals mode)
+      :noui true
+      :font-size 10
+      :text-color :white
+      :on-change (lambda (v) (fx-step-set-param mode v))
+      :width width
+      :height 1.15)))
+
+(def fx-step-parameters-panel ()
+  (box :debug-name "step-parameters-panel" :padding 0.75
+    (v-stack :gap 0.55
+      (h-stack :gap 0.35 :align :baseline
+        (label "step" :font-size 10 :color :white :bg :transparent)
+        (label (fx-step-selection-title) :font-size 8 :color :dim :bg :transparent))
+      (h-stack :gap 0.55 :align :center
+        (fx-step-param-picker 3 "transpose" 4.2)
+        (fx-step-param-picker 0 "velocity" 4.2)
+        (fx-step-param-picker 1 "duration" 4.2)))))
+
 (def fx-track-accumulator-panel ()
   (box :debug-name "track-accumulator-panel" :padding 0.75
     (h-stack :gap 0.55 :align :center

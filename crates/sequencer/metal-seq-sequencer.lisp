@@ -89,14 +89,32 @@
       (nth matches 0)
       -1)))
 
-(def seqv-activate-track-for-edit (track)
+(def seqv-global-cursor-step-for-track (track)
+  (mod cursor-step (max 1 (seqv-track-num-steps track))))
+
+(def seqv-sync-track-cursor-to-global (track)
+  (if (and (>= track 0) (< track (len SEQ.track-ids)))
+    (seqv-set-cursor-step
+      (seqv-track-id track)
+      cursor-step)
+    nil))
+
+(def seqv-sync-all-track-cursors-to-global ()
+  (for-each
+    (lambda (track) (seqv-sync-track-cursor-to-global track))
+    (range 0 (len SEQ.track-ids))))
+
+(def seqv-select-track-for-edit (track)
   (do
     (set! selected-bus -1)
     (if (= SEQ.current-track track)
       nil
       (seq-clear-selection))
     (seq-set-track track)
-    (set-track-cursor-step (seqv-current-step track (seqv-track-id track)))))
+    (seqv-sync-track-cursor-to-global track)))
+
+(def seqv-activate-track-for-edit (track)
+  (seqv-select-track-for-edit track))
 
 (def seqv-track-expanded? (track-id)
   (reactive-get "SEQV" (seqv-expanded-track-field track-id)))
@@ -120,7 +138,7 @@
       seqv-track-editor-state)))
     (if (> (len matches) 0)
       (nth matches 0)
-      (dict :id track-id :param-mode 0 :cursor-step 0))))
+      (dict :id track-id :param-mode 0))))
 
 (def seqv-upsert-editor-state (track-id next-state)
   (if (seqv-list-contains? (map (lambda (state) (get state :id)) seqv-track-editor-state) track-id)
@@ -144,7 +162,10 @@
         nil))))
 
 (def seqv-cursor-step (track-id)
-  (get (seqv-editor-state-for track-id) :cursor-step))
+  (let ((track (seqv-track-index-for-id track-id)))
+    (if (>= track 0)
+      (seqv-global-cursor-step-for-track track)
+      0)))
 
 (def seqv-cursor-highlight-field (track step)
   (str "seqv-track-cursor-" track "-" step))
@@ -153,24 +174,22 @@
   (bind "SEQV" (seqv-cursor-highlight-field track step)))
 
 (def seqv-set-cursor-step (track-id step)
-  (let ((old-step (seqv-cursor-step track-id))
-        (track (seqv-track-index-for-id track-id)))
-    (do
-      (seqv-upsert-editor-state track-id
-        (merge (seqv-editor-state-for track-id) :cursor-step step))
-      (if (>= track 0)
+  (let ((track (seqv-track-index-for-id track-id)))
+    (if (>= track 0)
+      (let ((projected-step (mod step (max 1 (seqv-track-num-steps track)))))
         (do
-          (reactive-set "SEQV" (seqv-cursor-highlight-field track old-step) false)
-          (reactive-set "SEQV" (seqv-cursor-highlight-field track step) true)
+          (for-each
+            (lambda (candidate-step)
+              (reactive-set "SEQV" (seqv-cursor-highlight-field track candidate-step) false))
+            (range 0 (seqv-track-num-steps track)))
+          (reactive-set "SEQV" (seqv-cursor-highlight-field track projected-step) true)
           (if (seqv-track-expanded? track-id)
             (seqv-sync-expanded-step-slots-for track track-id)
-            nil))
-        nil))))
+            nil)))
+      nil)))
 
 (def sequencer-cursor-step-changed (track step)
-  (if (and (>= track 0) (< track (len SEQ.track-ids)))
-    (seqv-set-cursor-step (seqv-track-id track) step)
-    nil))
+  (seqv-sync-all-track-cursors-to-global))
 
 (def seqv-current-track-id ()
   (seqv-track-id SEQ.current-track))
@@ -179,7 +198,7 @@
   (seqv-track-expanded? (seqv-current-track-id)))
 
 (def seqv-current-selected-step ()
-  (min cursor-step (- (max 1 (seqv-track-num-steps SEQ.current-track)) 1)))
+  (seqv-global-cursor-step-for-track SEQ.current-track))
 
 (def seqv-current-param-mode ()
   (seqv-param-mode (seqv-current-track-id)))
@@ -454,7 +473,7 @@
         (box :width 8.6 :height 1
           :key (str "seqv-select-" i)
           :background-color :transparent
-          :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
+          :on-click |x y r| (seqv-select-track-for-edit i)
           (label (substring name 0 12) :font-size 11 :width 8.6
             :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
                      :dark-gray
@@ -555,13 +574,18 @@
         (if visible
           (seqv-step-pointer-up track step evt)
           nil))
-      :odd odd
-      :active (bind-seq (str "seq-track-step-active-" track "-" step))
-      :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
-      :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
-      :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
-      :track-r track-r :track-g track-g :track-b track-b
-      :background "seqv-step-shell")))
+      :active (seqv-cursor-highlight-binding track step)
+      :selected (seqv-track-selected-binding track)
+      :background "cursor-highlight"
+      (box
+        :width 3.05 :height 1.45
+        :odd odd
+        :active (bind-seq (str "seq-track-step-active-" track "-" step))
+        :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
+        :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
+        :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
+        :track-r track-r :track-g track-g :track-b track-b
+        :background "seqv-step-shell"))))
 
 (def seqv-playhead-row (track track-id row)
   (box
@@ -719,7 +743,7 @@
     (seqv-step-param-value mode value)))
 
 (def seqv-current-step (track track-id)
-  (min (seqv-cursor-step track-id) (- (max 1 (seqv-track-num-steps track)) 1)))
+  (seqv-global-cursor-step-for-track track))
 
 (def seqv-page-count (track)
   (max 1 (floor (/ (+ (seqv-track-num-steps track) (- page-size 1)) page-size))))
@@ -824,7 +848,6 @@
 
 (def seqv-set-expanded-cursor (track track-id step)
   (do
-    (seqv-set-cursor-step track-id step)
     (set-track-cursor-step step)))
 
 (def seqv-expanded-step-click (track track-id step evt)
@@ -920,7 +943,6 @@
     (do
       (seqv-activate-track-for-edit track)
       (cool-off-follow)
-      (seqv-set-cursor-step track-id step)
       (set-track-cursor-step step))))
 
 (def seqv-double-track-pattern (track track-id)
@@ -928,14 +950,14 @@
     (seqv-activate-track-for-edit track)
     (cool-off-follow)
     (seq-double-track-pattern)
-    (seqv-set-cursor-step track-id (min (seqv-current-step track track-id) (- (max 1 (seqv-track-num-steps track)) 1)))))
+    (seqv-sync-all-track-cursors-to-global)))
 
 (def seqv-halve-track-pattern (track track-id)
   (do
     (seqv-activate-track-for-edit track)
     (cool-off-follow)
     (seq-halve-track-pattern)
-    (seqv-set-cursor-step track-id (min (seqv-current-step track track-id) (- (max 1 (seqv-track-num-steps track)) 1)))))
+    (seqv-sync-all-track-cursors-to-global)))
 
 (def seqv-param-tab (track track-id mode tab-label)
   (box :width 8 :height 2
@@ -1127,8 +1149,8 @@
           :border-color :mixer-strip-border
           :selected-border-color :mixer-strip-selected-border
           :muted-border-color :mixer-strip-border
-          :padding 0.45
-          :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
+          :padding 0.0145
+          :on-click |x y r| (seqv-select-track-for-edit i)
           (if (seqv-track-expanded? (nth SEQ.track-ids i))
             (v-stack :width :fill :gap 0.2
               (h-stack :width :fill :gap 0.6 :align :start
@@ -1144,3 +1166,5 @@
               (seqv-track-actions i))))))))
 
 (set-buffer-mode-for "*sequencer*" "seq-grid-mode")
+
+(sequencer-cursor-step-changed SEQ.current-track cursor-step)

@@ -11,7 +11,7 @@ use super::model::{
     CableEndpoint, InputPortRef, InputPresentation, OutputPortRef,
     connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
-use super::project::dgenlisp_operator_names;
+use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
 use super::writeback::{
@@ -3647,6 +3647,42 @@ fn dgenlisp_mod_special_form_projects_as_valid_expression_operator() {
 }
 
 #[test]
+fn dgenlisp_gather_projects_as_documented_tensor_operator() {
+    assert!(dgenlisp_operator_names().contains("gather"));
+
+    let patch = parse("(def selected (gather source indices))");
+    let node = patch.nodes.iter().find(|node| node.op == "gather").unwrap();
+
+    assert_eq!(node.args.len(), 2);
+    assert_eq!(node.diagnostic, None);
+}
+
+#[test]
+fn spectral_bloom_mod_gather_nodes_are_known_to_patcher() {
+    let source = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sequencer/effects/spectral-bloom-mod/dsp.lisp"
+    ))
+    .expect("read spectral-bloom-mod dsp");
+    let patch = parse_patch_source(&source, PatcherIntent::Effect).unwrap();
+    let gather_nodes = patch
+        .nodes
+        .iter()
+        .filter(|node| node.op == "gather")
+        .collect::<Vec<_>>();
+
+    assert_eq!(gather_nodes.len(), 3);
+    assert!(
+        gather_nodes.iter().all(|node| node.diagnostic.is_none()),
+        "gather diagnostics: {:?}",
+        gather_nodes
+            .iter()
+            .map(|node| node.diagnostic.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn instrument_preamble_helpers_project_as_documented_operators() {
     let patch = parse(
         r#"
@@ -3830,8 +3866,24 @@ fn operator_metadata_comes_from_generated_dgenlisp_json() {
     let names = dgenlisp_operator_names();
     assert!(names.len() >= 100, "expected generated operator metadata");
     assert!(names.contains("phasor"));
+    assert!(names.contains("gather"));
     assert!(names.contains("spectrum-delay"));
     assert!(names.contains("tosignal"));
+}
+
+#[test]
+fn operator_metadata_documents_gather_ports() {
+    let docs = dgenlisp_operator_documentation();
+    let gather = docs.get("gather").expect("gather operator metadata");
+
+    assert_eq!(
+        gather.summary.as_deref(),
+        Some("Gather values from a tensor or signalTensor using tensor or signalTensor indices. Fractional indices are truncated by the DGen gather implementation.")
+    );
+    assert_eq!(gather.inputs.len(), 2);
+    assert_eq!(gather.inputs[0].name.as_deref(), Some("source"));
+    assert_eq!(gather.inputs[1].name.as_deref(), Some("indices"));
+    assert_eq!(gather.outputs.len(), 1);
 }
 
 #[test]

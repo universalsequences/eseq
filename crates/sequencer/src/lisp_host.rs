@@ -11940,6 +11940,253 @@ mod tests {
     }
 
     #[test]
+    fn graph_8x8_reset_demo_ui_exposes_reset_and_global_timing_controls() {
+        fn collect_widgets<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == widget_type {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_widgets(child, widget_type, out);
+            }
+        }
+
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+        }
+
+        let state = Arc::new(SequencerState::new(
+            8,
+            (0..8).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+            ],
+            true,
+        );
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
+            .expect("install sequencer tab registration test stub");
+
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/graph-neural-8x8-reset-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read graph 8x8 reset demo script");
+        runtime
+            .eval_str(&source)
+            .expect("evaluate graph 8x8 reset demo");
+        assert!(
+            state.current_graph_overrides().is_empty(),
+            "loading the reset demo must publish graph/UI without writing pattern overrides"
+        );
+        let manifest = state
+            .published_sequencers()
+            .into_iter()
+            .find_map(|published| published.graph)
+            .expect("published reset graph manifest");
+        assert_eq!(manifest.name, "neural-8x8-reset-demo");
+        assert_eq!(manifest.shape.num_nodes(), 8);
+        assert_eq!(manifest.node.param_default("global-transpose"), Some(0.0));
+        assert_eq!(manifest.node.param_default("transpose-reset"), Some(0.0));
+        assert_eq!(manifest.node.param_default("dur-factor"), Some(1.0));
+        assert_eq!(manifest.node.param_default("vel-reset"), Some(0.0));
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        let tree = pending
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("graph 8x8 reset script should publish widget tree");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((64.0, 52.0)))
+            .expect("graph 8x8 reset widget tree should lay out");
+
+        let mut matrices = Vec::new();
+        collect_widgets(&layout, "matrix", &mut matrices);
+        assert_eq!(
+            matrices.len(),
+            4,
+            "expected editable weight matrix plus trigger/energy/dampening telemetry"
+        );
+        for matrix in &matrices {
+            assert_measured(matrix);
+        }
+
+        let mut pickers = Vec::new();
+        collect_widgets(&layout, "number-picker", &mut pickers);
+        assert_eq!(
+            pickers.len(),
+            8 * 5 + 4,
+            "expected per-node numeric controls plus reset/max/global transpose/duration"
+        );
+        let mut toggles = Vec::new();
+        collect_widgets(&layout, "toggle", &mut toggles);
+        assert_eq!(
+            toggles.len(),
+            8 * 2,
+            "expected transpose-reset and vel-reset toggles per node"
+        );
+        let mut dropdowns = Vec::new();
+        collect_widgets(&layout, "dropdown", &mut dropdowns);
+        assert_eq!(
+            dropdowns.len(),
+            8 * 3 + 2,
+            "expected per-node route/resolution/quantize plus delay and res/q scale factors"
+        );
+
+        for key in [
+            "graph-8x8-reset-global-transpose",
+            "graph-8x8-reset-dur-factor",
+            "graph-8x8-reset-delay-factor",
+            "graph-8x8-reset-timebase-factor",
+            "graph-8x8-reset-weight-matrix",
+        ] {
+            let widget = find_by_stable_key(&layout, key)
+                .unwrap_or_else(|| panic!("missing reset/global control {key}"));
+            assert_measured(widget);
+        }
+        for idx in 0..8 {
+            for key in [
+                format!("graph-8x8-reset-transpose-reset-{idx}"),
+                format!("graph-8x8-reset-vel-reset-{idx}"),
+                format!("graph-8x8-reset-resolution-{idx}"),
+                format!("graph-8x8-reset-quantize-{idx}"),
+            ] {
+                let widget = find_by_stable_key(&layout, &key)
+                    .unwrap_or_else(|| panic!("missing reset fork control {key}"));
+                assert_measured(widget);
+            }
+        }
+
+        let global_transpose_change =
+            find_by_stable_key(&layout, "graph-8x8-reset-global-transpose")
+                .and_then(|node| node.props.get("on-change"))
+                .cloned()
+                .expect("global transpose callback");
+        runtime
+            .invoke(global_transpose_change, vec![Value::Number(12.0)])
+            .expect("invoke global transpose callback");
+
+        let dur_factor_change = find_by_stable_key(&layout, "graph-8x8-reset-dur-factor")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("duration factor callback");
+        runtime
+            .invoke(dur_factor_change, vec![Value::Number(2.0)])
+            .expect("invoke duration factor callback");
+
+        let transpose_reset_change =
+            find_by_stable_key(&layout, "graph-8x8-reset-transpose-reset-2")
+                .and_then(|node| node.props.get("on-change"))
+                .cloned()
+                .expect("transpose reset callback");
+        runtime
+            .invoke(transpose_reset_change, vec![Value::Bool(true)])
+            .expect("invoke transpose reset callback");
+
+        let vel_reset_change = find_by_stable_key(&layout, "graph-8x8-reset-vel-reset-3")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("velocity reset callback");
+        runtime
+            .invoke(vel_reset_change, vec![Value::Bool(true)])
+            .expect("invoke velocity reset callback");
+
+        let delay_factor_change = find_by_stable_key(&layout, "graph-8x8-reset-delay-factor")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("delay factor callback");
+        runtime
+            .invoke(delay_factor_change, vec![Value::String("2".to_string())])
+            .expect("invoke delay factor callback");
+
+        let timebase_factor_change = find_by_stable_key(&layout, "graph-8x8-reset-timebase-factor")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("timebase factor callback");
+        runtime
+            .invoke(timebase_factor_change, vec![Value::String("2".to_string())])
+            .expect("invoke timebase factor callback");
+
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-8x8-reset-demo")
+            .expect("reset graph overrides");
+        assert_eq!(
+            graph
+                .node_params
+                .iter()
+                .filter(|param| param.param == "global-transpose" && param.value == 12.0)
+                .count(),
+            8,
+            "global transpose should write every node param"
+        );
+        assert_eq!(
+            graph
+                .node_params
+                .iter()
+                .filter(|param| param.param == "dur-factor" && param.value == 2.0)
+                .count(),
+            8,
+            "duration factor should write every node param"
+        );
+        assert!(graph.node_params.iter().any(|param| {
+            param.instance == 2 && param.param == "transpose-reset" && param.value == 1.0
+        }));
+        assert!(graph.node_params.iter().any(|param| {
+            param.instance == 3 && param.param == "vel-reset" && param.value == 1.0
+        }));
+        assert_eq!(
+            graph
+                .node_intrinsics
+                .iter()
+                .filter(|node| {
+                    node.delay_steps == Some(2)
+                        && node.resolution
+                            == Some(vec![crate::sequencer::Timebase::ThirtySecond as u8])
+                        && node.quantize
+                            == Some(crate::graph::ProjectGraphQuantizeOverride::Timebase(vec![
+                                crate::sequencer::Timebase::ThirtySecond as u8,
+                            ]))
+                })
+                .count(),
+            8,
+            "delay and res/q factors should batch-edit all node intrinsics"
+        );
+    }
+
+    #[test]
     fn graph_markov_8x8_demo_loads_weight_matrix_and_node_delays() {
         fn collect_widgets<'a>(
             node: &'a eseqlisp::layout::LayoutNode,

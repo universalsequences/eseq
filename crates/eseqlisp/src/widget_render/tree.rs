@@ -65,10 +65,25 @@ fn tree_state_key_from_value(node: &Value) -> Option<u64> {
 struct TreeRow {
     depth: usize,
     label: String,
+    detail: Option<String>,
     has_children: bool,
     expanded: bool,
     path: Vec<usize>,
     item_value: Value,
+}
+
+fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let mut truncated: String = text.chars().take(max_chars - 3).collect();
+    truncated.push_str("...");
+    truncated
 }
 
 /// Get a keyword-keyed value from either a Map or a keyword-value list.
@@ -116,6 +131,14 @@ fn flatten_items(
         };
         let children = get_item_field(&item, "children");
         let has_children = matches!(&children, Some(Value::List(l)) if !l.is_empty());
+        let detail = match get_item_field(&item, "detail") {
+            Some(Value::String(s)) if !s.is_empty() => Some(s),
+            Some(other) => {
+                let formatted = crate::vm::format_lisp_value(&other);
+                (!formatted.is_empty()).then_some(formatted)
+            }
+            None => None,
+        };
 
         let mut path = parent_path.to_vec();
         path.push(i);
@@ -124,6 +147,7 @@ fn flatten_items(
         rows.push(TreeRow {
             depth,
             label,
+            detail,
             has_children,
             expanded: is_expanded,
             path: path.clone(),
@@ -537,6 +561,9 @@ pub static TREE_WIDGET: TreeWidget = TreeWidget;
 pub static TREE_ROW_BG_WIDGET: TreeRowBgWidget = TreeRowBgWidget;
 
 const INDENT_CELLS: f32 = 1.5;
+const LABEL_APPROX_CHAR_WIDTH: f32 = 0.62;
+const DETAIL_APPROX_CHAR_WIDTH: f32 = 0.52;
+const LABEL_DETAIL_GAP: f32 = 1.2;
 
 impl WidgetDefinition for TreeWidget {
     fn names(&self) -> &'static [&'static str] {
@@ -626,6 +653,16 @@ impl WidgetDefinition for TreeWidget {
             b: 0.5,
             a: 1.0,
         };
+        let detail_color = resolve_named_color(
+            props,
+            "detail-color",
+            crate::backend::Color {
+                r: 0.45,
+                g: 0.70,
+                b: 0.90,
+                a: 1.0,
+            },
+        );
 
         for (i, row) in rows.iter().enumerate() {
             let r = rect.row.round() as u16 + i as u16;
@@ -644,12 +681,39 @@ impl WidgetDefinition for TreeWidget {
             // Label
             let label_col = col_start + 2;
             let color = if row.has_children { fg } else { dim };
-            for (j, ch) in row.label.chars().enumerate() {
+            let right_edge = rect.col.round() as u16 + rect.width.round() as u16;
+            let detail_width = row
+                .detail
+                .as_ref()
+                .map(|detail| detail.chars().count() as u16)
+                .unwrap_or(0);
+            let label_right_edge =
+                if detail_width > 0 && detail_width + 2 < rect.width.round() as u16 {
+                    right_edge.saturating_sub(detail_width + 3)
+                } else {
+                    right_edge
+                };
+            let label_chars = label_right_edge.saturating_sub(label_col) as usize;
+            let label = truncate_with_ellipsis(&row.label, label_chars);
+            for (j, ch) in label.chars().enumerate() {
                 let c = label_col + j as u16;
-                if c >= rect.col.round() as u16 + rect.width.round() as u16 {
+                if c >= label_right_edge {
                     break;
                 }
                 buf.set(r, c, styled_cell(ch, color, None));
+            }
+
+            if let Some(detail) = &row.detail {
+                if detail_width + 1 < rect.width.round() as u16 {
+                    let detail_col = right_edge.saturating_sub(detail_width + 1);
+                    for (j, ch) in detail.chars().enumerate() {
+                        let c = detail_col + j as u16;
+                        if c >= right_edge {
+                            break;
+                        }
+                        buf.set(r, c, styled_cell(ch, detail_color, None));
+                    }
+                }
             }
         }
     }
@@ -828,6 +892,16 @@ impl WidgetDefinition for TreeWidget {
                         "toggle",
                         &row.item_value,
                     )))
+                } else if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::SUPER)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    set_tree_state(widget_key, state);
+                    Some(WidgetEvent::Custom(make_action_value(
+                        "modified-activate",
+                        &row.item_value,
+                    )))
                 } else {
                     set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(make_action_value(
@@ -902,6 +976,7 @@ impl WidgetDefinition for TreeWidget {
             "toggle" => "on-toggle",
             "select" => "on-select",
             "activate" => "on-activate",
+            "modified-activate" => "on-modified-activate",
             "cursor-change" => "on-cursor-change",
             _ => return None,
         };
@@ -967,6 +1042,7 @@ impl WidgetDefinition for TreeWidget {
             a: 1.0,
         };
         let triangle_fg = resolve_named_color(&node.props, "chevron-color", default_chevron);
+        let detail_fg = resolve_named_color(&node.props, "detail-color", theme::STATUS_ACCENT());
 
         let mut prims = Vec::new();
 
@@ -1062,19 +1138,51 @@ impl WidgetDefinition for TreeWidget {
                 b: 0.0,
                 a: 0.0,
             };
+            let detail_layout = row.detail.as_ref().map(|detail| {
+                let detail_width =
+                    (detail.chars().count() as f32 * DETAIL_APPROX_CHAR_WIDTH).max(1.0);
+                let detail_col = node.rect.col + node.rect.width - detail_width - 0.9;
+                (detail, detail_width, detail_col)
+            });
+            let label_available_width = detail_layout
+                .as_ref()
+                .map(|(_, _, detail_col)| detail_col - label_x - LABEL_DETAIL_GAP)
+                .unwrap_or(node.rect.col + node.rect.width - label_x - 0.9)
+                .max(0.0);
+            let label_max_chars =
+                (label_available_width / LABEL_APPROX_CHAR_WIDTH).floor() as usize;
+            let label_text = truncate_with_ellipsis(&row.label, label_max_chars);
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
                     row: text_y,
                     col: label_x,
                     align_width: 0.0,
                     h_align: 0.0,
-                    text: row.label.clone(),
+                    text: label_text,
                     font_size,
                     scale: 1.0,
                     fg,
                     bg: transparent,
                 },
             ));
+
+            if let Some((detail, detail_width, detail_col)) = detail_layout {
+                if detail_col > label_x {
+                    prims.push(MetalPrimitive::ProportionalText(
+                        MetalProportionalTextPrimitive {
+                            row: text_y,
+                            col: detail_col,
+                            align_width: detail_width,
+                            h_align: 1.0,
+                            text: detail.to_string(),
+                            font_size: font_size * 0.82,
+                            scale: 1.0,
+                            fg: detail_fg,
+                            bg: transparent,
+                        },
+                    ));
+                }
+            }
         }
 
         prims

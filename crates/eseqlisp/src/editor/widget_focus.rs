@@ -37,6 +37,33 @@ impl Editor {
             .filter(|node| node.widget_id == focused_id)
     }
 
+    pub fn focus_widget_by_stable_key(
+        &mut self,
+        stable_key: &str,
+        widget_type: Option<&str>,
+    ) -> bool {
+        let node = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| find_focusable_node_by_stable_key(layout, stable_key, widget_type))
+            .or_else(|| {
+                self.active_leaf()
+                    .cached_layout
+                    .as_ref()
+                    .and_then(|layout| {
+                        find_focusable_node_by_stable_key(layout, stable_key, widget_type)
+                    })
+            });
+        let Some(node) = node else {
+            return false;
+        };
+        self.set_focused_widget(node);
+        self.clear_focus_on_other_tiles();
+        self.mark_needs_redraw();
+        true
+    }
+
     pub(super) fn remap_focused_widget_after_layout_change(&mut self) {
         let Some(previous) = self.active_leaf().focused_widget_node.clone() else {
             return;
@@ -590,6 +617,25 @@ fn find_focusable_node_by_stable_key_and_type(
         if let Some(found) =
             find_focusable_node_by_stable_key_and_type(child, stable_key, widget_type)
         {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_focusable_node_by_stable_key(
+    node: &LayoutNode,
+    stable_key: &str,
+    widget_type: Option<&str>,
+) -> Option<LayoutNode> {
+    if node.focusable
+        && node.stable_key.as_deref() == Some(stable_key)
+        && widget_type.is_none_or(|expected| node.widget_type == expected)
+    {
+        return Some(node.clone());
+    }
+    for child in &node.children {
+        if let Some(found) = find_focusable_node_by_stable_key(child, stable_key, widget_type) {
             return Some(found);
         }
     }

@@ -112,6 +112,12 @@ CURATED_OPERATORS = {
     "conv1d": {"category": "tensor_op", "summary": "1D convolution.", "signatures": ["(conv1d input kernel)"], "arity": {"minimum": 2, "maximum": 2}},
     "peek": {"category": "tensor_op", "summary": "Read a scalar from a tensor.", "signatures": ["(peek tensor index)", "(peek tensor index channel)"], "arity": {"minimum": 2, "maximum": 3}},
     "peek-row": {"category": "tensor_op", "summary": "Read a tensor row as a signalTensor.", "signatures": ["(peek-row tensor rowIndex)"], "arity": {"minimum": 2, "maximum": 2}},
+    "gather": {
+        "category": "tensor_op",
+        "summary": "Gather values from a tensor or signalTensor using tensor or signalTensor indices. Fractional indices are truncated by the DGen gather implementation.",
+        "signatures": ["(gather source indices)"],
+        "arity": {"minimum": 2, "maximum": 2},
+    },
     "sample": {"category": "tensor_op", "summary": "Interpolated row read from a tensor.", "signatures": ["(sample tensor index)"], "arity": {"minimum": 2, "maximum": 2}},
     "to-signal": {"category": "tensor_op", "summary": "Convert a 1D tensor into a signal playback source.", "signatures": ["(to-signal tensor)", "(to-signal tensor @max-frames 4096)"], "arity": {"minimum": 1, "maximum": None}},
     "reshape": {"category": "tensor_shape", "summary": "Reshape tensor dimensions.", "signatures": ["(reshape tensor @shape [d1,d2,...])"], "arity": {"minimum": 1, "maximum": None}},
@@ -314,6 +320,10 @@ CURATED_OPERATOR_INPUTS = {
         {"name": "value", "kind": "float", "summary": "Fill value.", "required": True},
     ],
     "tensor-param": [{"name": "shape", "kind": "int[]", "summary": "Tensor parameter shape, either as a bracket list, individual dimension arguments, or @shape.", "required": False, "variadic": True}],
+    "gather": [
+        {"name": "source", "kind": "tensor|signalTensor", "summary": "Tensor or signalTensor to read from.", "required": True},
+        {"name": "indices", "kind": "tensor|signalTensor", "summary": "Index tensor. SignalTensor indices produce a frame-aware gather.", "required": True},
+    ],
     "triangle": [
         {"name": "phase", "kind": "signal|float", "summary": "Phase signal, usually 0..1.", "required": True},
         {"name": "duty", "kind": "signal|float", "summary": "Optional duty cycle width in 0..1. Defaults to 0.5; 0 follows the phase ramp.", "required": False},

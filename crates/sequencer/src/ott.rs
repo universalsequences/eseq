@@ -170,7 +170,9 @@ unsafe extern "C" fn ott_process(
         db_to_amp((*s.add(STATE_HIGH_GAIN_DB)).clamp(-24.0, 24.0)),
     ];
     let f_low = (*s.add(STATE_XOVER_LOW_HZ)).clamp(40.0, 400.0);
-    let f_high = (*s.add(STATE_XOVER_HIGH_HZ)).clamp(1000.0, 8000.0).max(f_low * 2.0);
+    let f_high = (*s.add(STATE_XOVER_HIGH_HZ))
+        .clamp(1000.0, 8000.0)
+        .max(f_low * 2.0);
 
     let coefs = [
         butterworth(f_low, sr, 0),  // lp @ low xover
@@ -190,7 +192,11 @@ unsafe extern "C" fn ott_process(
     let down_strength = downward * DOWN_SLOPE;
     let up_strength = upward * UP_SLOPE;
 
-    let mut env = [*s.add(STATE_ENV), *s.add(STATE_ENV + 1), *s.add(STATE_ENV + 2)];
+    let mut env = [
+        *s.add(STATE_ENV),
+        *s.add(STATE_ENV + 1),
+        *s.add(STATE_ENV + 2),
+    ];
     let mut gain_db = [
         *s.add(STATE_GAIN_DB),
         *s.add(STATE_GAIN_DB + 1),
@@ -211,7 +217,11 @@ unsafe extern "C" fn ott_process(
         let mut wet_r = 0.0;
         for b in 0..3 {
             let detector = bands_l[b].abs().max(bands_r[b].abs());
-            let coef = if detector > env[b] { attack[b] } else { release[b] };
+            let coef = if detector > env[b] {
+                attack[b]
+            } else {
+                release[b]
+            };
             env[b] += coef * (detector - env[b]);
             let over_db = amp_to_db(env[b]) - TARGET_DB;
             let target_gain_db = if over_db > 0.0 {
@@ -273,12 +283,7 @@ mod tests {
     fn init_state() -> [f32; OTT_STATE_SIZE] {
         let mut state = [0.0f32; OTT_STATE_SIZE];
         unsafe {
-            ott_init(
-                state.as_mut_ptr() as *mut c_void,
-                SR,
-                512,
-                std::ptr::null(),
-            );
+            ott_init(state.as_mut_ptr() as *mut c_void, SR, 512, std::ptr::null());
         }
         state
     }

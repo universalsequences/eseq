@@ -256,13 +256,14 @@ impl SpringCoeffs {
         for k in 0..SPRING_LOOPS {
             let net = (p.d_loop[k] * sr - chain_delay).round();
             loop_delay[k] = (net as isize).clamp(1, (LOOP_BUF_LEN - 1) as isize) as usize;
-            loop_gain[k] =
-                (10.0f32).powf(-3.0 * p.d_loop[k] / p.t60.max(0.05)).min(0.9995);
+            loop_gain[k] = (10.0f32)
+                .powf(-3.0 * p.d_loop[k] / p.t60.max(0.05))
+                .min(0.9995);
         }
 
         let df1 = ((p.d_df1 * sr).round() as isize).clamp(1, (DIFF_BUF_LEN - 1) as isize) as usize;
-        let df2 = ((p.d_df1 * 2.6 * sr).round() as isize).clamp(1, (DIFF_BUF_LEN - 1) as isize)
-            as usize;
+        let df2 =
+            ((p.d_df1 * 2.6 * sr).round() as isize).clamp(1, (DIFF_BUF_LEN - 1) as isize) as usize;
         let hf_d = ((p.d_hf * sr).round() as isize).clamp(1, (HF_BUF_LEN - 1) as isize) as usize;
         let hf_fb = (10.0f32)
             .powf(-3.0 * p.d_hf / p.t60_hf.max(0.01))
@@ -402,7 +403,9 @@ mod tests {
         }
         rev.reverse();
         let total = rev[0].max(1e-30);
-        rev.iter().map(|v| (10.0 * (v / total).log10()) as f32).collect()
+        rev.iter()
+            .map(|v| (10.0 * (v / total).log10()) as f32)
+            .collect()
     }
 
     #[test]
@@ -433,14 +436,29 @@ mod tests {
     #[test]
     fn default_tension_is_the_tuned_fit_exactly() {
         let base = render_impulse(&SpringParams::re201(), 44_100.0, 1.0, 0.25);
-        let half = render_impulse(&SpringParams::re201().with_tension(0.5), 44_100.0, 1.0, 0.25);
+        let half = render_impulse(
+            &SpringParams::re201().with_tension(0.5),
+            44_100.0,
+            1.0,
+            0.25,
+        );
         assert_eq!(base, half, "tension 0.5 must be bit-identical to re201");
     }
 
     #[test]
     fn tension_extremes_stay_finite_and_shift_the_transit() {
-        let lo = render_impulse(&SpringParams::re201().with_tension(0.0), 44_100.0, 2.0, 0.25);
-        let hi = render_impulse(&SpringParams::re201().with_tension(1.0), 44_100.0, 2.0, 0.25);
+        let lo = render_impulse(
+            &SpringParams::re201().with_tension(0.0),
+            44_100.0,
+            2.0,
+            0.25,
+        );
+        let hi = render_impulse(
+            &SpringParams::re201().with_tension(1.0),
+            44_100.0,
+            2.0,
+            0.25,
+        );
         assert!(lo.iter().all(|x| x.is_finite()));
         assert!(hi.iter().all(|x| x.is_finite()));
         // Tight spring = shorter transit: the dominant arrival comes earlier.

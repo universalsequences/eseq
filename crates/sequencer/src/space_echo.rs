@@ -513,8 +513,10 @@ unsafe extern "C" fn space_echo_process(
     let mut loop_dc_y1 = *s.add(STATE_LOOP_DC_Y1);
 
     let tape = s.add(STATE_TAPE_OFFSET);
-    let spring_a_state = std::slice::from_raw_parts_mut(s.add(STATE_SPRING_A), SPRING_TANK_STATE_LEN);
-    let spring_b_state = std::slice::from_raw_parts_mut(s.add(STATE_SPRING_B), SPRING_TANK_STATE_LEN);
+    let spring_a_state =
+        std::slice::from_raw_parts_mut(s.add(STATE_SPRING_A), SPRING_TANK_STATE_LEN);
+    let spring_b_state =
+        std::slice::from_raw_parts_mut(s.add(STATE_SPRING_B), SPRING_TANK_STATE_LEN);
 
     let target_intensity = intensity_gain(intensity_knob);
     let fb_norm = 1.0 / (head_mask.count_ones().max(1)) as f32;
@@ -542,8 +544,7 @@ unsafe extern "C" fn space_echo_process(
         smooth_bass += param_smooth * (bass_gain - smooth_bass);
         smooth_treble += param_smooth * (treble_gain - smooth_treble);
         smooth_dry += param_smooth * (dry_level - smooth_dry);
-        let loop_gain =
-            (smooth_intensity + intensity_mod.clamp(-1.0, 1.0) * 1.15).clamp(0.0, 1.15);
+        let loop_gain = (smooth_intensity + intensity_mod.clamp(-1.0, 1.0) * 1.15).clamp(0.0, 1.15);
 
         // Rate modulation goes through the same motor smoother, so modulating
         // it produces tape-style pitch warble rather than zipper noise.
@@ -1078,7 +1079,10 @@ mod tests {
         let early = rms(&out_l[2400..4800]); // ~50-100 ms
         let late = rms(&out_l[SR as usize..SR as usize + 4800]); // ~1 s
         assert!(early > 1.0e-4, "spring produced no early energy: {early}");
-        assert!(late < early, "spring should decay: early {early} late {late}");
+        assert!(
+            late < early,
+            "spring should decay: early {early} late {late}"
+        );
         let tail = rms(&out_l[frames - 4800..]);
         assert!(tail < 1.0e-3, "spring tail did not die out: {tail}");
 
