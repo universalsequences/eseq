@@ -367,6 +367,7 @@ mod tests {
             HashMap::new(),
             0,
             rt.macros().clone(),
+            None,
         );
         compiler.expand_macros(&parse_expr(src), 0)
     }

@@ -446,6 +446,7 @@ fn expand_sdf_expression(
         HashMap::new(),
         0,
         macros.clone(),
+        None,
     )
     .expand_macros(expr, 0)
 }

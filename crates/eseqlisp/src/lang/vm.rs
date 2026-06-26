@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
+pub const SOURCE_BUFFER_ID_PROP: &str = "__source-buffer-id";
+pub const SOURCE_MODULE_PATH_PROP: &str = "__source-module-path";
+pub const SOURCE_SYMBOL_PROP: &str = "__source-symbol";
 
 #[derive(Debug, PartialEq)]
 pub enum VMError {
@@ -821,6 +824,7 @@ fn annotate_explicit_subtree_root(
 fn annotate_widget_tree_stable_ids(
     value: &Value,
     source_buffer_id: Option<BufferId>,
+    source_module: Option<&std::path::Path>,
     target: &EffectTarget,
     parent_stable_id: Option<u64>,
     path: &mut Vec<usize>,
@@ -853,6 +857,7 @@ fn annotate_widget_tree_stable_ids(
                             let annotated_child = annotate_widget_tree_stable_ids(
                                 &child.borrow(),
                                 source_buffer_id,
+                                source_module,
                                 target,
                                 Some(stable_id),
                                 path,
@@ -877,6 +882,22 @@ fn annotate_widget_tree_stable_ids(
         STABLE_WIDGET_ID_PROP.to_string(),
         Rc::new(RefCell::new(Value::Number(stable_id as f64))),
     );
+    if let Some(source_buffer_id) = source_buffer_id {
+        annotated.insert(
+            SOURCE_BUFFER_ID_PROP.to_string(),
+            Rc::new(RefCell::new(Value::Number(source_buffer_id as f64))),
+        );
+    }
+    if let Some(source_module) = source_module
+        && !annotated.contains_key(SOURCE_MODULE_PATH_PROP)
+    {
+        annotated.insert(
+            SOURCE_MODULE_PATH_PROP.to_string(),
+            Rc::new(RefCell::new(Value::String(
+                source_module.display().to_string(),
+            ))),
+        );
+    }
     let subtree_root_id = prop_u64_rc(map, SUBTREE_ROOT_ID_PROP).unwrap_or(stable_id);
     annotated.insert(
         SUBTREE_ROOT_ID_PROP.to_string(),
@@ -2273,6 +2294,19 @@ impl VM {
         self.globals[idx] = Some(Rc::new(RefCell::new(Value::NativeFunction(Rc::new(f)))));
     }
 
+    pub fn current_source_symbol(&self) -> Option<String> {
+        self.chunks
+            .get(self.current_chunk)
+            .and_then(|chunk| chunk.source_symbol.clone())
+    }
+
+    pub fn current_source_module(&self) -> Option<std::path::PathBuf> {
+        self.chunks
+            .get(self.current_chunk)
+            .and_then(|chunk| chunk.source_module.clone())
+            .or_else(|| self.source_manager.current_module())
+    }
+
     /// Compile and run `code` in this VM's existing context (globals persist).
     pub fn eval_str(&mut self, code: &str) -> Result<Option<Value>, VMError> {
         let tokens = Parser::new(code.to_string())
@@ -2291,6 +2325,7 @@ impl VM {
         let next_node_id = self.dag.next_id;
 
         let macros = self.macros.clone();
+        let source_module = self.source_manager.current_module();
         let mut compiler = Compiler::new_repl(
             exprs,
             existing,
@@ -2300,6 +2335,7 @@ impl VM {
             state_bindings,
             next_node_id,
             macros,
+            source_module,
         );
         match compiler.compile() {
             Ok(chunks) => {
@@ -2449,6 +2485,7 @@ impl VM {
         let next_node_id = self.dag.next_id;
 
         let macros = self.macros.clone();
+        let source_module = self.source_manager.current_module();
         let compile_started = std::time::Instant::now();
         let mut compiler = Compiler::new_repl(
             exprs,
@@ -2459,6 +2496,7 @@ impl VM {
             state_bindings,
             next_node_id,
             macros,
+            source_module,
         );
         let chunks = compiler.compile().map_err(|_| VMError::CompileError)?;
         self.chunks = chunks;
@@ -3245,20 +3283,33 @@ impl VM {
                     progressed = true;
                     let previous_owner = (
                         self.current_effect_source_buffer_id,
+                        self.source_manager.module_stack_snapshot(),
                         self.current_effect_target.clone(),
                     );
-                    if let Some((source_buffer_id, target, subtree_root_id)) =
+                    if let Some((source_buffer_id, source_module, target, subtree_root_id)) =
                         self.dag.nodes.get(&node_id).and_then(|node| match node {
                             ReactiveNode::Effect {
                                 source_buffer_id,
+                                source_module,
                                 target,
                                 subtree_root_id,
                                 ..
-                            } => Some((*source_buffer_id, target.clone(), *subtree_root_id)),
+                            } => Some((
+                                *source_buffer_id,
+                                source_module.clone(),
+                                target.clone(),
+                                *subtree_root_id,
+                            )),
                             _ => None,
                         })
                     {
                         self.current_effect_source_buffer_id = source_buffer_id;
+                        let source_module_stack = source_module
+                            .clone()
+                            .map(|module| vec![module])
+                            .unwrap_or_default();
+                        self.source_manager
+                            .restore_module_stack(source_module_stack);
                         self.current_effect_target = target;
                         if let Some(root_id) = subtree_root_id {
                             let Some(owner) = self.registered_subtree_owner(root_id) else {
@@ -3288,6 +3339,7 @@ impl VM {
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
                                 self.current_effect_source_buffer_id,
+                                source_module.as_deref(),
                                 &self.current_effect_target,
                                 None,
                                 &mut path,
@@ -3336,7 +3388,8 @@ impl VM {
                             self.current_subtree_capture_stack = previous_subtree_capture_stack;
                             self.current_subtree_reactive_reads = previous_subtree_reactive_reads;
                             self.current_effect_source_buffer_id = previous_owner.0;
-                            self.current_effect_target = previous_owner.1;
+                            self.source_manager.restore_module_stack(previous_owner.1);
+                            self.current_effect_target = previous_owner.2;
                             continue;
                         }
                     }
@@ -3417,7 +3470,8 @@ impl VM {
                     self.current_subtree_capture_stack = previous_subtree_capture_stack;
                     self.current_subtree_reactive_reads = previous_subtree_reactive_reads;
                     self.current_effect_source_buffer_id = previous_owner.0;
-                    self.current_effect_target = previous_owner.1;
+                    self.source_manager.restore_module_stack(previous_owner.1);
+                    self.current_effect_target = previous_owner.2;
                 }
 
                 if !progressed {
@@ -4271,6 +4325,7 @@ impl VM {
                         let annotated_tree = annotate_widget_tree_stable_ids(
                             &tree.borrow(),
                             self.current_effect_source_buffer_id,
+                            self.source_manager.current_module().as_deref(),
                             &self.current_effect_target,
                             None,
                             &mut path,
@@ -4334,7 +4389,25 @@ impl VM {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{EffectTarget, ReactiveDag, ReactiveNode, ReactiveSource, VM, Value};
+    use super::{
+        EffectTarget, PendingUiUpdate, ReactiveDag, ReactiveNode, ReactiveSource,
+        SOURCE_BUFFER_ID_PROP, SOURCE_MODULE_PATH_PROP, SOURCE_SYMBOL_PROP, VM, Value,
+    };
+
+    fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
+        let Value::Map(map) = value else {
+            return None;
+        };
+        Some(map.get(key)?.borrow())
+    }
+
+    fn first_child(value: &Value) -> Option<Value> {
+        let children = map_prop(value, "children")?;
+        let Value::List(children) = &*children else {
+            return None;
+        };
+        children.first().map(|child| child.borrow().clone())
+    }
 
     #[test]
     fn eval_str_grows_global_storage_for_large_programs() {
@@ -4369,6 +4442,115 @@ mod tests {
             .expect("macro definition");
 
         assert!(vm.eval_str("(again 1)").is_err());
+    }
+
+    #[test]
+    fn source_metadata_marks_emitted_widget_tree_with_source_buffer() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        vm.set_current_effect_context(Some(42));
+
+        vm.eval_str(r#"(effect (box :debug-name "root" (label "hello")))"#)
+            .expect("effect eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        assert_eq!(pending.source_buffer_id, Some(42));
+        assert_eq!(
+            map_prop(&pending.tree, SOURCE_BUFFER_ID_PROP).as_deref(),
+            Some(&Value::Number(42.0))
+        );
+        let child = first_child(&pending.tree).expect("child widget");
+        assert_eq!(
+            map_prop(&child, SOURCE_BUFFER_ID_PROP).as_deref(),
+            Some(&Value::Number(42.0))
+        );
+    }
+
+    #[test]
+    fn source_metadata_marks_module_emitted_widget_tree_with_module_path() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-metadata-{}.lisp",
+            std::process::id()
+        ));
+
+        vm.eval_module_source(path.clone(), r#"(effect (label "hello"))"#, 1)
+            .expect("module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        assert_eq!(
+            map_prop(&pending.tree, SOURCE_MODULE_PATH_PROP).as_deref(),
+            Some(&Value::String(path.display().to_string()))
+        );
+    }
+
+    #[test]
+    fn source_metadata_marks_named_function_that_created_widget() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        vm.set_current_effect_context(Some(42));
+
+        vm.eval_str(
+            r#"(def make-inspected-ui () (box (label "hello"))) (effect (make-inspected-ui))"#,
+        )
+        .expect("effect eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        assert_eq!(
+            map_prop(&pending.tree, SOURCE_SYMBOL_PROP).as_deref(),
+            Some(&Value::String("make-inspected-ui".to_string()))
+        );
+        let child = first_child(&pending.tree).expect("child widget");
+        assert_eq!(
+            map_prop(&child, SOURCE_SYMBOL_PROP).as_deref(),
+            Some(&Value::String("make-inspected-ui".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_metadata_preserves_cross_module_widget_function_origin() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        let function_path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-function-{}.lisp",
+            std::process::id()
+        ));
+        let effect_path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-effect-{}.lisp",
+            std::process::id()
+        ));
+
+        vm.eval_module_source(
+            function_path.clone(),
+            r#"(def instrument-panel () (waveform :height 4.85))"#,
+            1,
+        )
+        .expect("function module eval");
+        vm.eval_module_source(
+            effect_path,
+            r#"(effect-buffer "*fx*" (instrument-panel))"#,
+            1,
+        )
+        .expect("effect module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        assert_eq!(
+            map_prop(&pending.tree, SOURCE_MODULE_PATH_PROP).as_deref(),
+            Some(&Value::String(function_path.display().to_string()))
+        );
+        assert_eq!(
+            map_prop(&pending.tree, SOURCE_SYMBOL_PROP).as_deref(),
+            Some(&Value::String("instrument-panel".to_string()))
+        );
     }
 
     #[test]

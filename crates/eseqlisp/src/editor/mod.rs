@@ -27,8 +27,8 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{
-    SplitDir, TileBufferTab, TileId, TileLeaf, TileNode, split_ratio_for_point, tile_body_rect,
-    tile_tab_layouts,
+    SplitDir, TileBufferTab, TileId, TileLeaf, TileNode, TileSplit, split_ratio_for_point,
+    tile_body_rect, tile_tab_layouts,
 };
 use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
@@ -145,6 +145,79 @@ fn format_lisp_reload_report(report: &ReloadReport) -> String {
         lines.extend(report.diagnostics.iter().cloned());
     }
     lines.join("\n")
+}
+
+fn is_inspect_mode_toggle_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+fn inspect_node_source_buffer_id(node: &crate::layout::LayoutNode) -> Option<BufferId> {
+    match node.props.get(crate::vm::SOURCE_BUFFER_ID_PROP) {
+        Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => {
+            Some(*value as BufferId)
+        }
+        _ => None,
+    }
+}
+
+fn inspect_node_source_module_path(node: &crate::layout::LayoutNode) -> Option<PathBuf> {
+    match node.props.get(crate::vm::SOURCE_MODULE_PATH_PROP) {
+        Some(Value::String(path)) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => None,
+    }
+}
+
+fn inspect_node_source_symbol(node: &crate::layout::LayoutNode) -> Option<String> {
+    match node.props.get(crate::vm::SOURCE_SYMBOL_PROP) {
+        Some(Value::String(symbol)) if !symbol.is_empty() => Some(symbol.clone()),
+        _ => None,
+    }
+}
+
+fn inspect_node_prop_string(node: &crate::layout::LayoutNode, key: &str) -> Option<String> {
+    match node.props.get(key) {
+        Some(Value::String(value) | Value::Keyword(value)) if !value.is_empty() => {
+            Some(value.clone())
+        }
+        Some(Value::Number(value)) if value.is_finite() => Some(value.to_string()),
+        Some(Value::Bool(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn inspect_node_debug_label(node: &crate::layout::LayoutNode) -> String {
+    let detail = node
+        .props
+        .get("debug-name")
+        .and_then(|value| match value {
+            Value::String(value) | Value::Keyword(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .or(node.stable_key.as_deref());
+    match detail {
+        Some(detail) => format!("{} {detail}", node.widget_type),
+        None => node.widget_type.clone(),
+    }
+}
+
+fn inspect_node_has_source_identity(node: &crate::layout::LayoutNode) -> bool {
+    inspect_node_prop_string(node, "debug-name").is_some()
+        || inspect_node_prop_string(node, "key").is_some()
+        || node.stable_key.is_some()
+        || inspect_node_source_symbol(node).is_some()
+}
+
+fn inspect_debug_log(message: impl AsRef<str>) {
+    eprintln!("[inspect] {}", message.as_ref());
+}
+
+fn format_cursor_for_log(cursor: (usize, usize)) -> String {
+    format!("{}:{}", cursor.0 + 1, cursor.1 + 1)
 }
 
 fn widget_only_scratch_buffer_should_show_ui(buffer: &Buffer) -> bool {
@@ -390,6 +463,11 @@ pub struct Editor {
     pointer_drag_started_on_slider: bool,
     last_slider_drag_widget_id: Option<u64>,
     last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
+    inspect_mode: bool,
+    inspect_hover_tile_id: Option<TileId>,
+    inspect_hover_widget_id: Option<u64>,
+    inspect_hover_status: Option<String>,
+    inspect_source_tile_id: Option<TileId>,
     #[cfg(test)]
     test_clipboard: Option<String>,
 }
@@ -518,6 +596,11 @@ impl Editor {
             pointer_drag_started_on_slider: false,
             last_slider_drag_widget_id: None,
             last_layout_refresh_timings: Vec::new(),
+            inspect_mode: false,
+            inspect_hover_tile_id: None,
+            inspect_hover_widget_id: None,
+            inspect_hover_status: None,
+            inspect_source_tile_id: None,
             #[cfg(test)]
             test_clipboard: None,
         };
@@ -813,6 +896,53 @@ impl Editor {
             self.next_tile_id -= 2;
             None
         }
+    }
+
+    fn split_root_right_with_buffer(&mut self, new_buffer_idx: usize) -> TileId {
+        self.save_current_widget_tree();
+        let split_id = self.alloc_tile_id();
+        let new_tile_id = self.alloc_tile_id();
+        let existing_root = std::mem::replace(
+            &mut self.tile_root,
+            TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx)),
+        );
+        self.tile_root = TileNode::Split(TileSplit {
+            id: split_id,
+            dir: SplitDir::Vertical,
+            ratio: 0.72,
+            gap: 0.0,
+            a: Box::new(existing_root),
+            b: Box::new(TileNode::Leaf(TileLeaf::new(new_tile_id, new_buffer_idx))),
+        });
+        self.switch_active_tile(new_tile_id);
+        new_tile_id
+    }
+
+    fn replace_tile_buffer_and_activate(&mut self, tile_id: TileId, buffer_idx: usize) -> bool {
+        if self.tile_root.find_leaf(tile_id).is_none() {
+            return false;
+        }
+        let was_active = self.active_tile == tile_id;
+        self.save_current_widget_tree();
+        {
+            let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) else {
+                return false;
+            };
+            leaf.buffer_idx = buffer_idx;
+            leaf.selected_tab = leaf.tabs.iter().position(|tab| tab.buffer_idx == buffer_idx);
+            Self::invalidate_leaf_for_buffer_switch(leaf);
+        }
+        if was_active {
+            self.record_buffer_access_by_idx(buffer_idx);
+            self.sync_runtime_context();
+            self.completion = None;
+            self.clear_mark();
+            self.restore_buffer_widget_tree();
+            self.mark_needs_redraw();
+        } else {
+            self.switch_active_tile(tile_id);
+        }
+        true
     }
 
     /// Delete the active tile (close window, not buffer).
@@ -1294,6 +1424,10 @@ impl Editor {
             return;
         }
 
+        if self.handle_tiled_inspect_mouse_precise(mouse, precise_col, precise_row, border_inset) {
+            return;
+        }
+
         if let Some(tile_id) = self.active_tab_mouse_capture
             && matches!(
                 mouse.kind,
@@ -1543,6 +1677,72 @@ impl Editor {
         }
     }
 
+    fn handle_tiled_inspect_mouse_precise(
+        &mut self,
+        mouse: MouseEvent,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) -> bool {
+        if !self.inspect_mode {
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left) => {}
+            MouseEventKind::Down(MouseButton::Right) | MouseEventKind::Up(MouseButton::Right) => {
+                self.toggle_inspect_mode();
+                return true;
+            }
+            _ => return false,
+        }
+        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+            if self.inspect_hover_tile_id.take().is_some()
+                || self.inspect_hover_widget_id.take().is_some()
+            {
+                self.inspect_hover_status = None;
+                self.show_sticky_message("Inspect mode: no widget");
+                self.mark_needs_redraw();
+            }
+            return true;
+        };
+        let Some((content_col, content_row, _, _)) = self.tile_content_area(tile_id, border_inset)
+        else {
+            return true;
+        };
+        let (event_col, event_row) = self
+            .tile_content_precise_event_position(
+                tile_id,
+                border_inset,
+                content_col,
+                content_row,
+                precise_col,
+                precise_row,
+            )
+            .unwrap_or((precise_col, precise_row));
+        match mouse.kind {
+            MouseEventKind::Moved => {
+                self.update_widget_inspect_hover(
+                    tile_id,
+                    content_col,
+                    content_row,
+                    event_col,
+                    event_row,
+                );
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_widget_inspect_click(
+                    tile_id,
+                    content_col,
+                    content_row,
+                    event_col,
+                    event_row,
+                );
+            }
+            _ => {}
+        }
+        true
+    }
+
     pub fn handle_tiled_touchpad_magnify(
         &mut self,
         precise_col: f32,
@@ -1703,12 +1903,18 @@ impl Editor {
         Some(
             leaf.show_status
                 || buffer.view_mode != ViewMode::UiOnly
+                || (self.inspect_mode && self.inspect_hover_tile_id == Some(tile_id))
+                || (self.inspect_mode
+                    && self.inspect_hover_tile_id.is_none()
+                    && tile_id == self.active_tile)
                 || (tile_id == self.active_tile && self.active_status_input_is_pending()),
         )
     }
 
     fn active_status_input_is_pending(&self) -> bool {
-        self.pending_key.is_some() || self.minibuffer_input.is_some() || self.save_prompt.is_some()
+        self.pending_key.is_some()
+            || self.minibuffer_input.is_some()
+            || self.save_prompt.is_some()
     }
 
     fn status_toggle_tile_at_screen(&self, precise_col: f32, precise_row: f32) -> Option<TileId> {
@@ -3022,6 +3228,36 @@ impl Editor {
         Ok(id)
     }
 
+    fn upsert_inactive_file_buffer_with_mode(
+        &mut self,
+        path: PathBuf,
+        mode: BufferMode,
+    ) -> Result<BufferId, EditorError> {
+        if let Some(existing) = self
+            .buffers
+            .iter()
+            .find(|buffer| buffer.path.as_ref() == Some(&path))
+            .map(|buffer| buffer.id)
+        {
+            return Ok(existing);
+        }
+
+        let text = std::fs::read_to_string(&path)?;
+        let name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let id = self.alloc_buffer_id();
+        let mut buffer = Buffer::new(id, &name);
+        buffer.set_text(&text);
+        buffer.set_path(path);
+        buffer.set_mode(mode);
+        buffer.dirty = false;
+        self.buffers.push(buffer);
+        self.track_new_buffer(id, false);
+        Ok(id)
+    }
+
     pub fn open_or_create_file_buffer(
         &mut self,
         path: impl Into<PathBuf>,
@@ -3284,6 +3520,296 @@ impl Editor {
         }
     }
 
+    pub fn inspect_mode_enabled(&self) -> bool {
+        self.inspect_mode
+    }
+
+    pub fn toggle_inspect_mode(&mut self) {
+        self.inspect_mode = !self.inspect_mode;
+        self.inspect_hover_tile_id = None;
+        self.inspect_hover_widget_id = None;
+        self.inspect_hover_status = None;
+        if self.inspect_mode {
+            self.show_sticky_message("Inspect mode: hover widgets, click to open source");
+        } else {
+            self.show_transient_message("Inspect mode off");
+        }
+        self.widget_cursor = WidgetCursor::Default;
+        self.active_leaf_mut().active_widget_gesture = None;
+        crate::widget_render::set_drop_hover_target(None);
+        self.mark_needs_redraw();
+    }
+
+    fn exit_inspect_mode(&mut self) {
+        if !self.inspect_mode {
+            return;
+        }
+        self.inspect_mode = false;
+        self.inspect_hover_tile_id = None;
+        self.inspect_hover_widget_id = None;
+        self.inspect_hover_status = None;
+        self.widget_cursor = WidgetCursor::Default;
+        self.active_leaf_mut().active_widget_gesture = None;
+        crate::widget_render::set_drop_hover_target(None);
+        self.show_transient_message("Inspect mode off");
+    }
+
+    fn update_widget_inspect_hover(
+        &mut self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some(node) = self.inspect_widget_node_at_tile(
+            tile_id,
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+        ) else {
+            if self.inspect_hover_widget_id.take().is_some()
+                || self.inspect_hover_tile_id.take().is_some()
+            {
+                self.inspect_hover_status = None;
+                self.show_transient_message("Inspect mode: no widget");
+                self.mark_needs_redraw();
+            }
+            return false;
+        };
+        if self.inspect_hover_tile_id == Some(tile_id)
+            && self.inspect_hover_widget_id == Some(node.widget_id)
+        {
+            return true;
+        }
+        self.inspect_hover_tile_id = Some(tile_id);
+        self.inspect_hover_widget_id = Some(node.widget_id);
+        let status = self.inspect_status_for_node(&node);
+        self.inspect_hover_status = Some(status.clone());
+        self.mark_needs_redraw();
+        true
+    }
+
+    fn handle_widget_inspect_click(
+        &mut self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some(node) = self.inspect_widget_node_at_tile(
+            tile_id,
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+        ) else {
+            self.show_sticky_message("Inspect mode: no widget source at pointer");
+            return true;
+        };
+        self.inspect_hover_tile_id = Some(tile_id);
+        self.inspect_hover_widget_id = Some(node.widget_id);
+        match self.open_source_for_inspected_node(&node) {
+            Ok(true) => {
+                self.inspect_mode = false;
+                self.inspect_hover_tile_id = None;
+                self.inspect_hover_widget_id = None;
+                true
+            }
+            Ok(false) => {
+                self.show_sticky_message(format!(
+                    "Inspect mode: {} has no source metadata",
+                    inspect_node_debug_label(&node)
+                ));
+                true
+            }
+            Err(error) => {
+                self.show_sticky_message(format!("Inspect mode: {error:?}"));
+                true
+            }
+        }
+    }
+
+    pub(crate) fn tile_inspect_status_message(&self, tile_id: TileId) -> Option<&str> {
+        (self.inspect_mode && self.inspect_hover_tile_id == Some(tile_id))
+            .then_some(self.inspect_hover_status.as_deref())
+            .flatten()
+    }
+
+    fn inspect_widget_node_at_tile(
+        &self,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<crate::layout::LayoutNode> {
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        let buffer = self.buffers.get(leaf.buffer_idx)?;
+        if buffer.view_mode == ViewMode::TextOnly {
+            return None;
+        }
+        let (local_col, local_row) =
+            crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)?;
+        let layout = if tile_id == self.active_tile {
+            self.runtime.current_layout.as_ref()
+        } else {
+            leaf.cached_layout.as_ref()
+        }?;
+        let layout_col = local_col + leaf.widget_scroll_left;
+        let layout_row = local_row + leaf.widget_scroll_top + buffer.scroll_top as f32;
+        inspect_hit_test_layout(layout, layout_row, layout_col).cloned()
+    }
+
+    fn inspect_status_for_node(&self, node: &crate::layout::LayoutNode) -> String {
+        let source = inspect_node_source_module_path(node)
+            .map(|path| path.display().to_string())
+            .or_else(|| {
+                inspect_node_source_buffer_id(node).and_then(|id| {
+                    self.buffers
+                        .iter()
+                        .find(|buffer| buffer.id == id)
+                        .map(|buffer| buffer.name.clone())
+                })
+            })
+            .unwrap_or_else(|| "source unavailable".to_string());
+        let definition = inspect_node_source_symbol(node)
+            .map(|symbol| format!(" def {symbol}"))
+            .unwrap_or_default();
+        format!(
+            "Inspect: {} @ {:.1},{:.1} {:.1}x{:.1} -> {}{}",
+            inspect_node_debug_label(node),
+            node.rect.col,
+            node.rect.row,
+            node.rect.width,
+            node.rect.height,
+            source,
+            definition
+        )
+    }
+
+    fn open_source_for_inspected_node(
+        &mut self,
+        node: &crate::layout::LayoutNode,
+    ) -> Result<bool, EditorError> {
+        inspect_debug_log(format!(
+            "click widget={} stable_key={:?} debug_name={:?} source_buffer_id={:?} source_module={:?} source_symbol={:?}",
+            node.widget_type,
+            node.stable_key,
+            inspect_node_prop_string(node, "debug-name"),
+            inspect_node_source_buffer_id(node),
+            inspect_node_source_module_path(node),
+            inspect_node_source_symbol(node)
+        ));
+        let source_buffer_id = if let Some(id) = inspect_node_source_buffer_id(node) {
+            inspect_debug_log(format!("using source buffer id {id} from widget metadata"));
+            Some(id)
+        } else if let Some(path) = inspect_node_source_module_path(node) {
+            inspect_debug_log(format!("opening source module path {}", path.display()));
+            Some(self.upsert_inactive_file_buffer_with_mode(path, BufferMode::ESeqLisp)?)
+        } else {
+            inspect_debug_log("no source buffer or source module metadata; cannot open source");
+            None
+        };
+        let Some(source_buffer_id) = source_buffer_id else {
+            return Ok(false);
+        };
+        let Some(source_buffer_idx) = self.buffer_idx_for_id(source_buffer_id) else {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} was not found in editor buffers"
+            ));
+            return Ok(false);
+        };
+        self.buffers[source_buffer_idx].view_mode = ViewMode::TextOnly;
+
+        if let Some(tile_id) = self.visible_tile_for_buffer_id(source_buffer_id) {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} already visible in tile {tile_id:?}; switching"
+            ));
+            self.switch_active_tile(tile_id);
+            self.inspect_source_tile_id = Some(tile_id);
+        } else if let Some(tile_id) = self
+            .inspect_source_tile_id
+            .filter(|tile_id| self.tile_root.find_leaf(*tile_id).is_some())
+        {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} not visible; reusing inspect source tile {tile_id:?}"
+            ));
+            self.replace_tile_buffer_and_activate(tile_id, source_buffer_idx);
+        } else {
+            inspect_debug_log(format!(
+                "source buffer id {source_buffer_id} not visible; splitting root to the right"
+            ));
+            let source_tile = self.split_root_right_with_buffer(source_buffer_idx);
+            self.inspect_source_tile_id = Some(source_tile);
+            inspect_debug_log(format!(
+                "new root-right source tile {source_tile:?}; switching"
+            ));
+        }
+        let source_symbol = inspect_node_source_symbol(node);
+        let source_text = self.active_buffer().text();
+        let resolved_widget_form = find_widget_form_in_text(&source_text, node).or_else(|| {
+            source_symbol.as_deref().and_then(|symbol| {
+                find_unique_widget_form_in_definition(&source_text, symbol, node)
+            })
+        });
+        let resolved_definition = source_symbol
+            .as_deref()
+            .and_then(|symbol| find_definition_in_text(&source_text, symbol));
+        let resolved_cursor = resolved_widget_form.or(resolved_definition);
+        if let Some(cursor) = resolved_cursor {
+            if let Some(widget_cursor) = resolved_widget_form {
+                inspect_debug_log(format!(
+                    "resolved exact widget form at {}",
+                    format_cursor_for_log(widget_cursor)
+                ));
+            } else if let (Some(symbol), Some(def_cursor)) =
+                (source_symbol.as_deref(), resolved_definition)
+            {
+                inspect_debug_log(format!(
+                    "falling back to producer definition {symbol} at {}",
+                    format_cursor_for_log(def_cursor)
+                ));
+            }
+            self.active_buffer_mut().cursor = cursor;
+            self.sync_text_horizontal_scroll_to_viewport();
+        } else {
+            inspect_debug_log(
+                "falling back to top of source buffer; no widget form or definition match",
+            );
+            self.active_buffer_mut().cursor = (0, 0);
+        }
+        let destination_buffer = self.active_buffer();
+        inspect_debug_log(format!(
+            "opened buffer={} path={} cursor={}",
+            destination_buffer.name,
+            destination_buffer
+                .path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<scratch>".to_string()),
+            format_cursor_for_log(destination_buffer.cursor)
+        ));
+        self.sync_runtime_context();
+        let destination = match (
+            resolved_widget_form,
+            source_symbol.as_deref(),
+            resolved_definition,
+        ) {
+            (Some(_), _, _) => format!("widget form {}", inspect_node_debug_label(node)),
+            (None, Some(symbol), Some(_)) => format!("definition {symbol}"),
+            (None, Some(symbol), None) => format!("source for {symbol} (definition not found)"),
+            (None, None, _) => "source (definition metadata unavailable)".to_string(),
+        };
+        self.show_sticky_message(format!(
+            "Inspect: opened {destination} for {}",
+            inspect_node_debug_label(node)
+        ));
+        Ok(true)
+    }
+
     pub fn handle_host_event(&mut self, event: HostEvent) {
         let message = match event {
             HostEvent::Status(msg) => msg,
@@ -3392,6 +3918,11 @@ impl Editor {
             self.finish_typing_undo_group();
         }
 
+        if self.inspect_mode && key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
+            self.exit_inspect_mode();
+            return;
+        }
+
         if self.handle_save_prompt_key(key) {
             return;
         }
@@ -3413,6 +3944,11 @@ impl Editor {
         }
 
         if self.handle_patcher_source_tab(key) {
+            return;
+        }
+
+        if is_inspect_mode_toggle_key(key) {
+            self.toggle_inspect_mode();
             return;
         }
 
@@ -4122,6 +4658,37 @@ impl Editor {
         let view_mode = self.active_buffer().view_mode;
         let widgets_visible = view_mode != ViewMode::TextOnly;
         let text_visible = view_mode != ViewMode::UiOnly;
+
+        if self.inspect_mode && widgets_visible {
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    self.update_widget_inspect_hover(
+                        self.active_tile,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    );
+                    return;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.handle_widget_inspect_click(
+                        self.active_tile,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    );
+                    return;
+                }
+                MouseEventKind::Down(MouseButton::Right)
+                | MouseEventKind::Up(MouseButton::Right) => {
+                    self.toggle_inspect_mode();
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -6866,6 +7433,378 @@ fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
     }
 
     None
+}
+
+fn inspect_hit_test_layout(
+    node: &crate::layout::LayoutNode,
+    row: f32,
+    col: f32,
+) -> Option<&crate::layout::LayoutNode> {
+    if !rect_contains_point(node.rect, row, col) {
+        return None;
+    }
+    let deepest = node
+        .children
+        .iter()
+        .rev()
+        .find_map(|child| inspect_hit_test_layout(child, row, col));
+    match deepest {
+        Some(hit) if inspect_node_has_source_identity(hit) => Some(hit),
+        Some(_) if inspect_node_has_source_identity(node) => Some(node),
+        Some(hit) => Some(hit),
+        None => Some(node),
+    }
+}
+
+fn rect_contains_point(rect: Rect, row: f32, col: f32) -> bool {
+    row >= rect.row
+        && row < rect.row + rect.height
+        && col >= rect.col
+        && col < rect.col + rect.width
+}
+
+fn find_widget_form_in_text(
+    text: &str,
+    node: &crate::layout::LayoutNode,
+) -> Option<(usize, usize)> {
+    let mut identities = Vec::new();
+    if let Some(debug_name) = inspect_node_prop_string(node, "debug-name") {
+        identities.push(("debug-name".to_string(), debug_name));
+    }
+    if let Some(key) = inspect_node_prop_string(node, "key").or_else(|| node.stable_key.clone()) {
+        identities.push(("key".to_string(), key));
+    }
+    if identities.is_empty() {
+        return None;
+    }
+
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => {
+                in_comment = true;
+                idx += 1;
+            }
+            '"' => {
+                in_string = true;
+                idx += 1;
+            }
+            '(' => {
+                let form_start = idx;
+                idx += 1;
+                let mut cursor = skip_ws_and_comments(text, idx);
+                let head_start = cursor;
+                cursor = advance_symbol(text, cursor);
+                if cursor == head_start || &text[head_start..cursor] != node.widget_type {
+                    continue;
+                }
+                let Some(form_end) = find_matching_list_end(text, form_start) else {
+                    continue;
+                };
+                if widget_form_matches_identities(&text[form_start..form_end], &identities) {
+                    return Some(offset_to_position(text, form_start));
+                }
+                idx = form_end;
+            }
+            _ => idx += 1,
+        }
+    }
+
+    None
+}
+
+fn find_unique_widget_form_in_definition(
+    text: &str,
+    symbol: &str,
+    node: &crate::layout::LayoutNode,
+) -> Option<(usize, usize)> {
+    let (definition_start, definition_end) = find_definition_bounds_in_text(text, symbol)?;
+    let mut matches =
+        widget_form_positions_in_range(text, definition_start, definition_end, &node.widget_type);
+    if matches.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
+}
+
+fn find_definition_bounds_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let targets = ["def", "defmacro", "defwidget", "defmode"];
+
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => {
+                in_comment = true;
+                idx += 1;
+            }
+            '"' => {
+                in_string = true;
+                idx += 1;
+            }
+            '(' => {
+                let form_start = idx;
+                depth += 1;
+                idx += 1;
+                if depth != 1 {
+                    continue;
+                }
+                let mut cursor = skip_ws_and_comments(text, idx);
+                let head_start = cursor;
+                cursor = advance_symbol(text, cursor);
+                if cursor == head_start || !targets.contains(&&text[head_start..cursor]) {
+                    continue;
+                }
+                cursor = skip_ws_and_comments(text, cursor);
+                let name_start = if text[cursor..].starts_with('(') {
+                    skip_ws_and_comments(text, cursor + 1)
+                } else {
+                    cursor
+                };
+                let name_end = advance_symbol(text, name_start);
+                if name_end == name_start || &text[name_start..name_end] != symbol {
+                    continue;
+                }
+                if let Some(form_end) = find_matching_list_end(text, form_start) {
+                    return Some((form_start, form_end));
+                }
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                idx += 1;
+            }
+            _ => idx += 1,
+        }
+    }
+
+    None
+}
+
+fn widget_form_positions_in_range(
+    text: &str,
+    start: usize,
+    end: usize,
+    widget_type: &str,
+) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut idx = start;
+    let mut positions = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    while idx < end && idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => {
+                in_comment = true;
+                idx += 1;
+            }
+            '"' => {
+                in_string = true;
+                idx += 1;
+            }
+            '(' => {
+                let form_start = idx;
+                idx += 1;
+                let mut cursor = skip_ws_and_comments(text, idx);
+                let head_start = cursor;
+                cursor = advance_symbol(text, cursor);
+                if cursor != head_start && &text[head_start..cursor] == widget_type {
+                    positions.push(offset_to_position(text, form_start));
+                }
+            }
+            _ => idx += 1,
+        }
+    }
+
+    positions
+}
+
+fn find_matching_list_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut idx = start;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => in_comment = true,
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx + 1);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn widget_form_matches_identities(form: &str, identities: &[(String, String)]) -> bool {
+    let Ok(tokens) = crate::parser::Parser::new(form.to_string()).parse() else {
+        return false;
+    };
+    let mut ast = crate::parser::ASTParser::new(tokens);
+    let Ok(expressions) = ast.parse() else {
+        return false;
+    };
+    let Some(crate::parser::Expression::List(items)) = expressions.first() else {
+        return false;
+    };
+
+    identities.iter().any(|(key, expected)| {
+        items.windows(2).any(|pair| {
+            matches!(&pair[0], crate::parser::Expression::Keyword(candidate) if candidate == key)
+                && (expression_matches_source_identity(&pair[1], expected)
+                    || expression_may_generate_source_identity(&pair[1], expected))
+        })
+    })
+}
+
+fn expression_matches_source_identity(expr: &crate::parser::Expression, expected: &str) -> bool {
+    match expr {
+        crate::parser::Expression::String(value)
+        | crate::parser::Expression::Symbol(value)
+        | crate::parser::Expression::QuoteSymbol(value) => value == expected,
+        crate::parser::Expression::Keyword(value) => {
+            expected == value || expected == format!(":{value}")
+        }
+        crate::parser::Expression::Number(value) => expected
+            .parse::<f64>()
+            .is_ok_and(|expected| (expected - value).abs() < f64::EPSILON),
+        crate::parser::Expression::QuoteList(_)
+        | crate::parser::Expression::List(_)
+        | crate::parser::Expression::Quasiquote(_)
+        | crate::parser::Expression::Unquote(_) => false,
+    }
+}
+
+fn expression_may_generate_source_identity(
+    expr: &crate::parser::Expression,
+    expected: &str,
+) -> bool {
+    let crate::parser::Expression::List(items) = expr else {
+        return false;
+    };
+    let Some(crate::parser::Expression::Symbol(head)) = items.first() else {
+        return false;
+    };
+    if head != "str" {
+        return false;
+    }
+
+    let fragments = items[1..]
+        .iter()
+        .filter_map(|item| match item {
+            crate::parser::Expression::String(value) if !value.is_empty() => Some(value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    !fragments.is_empty() && string_contains_fragments_in_order(expected, &fragments)
+}
+
+fn string_contains_fragments_in_order(value: &str, fragments: &[&str]) -> bool {
+    let mut search_start = 0usize;
+    for fragment in fragments {
+        let Some(relative_idx) = value[search_start..].find(fragment) else {
+            return false;
+        };
+        search_start += relative_idx + fragment.len();
+    }
+    true
 }
 
 fn skip_ws_and_comments(text: &str, mut idx: usize) -> usize {

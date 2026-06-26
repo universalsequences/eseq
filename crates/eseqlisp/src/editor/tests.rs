@@ -55,8 +55,8 @@ fn focused_text_input_survives_on_change_rerender() {
     editor.set_layout_viewport(30, 8);
 
     let layout = editor.widget_layout().expect("layout");
-    let input =
-        super::find_layout_node_by_stable_key(layout.as_ref(), "search-input").expect("search input");
+    let input = super::find_layout_node_by_stable_key(layout.as_ref(), "search-input")
+        .expect("search input");
     editor.handle_mouse_precise(
         mouse_event(
             MouseEventKind::Down(MouseButton::Left),
@@ -5842,6 +5842,469 @@ fn hidden_ui_only_status_bar_reappears_for_chord_and_minibuffer_input() {
     assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
 }
 
+#[test]
+fn hidden_ui_only_status_bar_reappears_in_inspect_mode() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.active_leaf_mut().show_status = false;
+    let tile_id = editor.active_tile;
+
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    assert!(!frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
+
+    editor.toggle_inspect_mode();
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    let status: String = frame.tiles[0]
+        .frame
+        .status_cells
+        .iter()
+        .map(|cell| cell.ch)
+        .collect();
+    assert!(frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 7);
+    assert!(status.contains("Inspect mode"), "{status}");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 40, 9);
+    assert!(!frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
+}
+
+#[test]
+fn inspect_hover_reveals_status_for_inactive_ui_tile() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 12);
+    editor.update_tile_rects(80, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*inspect-target*"
+              (box :debug-name "inspect-target" :width 10 :height 4))
+            (split-window-right "*inspect-target*")
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(80, 12);
+
+    let target_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*inspect-target*")
+        .unwrap();
+    let target_tile = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| {
+            editor
+                .tile_root
+                .find_leaf(*tile_id)
+                .is_some_and(|leaf| leaf.buffer_idx == target_idx)
+        })
+        .unwrap();
+    let other_tile = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| *tile_id != target_tile)
+        .unwrap();
+    editor.switch_active_tile(other_tile);
+    editor
+        .tile_root
+        .find_leaf_mut(target_tile)
+        .unwrap()
+        .show_status = false;
+    editor.active_leaf_mut().show_status = false;
+    let other_idx = editor.tile_root.find_leaf(other_tile).unwrap().buffer_idx;
+    editor.buffers[other_idx].view_mode = super::ViewMode::UiOnly;
+    editor.buffers[target_idx].view_mode = super::ViewMode::UiOnly;
+
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 80, 12);
+    assert!(
+        !frame
+            .tiles
+            .iter()
+            .find(|tile| tile.tile_id == target_tile)
+            .unwrap()
+            .show_status
+    );
+
+    editor.toggle_inspect_mode();
+    let (content_col, content_row, _, _) = editor.tile_content_area(target_tile, 0).unwrap();
+    let target_node = editor
+        .tile_root
+        .find_leaf(target_tile)
+        .unwrap()
+        .cached_layout
+        .as_ref()
+        .expect("target tile should have cached layout")
+        .clone();
+    let hover_col = content_col as f32 + target_node.rect.col + target_node.rect.width * 0.5;
+    let hover_row = content_row as f32 + target_node.rect.row + target_node.rect.height * 0.5;
+    assert!(
+        editor
+            .inspect_widget_node_at_tile(
+                target_tile,
+                content_col,
+                content_row,
+                hover_col,
+                hover_row,
+            )
+            .is_some(),
+        "test hover point should hit the inactive tile widget"
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Moved,
+            hover_col.floor() as u16,
+            hover_row.floor() as u16,
+        ),
+        hover_col,
+        hover_row,
+        0,
+    );
+
+    assert_eq!(
+        editor.active_tile, other_tile,
+        "inspect hover should not select the hovered tile"
+    );
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 80, 12);
+    let other = frame
+        .tiles
+        .iter()
+        .find(|tile| tile.tile_id == other_tile)
+        .unwrap();
+    assert!(
+        !other.show_status,
+        "non-hovered hidden-status UI tile should not show inspect hover info"
+    );
+    let target = frame
+        .tiles
+        .iter()
+        .find(|tile| tile.tile_id == target_tile)
+        .unwrap();
+    assert!(target.show_status);
+    let status = target
+        .frame
+        .status_cells
+        .iter()
+        .map(|cell| cell.ch)
+        .collect::<String>();
+    assert!(status.contains("Inspect:"), "{status}");
+    assert!(status.contains("inspect-target"), "{status}");
+}
+
+#[test]
+fn inspect_source_opens_as_root_right_tile() {
+    use std::collections::HashMap;
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*left*", "(label \"left\")");
+    editor
+        .split_active_tile(SplitDir::Vertical, editor.active_buffer_idx())
+        .expect("split should create a second tile");
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime_mut()
+        .eval_str(r#"(effect (box :debug-name "stale-ui" :width 12 :height 4))"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    assert!(
+        editor.runtime.current_layout.is_some(),
+        "regression setup should start with a live UI layout"
+    );
+    editor.update_tile_rects(120, 20);
+    let leaf_count_before = editor.tile_root.leaf_count();
+    let root_width_before = editor.tile_root_rect().unwrap().width;
+
+    let dir = std::env::temp_dir().join(format!(
+        "eseqlisp-inspect-root-source-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("source.lisp");
+    std::fs::write(
+        &path,
+        "(def render-target ()\n  (box :debug-name \"target\"))\n",
+    )
+    .unwrap();
+
+    let mut props = HashMap::new();
+    props.insert(
+        crate::vm::SOURCE_MODULE_PATH_PROP.to_string(),
+        Value::String(path.display().to_string()),
+    );
+    props.insert(
+        "debug-name".to_string(),
+        Value::String("target".to_string()),
+    );
+    let node = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "box".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props,
+        children: Vec::new(),
+        focusable: false,
+    };
+
+    assert!(editor.open_source_for_inspected_node(&node).unwrap());
+    editor.update_tile_rects(120, 20);
+
+    assert_eq!(editor.tile_root.leaf_count(), leaf_count_before + 1);
+    let source_tile = editor.active_tile;
+    let source_leaf = editor.tile_root.find_leaf(source_tile).unwrap();
+    assert_eq!(
+        editor.buffers[source_leaf.buffer_idx].path.as_ref(),
+        Some(&path)
+    );
+    assert_eq!(
+        editor.buffers[source_leaf.buffer_idx].view_mode,
+        super::ViewMode::TextOnly
+    );
+    assert!(
+        editor.runtime.current_layout.is_none(),
+        "source tile activation must not inherit the previously active UI layout"
+    );
+    let source_rect = editor.tile_rect(source_tile).unwrap();
+    assert!(
+        source_rect.col > root_width_before * 0.6,
+        "source tile should be appended to the right of the previous layout"
+    );
+
+    let second_path = dir.join("other-source.lisp");
+    std::fs::write(
+        &second_path,
+        "(def render-other ()\n  (button :debug-name \"other-target\"))\n",
+    )
+    .unwrap();
+    let mut second_props = HashMap::new();
+    second_props.insert(
+        crate::vm::SOURCE_MODULE_PATH_PROP.to_string(),
+        Value::String(second_path.display().to_string()),
+    );
+    second_props.insert(
+        "debug-name".to_string(),
+        Value::String("other-target".to_string()),
+    );
+    let second_node = crate::layout::LayoutNode {
+        widget_id: 2,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "button".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props: second_props,
+        children: Vec::new(),
+        focusable: false,
+    };
+
+    assert!(editor.open_source_for_inspected_node(&second_node).unwrap());
+    editor.update_tile_rects(120, 20);
+    assert_eq!(
+        editor.tile_root.leaf_count(),
+        leaf_count_before + 1,
+        "opening another inspected source file should reuse the inspect source tile"
+    );
+    assert_eq!(editor.active_tile, source_tile);
+    let source_leaf = editor.tile_root.find_leaf(source_tile).unwrap();
+    assert_eq!(
+        editor.buffers[source_leaf.buffer_idx].path.as_ref(),
+        Some(&second_path)
+    );
+    assert_eq!(editor.active_buffer().cursor, (1, 2));
+}
+
+#[test]
+fn inspect_source_lookup_finds_debug_named_widget_form() {
+    use std::collections::HashMap;
+
+    let source = r#"
+(def unrelated ()
+  (box :debug-name "other"))
+
+(def render-target ()
+  (v-stack
+    (box :debug-name "target-box"
+      (label "inside"))))
+"#;
+    let mut props = HashMap::new();
+    props.insert(
+        "debug-name".to_string(),
+        crate::vm::Value::String("target-box".to_string()),
+    );
+    let node = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "box".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props,
+        children: Vec::new(),
+        focusable: false,
+    };
+
+    assert_eq!(super::find_widget_form_in_text(source, &node), Some((6, 4)));
+}
+
+#[test]
+fn inspect_hit_test_prefers_source_identified_ancestor() {
+    use std::collections::HashMap;
+
+    let mut parent_props = HashMap::new();
+    parent_props.insert("key".to_string(), Value::String("seqv-select-1".to_string()));
+    let child = crate::layout::LayoutNode {
+        widget_id: 2,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "label".to_string(),
+        rect: crate::layout::Rect {
+            row: 1.0,
+            col: 1.0,
+            width: 4.0,
+            height: 1.0,
+        },
+        props: HashMap::new(),
+        children: Vec::new(),
+        focusable: false,
+    };
+    let parent = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: Some("seqv-select-1".to_string()),
+        widget_type: "button".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 8.0,
+            height: 3.0,
+        },
+        props: parent_props,
+        children: vec![child],
+        focusable: false,
+    };
+
+    let hit = super::inspect_hit_test_layout(&parent, 1.2, 2.0).expect("hit");
+    assert_eq!(hit.widget_id, 1);
+    assert_eq!(hit.stable_key.as_deref(), Some("seqv-select-1"));
+}
+
+#[test]
+fn inspect_source_lookup_finds_widget_form_with_dynamic_str_key() {
+    use std::collections::HashMap;
+
+    let source = r#"
+(def seqv-step-cell (track step visible)
+  (let ((odd 0))
+    (box
+      :width 3.05 :height 1.45
+      :key (str "seqv-step-cell-" track "-" step)
+      :active true
+      (box :background "seqv-step-shell"))))
+"#;
+    let node = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: Some("seqv-step-cell-1-0".to_string()),
+        widget_type: "box".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props: HashMap::new(),
+        children: Vec::new(),
+        focusable: false,
+    };
+
+    let expected = source
+        .find("(box\n      :width")
+        .map(|offset| super::offset_to_position(source, offset));
+    assert_eq!(super::find_widget_form_in_text(source, &node), expected);
+}
+
+#[test]
+fn inspect_source_lookup_finds_unique_widget_form_inside_source_symbol() {
+    use std::collections::HashMap;
+
+    let source = r#"
+(def instrument-panel (inst)
+  (box
+    (v-stack
+      (waveform
+        :height 4.85
+        :buffer (get inst :buffer)))))
+"#;
+    let mut props = HashMap::new();
+    props.insert(
+        crate::vm::SOURCE_SYMBOL_PROP.to_string(),
+        crate::vm::Value::String("instrument-panel".to_string()),
+    );
+    let node = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "waveform".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props,
+        children: Vec::new(),
+        focusable: false,
+    };
+
+    let expected = source
+        .find("(waveform")
+        .map(|offset| super::offset_to_position(source, offset));
+    assert_eq!(
+        super::find_unique_widget_form_in_definition(source, "instrument-panel", &node),
+        expected
+    );
+}
+
 fn eval_tabbed_test_layout(editor: &mut Editor) {
     editor
         .runtime_mut()
@@ -5974,7 +6437,8 @@ fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
     let tile_rect = editor.tile_rect(tile_id).unwrap();
     assert!(
         tab_rect.rect.row >= tile_rect.row
-            && tab_rect.rect.row + tab_rect.rect.height <= editor.tile_body_rect(tile_id).unwrap().row + f32::EPSILON,
+            && tab_rect.rect.row + tab_rect.rect.height
+                <= editor.tile_body_rect(tile_id).unwrap().row + f32::EPSILON,
         "tabs should live in the tile header row above the content body"
     );
     assert_eq!(
@@ -6056,7 +6520,10 @@ fn tabbed_tile_frame_reserves_internal_header_row_for_tabs() {
         assert!(tab.rect.row + tab.rect.height <= tile.body_rect.row + f32::EPSILON);
     }
     assert!(tile.frame.widget_layout.as_ref().unwrap().rect.height > 0.0);
-    assert_eq!(editor.tile_body_rect(editor.active_tile).unwrap(), tile.body_rect);
+    assert_eq!(
+        editor.tile_body_rect(editor.active_tile).unwrap(),
+        tile.body_rect
+    );
 }
 
 #[test]

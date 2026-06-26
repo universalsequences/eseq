@@ -317,6 +317,14 @@ impl SourceManager {
         self.load_stack.last().cloned()
     }
 
+    pub fn module_stack_snapshot(&self) -> Vec<PathBuf> {
+        self.load_stack.clone()
+    }
+
+    pub fn restore_module_stack(&mut self, load_stack: Vec<PathBuf>) {
+        self.load_stack = load_stack;
+    }
+
     pub fn record_module_success(
         &mut self,
         path: PathBuf,

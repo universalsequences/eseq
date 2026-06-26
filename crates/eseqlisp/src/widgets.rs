@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::vm::{VM, Value, format_lisp_value};
+use crate::vm::{SOURCE_MODULE_PATH_PROP, SOURCE_SYMBOL_PROP, VM, Value, format_lisp_value};
 
 pub fn register_widget_natives(vm: &mut VM) {
     for widget in [
@@ -45,7 +45,26 @@ pub fn register_widget_natives(vm: &mut VM) {
         "tree",
     ] {
         let widget_type = widget.to_string();
-        vm.register_native(widget, move |args| build_widget(&widget_type, args));
+        vm.register_native_with_vm(widget, move |args, vm| {
+            let mut widget = build_widget(&widget_type, args);
+            if let Some(symbol) = vm.current_source_symbol() {
+                if let Value::Map(map) = &mut widget {
+                    map.insert(
+                        SOURCE_SYMBOL_PROP.to_string(),
+                        Rc::new(RefCell::new(Value::String(symbol))),
+                    );
+                }
+            }
+            if let Some(module) = vm.current_source_module() {
+                if let Value::Map(map) = &mut widget {
+                    map.insert(
+                        SOURCE_MODULE_PATH_PROP.to_string(),
+                        Rc::new(RefCell::new(Value::String(module.display().to_string()))),
+                    );
+                }
+            }
+            widget
+        });
     }
 }
 

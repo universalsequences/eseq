@@ -1,5 +1,6 @@
 use crate::parser::Expression;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -8,6 +9,8 @@ pub struct Chunk {
     pub strings: Vec<String>, // string constants pool
     pub symbols: Vec<String>,
     pub upvalues: Vec<String>,
+    pub source_symbol: Option<String>,
+    pub source_module: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -104,6 +107,7 @@ pub struct Compiler {
     state_bindings: HashMap<String, u32>,
     next_node_id: u32,
     next_temp_id: u32,
+    source_module: Option<PathBuf>,
     pub macros: HashMap<String, MacroDef>,
 }
 
@@ -235,6 +239,7 @@ impl Compiler {
             state_bindings: HashMap::new(),
             next_node_id: 0,
             next_temp_id: 0,
+            source_module: None,
             macros: HashMap::new(),
         }
     }
@@ -250,6 +255,7 @@ impl Compiler {
         state_bindings: HashMap<String, u32>,
         next_node_id: u32,
         macros: HashMap<String, MacroDef>,
+        source_module: Option<PathBuf>,
     ) -> Self {
         Compiler {
             expressions,
@@ -262,6 +268,7 @@ impl Compiler {
             state_bindings,
             next_node_id,
             next_temp_id: 0,
+            source_module,
             macros,
         }
     }
@@ -544,6 +551,8 @@ impl Compiler {
             strings: vec![],
             symbols: vec![],
             upvalues: vec![],
+            source_symbol: None,
+            source_module: self.source_module.clone(),
         });
 
         if is_effect {
@@ -1179,6 +1188,8 @@ impl Compiler {
             strings: vec![],
             symbols,
             upvalues: vec![],
+            source_symbol: name.clone(),
+            source_module: self.source_module.clone(),
         });
         self.compile_expression(&wrapped_body)?;
 
@@ -1733,6 +1744,8 @@ impl Compiler {
             strings: vec![],
             symbols: vec![],
             upvalues: vec![],
+            source_symbol: None,
+            source_module: self.source_module.clone(),
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {
