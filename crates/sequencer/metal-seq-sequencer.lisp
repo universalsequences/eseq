@@ -268,6 +268,31 @@
       (seqv-activate-track-for-edit track)
       (seqv-set-track-expanded track-id (not (seqv-track-expanded? track-id))))))
 
+(def seqv-drop-sample-on-track (event)
+  (let ((payload (get event :payload))
+        (target (get event :target)))
+    (let ((path (get payload :path))
+          (track (get target :track)))
+      (if path
+        (do
+          (seqv-activate-track-for-edit track)
+          (host-command "audition-sample" (dict :path path)))
+        (status "Drop a sample file, not a folder")))))
+
+(def seqv-drop-new-track (event)
+  (let ((payload (get event :payload)))
+    (let ((path (get payload :path))
+          (name (get payload :name)))
+      (if (= (get event :drag-type) "instrument")
+        (if name
+          (do
+            (set! sbrowser-loading-instrument-name name)
+            (host-command "add-track-instrument" (dict :name name)))
+          (status "Drop an instrument, not a folder"))
+        (if path
+          (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+          (status "Drop a sample file, not a folder"))))))
+
 (defwidget seqv-track-container
   :width 1.5 :height 1.5
   :state ()
@@ -433,7 +458,7 @@
 (def seqv-mute-bg (active)
   (if active
     (rgba 0.08 0.09 0.10 1.0)
-    (rgba 0.115 0.130 0.144 1.0)))
+         (rgba 0.95 0.48 0.18 1.0)))
 
 (def seqv-solo-bg (active)
   (if active
@@ -462,7 +487,7 @@
           :key (str "seqv-mute-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :background-color (seqv-mute-bg (nth SEQ.track-mutes i))
-          :color (if (nth SEQ.track-mutes i) :gray :blue)
+          :color (if (nth SEQ.track-mutes i) :gray :black)
           :on-click |x y r| (do (seqv-activate-track-for-edit i) (seq-toggle-track-mute i)))
         (button "S"
           :key (str "seqv-solo-" i)
@@ -1139,6 +1164,7 @@
         ;; :muted is a binding (not a value read) so mute/solo changes update
         ;; the row chrome without rerunning this subtree.
         (box :width :fill
+          :key (str "sequencer-track-drop-" i)
           :selected (seqv-track-selected-binding i)
           :muted (bind-seq-nth "track-muted-effective" i)
           :background-color :buffer-bg
@@ -1149,6 +1175,10 @@
           :border-color :mixer-strip-border
           :selected-border-color :mixer-strip-selected-border
           :muted-border-color :mixer-strip-border
+          :drop-hover-border-color :mixer-strip-selected-border
+          :drop-types (list "sample")
+          :drop-meta (dict :kind "track" :track i)
+          :on-drop (lambda (event) (seqv-drop-sample-on-track event))
           :padding 0.0145
           :on-click |x y r| (seqv-select-track-for-edit i)
           (if (seqv-track-expanded? (nth SEQ.track-ids i))
@@ -1163,7 +1193,22 @@
               (seqv-track-header i)
               (seqv-track-grid i)
               (box :flex 1 :width 0 :height 0.1 :bg :transparent)
-              (seqv-track-actions i))))))))
+              (seqv-track-actions i))))))
+    (box :key "sequencer-new-track-drop-zone"
+      :width :fill :height 2.4 :flex 1
+      :background-color :transparent
+      :drop-hover-background-color :mixer-control-bg
+      :border-width 1
+      :border-color :transparent
+      :drop-hover-border-color :mixer-strip-selected-border
+      :corner-radius 10
+      :drop-types (list "sample" "instrument")
+      :drop-meta (dict :kind "new-sample-track")
+      :on-drop (lambda (event) (seqv-drop-new-track event))
+      (label ""
+        :font-size 1
+        :color :transparent
+        :bg :transparent))))
 
 (set-buffer-mode-for "*sequencer*" "seq-grid-mode")
 

@@ -3878,7 +3878,9 @@ fn operator_metadata_documents_gather_ports() {
 
     assert_eq!(
         gather.summary.as_deref(),
-        Some("Gather values from a tensor or signalTensor using tensor or signalTensor indices. Fractional indices are truncated by the DGen gather implementation.")
+        Some(
+            "Gather values from a tensor or signalTensor using tensor or signalTensor indices. Fractional indices are truncated by the DGen gather implementation."
+        )
     );
     assert_eq!(gather.inputs.len(), 2);
     assert_eq!(gather.inputs[0].name.as_deref(), Some("source"));

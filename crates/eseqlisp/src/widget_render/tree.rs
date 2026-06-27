@@ -430,6 +430,26 @@ fn sync_state_with_external_selection(
     }
 }
 
+fn normalize_state_for_visible_rows(
+    widget_id: u64,
+    state: &mut TreeState,
+    visible_row_count: usize,
+) {
+    if visible_row_count == 0 {
+        return;
+    }
+
+    let original_state = state.clone();
+    state.cursor_row = state.cursor_row.min(visible_row_count - 1);
+    if matches!(state.external_selected_row, Some(row) if row >= visible_row_count) {
+        state.external_selected_row = None;
+    }
+
+    if *state != original_state {
+        set_tree_state(widget_id, state.clone());
+    }
+}
+
 pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f32)> {
     if node.widget_type != "tree" {
         return None;
@@ -440,6 +460,12 @@ pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f
     let widget_key = tree_state_key(node);
     let mut state = get_tree_state(widget_key);
     sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
+    let mut rows = Vec::new();
+    flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+    if rows.is_empty() {
+        return None;
+    }
+    normalize_state_for_visible_rows(widget_key, &mut state, rows.len());
     let selection_key = state.synced_selection.clone()?;
     let selected_row = if state.cursor_view_active {
         state.cursor_row
@@ -802,6 +828,7 @@ impl WidgetDefinition for TreeWidget {
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+        normalize_state_for_visible_rows(widget_key, &mut state, rows.len());
         if rows.is_empty() {
             return None;
         }
@@ -1008,6 +1035,7 @@ impl WidgetDefinition for TreeWidget {
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+        normalize_state_for_visible_rows(widget_key, &mut state, rows.len());
 
         // Update the last-known expanded state for measure() to use
         update_last_known_expanded(widget_key, &state.expanded);

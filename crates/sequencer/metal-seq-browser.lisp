@@ -303,12 +303,14 @@
       (selected (get tag :selected)))
     (button name
       :variant :ghost
-      :background-color (if selected "#ecca6d" '(rgba 1 1 1 1 0.01))
-      :color (if selected :black "#9ea1a8")
-      :border-color (if selected "#effb6d" '(rgba 1 1 1 0.2))
-      :height 1.02
-      :padding 0.32
-      :font-size 10.0
+      :background-color (if selected 
+         (rgba 0.95 0.68 0.28 1.0)
+         '(rgba 1 1 1 0.1))
+      :color (if selected :black :white)
+      :border-color (if selected (rgba 0.85 0.78 0.95 0.0) '(rgba 1 1 1 0.2))
+      :height 0.9
+      :padding 0.532
+      :font-size 11.0
       :on-click |x y r| (sbrowser-toggle-tag name))))
 
 (def sbrowser-search-placeholder ()

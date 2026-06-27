@@ -59,7 +59,7 @@
   (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
     (box :padding 0.6
-      (v-stack :gap 0.6
+      (v-stack :gap 0.1
         (fx-track-parameters-panel)
         (fx-track-accumulator-panel)))))
 
@@ -67,7 +67,7 @@
   (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
     (box :padding 0.6
-      (v-stack :gap 0.6
+      (v-stack :gap 0.1
         (fx-step-parameters-panel)
         (fx-track-plocks-panel)))))
 

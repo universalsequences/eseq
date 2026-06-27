@@ -371,6 +371,7 @@ pub enum MouseEventOutcome {
 pub enum WidgetCursor {
     Default,
     EwResize,
+    NsResize,
     DragCopy,
     DragNotAllowed,
 }
@@ -1056,6 +1057,7 @@ fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
 #[cfg(target_os = "macos")]
 pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
     let mut shaders = Vec::new();
+    shaders.push(("tile-chrome", None, TILE_CHROME_SHADER));
     shaders.push(("tile-tab", None, TILE_TAB_SHADER));
     shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
     shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
@@ -1069,6 +1071,44 @@ pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'sta
     }
     shaders
 }
+
+#[cfg(target_os = "macos")]
+pub const TILE_CHROME_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.0001);
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+
+    float radius = clamp(in.corner_radius, 0.0, min(aspect, 1.0));
+    float2 half_size = float2(aspect, 1.0);
+    float d = sdf_rounded_rect(p, half_size, radius);
+    float aa = max(fwidth(d), 0.001);
+    float outer_mask = smoothstep(aa, -aa, d);
+
+    float border_px = max(in.uniform_a.x, 0.0);
+    float border_mask = 0.0;
+    float fill_mask = outer_mask;
+    if (border_px > 0.0) {
+        float border_thickness = border_px * aa;
+        float2 inner_size = max(half_size - float2(border_thickness), float2(0.001));
+        float inner_radius = max(radius - border_thickness, 0.0);
+        float inner_d = sdf_rounded_rect(p, inner_size, inner_radius);
+        float inner_aa = max(fwidth(inner_d), 0.001);
+        float inner_mask = smoothstep(inner_aa, -inner_aa, inner_d);
+        border_mask = clamp(outer_mask - inner_mask, 0.0, 1.0);
+        fill_mask = inner_mask;
+    }
+
+    float4 fill = float4(in.color_a.rgb, in.color_a.a * fill_mask);
+    float4 border = float4(in.color_b.rgb, in.color_b.a * border_mask);
+    float out_alpha = fill.a + border.a * (1.0 - fill.a);
+    if (out_alpha <= 0.002) {
+        discard_fragment();
+    }
+    float3 out_rgb = (fill.rgb * fill.a + border.rgb * border.a * (1.0 - fill.a)) / out_alpha;
+    return float4(out_rgb, out_alpha);
+}
+"#;
 
 #[cfg(target_os = "macos")]
 pub const TILE_TAB_SHADER: &str = r#"

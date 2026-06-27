@@ -43,7 +43,9 @@ mod inner {
     };
 
     use crate::audio::sample::get_registered_sample;
-    use crate::backend::{Backend, BackendError, BackendEvent, Color, RenderFrame, TiledRenderFrame};
+    use crate::backend::{
+        Backend, BackendError, BackendEvent, Color, RenderFrame, TiledRenderFrame,
+    };
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
     use crate::theme;
@@ -740,7 +742,6 @@ vertex WidgetVaryings widget_vert(
             compile_widget_shader_with_metal(&output.shader_source).unwrap();
         }
     }
-
 
     const WAVETABLE_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
@@ -3247,6 +3248,7 @@ fragment float4 waveform_frag(
             let icon = match cursor {
                 crate::widget_render::WidgetCursor::Default => CursorIcon::Default,
                 crate::widget_render::WidgetCursor::EwResize => CursorIcon::EwResize,
+                crate::widget_render::WidgetCursor::NsResize => CursorIcon::NsResize,
                 crate::widget_render::WidgetCursor::DragCopy => CursorIcon::Copy,
                 crate::widget_render::WidgetCursor::DragNotAllowed => CursorIcon::NotAllowed,
             };
@@ -3971,26 +3973,48 @@ fragment float4 waveform_frag(
                 "[button-shader-watch] compiling button shader bytes={}",
                 fragment_src.len()
             );
-            match self.compile_widget_pipeline_source("button", None, &fragment_src) {
-                Ok(pipeline) => {
-                    self.widget_pipelines.insert("button".to_string(), pipeline);
-                    self.button_surface_override_modified = Some(modified);
-                    self.compiled_widget_runs.clear();
-                    self.stats.note_widget_run_cache_clear();
-                    eprintln!(
-                        "[button-shader-watch] reload ok; swapped button pipeline and cleared compiled widget runs"
-                    );
-                    true
-                }
+            let button_pipeline = match self.compile_widget_pipeline_source(
+                "button",
+                None,
+                &fragment_src,
+            ) {
+                Ok(pipeline) => pipeline,
                 Err(_) => {
                     self.button_surface_override_modified = Some(modified);
                     eprintln!(
                         "[button-shader-watch] reload failed; keeping previous button pipeline path={}",
                         path.display()
                     );
-                    false
+                    return false;
                 }
-            }
+            };
+            let number_picker_pipeline = match self.compile_widget_pipeline_source(
+                "number-picker",
+                None,
+                &fragment_src,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(_) => {
+                    self.button_surface_override_modified = Some(modified);
+                    eprintln!(
+                        "[button-shader-watch] reload failed; keeping previous number-picker pipeline path={}",
+                        path.display()
+                    );
+                    return false;
+                }
+            };
+
+            self.widget_pipelines
+                .insert("button".to_string(), button_pipeline);
+            self.widget_pipelines
+                .insert("number-picker".to_string(), number_picker_pipeline);
+            self.button_surface_override_modified = Some(modified);
+            self.compiled_widget_runs.clear();
+            self.stats.note_widget_run_cache_clear();
+            eprintln!(
+                "[button-shader-watch] reload ok; swapped button and number-picker pipelines and cleared compiled widget runs"
+            );
+            true
         }
 
         fn draw_waveform_primitives(
@@ -4272,6 +4296,7 @@ fragment float4 waveform_frag(
             let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
             let to_rgba = |c: Color| [c.r, c.g, c.b, c.a];
             let has_multiple_tiles = tiled.tiles.len() > 1;
+            let tile_chrome_pipeline = self.widget_pipelines.get("tile-chrome").cloned();
             let mut mod_patch_ports = Vec::new();
             let mut global_overlay_prims = Vec::new();
 
@@ -4362,28 +4387,53 @@ fragment float4 waveform_frag(
                     .and_then(theme::named_color)
                     .or(tile.background_color)
                     .unwrap_or(theme::BG());
-                let mut tile_bg_verts = Vec::new();
                 enc.setScissorRect(tile_scissor);
-                push_rounded_rect_fill_px(
-                    &mut tile_bg_verts,
-                    frame_left_px,
-                    frame_top_px,
-                    frame_width_px,
-                    frame_height_px,
-                    tile.border_radius_px,
-                    tile_bg,
-                    vp_w,
-                    vp_h,
-                );
-                draw_vertices(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    &pipeline,
-                    &atlas_texture,
-                    &tile_bg_verts,
-                );
+                if let (Some(tile_chrome_pipeline), Some(instance)) = (
+                    tile_chrome_pipeline.as_ref(),
+                    tile_chrome_instance_px(
+                        frame_left_px,
+                        frame_top_px,
+                        frame_width_px,
+                        frame_height_px,
+                        tile.border_radius_px,
+                        0.0,
+                        tile_bg,
+                        Color::rgba(0.0, 0.0, 0.0, 0.0),
+                        vp_w,
+                        vp_h,
+                    ),
+                ) {
+                    draw_widget_instances(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        tile_chrome_pipeline,
+                        std::slice::from_ref(&instance),
+                    );
+                } else {
+                    let mut tile_bg_verts = Vec::new();
+                    push_rounded_rect_fill_px(
+                        &mut tile_bg_verts,
+                        frame_left_px,
+                        frame_top_px,
+                        frame_width_px,
+                        frame_height_px,
+                        tile.border_radius_px,
+                        tile_bg,
+                        vp_w,
+                        vp_h,
+                    );
+                    draw_vertices(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        &pipeline,
+                        &atlas_texture,
+                        &tile_bg_verts,
+                    );
+                }
 
                 enc.setScissorRect(content_scissor);
 
@@ -4633,6 +4683,53 @@ fragment float4 waveform_frag(
                     }
                 }
 
+                if let Some(overlay) = tile.inspect_overlay {
+                    enc.setScissorRect(content_scissor);
+                    let text_scroll = tile.frame.text_scroll_top as f32;
+                    let overlay_x =
+                        (content_col + overlay.rect.col - tile.frame.widget_scroll_left) * cell_w;
+                    let overlay_y = (content_row + overlay.rect.row
+                        - text_scroll
+                        - tile.frame.widget_scroll_top)
+                        * cell_h;
+                    let overlay_w = overlay.rect.width * cell_w;
+                    let overlay_h = overlay.rect.height * cell_h;
+                    if overlay_w > 0.0 && overlay_h > 0.0 {
+                        let mut inspect_verts = Vec::new();
+                        push_rect_px(
+                            &mut inspect_verts,
+                            overlay_x,
+                            overlay_y,
+                            overlay_w,
+                            overlay_h,
+                            overlay.fill,
+                            vp_w,
+                            vp_h,
+                        );
+                        push_rounded_rect_border_px(
+                            &mut inspect_verts,
+                            overlay_x,
+                            overlay_y,
+                            overlay_w,
+                            overlay_h,
+                            1.5,
+                            3.0,
+                            overlay.border,
+                            vp_w,
+                            vp_h,
+                        );
+                        draw_vertices(
+                            &enc,
+                            &self.device,
+                            &mut self.upload_arena,
+                            &mut self.stats,
+                            &pipeline,
+                            &atlas_texture,
+                            &inspect_verts,
+                        );
+                    }
+                }
+
                 // ── Per-tile status bar (drawn ON TOP of widgets with full-tile scissor)
                 if tile.show_status {
                     let status_left_px = content_left_px;
@@ -4739,28 +4836,53 @@ fragment float4 waveform_frag(
                     } else {
                         tile_bg
                     };
-                    let mut bverts = Vec::new();
-                    push_rounded_rect_border_px(
-                        &mut bverts,
-                        frame_left_px,
-                        frame_top_px,
-                        frame_width_px,
-                        frame_height_px,
-                        tile.border_width_px,
-                        tile.border_radius_px,
-                        border_color,
-                        vp_w,
-                        vp_h,
-                    );
-                    draw_vertices(
-                        &enc,
-                        &self.device,
-                        &mut self.upload_arena,
-                        &mut self.stats,
-                        &pipeline,
-                        &atlas_texture,
-                        &bverts,
-                    );
+                    if let (Some(tile_chrome_pipeline), Some(instance)) = (
+                        tile_chrome_pipeline.as_ref(),
+                        tile_chrome_instance_px(
+                            frame_left_px,
+                            frame_top_px,
+                            frame_width_px,
+                            frame_height_px,
+                            tile.border_radius_px,
+                            tile.border_width_px,
+                            Color::rgba(0.0, 0.0, 0.0, 0.0),
+                            border_color,
+                            vp_w,
+                            vp_h,
+                        ),
+                    ) {
+                        draw_widget_instances(
+                            &enc,
+                            &self.device,
+                            &mut self.upload_arena,
+                            &mut self.stats,
+                            tile_chrome_pipeline,
+                            std::slice::from_ref(&instance),
+                        );
+                    } else {
+                        let mut bverts = Vec::new();
+                        push_rounded_rect_border_px(
+                            &mut bverts,
+                            frame_left_px,
+                            frame_top_px,
+                            frame_width_px,
+                            frame_height_px,
+                            tile.border_width_px,
+                            tile.border_radius_px,
+                            border_color,
+                            vp_w,
+                            vp_h,
+                        );
+                        draw_vertices(
+                            &enc,
+                            &self.device,
+                            &mut self.upload_arena,
+                            &mut self.stats,
+                            &pipeline,
+                            &atlas_texture,
+                            &bverts,
+                        );
+                    }
                 }
             }
 
@@ -4846,9 +4968,9 @@ fragment float4 waveform_frag(
                     };
                     tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
                         widget_render::MetalProportionalTextPrimitive {
-                            row: tab.rect.row + (tab.rect.height - 1.0) * 0.5,
-                            col: tab.rect.col,
-                            align_width: tab.rect.width.max(0.0),
+                            row: tab.label_rect.row + (tab.label_rect.height - 1.0) * 0.5,
+                            col: tab.label_rect.col,
+                            align_width: tab.label_rect.width.max(0.0),
                             h_align: 0.5,
                             text: tab.label.clone(),
                             font_size: 10.5,
@@ -4861,6 +4983,27 @@ fragment float4 waveform_frag(
                             },
                         },
                     ));
+                    if tab.close_visible
+                        && let Some(close_rect) = tab.close_rect
+                    {
+                        tab_text_prims.push(widget_render::MetalPrimitive::ProportionalText(
+                            widget_render::MetalProportionalTextPrimitive {
+                                row: close_rect.row + (close_rect.height - 1.0) * 0.5 - 0.08,
+                                col: close_rect.col,
+                                align_width: close_rect.width.max(0.0),
+                                h_align: 0.5,
+                                text: "×".to_string(),
+                                font_size: 14.0,
+                                scale: 1.0,
+                                fg,
+                                bg: if tab.selected {
+                                    selected_tab_bg
+                                } else {
+                                    group_bg
+                                },
+                            },
+                        ));
+                    }
                 }
             }
             if let Some(tab_pipeline) = self
@@ -5589,8 +5732,11 @@ fragment float4 waveform_frag(
             let wavetable_desc = MTLRenderPipelineDescriptor::new();
             wavetable_desc.setVertexFunction(Some(&wavetable_vert));
             wavetable_desc.setFragmentFunction(Some(&wavetable_frag));
-            let wavetable_attach =
-                unsafe { wavetable_desc.colorAttachments().objectAtIndexedSubscript(0) };
+            let wavetable_attach = unsafe {
+                wavetable_desc
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
             wavetable_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
             wavetable_attach.setBlendingEnabled(true);
             {
@@ -8331,6 +8477,52 @@ fragment float4 waveform_frag(
             return 0.0;
         }
         ((radius_px * 2.0) / (height_cells * cell_h)).clamp(0.001, 0.5)
+    }
+
+    fn tile_chrome_instance_px(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius_px: f32,
+        border_width_px: f32,
+        fill: Color,
+        border: Color,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Option<WidgetInstance> {
+        if width <= 0.0 || height <= 0.0 || vp_w <= 0.0 || vp_h <= 0.0 {
+            return None;
+        }
+
+        let radius_px = radius_px.clamp(0.0, width.min(height) * 0.5);
+        let normalized_radius = if radius_px > 0.0 {
+            ((radius_px * 2.0) / height).clamp(0.001, 1.0)
+        } else {
+            0.0
+        };
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let x0 = ndc_x(x);
+        let x1 = ndc_x(x + width);
+        let y0 = ndc_y(y);
+        let y1 = ndc_y(y + height);
+
+        Some(WidgetInstance {
+            ndc_min: [x0.min(x1), y1.min(y0)],
+            ndc_max: [x0.max(x1), y1.max(y0)],
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: 0.0,
+            uniform_a: [border_width_px.max(0.0), 0.0, 0.0, 0.0],
+            uniform_b: [width, height, 0.0, 0.0],
+            color_a: fill.to_rgba(),
+            color_b: border.to_rgba(),
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: normalized_radius,
+            pixel_aspect: (width / height).max(0.0001),
+        })
     }
 
     fn draw_widget_instances(

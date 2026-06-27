@@ -203,7 +203,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 "#;
 
 #[cfg(target_os = "macos")]
-const BUTTON_SURFACE_SHADER: &str = r#"
+pub(crate) const BUTTON_SURFACE_SHADER: &str = r#"
 float button_surface_rounded_rect(float2 p, float2 size, float radius)
 {
     float2 q = abs(p) - (size - float2(radius));

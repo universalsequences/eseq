@@ -76,6 +76,7 @@
         :font-size 10.5 :label-font-size 10
         :text-color :dim :label-color :dim
         :width 4.0 :height 2.05
+        :knob-size 2.5
         :on-change (lambda (v) (instrument-set-param-control-value p v))))))
 
 (def sampler-param-button (p key)
@@ -154,7 +155,7 @@
           :on-change (lambda (v) (instrument-set-param-control-value p v)))))
     (v-stack :gap 0.12 :align :center
       (box :height 0.82)
-      (h-stack :gap 0.2
+      (v-stack :gap 0.2
         (button "1/2"
           :width 1.85 :height 0.82 :padding 0 :font-size 8
           :background-color :mixer-control-bg :color :dim
@@ -165,7 +166,7 @@
           :on-click |x y r| (fx-set-instrument-value p (max 20 (/ (get p :value) 2))))))))
 
 (def sampler-param-knobs (params inst)
-  (h-stack :gap 0.65 :padding 0.55 :align :center
+  (h-stack :gap 0.85 :padding 0.55 :align :center
     (sampler-gate-button)
     (each (sampler-main-params params) |p pi|
       (sampler-param-control p))
@@ -198,7 +199,7 @@
                     (box :height 0.3)
                     (if (get inst :buffer)
                       (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                        (box :width 78 :height 4.85 
+                        (box :width 78 :height 5.85 
                           (waveform
                             :height 4.85
                             :header-height 0.3

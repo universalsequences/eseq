@@ -1353,4 +1353,3 @@ fn is_local_source_candidate(idx: usize, patch: &Patch, edges: &[LayoutEdge]) ->
         _ => false,
     }
 }
-

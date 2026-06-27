@@ -165,11 +165,31 @@
       :width width
       :height 1.15)))
 
+(def fx-step-track-badge ()
+  (let ((track SEQ.current-track)
+        (muted (mixer-v2-muted? SEQ.current-track)))
+    (box
+      :key "fx-step-track-badge"
+      :width 3.65 :height 1.0
+      :padding 0
+      :background-color (rgba
+        (mixer-v2-track-color-r track muted)
+        (mixer-v2-track-color-g track muted)
+        (mixer-v2-track-color-b track muted)
+        1.0)
+      (label (mixer-v2-track-collapsed-label track)
+        :width 3.65
+        :font-size 9
+        :h-align :center
+        :color (if muted :dim :black)
+        :bg :transparent))))
+
 (def fx-step-parameters-panel ()
   (box :debug-name "step-parameters-panel" :padding 0.75
     (v-stack :gap 0.55
-      (h-stack :gap 0.35 :align :baseline
-        (label "step" :font-size 10 :color :white :bg :transparent)
+      (h-stack :gap 0.45 :align :start
+        (fx-step-track-badge)
+        ;(label "step" :font-size 10 :color :white :bg :transparent)
         (label (fx-step-selection-title) :font-size 8 :color :dim :bg :transparent))
       (h-stack :gap 0.55 :align :center
         (fx-step-param-picker 3 "transpose" 4.2)
@@ -244,15 +264,8 @@
             :options SEQ.fts-options
             :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
             :width 7.0 :height 1.25 :font-size 9))
-        (v-stack :align :center :gap 0.30
-          (label "mute grp" :font-size 8 :color :dim :bg :transparent)
-          (dropdown :value SEQ.tp-mute-group
-            :options SEQ.mute-group-options
-            :on-change (lambda (v)
-              (do
-                (cool-off-follow)
-                (seq-set-track-param :mute-group (fx-mute-group-value v))))
-            :width 5.4 :height 1.25 :font-size 9)))
+
+        )
       (h-stack :gap 0.55 :align :center
         (v-stack :align :center :gap 0.30
           (label "swg res" :font-size 8 :color :dim :bg :transparent)
@@ -271,4 +284,18 @@
             (hslider :min 50 :max 75
               :value SEQ.tp-swing
               :material (aqua-slider-material)
-              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v))))))))))
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v)))
+              )
+            )
+          )
+
+        (v-stack :align :center :gap 0.30
+          (label "mute grp" :font-size 8 :color :dim :bg :transparent)
+          (dropdown :value SEQ.tp-mute-group
+            :options SEQ.mute-group-options
+            :on-change (lambda (v)
+              (do
+                (cool-off-follow)
+                (seq-set-track-param :mute-group (fx-mute-group-value v))))
+            :width 5.4 :height 1.25 :font-size 9))
+        ))))

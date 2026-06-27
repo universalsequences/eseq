@@ -1,7 +1,7 @@
 use super::*;
 use eseqlisp::widget_render::number_picker::{
-    NumberPickerEditOutcome, clear_number_picker_edit_state,
-    handle_number_picker_edit_key_for_widget, number_picker_edit_state,
+    clear_number_picker_edit_state, handle_number_picker_edit_key_for_widget,
+    number_picker_edit_state, NumberPickerEditOutcome,
 };
 
 #[derive(Clone, Debug)]
@@ -875,19 +875,14 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 if patcher_handles_plain_tab(editor) {
                     return false;
                 }
-                let sequencer_visible = editor.switch_active_tile_to_buffer_named("*sequencer*");
-                let command_name = if sequencer_visible {
-                    "seqv-toggle-current-track-expanded"
-                } else {
-                    "seq-toggle-current-track-expanded-main"
-                };
-                let _ = if let Some(callable) = editor.runtime_mut().global_value(command_name) {
+                let _ = if let Some(callable) =
+                    editor.runtime_mut().global_value("seq-toggle-mixer-panel")
+                {
                     editor.runtime_mut().invoke(callable, vec![])
                 } else {
-                    editor.runtime_mut().eval_str(&format!("({command_name})"))
+                    editor.runtime_mut().eval_str("(seq-toggle-mixer-panel)")
                 };
                 editor.refresh_runtime_side_effects();
-                editor.switch_active_tile_to_buffer_named("*sequencer*");
                 return true;
             }
             _ if is_shift_tab_shortcut(key) => {
@@ -1224,16 +1219,16 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        HeldKeyboardNote, SoftStepParamEdit, build_selection_value, handle_metal_command_shortcut,
-        handle_metal_soft_step_param_key, held_note_for_key, note_from_key,
+        build_selection_value, handle_metal_command_shortcut, handle_metal_soft_step_param_key,
+        held_note_for_key, note_from_key, HeldKeyboardNote, SoftStepParamEdit,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use eseqlisp::HostCommand;
     use eseqlisp::editor::ViewMode;
     use eseqlisp::mode::BufferMode;
     use eseqlisp::vm::Value;
+    use eseqlisp::HostCommand;
     use eseqlisp::{Editor, EditorConfig, Runtime};
     use sequencer::sequencer::{SequencerState, StepParam, StepSnapshot};
     use std::cell::RefCell;
@@ -1893,7 +1888,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn tab_expand_uses_visible_sequencer_tile_fast_path() {
+    fn plain_tab_toggles_mixer_panel_even_with_focused_sequencer_widget() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         let transport_id =
             editor.open_scratch_buffer_with_mode("*transport*", "", BufferMode::ESeqLisp);
@@ -1919,17 +1914,14 @@ mod live_keyboard_tests {
                     :view-duration 16
                     :on-action |e| e))
                 (def seqv-toggle-current-track-expanded ()
-                  (set! tab-target "fast"))
+                  (set! tab-target "expanded"))
                 (def seq-toggle-current-track-expanded-main ()
-                  (do
-                    (set! tab-target "slow")
-                    (set-layout
-                      (list :cols
-                        0.5 (list :buf "*transport*" :hide-status true)
-                        0.5 (list :buf "*sequencer*" :hide-status true)))))
+                  (set! tab-target "expanded-main"))
+                (def seq-toggle-mixer-panel ()
+                  (set! tab-target "mixer"))
                 "#,
             )
-            .expect("install tab expand handler");
+            .expect("install tab handler");
         editor
             .runtime_mut()
             .eval_str(
@@ -1989,19 +1981,9 @@ mod live_keyboard_tests {
         ));
 
         assert_eq!(
-            editor.active_buffer().name,
-            "*sequencer*",
-            "Tab expansion should leave the sequencer tile active so follow-up keys and auto-scroll target the expanded track"
-        );
-        assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("fast".to_string())),
-            "Tab should use the visible sequencer fast path instead of rebuilding the whole layout"
-        );
-        assert_ne!(
-            editor.active_buffer().id,
-            transport_id,
-            "the layout reset's first tile must not remain active after Tab expansion"
+            Some(eseqlisp::vm::Value::String("mixer".to_string())),
+            "plain Tab should toggle the mixer panel instead of expanding the selected sequencer track"
         );
     }
 

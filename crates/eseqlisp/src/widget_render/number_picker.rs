@@ -43,6 +43,54 @@ pub struct NumberPickerEditState {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    fn color_value(r: f64, g: f64, b: f64, a: f64) -> Value {
+        Value::List(
+            [r, g, b, a]
+                .into_iter()
+                .map(|value| std::rc::Rc::new(RefCell::new(Value::Number(value))))
+                .collect(),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_viewport() -> WidgetViewport {
+        WidgetViewport {
+            vp_w: 100.0,
+            vp_h: 100.0,
+            cell_w: 10.0,
+            cell_h: 10.0,
+            scroll_top: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 10.0,
+            inherited_hover: false,
+            time_seconds: 0.0,
+            scroll_left: 0.0,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_number_picker_node(props: HashMap<String, Value>) -> LayoutNode {
+        LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "number-picker".to_string(),
+            rect: Rect {
+                row: 2.0,
+                col: 4.0,
+                width: 8.0,
+                height: 1.4,
+            },
+            props,
+            children: Vec::new(),
+            focusable: true,
+        }
+    }
+
     #[test]
     fn value_is_bindable_but_not_size_affecting() {
         assert_eq!(NUMBER_PICKER_WIDGET.bindable_props(), &["value"]);
@@ -85,6 +133,44 @@ mod tests {
 
         assert_eq!(quantize_value(0.62, 0.0, 1.0, step), 0.5);
         assert_eq!(quantize_value(0.63, 0.0, 1.0, step), 0.75);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn number_picker_metal_background_uses_button_surface_detail_colors() {
+        let node = test_number_picker_node(HashMap::from([
+            ("value".to_string(), Value::Number(0.5)),
+            (
+                "background-color".to_string(),
+                color_value(0.1, 0.2, 0.3, 1.0),
+            ),
+            ("border-color".to_string(), color_value(0.4, 0.5, 0.6, 0.7)),
+            (
+                "highlight-color".to_string(),
+                color_value(0.8, 0.85, 0.9, 0.2),
+            ),
+            ("shadow-color".to_string(), color_value(0.0, 0.0, 0.0, 0.3)),
+        ]));
+
+        let prims =
+            NumberPickerWidget.build_metal_primitives("number-picker", &node, test_viewport());
+        let instance = prims
+            .iter()
+            .find_map(|prim| match prim {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    is_background: true,
+                } if widget_type == "number-picker" => Some(instance),
+                _ => None,
+            })
+            .expect("number picker should emit a detailed background primitive");
+
+        assert_eq!(instance.color_a, [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(instance.color_b, [0.4, 0.5, 0.6, 0.7]);
+        assert_eq!(instance.color_c, [0.8, 0.85, 0.9, 0.2]);
+        assert_eq!(instance.color_d, [0.0, 0.0, 0.0, 0.3]);
+        assert!(instance.corner_radius > 0.0);
     }
 }
 
@@ -261,6 +347,39 @@ fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f3
             cursor_pos as f32 * font_size * 0.55 / cell_w
         }
     })
+}
+
+#[cfg(target_os = "macos")]
+fn number_picker_bg(props: &HashMap<String, Value>) -> Color {
+    props
+        .get("background-color")
+        .and_then(theme::parse_color_value)
+        .or_else(|| props.get("bg-color").and_then(theme::parse_color_value))
+        .unwrap_or_else(theme::DROPDOWN_BG)
+}
+
+#[cfg(target_os = "macos")]
+fn number_picker_border(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "border-color", theme::BUTTON_BORDER())
+}
+
+#[cfg(target_os = "macos")]
+fn number_picker_highlight(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "highlight-color", theme::BUTTON_HIGHLIGHT())
+}
+
+#[cfg(target_os = "macos")]
+fn number_picker_shadow(props: &HashMap<String, Value>) -> Color {
+    resolve_named_color(props, "shadow-color", theme::BUTTON_SHADOW())
+}
+
+#[cfg(target_os = "macos")]
+fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
+    if radius_px <= 0.0 {
+        return 0.001;
+    }
+    let px_h = (rect.height * viewport.cell_h).max(1.0);
+    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
 }
 
 // ── Widget definition ───────────────────────────────────────────────────────
@@ -498,7 +617,7 @@ impl WidgetDefinition for NumberPickerWidget {
 
     fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
         match widget_type {
-            "number-picker" => Some(super::ROUNDED_RECT_SHADER),
+            "number-picker" => Some(super::button::BUTTON_SURFACE_SHADER),
             "number-picker-tri" => Some(NUMBER_PICKER_TRI_SHADER),
             _ => None,
         }
@@ -554,10 +673,13 @@ impl WidgetDefinition for NumberPickerWidget {
         let mut prims = Vec::new();
 
         if !noui {
-            let bg_color = resolve_named_color(&node.props, "bg-color", theme::DROPDOWN_BG());
+            let bg_color = number_picker_bg(&node.props);
             let ring_color = resolve_named_color(&node.props, "ring-color", theme::DROPDOWN_RING());
             let tri_color =
                 resolve_named_color(&node.props, "tri-color", theme::BUTTON_SECONDARY_FG());
+            let border_color = number_picker_border(&node.props);
+            let highlight_color = number_picker_highlight(&node.props);
+            let shadow_color = number_picker_shadow(&node.props);
 
             // ── Focus ring ──
             if effective_focused {
@@ -582,11 +704,11 @@ impl WidgetDefinition for NumberPickerWidget {
                         itime: viewport.time_seconds,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
-                        color_a: [ring_color.r, ring_color.g, ring_color.b, ring_color.a],
+                        color_a: ring_color.to_rgba(),
                         color_b: [0.0; 4],
                         color_c: [0.0; 4],
                         color_d: [0.0; 4],
-                        corner_radius: 0.0,
+                        corner_radius: normalized_corner_radius(ring_rect, viewport, 12.0),
                         pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                     },
                     is_background: true,
@@ -608,11 +730,11 @@ impl WidgetDefinition for NumberPickerWidget {
                         itime: viewport.time_seconds,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
-                        color_a: [bg_color.r, bg_color.g, bg_color.b, bg_color.a],
-                        color_b: [0.0; 4],
-                        color_c: [0.0; 4],
-                        color_d: [0.0; 4],
-                        corner_radius: 0.0,
+                        color_a: bg_color.to_rgba(),
+                        color_b: border_color.to_rgba(),
+                        color_c: highlight_color.to_rgba(),
+                        color_d: shadow_color.to_rgba(),
+                        corner_radius: normalized_corner_radius(node.rect, viewport, 12.0),
                         pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                     },
                     is_background: true,
@@ -642,7 +764,7 @@ impl WidgetDefinition for NumberPickerWidget {
                         itime: viewport.time_seconds,
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
-                        color_a: [tri_color.r, tri_color.g, tri_color.b, tri_color.a],
+                        color_a: tri_color.to_rgba(),
                         color_b: [0.0; 4],
                         color_c: [0.0; 4],
                         color_d: [0.0; 4],
@@ -735,6 +857,14 @@ impl WidgetDefinition for NumberPickerWidget {
 
 #[cfg(target_os = "macos")]
 const NUMBER_PICKER_TRI_SHADER: &str = r#"
+float number_picker_segment_distance(float2 p, float2 a, float2 b)
+{
+    float2 pa = p - a;
+    float2 ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
@@ -750,28 +880,22 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float2 b = float2(-0.5 * aspect,  0.7);
     float2 c = float2( 0.6 * aspect,  0.0);
 
-    // Point-in-triangle using cross products
     float d1 = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
     float d2 = (c.x - b.x) * (p.y - b.y) - (c.y - b.y) * (p.x - b.x);
     float d3 = (a.x - c.x) * (p.y - c.y) - (a.y - c.y) * (p.x - c.x);
 
     bool has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
     bool has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
-    float inside = (has_neg && has_pos) ? 0.0 : 1.0;
+    bool inside = !(has_neg && has_pos);
+    float edge_distance = min(
+        number_picker_segment_distance(p, a, b),
+        min(number_picker_segment_distance(p, b, c), number_picker_segment_distance(p, c, a))
+    );
+    float signed_distance = inside ? -edge_distance : edge_distance;
+    float aa = max(fwidth(signed_distance), 0.001) * 1.35;
+    float mask = smoothstep(aa, -aa, signed_distance);
 
-    // Soften edges with SDF approximation
-    // Distance to each edge
-    float2 ab = b - a;
-    float2 bc = c - b;
-    float2 ca = a - c;
-    float e1 = abs(d1) / length(ab);
-    float e2 = abs(d2) / length(bc);
-    float e3 = abs(d3) / length(ca);
-    float dist_to_edge = min(e1, min(e2, e3));
-    float aa = fwidth(dist_to_edge) * 1.5;
-    float mask = inside * smoothstep(0.0, aa, dist_to_edge);
-
-    if (mask < 0.01) { discard_fragment(); }
+    if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
 }
 "#;

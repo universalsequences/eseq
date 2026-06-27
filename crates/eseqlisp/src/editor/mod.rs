@@ -37,6 +37,13 @@ use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
 
+fn tile_resize_cursor(dir: SplitDir) -> WidgetCursor {
+    match dir {
+        SplitDir::Vertical => WidgetCursor::EwResize,
+        SplitDir::Horizontal => WidgetCursor::NsResize,
+    }
+}
+
 struct EditorSubtreeReplacement {
     buffer_idx: usize,
     source_buffer_id: Option<BufferId>,
@@ -460,6 +467,7 @@ pub struct Editor {
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
     active_tab_mouse_capture: Option<TileId>,
+    hovered_tile_tab: Option<(TileId, usize)>,
     pointer_drag_started_on_slider: bool,
     last_slider_drag_widget_id: Option<u64>,
     last_layout_refresh_timings: Vec<LayoutRefreshTiming>,
@@ -467,6 +475,7 @@ pub struct Editor {
     inspect_hover_tile_id: Option<TileId>,
     inspect_hover_widget_id: Option<u64>,
     inspect_hover_status: Option<String>,
+    inspect_hover_rect: Option<crate::layout::Rect>,
     inspect_source_tile_id: Option<TileId>,
     #[cfg(test)]
     test_clipboard: Option<String>,
@@ -593,6 +602,7 @@ impl Editor {
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
             active_tab_mouse_capture: None,
+            hovered_tile_tab: None,
             pointer_drag_started_on_slider: false,
             last_slider_drag_widget_id: None,
             last_layout_refresh_timings: Vec::new(),
@@ -600,6 +610,7 @@ impl Editor {
             inspect_hover_tile_id: None,
             inspect_hover_widget_id: None,
             inspect_hover_status: None,
+            inspect_hover_rect: None,
             inspect_source_tile_id: None,
             #[cfg(test)]
             test_clipboard: None,
@@ -929,7 +940,10 @@ impl Editor {
                 return false;
             };
             leaf.buffer_idx = buffer_idx;
-            leaf.selected_tab = leaf.tabs.iter().position(|tab| tab.buffer_idx == buffer_idx);
+            leaf.selected_tab = leaf
+                .tabs
+                .iter()
+                .position(|tab| tab.buffer_idx == buffer_idx);
             Self::invalidate_leaf_for_buffer_switch(leaf);
         }
         if was_active {
@@ -1078,6 +1092,7 @@ impl Editor {
                         resolved_tabs.push(TileBufferTab {
                             label: tab.label,
                             buffer_idx,
+                            on_close: tab.on_close,
                         });
                     }
                     if !resolved_tabs.is_empty()
@@ -1428,6 +1443,18 @@ impl Editor {
             return;
         }
 
+        if matches!(mouse.kind, MouseEventKind::Moved)
+            && self.update_tile_resize_hover_cursor(precise_col, precise_row, border_inset)
+        {
+            if self.hovered_tile_tab.take().is_some() {
+                self.mark_needs_redraw();
+            }
+            return;
+        }
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            let _ = self.update_tile_tab_hover(precise_col, precise_row);
+        }
+
         if let Some(tile_id) = self.active_tab_mouse_capture
             && matches!(
                 mouse.kind,
@@ -1590,6 +1617,15 @@ impl Editor {
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && let Some((tile_id, tab_index)) =
+                self.tile_tab_close_hit_at_screen(precise_col, precise_row)
+        {
+            self.tile_root.clear_focus_except(tile_id);
+            let _ = self.invoke_tile_tab_close(tile_id, tab_index);
+            return;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some((tile_id, tab_index)) =
                 self.tile_tab_hit_at_screen(precise_col, precise_row)
         {
             self.tile_root.clear_focus_except(tile_id);
@@ -1606,6 +1642,7 @@ impl Editor {
         };
         if let Some(tile_id) = target_tile {
             if matches!(mouse.kind, MouseEventKind::Moved) && tile_id != self.active_tile {
+                self.widget_cursor = WidgetCursor::Default;
                 if let Some((content_col, content_row, _, _)) =
                     self.tile_content_area(tile_id, border_inset)
                 {
@@ -1674,6 +1711,8 @@ impl Editor {
                     event_row,
                 );
             });
+        } else if matches!(mouse.kind, MouseEventKind::Moved) {
+            self.widget_cursor = WidgetCursor::Default;
         }
     }
 
@@ -1700,6 +1739,7 @@ impl Editor {
                 || self.inspect_hover_widget_id.take().is_some()
             {
                 self.inspect_hover_status = None;
+                self.inspect_hover_rect = None;
                 self.show_sticky_message("Inspect mode: no widget");
                 self.mark_needs_redraw();
             }
@@ -1912,9 +1952,7 @@ impl Editor {
     }
 
     fn active_status_input_is_pending(&self) -> bool {
-        self.pending_key.is_some()
-            || self.minibuffer_input.is_some()
-            || self.save_prompt.is_some()
+        self.pending_key.is_some() || self.minibuffer_input.is_some() || self.save_prompt.is_some()
     }
 
     fn status_toggle_tile_at_screen(&self, precise_col: f32, precise_row: f32) -> Option<TileId> {
@@ -1929,6 +1967,15 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> Option<(TileId, usize)> {
+        self.tile_tab_hit_at_screen_with_layout(precise_col, precise_row)
+            .map(|(tile_id, index, _)| (tile_id, index))
+    }
+
+    fn tile_tab_hit_at_screen_with_layout(
+        &self,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<(TileId, usize, crate::tile::TileTabLayout)> {
         self.cached_tile_rects
             .iter()
             .rev()
@@ -1942,8 +1989,68 @@ impl Editor {
                             && precise_row >= tab.rect.row
                             && precise_row < tab.rect.row + tab.rect.height
                     })
-                    .map(|tab| (*tile_id, tab.index))
+                    .map(|tab| (*tile_id, tab.index, tab))
             })
+    }
+
+    fn tile_tab_close_hit_at_screen(
+        &self,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<(TileId, usize)> {
+        self.tile_tab_hit_at_screen_with_layout(precise_col, precise_row)
+            .and_then(|(tile_id, tab_index, tab)| {
+                let close_rect = tab.close_rect?;
+                let leaf = self.tile_root.find_leaf(tile_id)?;
+                leaf.tabs.get(tab_index)?.on_close.as_ref()?;
+                (precise_col >= close_rect.col
+                    && precise_col < close_rect.col + close_rect.width
+                    && precise_row >= close_rect.row
+                    && precise_row < close_rect.row + close_rect.height)
+                    .then_some((tile_id, tab_index))
+            })
+    }
+
+    fn update_tile_tab_hover(&mut self, precise_col: f32, precise_row: f32) -> bool {
+        let hovered = self
+            .tile_tab_hit_at_screen(precise_col, precise_row)
+            .and_then(|(tile_id, tab_index)| {
+                let leaf = self.tile_root.find_leaf(tile_id)?;
+                leaf.tabs
+                    .get(tab_index)?
+                    .on_close
+                    .as_ref()
+                    .map(|_| (tile_id, tab_index))
+            });
+        if self.hovered_tile_tab == hovered {
+            return false;
+        }
+        self.hovered_tile_tab = hovered;
+        self.mark_needs_redraw();
+        true
+    }
+
+    pub(crate) fn hovered_tab_for_tile(&self, tile_id: TileId) -> Option<usize> {
+        self.hovered_tile_tab
+            .and_then(|(hovered_tile_id, tab_index)| {
+                (hovered_tile_id == tile_id).then_some(tab_index)
+            })
+    }
+
+    fn invoke_tile_tab_close(&mut self, tile_id: TileId, tab_index: usize) -> bool {
+        let Some((callback, buffer_name)) = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
+            let tab = leaf.tabs.get(tab_index)?;
+            let callback = tab.on_close.clone()?;
+            let buffer_name = self.buffers.get(tab.buffer_idx)?.name.clone();
+            Some((callback, buffer_name))
+        }) else {
+            return false;
+        };
+
+        self.apply_widget_output(Some(crate::widget_render::EventOutput {
+            callback,
+            args: vec![Value::String(buffer_name), Value::Number(tab_index as f64)],
+        }))
     }
 
     fn invalidate_leaf_for_buffer_switch(leaf: &mut TileLeaf) {
@@ -2103,6 +2210,7 @@ impl Editor {
             dir: hit.dir,
             area: hit.area,
         });
+        self.widget_cursor = tile_resize_cursor(hit.dir);
         self.update_tile_split_ratio(hit.split_id, hit.dir, hit.area, precise_col, precise_row);
         true
     }
@@ -2119,6 +2227,7 @@ impl Editor {
 
         match mouse.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
+                self.widget_cursor = tile_resize_cursor(drag.dir);
                 self.update_tile_split_ratio(
                     drag.split_id,
                     drag.dir,
@@ -2138,10 +2247,45 @@ impl Editor {
                 );
                 self.active_tile_resize_drag = None;
                 self.last_mouse_precise = None;
+                self.widget_cursor = WidgetCursor::Default;
                 true
             }
             _ => true,
         }
+    }
+
+    fn update_tile_resize_hover_cursor(
+        &mut self,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) -> bool {
+        let Some(hit) = self.tile_resize_hit_at_screen(precise_col, precise_row, border_inset)
+        else {
+            return false;
+        };
+        self.widget_cursor = tile_resize_cursor(hit.dir);
+        true
+    }
+
+    fn tile_resize_hit_at_screen(
+        &self,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) -> Option<crate::tile::SplitDividerHit> {
+        let root_area = self.tile_root_rect()?;
+        let tolerance = if border_inset == 0 { 0.5 } else { 1.0 };
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        self.tile_root.hit_test_split_divider(
+            root_area,
+            precise_col,
+            precise_row,
+            tolerance,
+            TILE_GAP_PX_PER_UNIT,
+            cell_w,
+            cell_h,
+        )
     }
 
     fn update_tile_split_ratio(
@@ -3399,6 +3543,7 @@ impl Editor {
             resolved_tabs.push(TileBufferTab {
                 label: tab.label,
                 buffer_idx,
+                on_close: tab.on_close,
             });
         }
         if !resolved_tabs
@@ -3529,6 +3674,7 @@ impl Editor {
         self.inspect_hover_tile_id = None;
         self.inspect_hover_widget_id = None;
         self.inspect_hover_status = None;
+        self.inspect_hover_rect = None;
         if self.inspect_mode {
             self.show_sticky_message("Inspect mode: hover widgets, click to open source");
         } else {
@@ -3548,6 +3694,7 @@ impl Editor {
         self.inspect_hover_tile_id = None;
         self.inspect_hover_widget_id = None;
         self.inspect_hover_status = None;
+        self.inspect_hover_rect = None;
         self.widget_cursor = WidgetCursor::Default;
         self.active_leaf_mut().active_widget_gesture = None;
         crate::widget_render::set_drop_hover_target(None);
@@ -3573,6 +3720,7 @@ impl Editor {
                 || self.inspect_hover_tile_id.take().is_some()
             {
                 self.inspect_hover_status = None;
+                self.inspect_hover_rect = None;
                 self.show_transient_message("Inspect mode: no widget");
                 self.mark_needs_redraw();
             }
@@ -3581,10 +3729,15 @@ impl Editor {
         if self.inspect_hover_tile_id == Some(tile_id)
             && self.inspect_hover_widget_id == Some(node.widget_id)
         {
+            if self.inspect_hover_rect != Some(node.rect) {
+                self.inspect_hover_rect = Some(node.rect);
+                self.mark_needs_redraw();
+            }
             return true;
         }
         self.inspect_hover_tile_id = Some(tile_id);
         self.inspect_hover_widget_id = Some(node.widget_id);
+        self.inspect_hover_rect = Some(node.rect);
         let status = self.inspect_status_for_node(&node);
         self.inspect_hover_status = Some(status.clone());
         self.mark_needs_redraw();
@@ -3611,11 +3764,13 @@ impl Editor {
         };
         self.inspect_hover_tile_id = Some(tile_id);
         self.inspect_hover_widget_id = Some(node.widget_id);
+        self.inspect_hover_rect = Some(node.rect);
         match self.open_source_for_inspected_node(&node) {
             Ok(true) => {
                 self.inspect_mode = false;
                 self.inspect_hover_tile_id = None;
                 self.inspect_hover_widget_id = None;
+                self.inspect_hover_rect = None;
                 true
             }
             Ok(false) => {
@@ -3636,6 +3791,20 @@ impl Editor {
         (self.inspect_mode && self.inspect_hover_tile_id == Some(tile_id))
             .then_some(self.inspect_hover_status.as_deref())
             .flatten()
+    }
+
+    pub(crate) fn tile_inspect_overlay_rect(&self, tile_id: TileId) -> Option<crate::layout::Rect> {
+        if !self.inspect_mode || self.inspect_hover_tile_id != Some(tile_id) {
+            return None;
+        }
+        let rect = self.inspect_hover_rect?;
+        (rect.row.is_finite()
+            && rect.col.is_finite()
+            && rect.width.is_finite()
+            && rect.height.is_finite()
+            && rect.width > 0.0
+            && rect.height > 0.0)
+            .then_some(rect)
     }
 
     fn inspect_widget_node_at_tile(
@@ -3703,12 +3872,12 @@ impl Editor {
             inspect_node_source_module_path(node),
             inspect_node_source_symbol(node)
         ));
-        let source_buffer_id = if let Some(id) = inspect_node_source_buffer_id(node) {
-            inspect_debug_log(format!("using source buffer id {id} from widget metadata"));
-            Some(id)
-        } else if let Some(path) = inspect_node_source_module_path(node) {
+        let source_buffer_id = if let Some(path) = inspect_node_source_module_path(node) {
             inspect_debug_log(format!("opening source module path {}", path.display()));
             Some(self.upsert_inactive_file_buffer_with_mode(path, BufferMode::ESeqLisp)?)
+        } else if let Some(id) = inspect_node_source_buffer_id(node) {
+            inspect_debug_log(format!("using source buffer id {id} from widget metadata"));
+            Some(id)
         } else {
             inspect_debug_log("no source buffer or source module metadata; cannot open source");
             None
@@ -6307,6 +6476,36 @@ impl Editor {
             }
         }
 
+        for (name, lines) in self.runtime.take_pending_remove_lines_for() {
+            let Some(buffer_idx) = self.buffers.iter().position(|b| b.name == name) else {
+                continue;
+            };
+            if lines.is_empty() {
+                continue;
+            }
+            let mut previous_blank = true;
+            let mut kept = Vec::new();
+            for line in self.buffers[buffer_idx].lines.iter() {
+                if lines.iter().any(|target| target == line) {
+                    continue;
+                }
+                let blank = line.trim().is_empty();
+                if blank && previous_blank {
+                    continue;
+                }
+                kept.push(line.clone());
+                previous_blank = blank;
+            }
+            while kept.last().is_some_and(|line| line.trim().is_empty()) {
+                kept.pop();
+            }
+            let next_text = kept.join("\n");
+            self.buffers[buffer_idx].set_text(&next_text);
+            if self.active_buffer_idx() == buffer_idx {
+                self.remap_focused_widget_after_layout_change();
+            }
+        }
+
         if let Some(lines) = self.runtime.take_pending_set_lines() {
             let buffer = self.active_buffer_mut();
             buffer.lines = if lines.is_empty() {
@@ -6482,6 +6681,7 @@ impl Editor {
                     subtree_root_id,
                     tree,
                     reactive_dependencies,
+                    ..
                 } => {
                     let buffer_idx = match target {
                         EffectTarget::BufferId(Some(id)) => {
@@ -6768,6 +6968,17 @@ impl Editor {
                     if let Err(error) = self.set_tabs_in_tile_showing(&current, tabs) {
                         self.minibuffer =
                             Some(format!("Could not update tabs for '{current}': {error}"));
+                    }
+                }
+                crate::runtime::TileOp::ClearWindowTabsFor { current } => {
+                    if let Some(buffer_idx) = self.buffers.iter().position(|b| b.name == current) {
+                        if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(buffer_idx) {
+                            leaf.tabs.clear();
+                            leaf.selected_tab = None;
+                            leaf.cached_inactive_frame = None;
+                            leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
+                            self.mark_needs_redraw();
+                        }
                     }
                 }
             }

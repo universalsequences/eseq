@@ -3478,6 +3478,19 @@ impl SequencerState {
         self.published_sequencers_version
             .fetch_add(1, Ordering::AcqRel);
     }
+    pub fn unpublish_sequencer_by_name(&self, name: &str) -> bool {
+        let removed = {
+            let mut list = self.published_sequencers.lock().unwrap();
+            let before = list.len();
+            list.retain(|sequencer| sequencer.name != name);
+            list.len() != before
+        };
+        if removed {
+            self.published_sequencers_version
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        removed
+    }
     pub fn published_sequencers(&self) -> Vec<PublishedSequencer> {
         self.published_sequencers.lock().unwrap().clone()
     }

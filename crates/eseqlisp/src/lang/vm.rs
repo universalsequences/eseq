@@ -165,6 +165,7 @@ pub struct EvalProfile {
 #[derive(Clone)]
 pub struct PendingWidgetTree {
     pub source_buffer_id: Option<BufferId>,
+    pub source_module: Option<std::path::PathBuf>,
     pub target: EffectTarget,
     pub tree: Value,
     pub reactive_dependencies: Vec<ReactiveFieldKey>,
@@ -175,6 +176,7 @@ pub enum PendingUiUpdate {
     FullTree(PendingWidgetTree),
     ReplaceSubtree {
         source_buffer_id: Option<BufferId>,
+        source_module: Option<std::path::PathBuf>,
         target: EffectTarget,
         subtree_root_id: u64,
         tree: Value,
@@ -189,6 +191,13 @@ impl PendingUiUpdate {
             PendingUiUpdate::ReplaceSubtree {
                 source_buffer_id, ..
             } => *source_buffer_id,
+        }
+    }
+
+    pub fn source_module(&self) -> Option<&std::path::Path> {
+        match self {
+            PendingUiUpdate::FullTree(pending) => pending.source_module.as_deref(),
+            PendingUiUpdate::ReplaceSubtree { source_module, .. } => source_module.as_deref(),
         }
     }
 
@@ -3367,6 +3376,7 @@ impl VM {
                             self.pending_widget_trees
                                 .push(PendingUiUpdate::ReplaceSubtree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
+                                    source_module: source_module.clone(),
                                     target: self.current_effect_target.clone(),
                                     subtree_root_id: root_id,
                                     tree: annotated_tree,
@@ -4342,6 +4352,7 @@ impl VM {
                             self.pending_widget_trees
                                 .push(PendingUiUpdate::ReplaceSubtree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
+                                    source_module: self.source_manager.current_module(),
                                     target: self.current_effect_target.clone(),
                                     subtree_root_id,
                                     tree: annotated_tree,
@@ -4351,6 +4362,7 @@ impl VM {
                             self.pending_widget_trees.push(PendingUiUpdate::FullTree(
                                 PendingWidgetTree {
                                     source_buffer_id: self.current_effect_source_buffer_id,
+                                    source_module: self.source_manager.current_module(),
                                     target: self.current_effect_target.clone(),
                                     tree: annotated_tree,
                                     reactive_dependencies: Vec::new(),

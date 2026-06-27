@@ -57,6 +57,7 @@ pub(crate) struct ClearedEffectSource {
 
 struct ActiveSubtreeReplacement {
     source_buffer_id: Option<BufferId>,
+    source_module: Option<PathBuf>,
     target: EffectTarget,
     subtree_root_id: u64,
     tree: Value,
@@ -674,14 +675,18 @@ pub enum TileOp {
         current: String,
         tabs: Vec<LayoutTabSpec>,
     },
+    ClearWindowTabsFor {
+        current: String,
+    },
     SetLayout(LayoutSpec),
 }
 
 /// Declarative layout specification for `set-layout`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayoutTabSpec {
     pub label: String,
     pub buffer_name: String,
+    pub on_close: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -747,6 +752,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_set_text_for: Vec<(String, String)>,
     pub pending_append_text_for: Vec<(String, String, String)>,
     pub pending_append_lines_for: Vec<(String, Vec<String>)>,
+    pub pending_remove_lines_for: Vec<(String, Vec<String>)>,
     pub pending_set_lines: Option<Vec<String>>,
     pub pending_set_buffer_styles: Option<Vec<BufferTextStyle>>,
     pub pending_goto_line: Option<usize>,
@@ -913,6 +919,7 @@ impl NativeContext {
             .pending_buffer_widget_trees
             .push(PendingUiUpdate::FullTree(PendingWidgetTree {
                 source_buffer_id,
+                source_module: None,
                 target: EffectTarget::BufferName(buffer_name),
                 tree: tree.deep_clone(),
                 reactive_dependencies: Vec::new(),
@@ -953,6 +960,13 @@ impl NativeContext {
         self.shared
             .borrow_mut()
             .pending_append_lines_for
+            .push((name, lines));
+    }
+
+    pub fn remove_buffer_lines_for(&mut self, name: String, lines: Vec<String>) {
+        self.shared
+            .borrow_mut()
+            .pending_remove_lines_for
             .push((name, lines));
     }
 
@@ -1019,6 +1033,13 @@ impl NativeContext {
             .borrow_mut()
             .pending_tile_ops
             .push(TileOp::SetWindowTabsFor { current, tabs });
+    }
+
+    pub fn clear_window_tabs_for(&mut self, current: String) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::ClearWindowTabsFor { current });
     }
 
     pub fn window_hide_status(&mut self) {
@@ -2542,6 +2563,10 @@ impl Runtime {
         std::mem::take(&mut self.shared.borrow_mut().pending_append_lines_for)
     }
 
+    pub(crate) fn take_pending_remove_lines_for(&mut self) -> Vec<(String, Vec<String>)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_remove_lines_for)
+    }
+
     pub(crate) fn take_pending_set_lines(&mut self) -> Option<Vec<String>> {
         self.shared.borrow_mut().pending_set_lines.take()
     }
@@ -3048,6 +3073,7 @@ impl Runtime {
                     fallback_pending.extend(replacements.drain(..).map(|replacement| {
                         PendingUiUpdate::ReplaceSubtree {
                             source_buffer_id: replacement.source_buffer_id,
+                            source_module: replacement.source_module,
                             target: replacement.target,
                             subtree_root_id: replacement.subtree_root_id,
                             tree: replacement.tree,
@@ -3090,6 +3116,7 @@ impl Runtime {
                                             active_subtree_replacements.push(
                                                 ActiveSubtreeReplacement {
                                                     source_buffer_id: pending.source_buffer_id,
+                                                    source_module: pending.source_module.clone(),
                                                     target: pending.target.clone(),
                                                     subtree_root_id,
                                                     tree: pending.tree.deep_clone(),
@@ -3147,6 +3174,7 @@ impl Runtime {
                     } => {
                         active_subtree_replacements.push(ActiveSubtreeReplacement {
                             source_buffer_id: *source_buffer_id,
+                            source_module: pending.source_module().map(PathBuf::from),
                             target: pending.target().clone(),
                             subtree_root_id: *subtree_root_id,
                             tree: tree.deep_clone(),

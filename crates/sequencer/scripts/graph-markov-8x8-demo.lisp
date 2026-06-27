@@ -50,6 +50,7 @@
 (def m8-node-count 8)
 (def script-buffer-name "*markov-8x8*")
 (def script-tab-label "Markov 8x8")
+(def script-sequencer-name m8-name)
 
 (def m8-res-options (list "1" "2" "4" "8" "16" "32" "64"))
 (def m8-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
@@ -273,4 +274,4 @@
                   (graph-edge m8-name :from r :to c :weight v))))))))))
 
 (effect-buffer "*markov-8x8*" (m8-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-step-sequencer-tab script-tab-label script-buffer-name)
+(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

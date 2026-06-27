@@ -78,6 +78,7 @@
 (def g8-node-count 8)
 (def script-buffer-name "*8x8*")
 (def script-tab-label "8x8")
+(def script-sequencer-name g8-name)
 
 ;; ── dropdown option lists (order is the index space bind-graph maps into) ──
 
@@ -348,4 +349,4 @@
           ))))))
 
 (effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-step-sequencer-tab script-tab-label script-buffer-name)
+(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

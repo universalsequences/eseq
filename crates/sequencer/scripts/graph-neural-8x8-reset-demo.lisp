@@ -89,6 +89,7 @@
 (def g8r-node-count 8)
 (def script-buffer-name "*8x8-reset*")
 (def script-tab-label "8x8 rst")
+(def script-sequencer-name g8r-name)
 
 ;; ── dropdown option lists (order is the index space bind-graph maps into) ──
 
@@ -280,6 +281,7 @@
 (def g8r-num (key value lo hi stp dec on-change)
   (number-picker
     :key key
+    :border-color '(rgba 1 1 1 1)
     :value value :min lo :max hi :step stp :decimals dec
     :width g8r-control-width :height g8r-row-height :font-size 9
     :on-change on-change))
@@ -343,17 +345,17 @@
 
 (def g8r-header ()
   (h-stack :gap 0.4 :align :center
-    (label "node"   :width g8r-node-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "route"  :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "delay"  :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "transp" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "trn rst" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "vel x"  :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "vel rst" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "dampen" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "recover" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "res"    :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)
-    (label "quant"  :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim)))
+    (label "node"   :width g8r-node-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "route"  :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "delay"  :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "transp" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "trn rst" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "vel x"  :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "vel rst" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "dampen" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "recover" :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "res"    :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "quant"  :width g8r-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
 
 (def g8r-panel (current-pattern graph-visualizations)
   (do
@@ -365,117 +367,129 @@
     (set! g8r-global-transpose (graph-param-value g8r-name 0 :global-transpose))
     (set! g8r-dur-factor (graph-param-value g8r-name 0 :dur-factor))
     (let ((viz (g8r-viz graph-visualizations)))
-      (box
+      (box 
         :padding 0.85
         :gap 0.6
         :width 37
         :height 45
         (v-stack :gap 0.5
           ;; ── sequencer-level config (on top) ──
-          (h-stack
-            (v-stack
-              (h-stack :gap 0.6 :align :center
-                (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
-                (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-                (g8r-num "graph-8x8-reset-reset-bars"
-                  (bind-graph-config g8r-name :reset-bars) 0 64 1 0
-                  (lambda (v) (g8r-edit-config :reset-bars v))))
-              (h-stack :gap 0.6 :align :center
-              (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-              (g8r-num "graph-8x8-reset-max-poly"
-                (bind-graph-config g8r-name :max-poly) 0 16 1 0
-                (lambda (v) (g8r-edit-config :max-poly v))))
-              (h-stack :gap 0.6 :align :center
-                (label "global trn" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-                (g8r-num "graph-8x8-reset-global-transpose"
-                  g8r-global-transpose -48 48 1 0
-                  (lambda (v)
-                    (do
-                      (set! g8r-global-transpose v)
-                      (g8r-edit-global-param :global-transpose v))))
-                (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-                (g8r-num "graph-8x8-reset-dur-factor"
-                  g8r-dur-factor 0 8 0.25 2
-                  (lambda (v)
-                    (do
-                      (set! g8r-dur-factor v)
-                      (g8r-edit-global-param :dur-factor v)))))
-              (h-stack :gap 0.6 :align :center
-                (label "delay x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-                (g8r-pick "graph-8x8-reset-delay-factor"
-                  g8r-delay-factor-index g8r-factor-options
-                  (lambda (v) (g8r-apply-delay-factor v)))
-                (label "res/q x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-                (g8r-pick "graph-8x8-reset-timebase-factor"
-                  g8r-timebase-factor-index g8r-factor-options
-                  (lambda (v) (g8r-apply-timebase-factor v))))
-            )
-          (matrix
-            :key "graph-8x8-reset-dampening-matrix"
-            :rows 8
-            :cols 8
-            :width 8
-            :height 4
+          (box 
+            :width 60
+            :background-color :black :padding 1 :corner-radius 16
             
-            :control :grid
-            :background :black
-            :fill :primary
-            :min 0
-            :max 1
-            :value (g8r-viz-matrix viz :dampening-matrix (g8r-zero-matrix))
-            )
-          )
-        (h-stack
-          (v-stack :gap 0.5
-            (v-stack :gap 0.2
-              (g8r-header)
-              (each (range 0 g8r-node-count) |n| (g8r-row n))))
+            (h-stack
+              (v-stack
+                (h-stack :gap 0.6 :align :center
+                  (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
+                  (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g8r-num "graph-8x8-reset-reset-bars"
+                    (bind-graph-config g8r-name :reset-bars) 0 64 1 0
+                    (lambda (v) (g8r-edit-config :reset-bars v))))
+                (h-stack :gap 0.6 :align :center
+                  (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g8r-num "graph-8x8-reset-max-poly"
+                    (bind-graph-config g8r-name :max-poly) 0 16 1 0
+                    (lambda (v) (g8r-edit-config :max-poly v))))
+                (h-stack :gap 0.6 :align :center
+                  (label "global trn" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g8r-num "graph-8x8-reset-global-transpose"
+                    g8r-global-transpose -48 48 1 0
+                    (lambda (v)
+                      (do
+                        (set! g8r-global-transpose v)
+                        (g8r-edit-global-param :global-transpose v))))
+                  (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g8r-num "graph-8x8-reset-dur-factor"
+                    g8r-dur-factor 0 8 0.25 2
+                    (lambda (v)
+                      (do
+                        (set! g8r-dur-factor v)
+                        (g8r-edit-global-param :dur-factor v)))))
+                (h-stack :gap 0.6 :align :center
+                  (label "delay x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g8r-pick "graph-8x8-reset-delay-factor"
+                    g8r-delay-factor-index g8r-factor-options
+                    (lambda (v) (g8r-apply-delay-factor v)))
+                  (label "res/q x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g8r-pick "graph-8x8-reset-timebase-factor"
+                    g8r-timebase-factor-index g8r-factor-options
+                    (lambda (v) (g8r-apply-timebase-factor v))))
+                )
+              (matrix
+                :key "graph-8x8-reset-dampening-matrix"
+                :rows 8
+                :cols 8
+                :width 20
+                :height 5
+                
+                :control :grid
+                :background :black
+                :fill :primary
+                :min 0
+                :max 1
+                :value (g8r-viz-matrix viz :dampening-matrix (g8r-zero-matrix))
+                )
+              ))
           
-          (v-stack :gap 0.35
-            (box :width 0 :height 0.8)
-            (matrix
-              :key "graph-8x8-reset-trigger-matrix"
-              :rows 8
-              :cols 1
-              :width 1
-              :height 9.5
-              :min 0
-              :max 1
-              :value (g8r-viz-matrix viz :trigger-matrix (g8r-zero-column-matrix))))            
+          (h-stack
+            (box 
+              :padding 1
+              :border-color (rgba 0.2 0.2 0.2 1)
+              :background-color :black :corner-radius 16
+              (v-stack :gap 0.5
+                (v-stack :gap 0.2
+                  (g8r-header)
+                  (each (range 0 g8r-node-count) |n| (g8r-row n)))))
+            
+            (v-stack :gap 0.35 
+              (box 
+                :border-width 2
+                :border-color :white
+                :width 0 :height 1.3)
+              (matrix
+                :key "graph-8x8-reset-trigger-matrix"
+                :rows 8
+                :cols 1
+                :width 1
+                :height 9.5
+                :min 0
+                :max 1
+                :value (g8r-viz-matrix viz :trigger-matrix (g8r-zero-column-matrix))))            
+            
+            (v-stack :gap 0.35
+              (box :width 0 :height 1.3 :font-size 8 :color :dim)
+              (matrix
+                :key "graph-8x8-reset-energy-matrix"
+                :rows 8
+                :cols 1
+                :width 2
+                :height 9.5
+                :min 0
+                :max 4
+                :value (g8r-viz-matrix viz :energy-matrix (g8r-zero-column-matrix))))            
+            (v-stack :gap 0.35
+              (box :width 0 :height 1.3 :font-size 8 :color :dim)
+              (matrix
+                :key "graph-8x8-reset-weight-matrix"
+                :rows 8
+                :cols 8
+                :width 26
+                :height 9.5
+                :min 0
+                :color :blue
+                :max 1
+                :value g8r-weights
+                :on-cell-change (lambda (r c v)
+                  (do
+                    (set! g8r-weights (g8r-set-cell g8r-weights r c v))
+                    (graph-edge g8r-name :from r :to c :weight v))))))
           
-          (v-stack :gap 0.35
-            (box :width 0 :height 0.8 :font-size 8 :color :dim)
-            (matrix
-              :key "graph-8x8-reset-energy-matrix"
-              :rows 8
-              :cols 1
-              :width 2
-              :height 9.5
-              :min 0
-              :max 4
-              :value (g8r-viz-matrix viz :energy-matrix (g8r-zero-column-matrix))))            
-          (v-stack :gap 0.35
-            (box :width 0 :height 0.7 :font-size 8 :color :dim)
-            (matrix
-              :key "graph-8x8-reset-weight-matrix"
-              :rows 8
-              :cols 8
-              :width 26
-              :height 9.5
-              :min 0
-              :color :blue
-              :max 1
-              :value g8r-weights
-              :on-cell-change (lambda (r c v)
-                (do
-                  (set! g8r-weights (g8r-set-cell g8r-weights r c v))
-                  (graph-edge g8r-name :from r :to c :weight v))))))
-        (v-stack :gap 0.5
           
           
-          (label "live dampening (from row -> to col)" :width 18 :height 1.2 :font-size 8 :color :dim)
           
-          ))))))
+          
+          )))))
 
 (effect-buffer "*8x8-reset*" (g8r-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-step-sequencer-tab script-tab-label script-buffer-name)
+(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

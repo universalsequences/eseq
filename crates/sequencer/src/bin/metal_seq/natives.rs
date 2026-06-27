@@ -2693,6 +2693,22 @@ pub(crate) fn init_runtime(
         Ok(Value::String(name))
     });
 
+    let st_unpublish_sequencer = state.clone();
+    let ui_ep_unpublish_sequencer = ui_epoch.clone();
+    runtime.register_native("seq-unpublish-sequencer", move |args, _ctx| {
+        let name = match args.first() {
+            Some(Value::String(name) | Value::Symbol(name) | Value::Keyword(name)) => {
+                name.trim_start_matches(':').trim_start_matches('@')
+            }
+            _ => return Err("seq-unpublish-sequencer expects a sequencer name".into()),
+        };
+        let removed = st_unpublish_sequencer.unpublish_sequencer_by_name(name);
+        if removed {
+            ui_ep_unpublish_sequencer.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Value::Bool(removed))
+    });
+
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
@@ -4038,6 +4054,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "__register-midi-fx-preview",
             "(__register-midi-fx-preview label)",
             "Internal helper that registers a MIDI FX preview label for UI selection.",
+        ),
+        (
+            "seq-unpublish-sequencer",
+            "(seq-unpublish-sequencer name)",
+            "Remove a UI-published def-sequencer by name.",
         ),
         (
             "seq-use-accumulator",

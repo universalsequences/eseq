@@ -10932,6 +10932,28 @@ mod tests {
         }
     }
 
+    fn find_widget_map_by_key(
+        value: &Value,
+        key: &str,
+    ) -> Option<std::collections::HashMap<String, Rc<RefCell<Value>>>> {
+        match value {
+            Value::Map(map) => {
+                if map
+                    .get("key")
+                    .is_some_and(|value| matches!(&*value.borrow(), Value::String(s) if s == key))
+                {
+                    return Some(map.clone());
+                }
+                map.get("children")
+                    .and_then(|children| find_widget_map_by_key(&children.borrow(), key))
+            }
+            Value::List(items) => items
+                .iter()
+                .find_map(|item| find_widget_map_by_key(&item.borrow(), key)),
+            _ => None,
+        }
+    }
+
     fn layout_contains_widget_type(node: &eseqlisp::layout::LayoutNode, widget_type: &str) -> bool {
         node.widget_type == widget_type
             || node
@@ -12894,6 +12916,11 @@ mod tests {
             .register_native("seq-set-track", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
+            .register_native("seq-unpublish-sequencer", |_args, _ctx| {
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
             .register_native("seq-clear-selection", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
@@ -13191,6 +13218,20 @@ mod tests {
 
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
         editor.runtime_mut().eval_str(&src).expect("load grid lisp");
+        editor.refresh_runtime_side_effects();
+        for name in [
+            "*transport*",
+            "*sequencer*",
+            "*step*",
+            "*track*",
+            "*samples*",
+            "*mixer*",
+            "*fx*",
+        ] {
+            if !editor.buffers.iter().any(|buffer| buffer.name == name) {
+                editor.create_scratch_buffer(name, "", eseqlisp::BufferMode::ESeqLisp);
+            }
+        }
         apply_startup_grid_layout(&mut editor).expect("apply startup grid layout");
         if let Some(status) = editor.runtime_mut().take_status_message() {
             if status.to_ascii_lowercase().contains("error") {
@@ -14158,6 +14199,64 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_delete_script_sequencer_removes_tab_and_scratch_load() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*16x16*" (label "sixteen"))
+                (seq-register-script-step-sequencer-tab
+                  "16x16"
+                  "*16x16*"
+                  "neural-16-demo"
+                  "scripts/graph-neural-16-demo.lisp")
+                (seq-script-append-to-scratch "scripts/graph-neural-16-demo.lisp")
+                (seq-select-main-step-tab-by-index 2)
+                "#,
+            )
+            .expect("register and select script sequencer tab");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(editor.active_buffer().name, "*16x16*");
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*16x16*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("16x16".to_string(), "*16x16*".to_string())
+            ]
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seq-delete-script-sequencer "neural-16-demo")"#)
+            .expect("delete script sequencer");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.active_buffer().name,
+            "*sequencer*",
+            "deleting the selected sequencer tab should return the visible panel to Seq"
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            Vec::<(String, String)>::new(),
+            "removing the last custom sequencer tab should remove the tab bar"
+        );
+        let scratch = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*scratch*")
+            .map(|buffer| buffer.text())
+            .unwrap_or_default();
+        assert!(
+            !scratch.contains("graph-neural-16-demo.lisp"),
+            "deleting a picker-loaded script should remove its persisted scratch load form; scratch={scratch:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_register_step_sequencer_tab_does_not_restore_main_layout_when_step_tile_absent() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.create_scratch_buffer("*code*", "", eseqlisp::BufferMode::ESeqLisp);
@@ -14503,12 +14602,9 @@ mod tests {
                 continue;
             };
             match items.as_slice() {
-                [
-                    Expression::Symbol(form),
-                    Expression::Symbol(name),
-                    Expression::String(value),
-                    ..,
-                ] if form == "def" && name == "script-buffer-name" => {
+                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
+                    if form == "def" && name == "script-buffer-name" =>
+                {
                     script_buffer_name = Some(value.clone());
                 }
                 [Expression::Symbol(form), Expression::String(target), ..]
@@ -14704,8 +14800,13 @@ mod tests {
         let layout = editor.widget_layout().expect("step panel layout");
         let step_params_panel = find_layout_node_by_debug_name(&layout, "step-parameters-panel")
             .expect("step parameters panel");
-        let title = find_layout_node_by_text(step_params_panel, "step").expect("step title");
-        assert_finite_nonzero_rect(title, "step title");
+        let track_badge = find_layout_node_by_stable_key(step_params_panel, "fx-step-track-badge")
+            .expect("step panel track badge");
+        assert_finite_nonzero_rect(track_badge, "step panel track badge");
+        assert!(
+            track_badge.props.contains_key("background-color"),
+            "step panel track badge should carry the mixer track color"
+        );
         let cursor_label =
             find_layout_node_by_text(step_params_panel, "step 3").expect("cursor step label");
         assert_finite_nonzero_rect(cursor_label, "cursor step label");
@@ -14849,6 +14950,7 @@ mod tests {
             .id;
         editor.set_active_buffer(sequencer_id);
         editor.set_layout_viewport(180, 40);
+        editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
 
         let layout = editor.widget_layout().expect("sequencer layout");
         let inactive_track_cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-0-0")
@@ -14874,6 +14976,133 @@ mod tests {
             ),
             "current track cursor wrapper should be gated by that track's selected binding"
         );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_exposes_track_and_empty_space_drop_targets() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.sync_layout_to_active_leaf();
+        let tree = editor
+            .runtime()
+            .current_widget_tree()
+            .expect("sequencer widget tree");
+
+        let root = find_widget_map_by_key(&tree, "sequencer-new-track-drop-zone")
+            .expect("sequencer root drop zone");
+        assert!(
+            root.contains_key("on-drop"),
+            "sequencer empty-space target should expose an on-drop callback"
+        );
+        let root_drop_types = root.get("drop-types").expect("root drop types").borrow();
+        assert!(value_contains_string(&root_drop_types, "sample"));
+        assert!(value_contains_string(&root_drop_types, "instrument"));
+
+        let row =
+            find_widget_map_by_key(&tree, "sequencer-track-drop-0").expect("sequencer track row");
+        assert!(
+            row.contains_key("on-drop"),
+            "sequencer track row should expose an on-drop callback"
+        );
+        let row_drop_types = row.get("drop-types").expect("row drop types").borrow();
+        assert!(value_contains_string(&row_drop_types, "sample"));
+        assert!(
+            !value_contains_string(&row_drop_types, "instrument"),
+            "dropping instruments onto an existing sequencer row should not be accepted"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_drop_handlers_route_to_existing_host_commands() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seqv-drop-sample-on-track
+                    (dict :drag-type "sample"
+                          :payload (dict :path "samples/kick.wav")
+                          :target (dict :kind "track" :track 1)))"#,
+            )
+            .expect("drop sample on sequencer track");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "audition-sample");
+                let Value::Map(payload) = payload else {
+                    panic!("audition-sample payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected audition-sample host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seqv-drop-new-track
+                    (dict :drag-type "sample"
+                          :payload (dict :path "samples/snare.wav")))"#,
+            )
+            .expect("drop sample on sequencer empty space");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-sample");
+                let Value::Map(payload) = payload else {
+                    panic!("add-track-sample payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/snare.wav".to_string()))
+                );
+                assert_eq!(
+                    payload
+                        .get("preserve-browser-context")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Bool(true))
+                );
+            }
+            other => panic!("expected add-track-sample host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seqv-drop-new-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :name "emulations/digitone")))"#,
+            )
+            .expect("drop instrument on sequencer empty space");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("add-track-instrument payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("emulations/digitone".to_string()))
+                );
+            }
+            other => panic!("expected add-track-instrument host command, got {other:?}"),
+        }
     }
 
     #[test]
@@ -14999,6 +15228,143 @@ mod tests {
         assert!(
             collect_tile_buffer_names(&editor).contains(&"*samples*".to_string()),
             "second toggle should restore the samples sidebar"
+        );
+    }
+
+    #[test]
+    fn metal_seq_mixer_panel_toggle_hides_and_restores_mixer_layout_spec() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (set! samples-sidebar-visible true)
+                  (set! mixer-panel-visible true))
+                "#,
+            )
+            .expect("show mixer panel");
+
+        let visible_spec = editor
+            .runtime_mut()
+            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .expect("build mixer-visible layout spec")
+            .expect("layout spec");
+        assert!(
+            value_contains_string(&visible_spec, "*mixer*"),
+            "visible mixer layout spec should include the mixer panel: {visible_spec:?}"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-mixer-panel)")
+            .expect("hide mixer panel");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("mixer-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(false))
+        );
+        let hidden_spec = editor
+            .runtime_mut()
+            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .expect("build mixer-hidden layout spec")
+            .expect("layout spec");
+        assert!(
+            !value_contains_string(&hidden_spec, "*mixer*"),
+            "hidden mixer layout spec should remove the mixer panel: {hidden_spec:?}"
+        );
+        for expected in ["*transport*", "*samples*", "*sequencer*", "*track*", "*fx*"] {
+            assert!(
+                value_contains_string(&hidden_spec, expected),
+                "hiding mixer should preserve {expected}: {hidden_spec:?}"
+            );
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-mixer-panel)")
+            .expect("show mixer panel");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("mixer-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
+        let restored_spec = editor
+            .runtime_mut()
+            .eval_str(r#"(seq-lower-panel-layout-spec "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)"#)
+            .expect("build restored layout spec")
+            .expect("layout spec");
+        assert!(
+            value_contains_string(&restored_spec, "*mixer*"),
+            "second toggle should restore the mixer panel: {restored_spec:?}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_mixer_panel_toggle_preserves_clicked_step_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (effect-buffer "*fake-seq*" (label "fake sequencer"))
+                  (seq-register-step-sequencer-tab "Fake" "*fake-seq*")
+                  (set-layout
+                    (list :buf "*sequencer*"
+                      :tabs (seq-main-step-tabs)
+                      :hide-status true
+                      :border-radius 12
+                      :border-width 4)))
+                "#,
+            )
+            .expect("register fake step tab and install tabbed step tile");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*fake-seq*")"#)
+            .expect("simulate clicking fake step tab");
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*fake-seq*"),
+            "fake step tab should be visible after selection"
+        );
+        assert_eq!(editor.active_buffer().name, "*fake-seq*");
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string())),
+            "mouse/tab selection intentionally does not update the Lisp selector state directly"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-mixer-panel)")
+            .expect("toggle mixer panel");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*fake-seq*".to_string())),
+            "mixer toggle should adopt the active clicked step tab before rebuilding the layout"
+        );
+        assert_eq!(
+            editor.active_buffer().name,
+            "*fake-seq*",
+            "plain Tab must not switch the selected sequencer step tab"
+        );
+        assert_eq!(
+            editor.active_leaf().selected_tab,
+            Some(1),
+            "the visible selected tab should remain the clicked step tab"
         );
     }
 
@@ -24615,9 +24981,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec![
-                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
-            ]
+            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
         );
     }
 

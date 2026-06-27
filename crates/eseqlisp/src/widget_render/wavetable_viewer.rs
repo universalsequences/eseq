@@ -204,11 +204,8 @@ impl WidgetDefinition for WavetableViewerWidget {
         let warp = prop_num(&node.props, "warp", 0.0).clamp(0.0, 1.0);
         let fold = prop_num(&node.props, "fold", 0.0).clamp(0.0, 1.0);
 
-        let selected_color = resolve_named_color(
-            &node.props,
-            "wave-color",
-            Color::rgba(1.0, 0.64, 0.22, 1.0),
-        );
+        let selected_color =
+            resolve_named_color(&node.props, "wave-color", Color::rgba(1.0, 0.64, 0.22, 1.0));
         let inactive_color = resolve_named_color(
             &node.props,
             "inactive-color",

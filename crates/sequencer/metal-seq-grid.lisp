@@ -16,6 +16,7 @@
   (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names))))
 
 (defstate samples-sidebar-visible true)
+(defstate mixer-panel-visible true)
 
 (load "metal-seq-browser.lisp")
 (load "metal-seq-fx.lisp")
@@ -42,14 +43,34 @@
 
 (def lower-fx-layout-height 11.5)
 
+(def seq-step-tab-label (tab)
+  (nth tab 0))
+
 (def seq-step-tab-buffer (tab)
   (nth tab 1))
+
+(def seq-step-tab-sequencer-name (tab)
+  (if (> (len tab) 2) (nth tab 2) ""))
+
+(def seq-step-tab-source-path (tab)
+  (if (> (len tab) 3) (nth tab 3) ""))
 
 (def seq-step-tab-matches-buffer? (tab buffer)
   (= (seq-step-tab-buffer tab) buffer))
 
+(def seq-render-step-tab (tab)
+  (let ((name (seq-step-tab-sequencer-name tab))
+        (buffer (seq-step-tab-buffer tab)))
+    (if (= name "")
+      (list (seq-step-tab-label tab) buffer)
+      (list (seq-step-tab-label tab)
+        buffer
+        :on-close
+        (lambda (closed-buffer tab-index)
+          (seq-delete-script-sequencer-with-buffer name closed-buffer))))))
+
 (def seq-main-step-tabs ()
-  (append (list (list "Seq" "*sequencer*")) seq-registered-step-tabs))
+  (append (list (list "Seq" "*sequencer*")) (map seq-render-step-tab seq-registered-step-tabs)))
 
 (def seq-main-step-tab-buffer? (buffer)
   (> (len (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
@@ -89,6 +110,28 @@
         (list (list label buffer))))
     (seq-refresh-step-tabs-if-present)))
 
+(def seq-register-script-step-sequencer-tab (label buffer sequencer-name source-path)
+  (do
+    (set! seq-registered-step-tabs
+      (append
+        (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
+          seq-registered-step-tabs)
+        (list (list label buffer sequencer-name source-path))))
+    (seq-refresh-step-tabs-if-present)))
+
+(def seq-unregister-step-sequencer-tab (buffer)
+  (do
+    (set! seq-registered-step-tabs
+      (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
+        seq-registered-step-tabs))
+    (if (= step-panel-buffer buffer) (set! step-panel-buffer "*sequencer*") nil)
+    (if (= remembered-step-panel-buffer buffer) (set! remembered-step-panel-buffer "*sequencer*") nil)
+    (set-window-buffer-for buffer "*sequencer*")
+    (seq-refresh-step-tabs-if-present)
+    (if (= (len seq-registered-step-tabs) 0)
+      (clear-window-tabs-for "*sequencer*")
+      false)))
+
 (def seq-select-main-step-tab-by-index (index)
   (let ((tab-index (- index 1))
         (tabs (seq-main-step-tabs)))
@@ -107,12 +150,14 @@
 ;; load, then calls script-init-fn once after a successful load.
 (def script-buffer-name "")
 (def script-tab-label "")
+(def script-sequencer-name "")
 (def script-init-fn () false)
 
 (def seq-script-reset-contract ()
   (do
     (set! script-buffer-name "")
     (set! script-tab-label "")
+    (set! script-sequencer-name "")
     (def script-init-fn () false)))
 
 (def seq-script-default-dir ()
@@ -208,12 +253,81 @@
 (def seq-script-append-to-scratch (path)
   (append-buffer-lines-for "*scratch*" (seq-script-scratch-entry path)))
 
+(def seq-script-remove-from-scratch (path)
+  (remove-buffer-lines-for "*scratch*" (seq-script-scratch-entry path)))
+
 (def seq-script-register-loaded-tab ()
   (if (not (= script-buffer-name ""))
-    (seq-register-step-sequencer-tab
+    (seq-register-script-step-sequencer-tab
       (if (= script-tab-label "") script-buffer-name script-tab-label)
-      script-buffer-name)
+      script-buffer-name
+      script-sequencer-name
+      "")
     false))
+
+(def seq-script-register-loaded-tab-from-path (path)
+  (if (not (= script-buffer-name ""))
+    (seq-register-script-step-sequencer-tab
+      (if (= script-tab-label "") script-buffer-name script-tab-label)
+      script-buffer-name
+      script-sequencer-name
+      path)
+    false))
+
+(def seq-script-tab-matches-sequencer? (tab name)
+  (= (seq-step-tab-sequencer-name tab) name))
+
+(def seq-script-tab-for-sequencer (name)
+  (let ((hits (filter (lambda (tab) (seq-script-tab-matches-sequencer? tab name))
+                seq-registered-step-tabs)))
+    (if (> (len hits) 0) (nth hits 0) nil)))
+
+(def seq-delete-step-sequencer-tab (buffer)
+  (seq-unregister-step-sequencer-tab buffer))
+
+(def seq-delete-script-sequencer-by-buffer (buffer)
+  (let ((hits (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
+                seq-registered-step-tabs)))
+    (if (> (len hits) 0)
+      (let ((tab (nth hits 0))
+            (name (seq-step-tab-sequencer-name (nth hits 0)))
+            (path (seq-step-tab-source-path (nth hits 0))))
+        (do
+          (if (not (= name "")) (seq-unpublish-sequencer name) false)
+          (if (not (= path "")) (seq-script-remove-from-scratch path) false)
+          (seq-unregister-step-sequencer-tab buffer)
+          (status (fmt "Deleted sequencer tab {}" buffer))
+          true))
+      false)))
+
+(def seq-delete-script-sequencer (name)
+  (let ((tab (seq-script-tab-for-sequencer name)))
+    (do
+      (seq-unpublish-sequencer name)
+      (if tab
+        (do
+          (if (not (= (seq-step-tab-source-path tab) ""))
+            (seq-script-remove-from-scratch (seq-step-tab-source-path tab))
+            false)
+          (seq-unregister-step-sequencer-tab (seq-step-tab-buffer tab)))
+        false)
+      (status (fmt "Deleted sequencer {}" name))
+      true)))
+
+(def seq-delete-script-sequencer-with-buffer (name buffer)
+  (let ((hits (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
+                seq-registered-step-tabs)))
+    (do
+      (seq-unpublish-sequencer name)
+      (if (> (len hits) 0)
+        (let ((path (seq-step-tab-source-path (nth hits 0))))
+          (if (not (= path ""))
+            (seq-script-remove-from-scratch path)
+            false))
+        false)
+      (seq-unregister-step-sequencer-tab buffer)
+      (status (fmt "Deleted sequencer {}" name))
+      true)))
 
 (def seq-script-return-to-source-buffer ()
   (if (not (= seq-script-picker-source-buffer ""))
@@ -229,7 +343,7 @@
         (do
           (seq-script-append-to-scratch path)
           (script-init-fn)
-          (seq-script-register-loaded-tab)
+          (seq-script-register-loaded-tab-from-path path)
           (seq-script-return-to-source-buffer)
           (status (fmt "Loaded script {}" (path-filename path))))))))
 
@@ -279,9 +393,11 @@
   (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42))
 
 (def seq-main-and-mixer-layout-spec (lower-buffer)
-  (list :rows :gap 1
-    0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
-    0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 14 :max-height 14)))
+  (if mixer-panel-visible
+    (list :rows :gap 1
+      0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
+      0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 14 :max-height 14))
+    (seq-step-and-track-panel-layout-spec lower-buffer)))
 
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (list :rows :gap 1
@@ -294,14 +410,20 @@
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
 (def seq-patcher-bottom-bar-layout-spec ()
-  (if samples-sidebar-visible
+  (if (and samples-sidebar-visible mixer-panel-visible)
     (list :cols :gap 1
       0.333 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
       0.334 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
       0.333 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
-    (list :cols :gap 1
-      0.5 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
-      0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))))
+    (if samples-sidebar-visible
+      (list :cols :gap 1
+        0.5 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28 :min-height 13 :max-height 13)
+        0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
+      (if mixer-panel-visible
+        (list :cols :gap 1
+          0.5 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 30 :min-height 13 :max-height 13)
+          0.5 (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13))
+        (list :buf "*fx*" :hide-status true :border-radius 12 :border-width 40 :background-color :buffer-bg :min-height 13 :max-height 13)))))
 
 (def seq-instrument-patcher-layout-spec (patcher-buffer)
   (list :rows :gap 1
@@ -365,6 +487,12 @@
     (set! samples-sidebar-visible (not samples-sidebar-visible))
     (seq-refresh-current-layout)))
 
+(def seq-toggle-mixer-panel ()
+  (do
+    (seq-sync-step-panel-buffer-from-current-window)
+    (set! mixer-panel-visible (not mixer-panel-visible))
+    (seq-refresh-current-layout)))
+
 (def seq-restore-instrument-patcher-layout ()
   (do
     (set! step-panel-buffer remembered-step-panel-buffer)
@@ -377,6 +505,14 @@
     (if (= step-panel-buffer "*piano-roll*")
       remembered-step-panel-buffer
       step-panel-buffer)))
+
+(def seq-sync-step-panel-buffer-from-current-window ()
+  (let ((buffer (current-buffer-name)))
+    (if (seq-main-step-tab-buffer? buffer)
+      (do
+        (set! step-panel-buffer buffer)
+        (set! remembered-step-panel-buffer buffer))
+      nil)))
 
 (def seq-piano-roll-open? ()
   (or (= step-panel-buffer "*piano-roll*")
@@ -495,7 +631,7 @@
     (instrument-toggle-mods-view)
     (seq-show-fx-lower-panel)))
 
-(bind-key "Tab" "seq-toggle-current-track-expanded-main")
+(bind-key "Tab" "seq-toggle-mixer-panel")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay

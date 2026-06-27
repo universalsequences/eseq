@@ -1331,6 +1331,29 @@ fn dragging_vertical_tile_border_updates_split_ratio() {
 }
 
 #[test]
+fn hovering_vertical_tile_border_uses_horizontal_resize_cursor() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "(+ 1 2)");
+    editor.split_active_tile(SplitDir::Vertical, 0);
+    editor.update_tile_rects(100, 40);
+
+    editor.handle_tiled_mouse_precise(mouse_event(MouseEventKind::Moved, 50, 10), 50.0, 10.0, 1);
+
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::EwResize
+    );
+
+    editor.handle_tiled_mouse_precise(mouse_event(MouseEventKind::Moved, 2, 10), 2.0, 10.0, 1);
+
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::Default
+    );
+}
+
+#[test]
 fn dragging_horizontal_tile_border_updates_split_ratio() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -1364,6 +1387,22 @@ fn dragging_horizontal_tile_border_updates_split_ratio() {
         (split.ratio - (8.0 / 39.0)).abs() < 0.05,
         "ratio was {}",
         split.ratio
+    );
+}
+
+#[test]
+fn hovering_horizontal_tile_border_uses_vertical_resize_cursor() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "(+ 1 2)");
+    editor.split_active_tile(SplitDir::Horizontal, 0);
+    editor.update_tile_rects(80, 40);
+
+    editor.handle_tiled_mouse_precise(mouse_event(MouseEventKind::Moved, 20, 19), 20.0, 19.0, 1);
+
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::NsResize
     );
 }
 
@@ -5984,12 +6023,22 @@ fn inspect_hover_reveals_status_for_inactive_ui_tile() {
         !other.show_status,
         "non-hovered hidden-status UI tile should not show inspect hover info"
     );
+    assert!(
+        other.inspect_overlay.is_none(),
+        "non-hovered tile should not have an inspect overlay"
+    );
     let target = frame
         .tiles
         .iter()
         .find(|tile| tile.tile_id == target_tile)
         .unwrap();
     assert!(target.show_status);
+    let overlay = target
+        .inspect_overlay
+        .expect("hovered tile should carry an inspect overlay");
+    assert_eq!(overlay.rect, target_node.rect);
+    assert!(overlay.rect.width > 0.0);
+    assert!(overlay.rect.height > 0.0);
     let status = target
         .frame
         .status_cells
@@ -6137,6 +6186,67 @@ fn inspect_source_opens_as_root_right_tile() {
         Some(&second_path)
     );
     assert_eq!(editor.active_buffer().cursor, (1, 2));
+}
+
+#[test]
+fn inspect_source_prefers_module_path_over_transient_source_buffer() {
+    use std::collections::HashMap;
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*scripts*", "Scripts > fixtures");
+    let scripts_buffer_id = editor.active_buffer().id;
+
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-inspect-script-picker-source-{}.lisp",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        "(def script-ui ()\n  (number-picker :debug-name \"script-delay\"))\n",
+    )
+    .unwrap();
+
+    let mut props = HashMap::new();
+    props.insert(
+        crate::vm::SOURCE_BUFFER_ID_PROP.to_string(),
+        Value::Number(scripts_buffer_id as f64),
+    );
+    props.insert(
+        crate::vm::SOURCE_MODULE_PATH_PROP.to_string(),
+        Value::String(path.display().to_string()),
+    );
+    props.insert(
+        "debug-name".to_string(),
+        Value::String("script-delay".to_string()),
+    );
+    let node = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "number-picker".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props,
+        children: Vec::new(),
+        focusable: false,
+    };
+
+    assert!(editor.open_source_for_inspected_node(&node).unwrap());
+    assert_eq!(
+        editor.active_buffer().path.as_ref(),
+        Some(&path),
+        "inspect should open the loaded script file, not the script picker buffer"
+    );
+    assert_eq!(editor.active_buffer().cursor, (1, 2));
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -6479,6 +6589,98 @@ fn clicking_folder_tab_switches_buffer_without_dispatching_underlying_widget() {
         editor.runtime.eval_str("tab-clicked").unwrap().unwrap(),
         Value::Bool(false),
         "tab clicks must not dispatch to buffer widgets underneath"
+    );
+}
+
+#[test]
+fn clicking_folder_tab_close_invokes_callback_without_selecting_tab() {
+    let mut editor = editor_with_tabbed_buffers();
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def closed-buffer (state ""))
+            (def closed-index (state -1))
+            (set-layout
+              (list :buf "*sequencer*"
+                :tabs (list
+                  (list "Sequencer" "*sequencer*")
+                  (list "Matrix" "*matrix*"
+                    :on-close (lambda (buffer index)
+                      (do
+                        (set! closed-buffer buffer)
+                        (set! closed-index index)))))
+                :hide-status true
+                :border-radius 12
+                :border-width 4))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 12);
+
+    let sequencer_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*sequencer*")
+        .unwrap();
+    let tile_id = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(sequencer_idx)
+        .unwrap()
+        .id;
+    let leaf = editor.tile_root.find_leaf(tile_id).unwrap();
+    let close_rect = crate::tile::tile_tab_layouts_with_hover(
+        editor.tile_rect(tile_id).unwrap(),
+        &leaf.tabs,
+        leaf.selected_tab,
+        Some(1),
+    )
+    .into_iter()
+    .find(|tab| tab.index == 1)
+    .and_then(|tab| tab.close_rect)
+    .expect("matrix tab close rect");
+    let precise_col = close_rect.col + close_rect.width * 0.5;
+    let precise_row = close_rect.row + close_rect.height * 0.5;
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Moved,
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);
+    let hovered_tab = frame.tiles[0]
+        .tabs
+        .iter()
+        .find(|tab| tab.index == 1)
+        .expect("matrix tab in frame");
+    assert!(hovered_tab.close_visible);
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+
+    assert_eq!(editor.active_buffer().name, "*sequencer*");
+    assert_eq!(editor.active_leaf().selected_tab, Some(0));
+    assert_eq!(
+        editor.runtime.eval_str("closed-buffer").unwrap().unwrap(),
+        Value::String("*matrix*".to_string())
+    );
+    assert_eq!(
+        editor.runtime.eval_str("closed-index").unwrap().unwrap(),
+        Value::Number(1.0)
     );
 }
 

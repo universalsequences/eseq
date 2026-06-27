@@ -105,6 +105,8 @@ pub struct Theme {
     pub dropdown_hover_bg: Color,
     pub dropdown_check: Color,
     pub dropdown_scrollbar: Color,
+    pub inspect_overlay_fill: Color,
+    pub inspect_overlay_border: Color,
     pub widget_focus_bg: Color,
     pub widget_label_fg: Color,
     pub widget_slider_filled: Color,
@@ -574,6 +576,16 @@ theme_slots!(
         dropdown_scrollbar,
         DROPDOWN_SCROLLBAR,
         Color::rgba(1.0, 1.0, 1.0, 0.25)
+    ),
+    (
+        inspect_overlay_fill,
+        INSPECT_OVERLAY_FILL,
+        Color::rgba(0.18, 0.55, 1.0, 0.18)
+    ),
+    (
+        inspect_overlay_border,
+        INSPECT_OVERLAY_BORDER,
+        Color::rgba(0.35, 0.75, 1.0, 0.95)
     ),
     (
         widget_focus_bg,

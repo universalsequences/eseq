@@ -84,6 +84,7 @@
 (def g16c-node-count 16)
 (def script-buffer-name "*16x16-cycle*")
 (def script-tab-label "16x16 cyc")
+(def script-sequencer-name g16c-name)
 
 ;; Dropdown option lists. Order is the index space bind-graph maps into.
 
@@ -423,4 +424,4 @@
               :value (g16c-viz-matrix viz :dampening-matrix (g16c-zero-matrix)))))))))
 
 (effect-buffer "*16x16-cycle*" (g16c-panel SEQ.current-pattern SEQ.graph-visualizations))
-(seq-register-step-sequencer-tab script-tab-label script-buffer-name)
+(seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
