@@ -73,6 +73,7 @@ extern "C" {
     pub fn engine_enable_rt_logging(enable: c_int);
     pub fn engine_enable_graph_logging(enable: c_int);
     pub fn engine_enable_rt_time_constraint(enable: c_int);
+    pub fn debug_dump_graph(lg: *mut LiveGraph);
 
     // Graph lifecycle
     pub fn create_live_graph(

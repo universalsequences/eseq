@@ -10,6 +10,8 @@ use crate::reverb;
 use crate::sequencer::{BusId, KeyboardTrigger, SequencerState};
 use crate::ui::{AudioBuses, BusGateRuntimeState, BusNodeIds};
 
+const INITIAL_GRAPH_CAPACITY: i32 = 256;
+
 pub struct Engine {
     pub state: Arc<SequencerState>,
     pub lg_ptr: LiveGraphPtr,
@@ -139,7 +141,12 @@ fn init_engine_parts(
 
     let label = CString::new("sequencer").unwrap();
     let lg = unsafe {
-        audiograph::create_live_graph(64, block_size as i32, label.as_ptr(), channels as i32)
+        audiograph::create_live_graph(
+            INITIAL_GRAPH_CAPACITY,
+            block_size as i32,
+            label.as_ptr(),
+            channels as i32,
+        )
     };
     if lg.is_null() {
         return Err("Failed to create live graph".into());

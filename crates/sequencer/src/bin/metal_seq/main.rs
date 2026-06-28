@@ -16,6 +16,7 @@ mod editor_setup;
 mod host_commands;
 mod input;
 mod lisp_hot_reload;
+mod live_audio_analyzer;
 mod natives;
 mod piano_roll;
 mod profile;
@@ -32,6 +33,7 @@ use editor_setup::*;
 use host_commands::*;
 use input::*;
 use lisp_hot_reload::*;
+use live_audio_analyzer::*;
 use natives::*;
 use piano_roll::*;
 use profile::*;
@@ -63,8 +65,9 @@ use sequencer::agent::actions::{
 use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
-    CustomInstrumentRunMode, KeyboardTrigger, MidiFxPosition, PatternId, SequencerState, StepParam,
-    SwingResolution, Timebase, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
+    CustomInstrumentRunMode, KeyboardTrigger, MAX_STEPS, MidiFxPosition, PatternId,
+    SYNC_RESOLUTIONS, SequencerState, StepParam, SwingResolution, Timebase, TrackOutput,
+    TrackSendSnapshot,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
@@ -2984,13 +2987,13 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
+        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP, Runtime, StepParam, Value,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
-        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -4562,6 +4565,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut cached_modulator_phases, mut cached_modulator_levels) =
         read_modulator_display_values(app.graph.lg, &app);
     let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
+    let mut live_audio_analyzer = LiveAudioAnalyzerManager::new(app.graph.lg);
     let mut last_neural_visualization_poll_at = Instant::now() - NEURAL_VISUALIZATION_POLL_INTERVAL;
     let mut last_cpu_ui_poll_at = Instant::now() - CPU_UI_POLL_INTERVAL;
     let mut last_voice_count_log_at = Instant::now() - VOICE_COUNT_LOG_INTERVAL;
@@ -4658,6 +4662,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         editor.update_tile_rects(cols as u16, rows as u16);
         editor.sync_reactive_bindings_for_visible_layouts();
+        if live_audio_analyzer.sync_visible(&editor, &app) {
+            editor.mark_needs_redraw();
+        }
         if log_voice_counts && last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL {
             log_active_voice_counts(&state, &track_names);
             last_voice_count_log_at = Instant::now();
@@ -13001,6 +13008,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut project_load_still_pending = false;
         if app.has_pending_project_load() {
+            if live_audio_analyzer.suspend_for_project_load() {
+                editor.mark_needs_redraw();
+            }
             let was_pending = true;
             match app.advance_pending_project_load() {
                 Ok(()) => {

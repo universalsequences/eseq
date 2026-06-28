@@ -372,7 +372,7 @@
         (v-stack :gap 0.5
           ;; ── sequencer-level config (on top) ──
           (box 
-            :width 61
+            :width 81.5
             :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
             
             (h-stack
@@ -443,11 +443,30 @@
                 :z-min 0
                 :z-max 16
                 :phase-beats 16
+                :auto-rotate true
                 :window-beats 16
                 :brightness :velocity
                 :background (rgba 0.1 0.1 0.1 0.7)
                 :width 20
                 :height 8)              
+	(spectrogram
+                  :key "graph-8c-master-spectrogram"
+                  :source :master
+                  :mode :waterfall
+                  :freq-scale :log
+                  :fft-size 2048
+                  :time-slices 180
+                  :min-db -64
+                  :max-db 0
+                  :smoothing 0.68
+                  :width 20
+                  :height 8.0
+                  :background-color (rgba 0.13 0.13 0.13 1.00)
+                  :min-color (rgba 0.05 0.05 0.11 1)
+                  :mid-color (rgba 0.16 0.66 0.88 1)
+                  :max-color (rgba 1.0 0.72 0.28 1)
+		  )
+
               ))
           
           (h-stack

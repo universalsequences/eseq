@@ -46,6 +46,7 @@ mod accumulator;
 pub mod agent;
 pub mod analysis;
 pub mod audio;
+pub mod audio_tap;
 pub mod audiograph;
 #[allow(dead_code)]
 mod compressor;

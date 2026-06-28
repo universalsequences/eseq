@@ -48,6 +48,7 @@ mod inner {
     };
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
+    use crate::live_audio;
     use crate::theme;
     use crate::vm::Value;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
@@ -1144,6 +1145,190 @@ fragment float4 waveform_frag(
 }
 "#;
 
+    const LIVE_SPECTROGRAM_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct LiveSpectrogramInstance {
+    float2 ndc_min;
+    float2 ndc_max;
+    float widget_px_w;
+    float widget_px_h;
+    uint bins;
+    uint time_slices;
+    uint write_head;
+    uint mode;
+    uint freq_scale;
+    float sample_rate;
+    float4 min_color;
+    float4 mid_color;
+    float4 max_color;
+    float4 eq_line_color;
+    float4 eq_fill_color;
+    float4 background_color;
+};
+
+struct LiveSpectrogramVaryings {
+    float4 position [[position]];
+    float2 uv;
+    float widget_px_w [[flat]];
+    float widget_px_h [[flat]];
+    uint bins [[flat]];
+    uint time_slices [[flat]];
+    uint write_head [[flat]];
+    uint mode [[flat]];
+    uint freq_scale [[flat]];
+    float sample_rate [[flat]];
+    float4 min_color [[flat]];
+    float4 mid_color [[flat]];
+    float4 max_color [[flat]];
+    float4 eq_line_color [[flat]];
+    float4 eq_fill_color [[flat]];
+    float4 background_color [[flat]];
+};
+
+vertex LiveSpectrogramVaryings live_spectrogram_vert(
+    uint vid [[vertex_id]],
+    device const LiveSpectrogramInstance* instances [[buffer(0)]])
+{
+    float2 corners[6] = {
+        float2(0, 0), float2(0, 1), float2(1, 0),
+        float2(1, 0), float2(0, 1), float2(1, 1)
+    };
+    float2 corner = corners[vid];
+    LiveSpectrogramInstance inst = instances[0];
+    float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
+
+    LiveSpectrogramVaryings out;
+    out.position = float4(ndc, 0.0, 1.0);
+    out.uv = corner;
+    out.widget_px_w = inst.widget_px_w;
+    out.widget_px_h = inst.widget_px_h;
+    out.bins = inst.bins;
+    out.time_slices = inst.time_slices;
+    out.write_head = inst.write_head;
+    out.mode = inst.mode;
+    out.freq_scale = inst.freq_scale;
+    out.sample_rate = inst.sample_rate;
+    out.min_color = inst.min_color;
+    out.mid_color = inst.mid_color;
+    out.max_color = inst.max_color;
+    out.eq_line_color = inst.eq_line_color;
+    out.eq_fill_color = inst.eq_fill_color;
+    out.background_color = inst.background_color;
+    return out;
+}
+
+static inline float spectrogram_bin_for_uv(float freq_t, uint freq_scale, uint bins, float sample_rate) {
+    float max_bin = float(max(bins, 1u) - 1u);
+    if (freq_scale == 1u || sample_rate <= 1.0 || bins < 2u) {
+        return clamp(freq_t, 0.0, 1.0) * max_bin;
+    }
+    float nyquist = max(sample_rate * 0.5, 160.0);
+    float max_hz = min(16000.0, nyquist);
+    float min_hz = min(80.0, max_hz * 0.5);
+    float hz = min_hz * exp2(log2(max_hz / min_hz) * clamp(freq_t, 0.0, 1.0));
+    return clamp(hz / nyquist, 0.0, 1.0) * max_bin;
+}
+
+static inline float sample_bin(device const float* data, uint bins, uint row, float bin) {
+    uint lo = uint(floor(clamp(bin, 0.0, float(bins - 1u))));
+    uint hi = min(lo + 1u, bins - 1u);
+    float t = fract(bin);
+    return mix(data[row * bins + lo], data[row * bins + hi], t);
+}
+
+static inline float sample_bin_range(device const float* data, uint bins, uint row, float bin, float bin_width) {
+    float max_bin = float(bins - 1u);
+    float half_width = max(bin_width * 0.5, 0.5);
+    int lo = int(floor(clamp(bin - half_width, 0.0, max_bin)));
+    int hi = int(ceil(clamp(bin + half_width, 0.0, max_bin)));
+    int span = max(hi - lo + 1, 1);
+
+    if (span <= 1) {
+        return sample_bin(data, bins, row, bin);
+    }
+
+    float peak = 0.0;
+    float sum = 0.0;
+    int sample_count = 0;
+    if (span <= 64) {
+        for (int idx = lo; idx <= hi; idx++) {
+            float v = data[row * bins + uint(idx)];
+            peak = max(peak, v);
+            sum += v;
+            sample_count += 1;
+        }
+    } else {
+        for (int i = 0; i < 64; i++) {
+            int idx = lo + int(round(float(i) * float(span - 1) / 63.0));
+            float v = data[row * bins + uint(idx)];
+            peak = max(peak, v);
+            sum += v;
+            sample_count += 1;
+        }
+    }
+    float average = sum / float(max(sample_count, 1));
+    return max(peak, average);
+}
+
+static inline float spectrogram_display_value(float value) {
+    float v = clamp(value, 0.0, 1.0);
+    const float noise_floor = 0.025;
+    if (v <= noise_floor) {
+        return 0.0;
+    }
+    return pow((v - noise_floor) / (1.0 - noise_floor), 0.68);
+}
+
+static inline float3 heat_color(float value, float3 low, float3 mid, float3 high) {
+    float v = clamp(value, 0.0, 1.0);
+    float3 lower = mix(low, mid, smoothstep(0.0, 0.55, v));
+    float3 upper = mix(mid, high, smoothstep(0.45, 1.0, v));
+    return v < 0.55 ? lower : upper;
+}
+
+fragment float4 live_spectrogram_frag(
+    LiveSpectrogramVaryings in [[stage_in]],
+    device const float* waterfall [[buffer(1)]],
+    device const float* smoothed [[buffer(2)]])
+{
+    if (in.bins < 2u || in.time_slices < 1u) {
+        discard_fragment();
+    }
+
+    float2 uv = clamp(in.uv, float2(0.0), float2(1.0));
+    float bin = spectrogram_bin_for_uv(uv.y, in.freq_scale, in.bins, in.sample_rate);
+    float border = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    float border_mask = 1.0 - smoothstep(0.0, max(fwidth(border) * 1.5, 0.002), border);
+
+    if (in.mode == 1u) {
+        float eq_bin = spectrogram_bin_for_uv(uv.x, in.freq_scale, in.bins, in.sample_rate);
+        float value = spectrogram_display_value(sample_bin_range(smoothed, in.bins, 0u, eq_bin, max(fwidth(eq_bin), 1.0)));
+        float y = clamp(value, 0.0, 1.0);
+        float fill = smoothstep(0.0, 0.006, y - uv.y);
+        float line_width = max(1.35 / max(in.widget_px_h, 1.0), 0.003);
+        float line = 1.0 - smoothstep(line_width, line_width * 2.2, abs(uv.y - y));
+        float3 rgb = in.background_color.rgb;
+        rgb = mix(rgb, in.eq_fill_color.rgb, fill * in.eq_fill_color.a);
+        rgb = mix(rgb, in.eq_line_color.rgb, line * in.eq_line_color.a);
+        rgb = mix(rgb, in.eq_line_color.rgb, border_mask * 0.45);
+        float alpha = max(max(fill * in.eq_fill_color.a, line * in.eq_line_color.a), border_mask * 0.35);
+        return float4(rgb, alpha);
+    }
+
+    float x = clamp(uv.x, 0.0, 0.999999);
+    uint time_offset = uint(floor(x * float(in.time_slices)));
+    uint row = (in.write_head + time_offset) % in.time_slices;
+    float value = spectrogram_display_value(sample_bin_range(waterfall, in.bins, row, bin, max(fwidth(bin), 1.0)));
+    float3 heat = heat_color(value, in.min_color.rgb, in.mid_color.rgb, in.max_color.rgb);
+    float3 rgb = mix(in.background_color.rgb, heat, smoothstep(0.02, 0.95, value));
+    rgb = mix(rgb, in.max_color.rgb, border_mask * 0.28);
+    float alpha = max(smoothstep(0.005, 0.12, value), border_mask * 0.30);
+    return float4(rgb, alpha);
+}
+"#;
+
     // ── Vertex type ───────────────────────────────────────────────────────────
 
     /// One vertex of a cell quad.  Two triangles (6 vertices) form each cell.
@@ -1557,6 +1742,27 @@ fragment float4 waveform_frag(
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    struct LiveSpectrogramInstance {
+        ndc_min: [f32; 2],
+        ndc_max: [f32; 2],
+        widget_px_w: f32,
+        widget_px_h: f32,
+        bins: u32,
+        time_slices: u32,
+        write_head: u32,
+        mode: u32,
+        freq_scale: u32,
+        sample_rate: f32,
+        min_color: [f32; 4],
+        mid_color: [f32; 4],
+        max_color: [f32; 4],
+        eq_line_color: [f32; 4],
+        eq_fill_color: [f32; 4],
+        background_color: [f32; 4],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     struct PatchCableInstance {
         ndc_min: [f32; 2],
         ndc_max: [f32; 2],
@@ -1582,6 +1788,16 @@ fragment float4 waveform_frag(
     struct WaveformGpuResource {
         bucket_count: u32,
         buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    }
+
+    struct LiveSpectrogramGpuResource {
+        revision: u64,
+        bins: u32,
+        time_slices: u32,
+        write_head: u32,
+        sample_rate: f32,
+        waterfall_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+        smoothed_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     }
 
     /// Layout + colour context threaded into `rasterize_char`.
@@ -1883,6 +2099,7 @@ fragment float4 waveform_frag(
             }
             widget_render::MetalPrimitive::PatchCable(_)
             | widget_render::MetalPrimitive::Waveform(_)
+            | widget_render::MetalPrimitive::LiveSpectrogram(_)
             | widget_render::MetalPrimitive::Image(_)
             | widget_render::MetalPrimitive::PushClipRect(_)
             | widget_render::MetalPrimitive::PopClipRect => {
@@ -1939,10 +2156,12 @@ fragment float4 waveform_frag(
         sdf_widget_pipeline_registry_generation: u64,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         wavetable_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        live_spectrogram_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         image_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         patch_cable_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
         wavetable_buffers: HashMap<String, Retained<ProtocolObject<dyn MTLBuffer>>>,
+        live_spectrogram_buffers: HashMap<String, LiveSpectrogramGpuResource>,
         image_textures: HashMap<PathBuf, ImageTextureResource>,
         image_decode_tx: mpsc::Sender<ImageDecodeJob>,
         image_decode_rx: mpsc::Receiver<ImageDecodeResult>,
@@ -2063,10 +2282,12 @@ fragment float4 waveform_frag(
                 sdf_widget_pipeline_registry_generation: 0,
                 waveform_pipeline: None,
                 wavetable_pipeline: None,
+                live_spectrogram_pipeline: None,
                 image_pipeline: None,
                 patch_cable_pipeline: None,
                 waveform_buffers: HashMap::new(),
                 wavetable_buffers: HashMap::new(),
+                live_spectrogram_buffers: HashMap::new(),
                 image_textures: HashMap::new(),
                 image_decode_tx,
                 image_decode_rx,
@@ -2943,6 +3164,19 @@ fragment float4 waveform_frag(
                     );
                 }
 
+                if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone() {
+                    let spectrograms = collect_live_spectrogram_primitives(seg_prims);
+                    self.draw_live_spectrogram_primitives(
+                        enc,
+                        &live_spectrogram_pipeline,
+                        &spectrograms,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                }
+
                 for (widget_type, instances) in &fg_runs {
                     let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                         continue;
@@ -3207,6 +3441,22 @@ fragment float4 waveform_frag(
                             enc,
                             &wavetable_pipeline,
                             &wavetables,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
+
+                    if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone()
+                    {
+                        let spectrograms = collect_live_spectrogram_primitives(
+                            &offset_prims[segment_range.clone()],
+                        );
+                        self.draw_live_spectrogram_primitives(
+                            enc,
+                            &live_spectrogram_pipeline,
+                            &spectrograms,
                             cell_w,
                             cell_h,
                             vp_w,
@@ -3518,6 +3768,19 @@ fragment float4 waveform_frag(
                     &enc,
                     &wavetable_pipeline,
                     &wavetable_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone() {
+                let spectrogram_primitives = collect_live_spectrogram_primitives(&primitive_scene);
+                self.draw_live_spectrogram_primitives(
+                    &enc,
+                    &live_spectrogram_pipeline,
+                    &spectrogram_primitives,
                     cell_w,
                     cell_h,
                     vp_w,
@@ -4172,6 +4435,139 @@ fragment float4 waveform_frag(
                         0,
                     );
                     enc.setFragmentBuffer_offset_atIndex(Some(&bank_buffer), 0, 1);
+                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+                }
+                self.stats.note_draw_command();
+            }
+        }
+
+        fn ensure_live_spectrogram_buffers(
+            &mut self,
+            data_key: &str,
+        ) -> Option<&LiveSpectrogramGpuResource> {
+            let frame = live_audio::spectrogram_frame(data_key)?;
+            let needs_upload = self
+                .live_spectrogram_buffers
+                .get(data_key)
+                .map(|resource| {
+                    resource.revision != frame.revision
+                        || resource.bins != frame.bins
+                        || resource.time_slices != frame.time_slices
+                })
+                .unwrap_or(true);
+            if needs_upload {
+                let waterfall_buffer = unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        NonNull::new(frame.waterfall.as_ptr() as *mut _)?,
+                        std::mem::size_of_val(frame.waterfall.as_slice()),
+                        MTLResourceOptions(0),
+                    )
+                }?;
+                let smoothed_buffer = unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        NonNull::new(frame.smoothed.as_ptr() as *mut _)?,
+                        std::mem::size_of_val(frame.smoothed.as_slice()),
+                        MTLResourceOptions(0),
+                    )
+                }?;
+                self.live_spectrogram_buffers.insert(
+                    data_key.to_string(),
+                    LiveSpectrogramGpuResource {
+                        revision: frame.revision,
+                        bins: frame.bins,
+                        time_slices: frame.time_slices,
+                        write_head: frame.write_head,
+                        sample_rate: frame.sample_rate,
+                        waterfall_buffer,
+                        smoothed_buffer,
+                    },
+                );
+            } else if let Some(resource) = self.live_spectrogram_buffers.get_mut(data_key) {
+                resource.write_head = frame.write_head;
+                resource.sample_rate = frame.sample_rate;
+            }
+            self.live_spectrogram_buffers.get(data_key)
+        }
+
+        fn draw_live_spectrogram_primitives(
+            &mut self,
+            enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+            pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+            primitives: &[widget_render::MetalLiveSpectrogramPrimitive],
+            cell_w: f32,
+            cell_h: f32,
+            vp_w: f32,
+            vp_h: f32,
+        ) {
+            for primitive in primitives {
+                let Some((
+                    bins,
+                    time_slices,
+                    write_head,
+                    sample_rate,
+                    waterfall_buffer,
+                    smoothed_buffer,
+                )) = self
+                    .ensure_live_spectrogram_buffers(&primitive.data_key)
+                    .map(|resource| {
+                        (
+                            resource.bins,
+                            resource.time_slices,
+                            resource.write_head,
+                            resource.sample_rate,
+                            resource.waterfall_buffer.clone(),
+                            resource.smoothed_buffer.clone(),
+                        )
+                    })
+                else {
+                    continue;
+                };
+                if bins < 2 || time_slices == 0 {
+                    continue;
+                }
+
+                let ndc_min = [
+                    (primitive.rect.col * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - ((primitive.rect.row + primitive.rect.height) * cell_h / vp_h) * 2.0,
+                ];
+                let ndc_max = [
+                    ((primitive.rect.col + primitive.rect.width) * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - (primitive.rect.row * cell_h / vp_h) * 2.0,
+                ];
+                let instance = LiveSpectrogramInstance {
+                    ndc_min,
+                    ndc_max,
+                    widget_px_w: primitive.rect.width * cell_w,
+                    widget_px_h: primitive.rect.height * cell_h,
+                    bins,
+                    time_slices,
+                    write_head,
+                    mode: primitive.mode,
+                    freq_scale: primitive.freq_scale,
+                    sample_rate,
+                    min_color: primitive.min_color.to_rgba(),
+                    mid_color: primitive.mid_color.to_rgba(),
+                    max_color: primitive.max_color.to_rgba(),
+                    eq_line_color: primitive.eq_line_color.to_rgba(),
+                    eq_fill_color: primitive.eq_fill_color.to_rgba(),
+                    background_color: primitive.background_color.to_rgba(),
+                };
+                let Some(instance_upload) =
+                    self.upload_arena
+                        .upload_one(&self.device, &instance, &mut self.stats)
+                else {
+                    continue;
+                };
+
+                enc.setRenderPipelineState(pipeline);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(
+                        Some(&instance_upload.buffer),
+                        instance_upload.offset,
+                        0,
+                    );
+                    enc.setFragmentBuffer_offset_atIndex(Some(&waterfall_buffer), 0, 1);
+                    enc.setFragmentBuffer_offset_atIndex(Some(&smoothed_buffer), 0, 2);
                     enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
                 }
                 self.stats.note_draw_command();
@@ -5755,6 +6151,44 @@ fragment float4 waveform_frag(
                     .map_err(|_| BackendError::MetalError)?,
             );
 
+            let live_spectrogram_src = NSString::from_str(LIVE_SPECTROGRAM_SHADER_SRC);
+            let live_spectrogram_lib = self
+                .device
+                .newLibraryWithSource_options_error(&live_spectrogram_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+            let live_spectrogram_vert = live_spectrogram_lib
+                .newFunctionWithName(&NSString::from_str("live_spectrogram_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let live_spectrogram_frag = live_spectrogram_lib
+                .newFunctionWithName(&NSString::from_str("live_spectrogram_frag"))
+                .ok_or(BackendError::MetalError)?;
+            let live_spectrogram_desc = MTLRenderPipelineDescriptor::new();
+            live_spectrogram_desc.setVertexFunction(Some(&live_spectrogram_vert));
+            live_spectrogram_desc.setFragmentFunction(Some(&live_spectrogram_frag));
+            let live_spectrogram_attach = unsafe {
+                live_spectrogram_desc
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
+            live_spectrogram_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            live_spectrogram_attach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                live_spectrogram_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                live_spectrogram_attach
+                    .setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                live_spectrogram_attach.setRgbBlendOperation(MTLBlendOperation::Add);
+                live_spectrogram_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                live_spectrogram_attach
+                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                live_spectrogram_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+            self.live_spectrogram_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&live_spectrogram_desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
             Ok(())
         }
 
@@ -6210,6 +6644,19 @@ fragment float4 waveform_frag(
                     &enc,
                     &wavetable_pipeline,
                     &wavetable_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone() {
+                let spectrogram_primitives = collect_live_spectrogram_primitives(&primitive_scene);
+                self.draw_live_spectrogram_primitives(
+                    &enc,
+                    &live_spectrogram_pipeline,
+                    &spectrogram_primitives,
                     cell_w,
                     cell_h,
                     vp_w,
@@ -7210,6 +7657,7 @@ fragment float4 waveform_frag(
                 widget_render::MetalPrimitive::Circle(_) => {}
                 widget_render::MetalPrimitive::Waveform(_) => {}
                 widget_render::MetalPrimitive::Wavetable(_) => {}
+                widget_render::MetalPrimitive::LiveSpectrogram(_) => {}
                 widget_render::MetalPrimitive::Image(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
                 widget_render::MetalPrimitive::PushClipRect(_)
@@ -7305,6 +7753,22 @@ fragment float4 waveform_frag(
             .filter_map(
                 |primitive| match widget_render::innermost_primitive(primitive) {
                     widget_render::MetalPrimitive::Wavetable(wavetable) => Some(wavetable.clone()),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    fn collect_live_spectrogram_primitives(
+        primitives: &[widget_render::MetalPrimitive],
+    ) -> Vec<widget_render::MetalLiveSpectrogramPrimitive> {
+        primitives
+            .iter()
+            .filter_map(
+                |primitive| match widget_render::innermost_primitive(primitive) {
+                    widget_render::MetalPrimitive::LiveSpectrogram(spectrogram) => {
+                        Some(spectrogram.clone())
+                    }
                     _ => None,
                 },
             )
@@ -8966,6 +9430,12 @@ fragment float4 waveform_frag(
                 }
                 widget_render::MetalPrimitive::Wavetable(w)
             }
+            widget_render::MetalPrimitive::LiveSpectrogram(mut s) => {
+                if reaches_right(s.rect.col + s.rect.width) {
+                    s.rect.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::LiveSpectrogram(s)
+            }
             widget_render::MetalPrimitive::Image(mut i) => {
                 if reaches_right(i.rect.col + i.rect.width) {
                     i.rect.width += extra_cols;
@@ -9082,6 +9552,11 @@ fragment float4 waveform_frag(
                 w.rect.col += col_off;
                 w.rect.row += row_off;
                 widget_render::MetalPrimitive::Wavetable(w)
+            }
+            widget_render::MetalPrimitive::LiveSpectrogram(mut s) => {
+                s.rect.col += col_off;
+                s.rect.row += row_off;
+                widget_render::MetalPrimitive::LiveSpectrogram(s)
             }
             widget_render::MetalPrimitive::Image(mut i) => {
                 i.rect.col += col_off;
@@ -9258,8 +9733,10 @@ fragment float4 waveform_frag(
     mod render_dispatch_tests {
         use super::*;
         use crate::layout::LayoutNode;
+        use crate::live_audio::{SpectrogramFrame, clear_spectrogram_frames};
         use crate::vm::Value;
         use crate::widget_render::{MetalPrimitive, WidgetViewport};
+        use std::sync::Arc;
 
         fn prop_string(value: &str) -> Value {
             Value::String(value.to_string())
@@ -9291,6 +9768,267 @@ fragment float4 waveform_frag(
                 children: Vec::new(),
                 focusable: false,
             }
+        }
+
+        fn unwrap_backend<T>(result: Result<T, BackendError>, context: &str) -> T {
+            match result {
+                Ok(value) => value,
+                Err(_) => panic!("{context}"),
+            }
+        }
+
+        fn unwrap_option<T>(option: Option<T>, context: &str) -> T {
+            match option {
+                Some(value) => value,
+                None => panic!("{context}"),
+            }
+        }
+
+        fn publish_synthetic_spectrogram_frame(data_key: &str) {
+            let bins = 64usize;
+            let time_slices = 32usize;
+            let mut waterfall = vec![0.0f32; bins * time_slices];
+            for time in 0..time_slices {
+                for bin in 0..bins {
+                    let ridge =
+                        ((bin as f32 - (time as f32 * 1.7 + 8.0)).abs() / 8.0).clamp(0.0, 1.0);
+                    let floor = bin as f32 / bins as f32 * 0.22;
+                    waterfall[time * bins + bin] = (1.0 - ridge).max(floor);
+                }
+            }
+            let smoothed = (0..bins)
+                .map(|bin| {
+                    let x = bin as f32 / (bins - 1) as f32;
+                    (0.16 + (x * std::f32::consts::PI * 3.0).sin().abs() * 0.74).clamp(0.0, 1.0)
+                })
+                .collect::<Vec<_>>();
+            crate::live_audio::publish_spectrogram_frame(
+                data_key,
+                SpectrogramFrame {
+                    revision: 1,
+                    bins: bins as u32,
+                    time_slices: time_slices as u32,
+                    write_head: 9,
+                    sample_rate: 48_000.0,
+                    waterfall: Arc::new(waterfall),
+                    smoothed: Arc::new(smoothed),
+                },
+            );
+        }
+
+        fn publish_high_frequency_spectrogram_frame(data_key: &str) {
+            let bins = 1024usize;
+            let time_slices = 32usize;
+            let ridge_bin = 512usize;
+            let mut waterfall = vec![0.0f32; bins * time_slices];
+            for time in 0..time_slices {
+                waterfall[time * bins + ridge_bin] = 0.45;
+            }
+            let mut smoothed = vec![0.0f32; bins];
+            smoothed[ridge_bin] = 0.45;
+            crate::live_audio::publish_spectrogram_frame(
+                data_key,
+                SpectrogramFrame {
+                    revision: 1,
+                    bins: bins as u32,
+                    time_slices: time_slices as u32,
+                    write_head: 0,
+                    sample_rate: 48_000.0,
+                    waterfall: Arc::new(waterfall),
+                    smoothed: Arc::new(smoothed),
+                },
+            );
+        }
+
+        fn compile_live_spectrogram_pipeline(
+            backend: &MetalBackend,
+        ) -> Retained<ProtocolObject<dyn MTLRenderPipelineState>> {
+            let lib = match backend.device.newLibraryWithSource_options_error(
+                &NSString::from_str(LIVE_SPECTROGRAM_SHADER_SRC),
+                None,
+            ) {
+                Ok(lib) => lib,
+                Err(_) => panic!("compile live spectrogram shader"),
+            };
+            let vert = unwrap_option(
+                lib.newFunctionWithName(&NSString::from_str("live_spectrogram_vert")),
+                "live spectrogram vertex function",
+            );
+            let frag = unwrap_option(
+                lib.newFunctionWithName(&NSString::from_str("live_spectrogram_frag")),
+                "live spectrogram fragment function",
+            );
+            let desc = MTLRenderPipelineDescriptor::new();
+            desc.setVertexFunction(Some(&vert));
+            desc.setFragmentFunction(Some(&frag));
+            let attach = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+            attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            attach.setBlendingEnabled(true);
+            attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+            attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+            attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            match backend
+                .device
+                .newRenderPipelineStateWithDescriptor_error(&desc)
+            {
+                Ok(pipeline) => pipeline,
+                Err(_) => panic!("create live spectrogram pipeline"),
+            }
+        }
+
+        fn render_live_spectrogram_pixels_with_frame(
+            mode: u32,
+            publish_frame: fn(&str),
+        ) -> Vec<u8> {
+            let width = 360usize;
+            let height = 220usize;
+            let mut backend = unwrap_backend(
+                MetalBackend::new_capture(width as u32, height as u32),
+                "capture backend",
+            );
+            let pipeline = compile_live_spectrogram_pipeline(&backend);
+            let props = if mode == 1 {
+                HashMap::from([("mode".to_string(), Value::Keyword("eq".to_string()))])
+            } else {
+                HashMap::new()
+            };
+            let request = widget_render::spectrogram::request_from_props(&props);
+            publish_frame(&request.data_key);
+
+            let desc = MTLTextureDescriptor::new();
+            desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            unsafe {
+                desc.setWidth(width);
+                desc.setHeight(height);
+            }
+            desc.setStorageMode(MTLStorageMode::Shared);
+            desc.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+            let texture = unwrap_option(
+                backend.device.newTextureWithDescriptor(&desc),
+                "offscreen live spectrogram texture",
+            );
+
+            let render_desc = MTLRenderPassDescriptor::new();
+            let attach = unsafe { render_desc.colorAttachments().objectAtIndexedSubscript(0) };
+            attach.setTexture(Some(&texture));
+            attach.setLoadAction(MTLLoadAction::Clear);
+            attach.setClearColor(MTLClearColor {
+                red: theme::BG().r as f64,
+                green: theme::BG().g as f64,
+                blue: theme::BG().b as f64,
+                alpha: 1.0,
+            });
+            attach.setStoreAction(MTLStoreAction::Store);
+
+            let command_buffer =
+                unwrap_option(backend.command_queue.commandBuffer(), "command buffer");
+            let encoder = unwrap_option(
+                command_buffer.renderCommandEncoderWithDescriptor(&render_desc),
+                "render command encoder",
+            );
+            encoder.setScissorRect(MTLScissorRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            });
+            backend.upload_arena.begin_frame(&mut backend.stats);
+            let primitive = widget_render::MetalLiveSpectrogramPrimitive {
+                rect: Rect {
+                    col: 1.0,
+                    row: 1.0,
+                    width: 34.0,
+                    height: 9.0,
+                },
+                data_key: request.data_key,
+                mode,
+                freq_scale: 0,
+                min_color: Color::rgba(0.04, 0.04, 0.10, 1.0),
+                mid_color: Color::rgba(0.12, 0.68, 0.86, 1.0),
+                max_color: Color::rgba(1.00, 0.74, 0.30, 1.0),
+                eq_line_color: Color::rgba(0.78, 0.98, 1.0, 1.0),
+                eq_fill_color: Color::rgba(0.18, 0.78, 0.86, 0.26),
+                background_color: theme::BG(),
+            };
+            backend.draw_live_spectrogram_primitives(
+                &encoder,
+                &pipeline,
+                &[primitive],
+                8.0,
+                16.0,
+                width as f32,
+                height as f32,
+            );
+            encoder.endEncoding();
+            command_buffer.commit();
+            backend.upload_arena.finish_frame(command_buffer.clone());
+            command_buffer.waitUntilCompleted();
+
+            let bytes_per_row = width * 4;
+            let mut bgra = vec![0u8; bytes_per_row * height];
+            unsafe {
+                texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                    NonNull::new(bgra.as_mut_ptr().cast()).unwrap(),
+                    bytes_per_row,
+                    MTLRegion {
+                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                        size: MTLSize {
+                            width,
+                            height,
+                            depth: 1,
+                        },
+                    },
+                    0,
+                );
+            }
+            bgra
+        }
+
+        fn render_live_spectrogram_pixels(mode: u32) -> Vec<u8> {
+            render_live_spectrogram_pixels_with_frame(mode, publish_synthetic_spectrogram_frame)
+        }
+
+        fn assert_pixels_have_non_background_values(bgra: &[u8]) {
+            let background = &bgra[0..4];
+            let changed = bgra
+                .chunks_exact(4)
+                .filter(|pixel| {
+                    pixel[0].abs_diff(background[0]) as u32
+                        + pixel[1].abs_diff(background[1]) as u32
+                        + pixel[2].abs_diff(background[2]) as u32
+                        > 18
+                })
+                .count();
+            assert!(
+                changed > 500,
+                "expected rendered spectrogram to change pixels, changed={changed}"
+            );
+        }
+
+        fn changed_pixels_in_rect(
+            bgra: &[u8],
+            width: usize,
+            x0: usize,
+            y0: usize,
+            x1: usize,
+            y1: usize,
+        ) -> usize {
+            let background = &bgra[0..4];
+            let mut changed = 0usize;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let offset = (y * width + x) * 4;
+                    let pixel = &bgra[offset..offset + 4];
+                    let delta = pixel[0].abs_diff(background[0]) as u32
+                        + pixel[1].abs_diff(background[1]) as u32
+                        + pixel[2].abs_diff(background[2]) as u32;
+                    if delta > 18 {
+                        changed += 1;
+                    }
+                }
+            }
+            changed
         }
 
         fn rect_contains(outer: Rect, inner: Rect) -> bool {
@@ -9671,6 +10409,37 @@ fragment float4 waveform_frag(
                 base,
                 test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
             );
+        }
+
+        #[test]
+        fn live_spectrogram_waterfall_capture_is_nonblank() {
+            clear_spectrogram_frames();
+            let pixels = render_live_spectrogram_pixels(0);
+            assert_pixels_have_non_background_values(&pixels);
+            clear_spectrogram_frames();
+        }
+
+        #[test]
+        fn live_spectrogram_eq_capture_is_nonblank() {
+            clear_spectrogram_frames();
+            let pixels = render_live_spectrogram_pixels(1);
+            assert_pixels_have_non_background_values(&pixels);
+            clear_spectrogram_frames();
+        }
+
+        #[test]
+        fn live_spectrogram_waterfall_renders_narrow_high_frequency_energy() {
+            clear_spectrogram_frames();
+            let pixels = render_live_spectrogram_pixels_with_frame(
+                0,
+                publish_high_frequency_spectrogram_frame,
+            );
+            let changed = changed_pixels_in_rect(&pixels, 360, 20, 20, 270, 52);
+            assert!(
+                changed > 150,
+                "expected narrow high-frequency ridge to render in the top band, changed={changed}"
+            );
+            clear_spectrogram_frames();
         }
     }
 }

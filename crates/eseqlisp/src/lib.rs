@@ -69,6 +69,7 @@ pub mod defmacro_library;
 pub mod editor;
 pub mod host;
 pub mod hot_reload;
+pub mod live_audio;
 pub mod mode;
 pub mod reactive;
 pub mod runtime;

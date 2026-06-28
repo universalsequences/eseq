@@ -9,6 +9,10 @@
 #define DGEN_CANARY_INDEX 2
 #define DGEN_HEADER_CANARY_BITS 0x4cd35a1dU
 #define DGEN_STATE_REDZONE_SLOTS 256
+#define LARGE_PROJECT_LOAD_PARAM_BURST 12000
+
+_Static_assert(PARAM_RING_CAP >= LARGE_PROJECT_LOAD_PARAM_BURST,
+               "param ring must hold large project-load bursts");
 
 // ===================== Custom State Output Node =====================
 
@@ -242,9 +246,35 @@ void test_dgen_scalar_param_update_does_not_touch_adjacent_slots() {
   printf("=== DGen Scalar Parameter Update Slot Isolation Completed Successfully ===\n\n");
 }
 
+void test_param_ring_accepts_large_project_load_burst() {
+  printf("=== Testing Large Project-Load Parameter Burst Capacity ===\n");
+
+  LiveGraph *lg = create_live_graph(16, 64, "param_burst_capacity_test", 1);
+  assert(lg != NULL);
+
+  for (int i = 0; i < LARGE_PROJECT_LOAD_PARAM_BURST; i++) {
+    ParamMsg msg = {
+        .logical_id = 1,
+        .idx = (uint64_t)i,
+        .fvalue = (float)i,
+    };
+    assert(params_push(lg->params, msg));
+  }
+
+  uint32_t head = atomic_load_explicit(&lg->params->head, memory_order_acquire);
+  uint32_t tail = atomic_load_explicit(&lg->params->tail, memory_order_acquire);
+  assert(head - tail == LARGE_PROJECT_LOAD_PARAM_BURST);
+
+  destroy_live_graph(lg);
+  printf("✓ Accepted %d queued parameter updates without overflow\n",
+         LARGE_PROJECT_LOAD_PARAM_BURST);
+  printf("=== Large Project-Load Parameter Burst Capacity Test Completed Successfully ===\n\n");
+}
+
 int main() {
   initialize_engine(64, 48000);
   test_param_updates();
   test_dgen_scalar_param_update_does_not_touch_adjacent_slots();
+  test_param_ring_accepts_large_project_load_burst();
   return 0;
 }

@@ -41,6 +41,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "transport-clock",
     "waveform",
     "wavetable-viewer",
+    "spectrogram",
     "scroll",
     "tree",
 ];

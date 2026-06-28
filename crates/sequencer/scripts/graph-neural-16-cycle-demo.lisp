@@ -240,7 +240,7 @@
 
 ;; UI
 
-(def g16c-row-height 1.3)
+(def g16c-row-height 0.9)
 (def g16c-node-width 1.4)
 (def g16c-control-width 4.8)
 (def g16c-dropdown-width 6.8)
@@ -337,53 +337,92 @@
         :gap 0.6
         :width 42
         :height 47
-        (v-stack :gap 0.5
-          (h-stack :gap 0.6 :align :center
-            (label "16x16 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
-            (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (g16c-num "graph-16-reset-bars"
-              (bind-graph-config g16c-name :reset-bars) 0 64 1 0
-              (lambda (v) (g16c-edit-config :reset-bars v)))
-            (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (g16c-num "graph-16-max-poly"
-              (bind-graph-config g16c-name :max-poly) 0 16 1 0
-              (lambda (v) (g16c-edit-config :max-poly v))))
-          (h-stack :gap 0.6 :align :center
-            (label "timing" :width 8 :height 1.2 :font-size 9 :color :dim)
-            (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (g16c-num "graph-16-dur-factor"
-              g16c-dur-factor 0 8 0.25 2
-              (lambda (v)
-                (do
-                  (set! g16c-dur-factor v)
-                  (g16c-edit-global-param :dur-factor v))))
-            (label "swing" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
-            (g16c-num "graph-16-swing"
-              g16c-swing 50 75 1 0
-              (lambda (v)
-                (do
-                  (set! g16c-swing v)
-                  (g16c-edit-global-param :swing v)))))
-          (event-view
-            :key "graph-16c-event-view"
-            :events (if viz (get viz :event-history) (list))
-            :current-beat (if viz (get viz :current-beat) 0)
-            :renderer :isometric
-            :x :transpose
-            :x-min -24
-            :x-max 24
-            :y :node
-            :y-min 0
-            :y-max 15
-            :z :beat-phase
-            :z-min 0
-            :z-max 16
-            :phase-beats 16
-            :window-beats 16
-            :brightness :velocity
-            :cube-padding 0
-            :width 34
-            :height 16)
+        (v-stack
+          (box
+            :corner-radius 16
+            :padding 1
+            :width 82
+            :background-color :mixer-strip-bg
+            :border-color :mixer-strip-border
+            (h-stack
+              (v-stack :gap 0.5
+                (h-stack :gap 0.6 :align :center
+                  (label "16x16 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
+                  (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g16c-num "graph-16-reset-bars"
+                    (bind-graph-config g16c-name :reset-bars) 0 64 1 0
+                    (lambda (v) (g16c-edit-config :reset-bars v)))
+                  (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g16c-num "graph-16-max-poly"
+                    (bind-graph-config g16c-name :max-poly) 0 16 1 0
+                    (lambda (v) (g16c-edit-config :max-poly v))))
+                (h-stack :gap 0.6 :align :center
+                  (label "timing" :width 8 :height 1.2 :font-size 9 :color :dim)
+                  (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g16c-num "graph-16-dur-factor"
+                    g16c-dur-factor 0 8 0.25 2
+                    (lambda (v)
+                      (do
+                        (set! g16c-dur-factor v)
+                        (g16c-edit-global-param :dur-factor v))))
+                  (label "swing" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (g16c-num "graph-16-swing"
+                    g16c-swing 50 75 1 0
+                    (lambda (v)
+                      (do
+                        (set! g16c-swing v)
+                        (g16c-edit-global-param :swing v))))))
+              (h-stack :gap 0.45
+                (matrix
+                  :key "graph-16-dampening-matrix"
+                  :rows 16
+                  :cols 16
+                  :width 12
+                  :height 6
+                  :control :grid
+                  :background (rgba 0.1 0.1 0.1 .1)
+                  :fill :primary
+                  :min 0
+                  :max 1
+                  :value (g16c-viz-matrix viz :dampening-matrix (g16c-zero-matrix)
+                    )
+                  )                (event-view
+                  :key "graph-16c-event-view"
+                  :events (if viz (get viz :event-history) (list))
+                  :current-beat (if viz (get viz :current-beat) 0)
+                  :renderer :isometric
+                  :x :transpose
+                  :x-min -24
+                  :background (rgba 0.1 0.1 0.1 0.1)
+                  :x-max 24
+                  :y :node
+                  :y-min 0
+                  :y-max 15
+                  :z :beat-phase
+                  :z-min 0
+                  :z-max 16
+                  :phase-beats 16
+                  :window-beats 16
+                  :brightness :velocity
+                  :cube-padding 0
+                  :width 14
+                  :height 6)
+                (spectrogram
+                  :key "graph-16c-master-spectrogram"
+                  :source :master
+                  :mode :waterfall
+                  :freq-scale :log
+                  :fft-size 2048
+                  :time-slices 180
+                  :min-db -64
+                  :max-db 0
+                  :smoothing 0.68
+                  :width 20
+                  :height 6.0
+                  :background-color (rgba 0.13 0.13 0.13 1.00)
+                  :min-color (rgba 0.05 0.05 0.11 1)
+                  :mid-color (rgba 0.16 0.66 0.88 1)
+                  :max-color (rgba 1.0 0.72 0.28 1)))))
           (h-stack
             (v-stack :gap 0.5
               (h-stack :gap 0.5 :align :center
@@ -398,7 +437,7 @@
                 :rows 16
                 :cols 1
                 :width 1
-                :height 24
+                :height 17.5
                 :min 0
                 :max 1
                 :value (g16c-viz-matrix viz :trigger-matrix (g16c-zero-column-matrix))))
@@ -409,7 +448,7 @@
                 :rows 16
                 :cols 1
                 :width 2
-                :height 24
+                :height 17.5
                 :min 0
                 :max 4
                 :value (g16c-viz-matrix viz :energy-matrix (g16c-zero-column-matrix))))
@@ -419,8 +458,8 @@
                 :key "graph-16-weight-matrix"
                 :rows 16
                 :cols 16
-                :width 52
-                :height 24
+                :width 45
+                :height 17.5
                 :min 0
                 :max 1
                 :value g16c-weights
@@ -429,19 +468,8 @@
                     (set! g16c-weights (g16c-set-cell g16c-weights r c v))
                     (graph-edge g16c-name :from r :to c :weight v))))))
           (v-stack :gap 0.5
-            (label "live dampening (from row -> to col)" :width 18 :height 1.2 :font-size 8 :color :dim)
-            (matrix
-              :key "graph-16-dampening-matrix"
-              :rows 16
-              :cols 16
-              :width 26
-              :height 12
-              :control :grid
-              :background :black
-              :fill :primary
-              :min 0
-              :max 1
-              :value (g16c-viz-matrix viz :dampening-matrix (g16c-zero-matrix)))))))))
+
+            ))))))
 
 (effect-buffer "*16x16-cycle*" (g16c-panel SEQ.current-pattern SEQ.graph-visualizations))
 (seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

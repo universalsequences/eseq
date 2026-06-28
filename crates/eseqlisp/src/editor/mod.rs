@@ -3103,6 +3103,22 @@ impl Editor {
         self.runtime.current_layout.clone()
     }
 
+    pub fn visible_widget_layouts(&self) -> Vec<Arc<crate::layout::LayoutNode>> {
+        let active_buffer_idx = self.active_buffer_idx();
+        self.tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter_map(|tile_id| self.tile_root.find_leaf(tile_id))
+            .filter_map(|leaf| {
+                if leaf.buffer_idx == active_buffer_idx {
+                    self.runtime.current_layout.clone()
+                } else {
+                    leaf.cached_layout.clone()
+                }
+            })
+            .collect()
+    }
+
     pub fn active_buffer_has_ui(&self) -> bool {
         self.active_buffer().widget_tree.is_some()
             || self.runtime.current_widget_tree().is_some()

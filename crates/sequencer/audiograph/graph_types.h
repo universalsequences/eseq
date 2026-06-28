@@ -69,7 +69,7 @@ typedef struct {
   float fvalue;        // e.g., new gain
 } ParamMsg;
 
-#define PARAM_RING_CAP 2048
+#define PARAM_RING_CAP 16384
 
 typedef struct ParamRing {
   ParamMsg buf[PARAM_RING_CAP];

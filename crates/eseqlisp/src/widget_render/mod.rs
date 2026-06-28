@@ -11,6 +11,7 @@ pub mod image;
 pub mod knob;
 pub mod knob_number;
 pub mod label;
+pub mod live_audio;
 pub mod matrix;
 pub mod mixer_meter;
 pub mod modulator_curve;
@@ -20,6 +21,7 @@ pub mod patcher;
 pub mod response_curve_editor;
 pub mod scroll;
 pub mod sdf_widget;
+pub mod spectrogram;
 pub mod tabs;
 pub mod text_input;
 pub mod time_view;
@@ -517,6 +519,21 @@ pub struct MetalWavetablePrimitive {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
+pub struct MetalLiveSpectrogramPrimitive {
+    pub rect: Rect,
+    pub data_key: String,
+    pub mode: u32,
+    pub freq_scale: u32,
+    pub min_color: Color,
+    pub mid_color: Color,
+    pub max_color: Color,
+    pub eq_line_color: Color,
+    pub eq_fill_color: Color,
+    pub background_color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub struct MetalImagePrimitive {
     pub widget_id: u64,
     pub rect: Rect,
@@ -588,6 +605,7 @@ pub enum MetalPrimitive {
     Circle(MetalCirclePrimitive),
     Waveform(MetalWaveformPrimitive),
     Wavetable(MetalWavetablePrimitive),
+    LiveSpectrogram(MetalLiveSpectrogramPrimitive),
     Image(MetalImagePrimitive),
     WidgetInstance {
         widget_type: String,
@@ -850,6 +868,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
+    &spectrogram::SPECTROGRAM_WIDGET,
     &vstack::VSTACK_WIDGET,
     &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,
@@ -2166,6 +2185,7 @@ fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetVi
         MetalPrimitive::Circle(c) => c.center[1] += dy,
         MetalPrimitive::Waveform(w) => w.rect.row += dy,
         MetalPrimitive::Wavetable(w) => w.rect.row += dy,
+        MetalPrimitive::LiveSpectrogram(s) => s.rect.row += dy,
         MetalPrimitive::Image(i) => i.rect.row += dy,
         MetalPrimitive::WidgetInstance { instance, .. } => {
             let ndc_dy = -(dy * viewport.cell_h / viewport.vp_h) * 2.0;
@@ -2471,6 +2491,21 @@ mod tests {
                     color_token(wavetable.selected_color),
                     color_token(wavetable.inactive_color),
                     color_token(wavetable.bg_color)
+                )
+            }
+            MetalPrimitive::LiveSpectrogram(spectrogram) => {
+                format!(
+                    "live-spectrogram:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                    rect_token(spectrogram.rect),
+                    spectrogram.data_key,
+                    spectrogram.mode,
+                    spectrogram.freq_scale,
+                    color_token(spectrogram.min_color),
+                    color_token(spectrogram.mid_color),
+                    color_token(spectrogram.max_color),
+                    color_token(spectrogram.eq_line_color),
+                    color_token(spectrogram.eq_fill_color),
+                    color_token(spectrogram.background_color)
                 )
             }
             MetalPrimitive::Image(image) => {
