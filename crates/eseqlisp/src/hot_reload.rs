@@ -27,6 +27,12 @@ pub struct LoadedSource {
     pub dirty: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleStackEntry {
+    pub path: PathBuf,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ModuleRecord {
     pub path: PathBuf,
@@ -184,10 +190,12 @@ pub struct SourceManager {
     cwd: PathBuf,
     overlays: HashMap<PathBuf, OverlayRecord>,
     load_stack: Vec<PathBuf>,
+    revision_stack: Vec<u64>,
     module_graph: ModuleGraph,
     pending_children: HashMap<PathBuf, HashSet<PathBuf>>,
     changed_symbols: HashSet<String>,
     diagnostics: Vec<String>,
+    evaluated_sources: HashMap<(PathBuf, u64), String>,
 }
 
 impl Default for SourceManager {
@@ -202,10 +210,12 @@ impl SourceManager {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             overlays: HashMap::new(),
             load_stack: Vec::new(),
+            revision_stack: Vec::new(),
             module_graph: ModuleGraph::default(),
             pending_children: HashMap::new(),
             changed_symbols: HashSet::new(),
             diagnostics: Vec::new(),
+            evaluated_sources: HashMap::new(),
         }
     }
 
@@ -304,25 +314,50 @@ impl SourceManager {
         })
     }
 
-    pub fn enter_module(&mut self, path: PathBuf) {
+    pub fn enter_module(&mut self, path: PathBuf, revision: u64) {
         self.pending_children.entry(path.clone()).or_default();
         self.load_stack.push(path);
+        self.revision_stack.push(revision);
     }
 
     pub fn leave_module(&mut self) {
         let _ = self.load_stack.pop();
+        let _ = self.revision_stack.pop();
     }
 
     pub fn current_module(&self) -> Option<PathBuf> {
         self.load_stack.last().cloned()
     }
 
-    pub fn module_stack_snapshot(&self) -> Vec<PathBuf> {
-        self.load_stack.clone()
+    pub fn current_revision(&self) -> Option<u64> {
+        self.revision_stack.last().copied()
     }
 
-    pub fn restore_module_stack(&mut self, load_stack: Vec<PathBuf>) {
-        self.load_stack = load_stack;
+    pub fn module_stack_snapshot(&self) -> Vec<ModuleStackEntry> {
+        self.load_stack
+            .iter()
+            .cloned()
+            .zip(self.revision_stack.iter().copied())
+            .map(|(path, revision)| ModuleStackEntry { path, revision })
+            .collect()
+    }
+
+    pub fn restore_module_stack(&mut self, stack: Vec<ModuleStackEntry>) {
+        self.load_stack = stack.iter().map(|entry| entry.path.clone()).collect();
+        self.revision_stack = stack.iter().map(|entry| entry.revision).collect();
+    }
+
+    pub fn remember_evaluated_source(&mut self, path: PathBuf, revision: u64, source: &str) {
+        let path = self.canonicalize_path(&path);
+        self.evaluated_sources
+            .insert((path, revision), source.to_string());
+    }
+
+    pub fn evaluated_source(&self, path: &Path, revision: u64) -> Option<&str> {
+        let path = self.canonicalize_path(path);
+        self.evaluated_sources
+            .get(&(path, revision))
+            .map(String::as_str)
     }
 
     pub fn record_module_success(

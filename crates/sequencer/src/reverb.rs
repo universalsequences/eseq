@@ -164,13 +164,14 @@ unsafe extern "C" fn reverb_process(
     let s = state as *mut f32;
     let nf = nframes as usize;
 
-    let in0 = *inp.add(0); // Mono input (from reverb bus)
+    let in_l = *inp.add(0);
+    let in_r = *inp.add(1);
     let out0 = *out.add(0); // L output
     let out1 = *out.add(1); // R output
 
     if *s.add(ST_ENABLED) <= 0.5 {
-        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
-        std::ptr::copy_nonoverlapping(in0 as *const f32, out1, nf);
+        std::ptr::copy_nonoverlapping(in_l as *const f32, out0, nf);
+        std::ptr::copy_nonoverlapping(in_r as *const f32, out1, nf);
         return;
     }
 
@@ -267,10 +268,8 @@ unsafe extern "C" fn reverb_process(
     // They are unsafe and expect valid indices.
 
     for i in 0..nf {
-        // Read mono input → feed to both L and R
-        let input = *in0.add(i);
-        let dry_l = input;
-        let dry_r = input;
+        let dry_l = *in_l.add(i);
+        let dry_r = *in_r.add(i);
 
         // Update vibrato modulation
         vib_m += vib_increment;
@@ -542,5 +541,45 @@ pub fn reverb_vtable() -> NodeVTable {
         init: Some(reverb_init),
         reset: None,
         migrate: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ptr;
+
+    fn init_state() -> Vec<f32> {
+        let mut state = vec![0.0; REVERB_STATE_SIZE];
+        unsafe {
+            reverb_init(state.as_mut_ptr().cast(), 44_100, 64, ptr::null());
+        }
+        state
+    }
+
+    #[test]
+    fn disabled_reverb_passes_stereo_inputs_independently() {
+        let mut state = init_state();
+        state[ST_ENABLED] = 0.0;
+
+        let mut in_l = [0.25, -0.5, 0.75, -1.0];
+        let mut in_r = [-0.125, 0.375, -0.625, 0.875];
+        let inputs = [in_l.as_mut_ptr(), in_r.as_mut_ptr()];
+        let mut out_l = [0.0; 4];
+        let mut out_r = [0.0; 4];
+        let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+
+        unsafe {
+            reverb_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                in_l.len() as c_int,
+                state.as_mut_ptr().cast(),
+                ptr::null_mut(),
+            );
+        }
+
+        assert_eq!(out_l, in_l);
+        assert_eq!(out_r, in_r);
     }
 }

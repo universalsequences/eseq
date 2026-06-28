@@ -4,46 +4,53 @@ use std::rc::Rc;
 
 use crate::vm::{SOURCE_MODULE_PATH_PROP, SOURCE_SYMBOL_PROP, VM, Value, format_lisp_value};
 
+pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
+    "label",
+    "button",
+    "badge",
+    "slider",
+    "hslider",
+    "vslider",
+    "toggle",
+    "event-view",
+    "matrix",
+    "knob",
+    "knob-number",
+    "adsr-editor",
+    "meter",
+    "mixer-meter",
+    "modulator-curve",
+    "text-input",
+    "textbox",
+    "number-picker",
+    "number-label",
+    "patcher",
+    "response-curve-editor",
+    "dropdown",
+    "select",
+    "v-stack",
+    "h-stack",
+    "wrap",
+    "virtual-v-stack",
+    "box",
+    "grid",
+    "responsive-grid",
+    "image",
+    "tabs",
+    "timeline",
+    "transport-clock",
+    "waveform",
+    "wavetable-viewer",
+    "scroll",
+    "tree",
+];
+
+pub fn is_builtin_widget_name(name: &str) -> bool {
+    BUILTIN_WIDGET_NAMES.contains(&name)
+}
+
 pub fn register_widget_natives(vm: &mut VM) {
-    for widget in [
-        "label",
-        "button",
-        "badge",
-        "slider",
-        "hslider",
-        "vslider",
-        "toggle",
-        "matrix",
-        "knob",
-        "knob-number",
-        "adsr-editor",
-        "meter",
-        "mixer-meter",
-        "modulator-curve",
-        "text-input",
-        "textbox",
-        "number-picker",
-        "number-label",
-        "patcher",
-        "response-curve-editor",
-        "dropdown",
-        "select",
-        "v-stack",
-        "h-stack",
-        "wrap",
-        "virtual-v-stack",
-        "box",
-        "grid",
-        "responsive-grid",
-        "image",
-        "tabs",
-        "timeline",
-        "transport-clock",
-        "waveform",
-        "wavetable-viewer",
-        "scroll",
-        "tree",
-    ] {
+    for widget in BUILTIN_WIDGET_NAMES {
         let widget_type = widget.to_string();
         vm.register_native_with_vm(widget, move |args, vm| {
             let mut widget = build_widget(&widget_type, args);

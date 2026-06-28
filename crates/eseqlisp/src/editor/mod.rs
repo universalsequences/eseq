@@ -186,6 +186,27 @@ fn inspect_node_source_symbol(node: &crate::layout::LayoutNode) -> Option<String
     }
 }
 
+fn inspect_node_source_number(node: &crate::layout::LayoutNode, key: &str) -> Option<usize> {
+    match node.props.get(key) {
+        Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => Some(*value as usize),
+        _ => None,
+    }
+}
+
+fn inspect_node_source_span(node: &crate::layout::LayoutNode) -> Option<(usize, usize)> {
+    let start = inspect_node_source_number(node, crate::vm::SOURCE_START_BYTE_PROP)?;
+    let end = inspect_node_source_number(node, crate::vm::SOURCE_END_BYTE_PROP)?;
+    (end >= start).then_some((start, end))
+}
+
+fn inspect_node_source_revision(node: &crate::layout::LayoutNode) -> Option<u64> {
+    match node.props.get(crate::vm::SOURCE_REVISION_PROP) {
+        Some(Value::String(value)) => value.parse::<u64>().ok(),
+        Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
 fn inspect_node_prop_string(node: &crate::layout::LayoutNode, key: &str) -> Option<String> {
     match node.props.get(key) {
         Some(Value::String(value) | Value::Keyword(value)) if !value.is_empty() => {
@@ -213,7 +234,8 @@ fn inspect_node_debug_label(node: &crate::layout::LayoutNode) -> String {
 }
 
 fn inspect_node_has_source_identity(node: &crate::layout::LayoutNode) -> bool {
-    inspect_node_prop_string(node, "debug-name").is_some()
+    inspect_node_source_span(node).is_some()
+        || inspect_node_prop_string(node, "debug-name").is_some()
         || inspect_node_prop_string(node, "key").is_some()
         || node.stable_key.is_some()
         || inspect_node_source_symbol(node).is_some()
@@ -3864,15 +3886,18 @@ impl Editor {
         node: &crate::layout::LayoutNode,
     ) -> Result<bool, EditorError> {
         inspect_debug_log(format!(
-            "click widget={} stable_key={:?} debug_name={:?} source_buffer_id={:?} source_module={:?} source_symbol={:?}",
+            "click widget={} stable_key={:?} debug_name={:?} source_buffer_id={:?} source_module={:?} source_symbol={:?} source_span={:?} source_revision={:?}",
             node.widget_type,
             node.stable_key,
             inspect_node_prop_string(node, "debug-name"),
             inspect_node_source_buffer_id(node),
             inspect_node_source_module_path(node),
-            inspect_node_source_symbol(node)
+            inspect_node_source_symbol(node),
+            inspect_node_source_span(node),
+            inspect_node_source_revision(node)
         ));
-        let source_buffer_id = if let Some(path) = inspect_node_source_module_path(node) {
+        let source_module_path = inspect_node_source_module_path(node);
+        let source_buffer_id = if let Some(path) = source_module_path.clone() {
             inspect_debug_log(format!("opening source module path {}", path.display()));
             Some(self.upsert_inactive_file_buffer_with_mode(path, BufferMode::ESeqLisp)?)
         } else if let Some(id) = inspect_node_source_buffer_id(node) {
@@ -3882,15 +3907,49 @@ impl Editor {
             inspect_debug_log("no source buffer or source module metadata; cannot open source");
             None
         };
-        let Some(source_buffer_id) = source_buffer_id else {
+        let Some(mut source_buffer_id) = source_buffer_id else {
             return Ok(false);
         };
-        let Some(source_buffer_idx) = self.buffer_idx_for_id(source_buffer_id) else {
+        let Some(mut source_buffer_idx) = self.buffer_idx_for_id(source_buffer_id) else {
             inspect_debug_log(format!(
                 "source buffer id {source_buffer_id} was not found in editor buffers"
             ));
             return Ok(false);
         };
+        let mut opened_stale_snapshot = false;
+        if let (Some(path), Some(revision), Some(_span)) = (
+            source_module_path.as_deref(),
+            inspect_node_source_revision(node),
+            inspect_node_source_span(node),
+        ) {
+            if let Some(snapshot_text) = self.runtime.evaluated_source_text(path, revision) {
+                let current_text = self.buffers[source_buffer_idx].text();
+                if current_text != snapshot_text {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| format!("*inspect source: {name} @ {revision:x}*"))
+                        .unwrap_or_else(|| format!("*inspect source @ {revision:x}*"));
+                    let snapshot_buffer_id = self.upsert_read_only_scratch_buffer_with_mode(
+                        &name,
+                        &snapshot_text,
+                        BufferMode::ESeqLisp,
+                    );
+                    if let Some(idx) = self.buffer_idx_for_id(snapshot_buffer_id) {
+                        inspect_debug_log(format!(
+                            "rendered source revision is stale in visible file; opening evaluated read-only snapshot {name}"
+                        ));
+                        source_buffer_id = snapshot_buffer_id;
+                        source_buffer_idx = idx;
+                        opened_stale_snapshot = true;
+                    }
+                }
+            } else {
+                inspect_debug_log(format!(
+                    "source revision {revision} has no evaluated snapshot; using current buffer text"
+                ));
+            }
+        }
         self.buffers[source_buffer_idx].view_mode = ViewMode::TextOnly;
 
         if let Some(tile_id) = self.visible_tile_for_buffer_id(source_buffer_id) {
@@ -3917,18 +3976,47 @@ impl Editor {
                 "new root-right source tile {source_tile:?}; switching"
             ));
         }
+        let source_span = inspect_node_source_span(node);
         let source_symbol = inspect_node_source_symbol(node);
         let source_text = self.active_buffer().text();
-        let resolved_widget_form = find_widget_form_in_text(&source_text, node).or_else(|| {
-            source_symbol.as_deref().and_then(|symbol| {
-                find_unique_widget_form_in_definition(&source_text, symbol, node)
-            })
+        let resolved_span_cursor = source_span.and_then(|(start, end)| {
+            if end > source_text.len()
+                || !source_text.is_char_boundary(start)
+                || !source_text.is_char_boundary(end)
+            {
+                inspect_debug_log(format!(
+                    "source span {start}..{end} is outside the opened source snapshot ({} bytes)",
+                    source_text.len()
+                ));
+                None
+            } else {
+                Some(offset_to_position(&source_text, start))
+            }
         });
-        let resolved_definition = source_symbol
-            .as_deref()
-            .and_then(|symbol| find_definition_in_text(&source_text, symbol));
-        let resolved_cursor = resolved_widget_form.or(resolved_definition);
+        let (resolved_widget_form, resolved_definition) = if resolved_span_cursor.is_some() {
+            (None, None)
+        } else {
+            inspect_debug_log("legacy fallback: no usable parser source span metadata");
+            let widget_form = find_widget_form_in_text(&source_text, node).or_else(|| {
+                source_symbol.as_deref().and_then(|symbol| {
+                    find_unique_widget_form_in_definition(&source_text, symbol, node)
+                })
+            });
+            let definition = source_symbol
+                .as_deref()
+                .and_then(|symbol| find_definition_in_text(&source_text, symbol));
+            (widget_form, definition)
+        };
+        let resolved_cursor = resolved_span_cursor
+            .or(resolved_widget_form)
+            .or(resolved_definition);
         if let Some(cursor) = resolved_cursor {
+            if source_span.is_some() && resolved_span_cursor.is_some() {
+                inspect_debug_log(format!(
+                    "resolved parser source span at {}",
+                    format_cursor_for_log(cursor)
+                ));
+            }
             if let Some(widget_cursor) = resolved_widget_form {
                 inspect_debug_log(format!(
                     "resolved exact widget form at {}",
@@ -3946,9 +4034,8 @@ impl Editor {
             self.sync_text_horizontal_scroll_to_viewport();
         } else {
             inspect_debug_log(
-                "falling back to top of source buffer; no widget form or definition match",
+                "source opened without exact cursor; no source span, widget form, or definition match",
             );
-            self.active_buffer_mut().cursor = (0, 0);
         }
         let destination_buffer = self.active_buffer();
         inspect_debug_log(format!(
@@ -3963,14 +4050,25 @@ impl Editor {
         ));
         self.sync_runtime_context();
         let destination = match (
+            resolved_span_cursor,
             resolved_widget_form,
             source_symbol.as_deref(),
             resolved_definition,
+            opened_stale_snapshot,
         ) {
-            (Some(_), _, _) => format!("widget form {}", inspect_node_debug_label(node)),
-            (None, Some(symbol), Some(_)) => format!("definition {symbol}"),
-            (None, Some(symbol), None) => format!("source for {symbol} (definition not found)"),
-            (None, None, _) => "source (definition metadata unavailable)".to_string(),
+            (Some(_), _, _, _, true) => {
+                format!(
+                    "stale source snapshot for {}",
+                    inspect_node_debug_label(node)
+                )
+            }
+            (Some(_), _, _, _, false) => format!("source span {}", inspect_node_debug_label(node)),
+            (None, Some(_), _, _, _) => format!("widget form {}", inspect_node_debug_label(node)),
+            (None, None, Some(symbol), Some(_), _) => format!("definition {symbol}"),
+            (None, None, Some(symbol), None, _) => {
+                format!("source for {symbol} (definition not found)")
+            }
+            (None, None, None, _, _) => "source (exact location metadata unavailable)".to_string(),
         };
         self.show_sticky_message(format!(
             "Inspect: opened {destination} for {}",

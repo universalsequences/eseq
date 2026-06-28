@@ -182,12 +182,16 @@ pub struct GraphVisualizationSnapshot {
     pub id: u64,
     pub name: String,
     pub active: bool,
+    pub current_beat: f64,
     pub num_nodes: usize,
     pub energy: Vec<f64>,
     pub trigger_activity: Vec<f32>,
     pub node_events: Vec<Option<GraphVisualizationEvent>>,
+    pub event_history: Vec<GraphVisualizationEvent>,
     pub edges: Vec<GraphVisualizationEdge>,
 }
+
+const GRAPH_EVENT_HISTORY_CAP: usize = 1024;
 
 impl GraphEdge {
     pub fn new(from: usize, to: usize, weight: f64) -> Self {
@@ -799,6 +803,7 @@ pub struct GraphRuntime {
     trigger_activity: Vec<f32>,
     trigger_visual_until_beats: Vec<f64>,
     node_events: Vec<Option<GraphVisualizationEvent>>,
+    event_history: Vec<GraphVisualizationEvent>,
     input_accum: Vec<f64>,
     input_seen: Vec<bool>,
     /// The payload that last arrived at each node (Ext 1), consumed by its next fire.
@@ -911,6 +916,7 @@ impl GraphRuntime {
             trigger_activity: vec![0.0; num_nodes],
             trigger_visual_until_beats: vec![0.0; num_nodes],
             node_events: vec![None; num_nodes],
+            event_history: Vec::new(),
             input_accum: vec![0.0; num_nodes],
             input_seen: vec![false; num_nodes],
             source_event: vec![None; num_nodes],
@@ -936,14 +942,25 @@ impl GraphRuntime {
     }
 
     pub fn visualization_snapshot(&self) -> GraphVisualizationSnapshot {
+        let current_beat = self
+            .event_history
+            .last()
+            .map(|event| event.beat)
+            .unwrap_or(0.0);
+        self.visualization_snapshot_at(current_beat)
+    }
+
+    pub fn visualization_snapshot_at(&self, current_beat: f64) -> GraphVisualizationSnapshot {
         GraphVisualizationSnapshot {
             id: self.id,
             name: self.name.clone(),
             active: self.active,
+            current_beat,
             num_nodes: self.num_nodes,
             energy: self.energy.clone(),
             trigger_activity: self.trigger_activity.clone(),
             node_events: self.node_events.clone(),
+            event_history: self.event_history.clone(),
             edges: self
                 .edges
                 .iter()
@@ -1079,6 +1096,7 @@ impl GraphRuntime {
     }
 
     fn reset_internal(&mut self, total_beats: f64, preserve_external_seeds: bool) {
+        self.event_history.clear();
         for idx in 0..self.num_nodes {
             let preserved_external_seeds = if preserve_external_seeds {
                 self.pending[idx]
@@ -1578,14 +1596,23 @@ impl GraphRuntime {
         event.resolved.transpose = payload.note;
         event.resolved.velocity = payload.velocity;
         event.resolved.duration = payload.duration_beats;
-        self.node_events[node_index] = Some(GraphVisualizationEvent {
+        let visualization_event = GraphVisualizationEvent {
             node_index,
             track: event.track,
             sample_time: candidate.fire_sample,
             beat: candidate.fire_beats,
             transpose: payload.note,
             velocity: payload.velocity,
-        });
+        };
+        self.node_events[node_index] = Some(visualization_event);
+        self.event_history.push(visualization_event);
+        let overflow = self
+            .event_history
+            .len()
+            .saturating_sub(GRAPH_EVENT_HISTORY_CAP);
+        if overflow > 0 {
+            self.event_history.drain(0..overflow);
+        }
         out.push(GraphEmission {
             sample_time: candidate.fire_sample,
             node_index,
@@ -3155,6 +3182,7 @@ mod tests {
         assert_eq!(event.beat, 1.0);
         assert_eq!(event.transpose, 12.0);
         assert_eq!(event.velocity, 0.42);
+        assert_eq!(snapshot.event_history, vec![event]);
     }
 
     #[test]
@@ -3187,6 +3215,7 @@ mod tests {
         let expired = runtime.visualization_snapshot();
         assert_eq!(expired.trigger_activity[1], 0.0);
         assert!(expired.node_events[1].is_none());
+        assert_eq!(expired.event_history.len(), 1);
 
         runtime.push_propagation(0, 1.26, GraphPayload::default());
         runtime.process_block(
@@ -3203,6 +3232,44 @@ mod tests {
         let reset = runtime.visualization_snapshot();
         assert_eq!(reset.trigger_activity[1], 0.0);
         assert!(reset.node_events[1].is_none());
+        assert!(reset.event_history.is_empty());
+    }
+
+    #[test]
+    fn event_history_is_bounded() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        let mut out = Vec::new();
+
+        for idx in 0..(GRAPH_EVENT_HISTORY_CAP + 3) {
+            let start = idx as f64;
+            let end = start + 1.0;
+            runtime.push_propagation(0, start, GraphPayload::default());
+            runtime.process_block(
+                start,
+                end,
+                (idx as u64) * 48_000,
+                48_000.0,
+                0,
+                always_fire_with_dampen(0.0),
+                &mut out,
+            );
+        }
+
+        let snapshot = runtime.visualization_snapshot();
+        assert_eq!(snapshot.event_history.len(), GRAPH_EVENT_HISTORY_CAP);
+        assert_eq!(snapshot.event_history[0].beat, 4.0);
+
+        let fresh = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![node(Timebase::Quarter), node(Timebase::Quarter)],
+            vec![GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        assert!(fresh.visualization_snapshot().event_history.is_empty());
     }
 
     #[test]

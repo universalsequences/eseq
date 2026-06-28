@@ -46,6 +46,21 @@ struct CustomEffectEdge {
     dest_channels: usize,
 }
 
+fn adapted_audio_port_connections(
+    source_channels: usize,
+    destination_channels: usize,
+) -> Vec<(i32, i32)> {
+    let source_channels = source_channels.max(1).min(2);
+    let destination_channels = destination_channels.max(1).min(2);
+    match (source_channels, destination_channels) {
+        (1, 2) => vec![(0, 0), (0, 1)],
+        (2, 1) => vec![(0, 0), (1, 0)],
+        _ => (0..source_channels.min(destination_channels))
+            .map(|channel| (channel as i32, channel as i32))
+            .collect(),
+    }
+}
+
 fn instrument_display_name(name: &str) -> String {
     std::path::Path::new(name)
         .file_name()
@@ -1049,52 +1064,27 @@ impl App {
             }
         }
 
-        if effect_inputs <= 1 {
-            let pred_channels = predecessor_outputs.max(1).min(2);
-            for src_port in 0..pred_channels {
-                let _ = crate::audiograph::graph_connect(
-                    self.graph.lg.0,
-                    predecessor_id,
-                    src_port as i32,
-                    effect_id,
-                    0,
-                );
-            }
-        } else {
-            let pred_channels = predecessor_outputs.max(1).min(2);
-            for ch in 0..pred_channels.min(effect_inputs).min(2) {
-                let _ = crate::audiograph::graph_connect(
-                    self.graph.lg.0,
-                    predecessor_id,
-                    ch as i32,
-                    effect_id,
-                    ch as i32,
-                );
-            }
+        for (src_port, dst_port) in
+            adapted_audio_port_connections(predecessor_outputs, effect_inputs)
+        {
+            let _ = crate::audiograph::graph_connect(
+                self.graph.lg.0,
+                predecessor_id,
+                src_port,
+                effect_id,
+                dst_port,
+            );
         }
 
-        if effect_outputs <= 1 {
-            let succ_channels = successor_inputs.max(1).min(2);
-            for dst_port in 0..succ_channels {
-                let _ = crate::audiograph::graph_connect(
-                    self.graph.lg.0,
-                    effect_id,
-                    0,
-                    successor_id,
-                    dst_port as i32,
-                );
-            }
-        } else {
-            let succ_channels = successor_inputs.max(1).min(2);
-            for ch in 0..succ_channels.min(effect_outputs).min(2) {
-                let _ = crate::audiograph::graph_connect(
-                    self.graph.lg.0,
-                    effect_id,
-                    ch as i32,
-                    successor_id,
-                    ch as i32,
-                );
-            }
+        for (src_port, dst_port) in adapted_audio_port_connections(effect_outputs, successor_inputs)
+        {
+            let _ = crate::audiograph::graph_connect(
+                self.graph.lg.0,
+                effect_id,
+                src_port,
+                successor_id,
+                dst_port,
+            );
         }
     }
 
@@ -3598,6 +3588,15 @@ mod tests {
 
     fn test_app_with_track() -> App {
         test_app_with_track_count(1)
+    }
+
+    #[test]
+    fn audio_port_adapter_duplicates_mono_and_folds_stereo() {
+        assert_eq!(adapted_audio_port_connections(1, 1), vec![(0, 0)]);
+        assert_eq!(adapted_audio_port_connections(1, 2), vec![(0, 0), (0, 1)]);
+        assert_eq!(adapted_audio_port_connections(2, 1), vec![(0, 0), (1, 0)]);
+        assert_eq!(adapted_audio_port_connections(2, 2), vec![(0, 0), (1, 1)]);
+        assert_eq!(adapted_audio_port_connections(4, 4), vec![(0, 0), (1, 1)]);
     }
 
     #[test]

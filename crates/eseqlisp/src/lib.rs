@@ -2592,9 +2592,9 @@ mod tests {
                                 (label (fmt "{}" step)
                                   :color (if selected
                                            :yellow
-                                           (if (reactive-get "APP" (fmt "active-{}" step))
-                                             :white
-                                             :gray))))))))))
+                                             (if (reactive-get "APP" (fmt "active-{}" step))
+                                               :white
+                                             :gray)))))))))))
                 "#,
             )
             .expect("eval grid subtree effect");

@@ -22,7 +22,141 @@ pub struct ParserProfile {
     pub tokens_emitted: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceSpan {
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+impl SourceSpan {
+    pub fn new(start_byte: usize, end_byte: usize) -> Self {
+        Self {
+            start_byte,
+            end_byte,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceOrigin {
+    pub source_id: Option<String>,
+    pub revision: Option<u64>,
+    pub primary_span: SourceSpan,
+    pub expansion_chain: Vec<SourceSpan>,
+}
+
+impl SourceOrigin {
+    pub fn new(primary_span: SourceSpan) -> Self {
+        Self {
+            source_id: None,
+            revision: None,
+            primary_span,
+            expansion_chain: Vec::new(),
+        }
+    }
+
+    pub fn synthetic_at(span: SourceSpan) -> Self {
+        Self::new(span)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub origin: SourceOrigin,
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, origin: SourceOrigin) -> Self {
+        Self { kind, origin }
+    }
+
+    pub fn synthetic(kind: ExprKind) -> Self {
+        Self {
+            kind,
+            origin: SourceOrigin::synthetic_at(SourceSpan::new(0, 0)),
+        }
+    }
+
+    pub fn synthetic_like(kind: ExprKind, source: &Expr) -> Self {
+        Self {
+            kind,
+            origin: source.origin.clone(),
+        }
+    }
+
+    pub fn with_origin_from(kind: ExprKind, source: &SourceOrigin) -> Self {
+        Self {
+            kind,
+            origin: source.clone(),
+        }
+    }
+
+    pub fn to_legacy(&self) -> Expression {
+        match &self.kind {
+            ExprKind::Symbol(value) => Expression::Symbol(value.clone()),
+            ExprKind::Keyword(value) => Expression::Keyword(value.clone()),
+            ExprKind::String(value) => Expression::String(value.clone()),
+            ExprKind::QuoteSymbol(value) => Expression::QuoteSymbol(value.clone()),
+            ExprKind::QuoteList(items) => {
+                Expression::QuoteList(items.iter().map(Expr::to_legacy).collect())
+            }
+            ExprKind::Number(value) => Expression::Number(*value),
+            ExprKind::List(items) => Expression::List(items.iter().map(Expr::to_legacy).collect()),
+            ExprKind::Quasiquote(inner) => Expression::Quasiquote(Box::new(inner.to_legacy())),
+            ExprKind::Unquote(inner) => Expression::Unquote(Box::new(inner.to_legacy())),
+        }
+    }
+
+    pub fn from_legacy(expr: Expression) -> Self {
+        let origin = SourceOrigin::synthetic_at(SourceSpan::new(0, 0));
+        Self::from_legacy_with_origin(expr, &origin)
+    }
+
+    pub fn from_legacy_with_origin(expr: Expression, origin: &SourceOrigin) -> Self {
+        let kind = match expr {
+            Expression::Symbol(value) => ExprKind::Symbol(value),
+            Expression::Keyword(value) => ExprKind::Keyword(value),
+            Expression::String(value) => ExprKind::String(value),
+            Expression::QuoteSymbol(value) => ExprKind::QuoteSymbol(value),
+            Expression::QuoteList(items) => ExprKind::QuoteList(
+                items
+                    .into_iter()
+                    .map(|item| Expr::from_legacy_with_origin(item, origin))
+                    .collect(),
+            ),
+            Expression::Number(value) => ExprKind::Number(value),
+            Expression::List(items) => ExprKind::List(
+                items
+                    .into_iter()
+                    .map(|item| Expr::from_legacy_with_origin(item, origin))
+                    .collect(),
+            ),
+            Expression::Quasiquote(inner) => {
+                ExprKind::Quasiquote(Box::new(Expr::from_legacy_with_origin(*inner, origin)))
+            }
+            Expression::Unquote(inner) => {
+                ExprKind::Unquote(Box::new(Expr::from_legacy_with_origin(*inner, origin)))
+            }
+        };
+        Expr::with_origin_from(kind, origin)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExprKind {
+    Symbol(String),
+    Keyword(String),
+    String(String),
+    QuoteSymbol(String),
+    QuoteList(Vec<Expr>),
+    Number(f64),
+    List(Vec<Expr>),
+    Quasiquote(Box<Expr>),
+    Unquote(Box<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParserError {
     ErrorParsingNumber,
     ExpectedLeftParen,
@@ -33,7 +167,7 @@ pub enum ParserError {
     UnexpectedEOF,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     LeftParen,
     RightParen,
@@ -45,6 +179,21 @@ pub enum Token {
     Quote,
     Backtick, // ` (quasiquote)
     Comma,    // , (unquote)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: SourceSpan,
+}
+
+impl SpannedToken {
+    fn new(token: Token, start_byte: usize, end_byte: usize) -> Self {
+        Self {
+            token,
+            span: SourceSpan::new(start_byte, end_byte),
+        }
+    }
 }
 
 impl Parser {
@@ -209,41 +358,43 @@ impl Parser {
         Ok(Token::String(text))
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Token>, ParserError> {
-        let mut tokens: Vec<Token> = vec![];
+    pub fn parse_spanned(&mut self) -> Result<Vec<SpannedToken>, ParserError> {
+        let mut tokens: Vec<SpannedToken> = vec![];
 
         while self.peek().is_some() {
             self.skip_whitespace();
             if let Some(next) = self.peek() {
+                let start = self.pos;
                 match next {
                     b'(' => {
-                        tokens.push(Token::LeftParen);
                         self.next();
+                        tokens.push(SpannedToken::new(Token::LeftParen, start, self.pos));
                     }
                     b')' => {
-                        tokens.push(Token::RightParen);
                         self.next();
+                        tokens.push(SpannedToken::new(Token::RightParen, start, self.pos));
                     }
                     b'|' => {
-                        tokens.push(Token::Pipe);
                         self.next();
+                        tokens.push(SpannedToken::new(Token::Pipe, start, self.pos));
                     }
                     b'\'' => {
-                        tokens.push(Token::Quote);
                         self.next();
+                        tokens.push(SpannedToken::new(Token::Quote, start, self.pos));
                     }
                     b'`' => {
-                        tokens.push(Token::Backtick);
                         self.next();
+                        tokens.push(SpannedToken::new(Token::Backtick, start, self.pos));
                     }
                     b',' => {
-                        tokens.push(Token::Comma);
                         self.next();
+                        tokens.push(SpannedToken::new(Token::Comma, start, self.pos));
                     }
                     b'"' => {
                         self.next();
-                        tokens.push(self.parse_string()?);
+                        let token = self.parse_string()?;
                         self.next();
+                        tokens.push(SpannedToken::new(token, start, self.pos));
                     }
                     b';' => {
                         #[cfg(test)]
@@ -264,7 +415,7 @@ impl Parser {
                         let Token::Symbol(name) = self.parse_symbol()? else {
                             unreachable!()
                         };
-                        tokens.push(Token::Keyword(name));
+                        tokens.push(SpannedToken::new(Token::Keyword(name), start, self.pos));
                     }
                     _ if next.is_ascii_digit()
                         || (next == b'-'
@@ -272,10 +423,12 @@ impl Parser {
                         || (next == b'.'
                             && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit())) =>
                     {
-                        tokens.push(self.parse_number()?);
+                        let token = self.parse_number()?;
+                        tokens.push(SpannedToken::new(token, start, self.pos));
                     }
                     _ if next.is_ascii_alphabetic() || next.is_ascii_punctuation() => {
-                        tokens.push(self.parse_symbol()?);
+                        let token = self.parse_symbol()?;
+                        tokens.push(SpannedToken::new(token, start, self.pos));
                     }
                     _ => {
                         self.advance_char();
@@ -288,6 +441,14 @@ impl Parser {
             self.profile.borrow_mut().tokens_emitted = tokens.len();
         }
         Ok(tokens)
+    }
+
+    pub fn parse(&mut self) -> Result<Vec<Token>, ParserError> {
+        Ok(self
+            .parse_spanned()?
+            .into_iter()
+            .map(|token| token.token)
+            .collect())
     }
 
     #[cfg(test)]
@@ -470,6 +631,196 @@ impl ASTParser {
     }
 }
 
+pub struct SpannedASTParser {
+    tokens: Vec<SpannedToken>,
+    pos: usize,
+}
+
+impl SpannedASTParser {
+    pub fn new(tokens: Vec<SpannedToken>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    pub fn peek(&self) -> Option<&SpannedToken> {
+        self.tokens.get(self.pos)
+    }
+
+    pub fn next(&mut self) -> Option<SpannedToken> {
+        if self.pos < self.tokens.len() {
+            let token = self.tokens[self.pos].clone();
+            self.pos += 1;
+            Some(token)
+        } else {
+            None
+        }
+    }
+
+    fn expr(&self, kind: ExprKind, span: SourceSpan) -> Expr {
+        Expr::new(kind, SourceOrigin::new(span))
+    }
+
+    pub fn parse_quote(&mut self) -> Result<Expr, ParserError> {
+        let quote = match self.next() {
+            Some(token) if matches!(token.token, Token::Quote) => token,
+            _ => return Err(ParserError::ExpectedLeftParen),
+        };
+
+        match self.peek().cloned() {
+            None => Err(ParserError::UnexpectedEOF),
+            Some(token)
+                if matches!(
+                    token.token,
+                    Token::Number(_)
+                        | Token::RightParen
+                        | Token::Pipe
+                        | Token::Quote
+                        | Token::String(_)
+                        | Token::Keyword(_)
+                        | Token::Backtick
+                        | Token::Comma
+                ) =>
+            {
+                Err(ParserError::InvalidQuote)
+            }
+            Some(token) => match token.token {
+                Token::Symbol(value) => {
+                    let token = self.next().expect("peeked");
+                    Ok(self.expr(
+                        ExprKind::QuoteSymbol(value),
+                        SourceSpan::new(quote.span.start_byte, token.span.end_byte),
+                    ))
+                }
+                Token::LeftParen => {
+                    let list = self.parse_list_expr()?;
+                    let ExprKind::List(items) = list.kind else {
+                        unreachable!();
+                    };
+                    Ok(self.expr(
+                        ExprKind::QuoteList(items),
+                        SourceSpan::new(quote.span.start_byte, list.origin.primary_span.end_byte),
+                    ))
+                }
+                _ => Err(ParserError::InvalidQuote),
+            },
+        }
+    }
+
+    fn parse_lambda_shorthand(&mut self) -> Result<Expr, ParserError> {
+        let start = match self.next() {
+            Some(token) if matches!(token.token, Token::Pipe) => token.span.start_byte,
+            _ => return Err(ParserError::ExpectedPipe),
+        };
+
+        let mut args = Vec::new();
+        let pipe_end;
+        loop {
+            match self.peek().cloned() {
+                Some(token) if matches!(token.token, Token::Pipe) => {
+                    pipe_end = token.span.end_byte;
+                    self.next();
+                    break;
+                }
+                Some(SpannedToken {
+                    token: Token::Symbol(value),
+                    span,
+                }) => {
+                    self.next();
+                    args.push(self.expr(ExprKind::Symbol(value), span));
+                }
+                Some(token) if matches!(token.token, Token::LeftParen) => {
+                    args.push(self.parse_list_expr()?);
+                }
+                Some(_) => return Err(ParserError::InvalidLambda),
+                None => return Err(ParserError::UnexpectedEOF),
+            }
+        }
+
+        let body = self.parse_expression()?;
+        let full_span = SourceSpan::new(start, body.origin.primary_span.end_byte);
+        let origin = SourceOrigin::new(full_span.clone());
+        let lambda_symbol = Expr::with_origin_from(ExprKind::Symbol("lambda".to_string()), &origin);
+        let arg_list = Expr::with_origin_from(ExprKind::List(args), &origin);
+        let end = body.origin.primary_span.end_byte.max(pipe_end);
+        Ok(self.expr(
+            ExprKind::List(vec![lambda_symbol, arg_list, body]),
+            SourceSpan::new(start, end),
+        ))
+    }
+
+    fn parse_expression(&mut self) -> Result<Expr, ParserError> {
+        let Some(token) = self.peek().cloned() else {
+            return Err(ParserError::UnexpectedEOF);
+        };
+        match token.token {
+            Token::LeftParen => self.parse_list_expr(),
+            Token::Quote => self.parse_quote(),
+            Token::Number(value) => {
+                self.next();
+                Ok(self.expr(ExprKind::Number(value), token.span))
+            }
+            Token::String(value) => {
+                self.next();
+                Ok(self.expr(ExprKind::String(value), token.span))
+            }
+            Token::Symbol(value) => {
+                self.next();
+                Ok(self.expr(ExprKind::Symbol(value), token.span))
+            }
+            Token::Keyword(value) => {
+                self.next();
+                Ok(self.expr(ExprKind::Keyword(value), token.span))
+            }
+            Token::Pipe => self.parse_lambda_shorthand(),
+            Token::Backtick => {
+                self.next();
+                let expr = self.parse_expression()?;
+                Ok(self.expr(
+                    ExprKind::Quasiquote(Box::new(expr.clone())),
+                    SourceSpan::new(token.span.start_byte, expr.origin.primary_span.end_byte),
+                ))
+            }
+            Token::Comma => {
+                self.next();
+                let expr = self.parse_expression()?;
+                Ok(self.expr(
+                    ExprKind::Unquote(Box::new(expr.clone())),
+                    SourceSpan::new(token.span.start_byte, expr.origin.primary_span.end_byte),
+                ))
+            }
+            Token::RightParen => Err(ParserError::ExpectedLeftParen),
+        }
+    }
+
+    pub fn parse_list_expr(&mut self) -> Result<Expr, ParserError> {
+        let start = match self.next() {
+            Some(token) if matches!(token.token, Token::LeftParen) => token.span.start_byte,
+            _ => return Err(ParserError::ExpectedLeftParen),
+        };
+
+        let mut items = Vec::new();
+        while let Some(token) = self.peek().cloned() {
+            if matches!(token.token, Token::RightParen) {
+                self.next();
+                return Ok(self.expr(
+                    ExprKind::List(items),
+                    SourceSpan::new(start, token.span.end_byte),
+                ));
+            }
+            items.push(self.parse_expression()?);
+        }
+
+        Err(ParserError::UnexpectedEOF)
+    }
+
+    pub fn parse(&mut self) -> Result<Vec<Expr>, ParserError> {
+        let mut expressions = Vec::new();
+        while self.peek().is_some() {
+            expressions.push(self.parse_expression()?);
+        }
+        Ok(expressions)
+    }
+}
+
 /// Format an Expression back to a Lisp source string.
 pub fn format_expression(expr: &Expression) -> String {
     match expr {
@@ -507,6 +858,11 @@ mod tests {
         ast.parse().unwrap()
     }
 
+    fn parse_spanned_str(input: &str) -> Vec<Expr> {
+        let tokens = Parser::new(input.to_string()).parse_spanned().unwrap();
+        SpannedASTParser::new(tokens).parse().unwrap()
+    }
+
     #[test]
     fn negative_number_literal() {
         let exprs = parse_str("(foo :min -10 :max 10)");
@@ -533,5 +889,88 @@ mod tests {
             panic!("expected list");
         };
         assert!(matches!(&list[0], Expression::Symbol(s) if s == "-"));
+    }
+
+    #[test]
+    fn spanned_parser_tracks_lists_strings_comments_and_unicode() {
+        let source = "; leading comment\n(box :text \"hé\")";
+        let exprs = parse_spanned_str(source);
+        assert_eq!(exprs.len(), 1);
+        let form_start = source.find("(box").unwrap();
+        assert_eq!(
+            exprs[0].origin.primary_span,
+            SourceSpan::new(form_start, source.len())
+        );
+        let ExprKind::List(items) = &exprs[0].kind else {
+            panic!("expected list");
+        };
+        assert_eq!(
+            items[0].origin.primary_span,
+            SourceSpan::new(form_start + 1, form_start + 4)
+        );
+        let string_start = source.find("\"hé\"").unwrap();
+        assert_eq!(
+            items[2].origin.primary_span,
+            SourceSpan::new(string_start, string_start + "\"hé\"".len())
+        );
+    }
+
+    #[test]
+    fn spanned_parser_tracks_lambda_shorthand_body_span() {
+        let source = "(each xs |x| (label x))";
+        let exprs = parse_spanned_str(source);
+        let ExprKind::List(items) = &exprs[0].kind else {
+            panic!("expected each list");
+        };
+        let lambda = &items[2];
+        let lambda_start = source.find("|x|").unwrap();
+        let lambda_end = source.rfind("))").unwrap() + 1;
+        assert_eq!(
+            lambda.origin.primary_span,
+            SourceSpan::new(lambda_start, lambda_end)
+        );
+        let ExprKind::List(lambda_items) = &lambda.kind else {
+            panic!("expected lambda desugaring");
+        };
+        assert!(matches!(&lambda_items[0].kind, ExprKind::Symbol(symbol) if symbol == "lambda"));
+        assert_eq!(
+            lambda_items[2].origin.primary_span,
+            SourceSpan::new(source.find("(label").unwrap(), lambda_end)
+        );
+    }
+
+    #[test]
+    fn spanned_parser_tracks_quote_quasiquote_and_unquote_spans() {
+        let source = "'(a b) `(box ,x)";
+        let exprs = parse_spanned_str(source);
+        assert_eq!(exprs.len(), 2);
+        assert_eq!(exprs[0].origin.primary_span, SourceSpan::new(0, 6));
+        assert!(matches!(exprs[0].kind, ExprKind::QuoteList(_)));
+        let quasi_start = source.find('`').unwrap();
+        assert_eq!(
+            exprs[1].origin.primary_span,
+            SourceSpan::new(quasi_start, source.len())
+        );
+        let ExprKind::Quasiquote(inner) = &exprs[1].kind else {
+            panic!("expected quasiquote");
+        };
+        let ExprKind::List(items) = &inner.kind else {
+            panic!("expected quasiquoted list");
+        };
+        let unquote_start = source.find(",x").unwrap();
+        assert_eq!(
+            items[1].origin.primary_span,
+            SourceSpan::new(unquote_start, unquote_start + 2)
+        );
+        assert!(matches!(items[1].kind, ExprKind::Unquote(_)));
+    }
+
+    #[test]
+    fn spanned_parser_reports_unclosed_list_as_unexpected_eof() {
+        let tokens = Parser::new("(box :text \"x\"".to_string())
+            .parse_spanned()
+            .unwrap();
+        let result = SpannedASTParser::new(tokens).parse();
+        assert_eq!(result, Err(ParserError::UnexpectedEOF));
     }
 }

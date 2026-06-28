@@ -6250,6 +6250,214 @@ fn inspect_source_prefers_module_path_over_transient_source_buffer() {
 }
 
 #[test]
+fn inspect_source_span_opens_exact_widget_form_without_legacy_identity() {
+    use std::collections::HashMap;
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-inspect-source-span-{}.lisp",
+        std::process::id()
+    ));
+    let source = "(def render-target ()\n  (knob-number :label \"base\"))\n";
+    std::fs::write(&path, source).unwrap();
+    editor
+        .runtime_mut()
+        .eval_source_at_path(path.clone(), source)
+        .unwrap();
+    let start = source.find("(knob-number").unwrap();
+    let end = source[start..].find(')').map(|offset| start + offset + 1).unwrap();
+    let revision = crate::hot_reload::hash_source(source);
+
+    let mut props = HashMap::new();
+    props.insert(
+        crate::vm::SOURCE_MODULE_PATH_PROP.to_string(),
+        Value::String(path.display().to_string()),
+    );
+    props.insert(
+        crate::vm::SOURCE_START_BYTE_PROP.to_string(),
+        Value::Number(start as f64),
+    );
+    props.insert(
+        crate::vm::SOURCE_END_BYTE_PROP.to_string(),
+        Value::Number(end as f64),
+    );
+    props.insert(
+        crate::vm::SOURCE_REVISION_PROP.to_string(),
+        Value::String(revision.to_string()),
+    );
+    let node = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "knob-number".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props,
+        children: Vec::new(),
+        focusable: false,
+    };
+
+    assert!(super::inspect_node_has_source_identity(&node));
+    assert!(editor.open_source_for_inspected_node(&node).unwrap());
+    assert_eq!(editor.active_buffer().path.as_ref(), Some(&path));
+    assert_eq!(editor.active_buffer().cursor, super::offset_to_position(source, start));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn inspect_source_span_opens_evaluated_snapshot_when_file_changed() {
+    use std::collections::HashMap;
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-inspect-source-snapshot-{}.lisp",
+        std::process::id()
+    ));
+    let evaluated_source = "(def render-target ()\n  (knob-number :label \"base\"))\n";
+    std::fs::write(&path, evaluated_source).unwrap();
+    editor
+        .runtime_mut()
+        .eval_source_at_path(path.clone(), evaluated_source)
+        .unwrap();
+    std::fs::write(
+        &path,
+        "(def render-target ()\n  ;; inserted after render\n  (knob-number :label \"base\"))\n",
+    )
+    .unwrap();
+    let start = evaluated_source.find("(knob-number").unwrap();
+    let end = evaluated_source[start..]
+        .find(')')
+        .map(|offset| start + offset + 1)
+        .unwrap();
+    let revision = crate::hot_reload::hash_source(evaluated_source);
+
+    let mut props = HashMap::new();
+    props.insert(
+        crate::vm::SOURCE_MODULE_PATH_PROP.to_string(),
+        Value::String(path.display().to_string()),
+    );
+    props.insert(
+        crate::vm::SOURCE_START_BYTE_PROP.to_string(),
+        Value::Number(start as f64),
+    );
+    props.insert(
+        crate::vm::SOURCE_END_BYTE_PROP.to_string(),
+        Value::Number(end as f64),
+    );
+    props.insert(
+        crate::vm::SOURCE_REVISION_PROP.to_string(),
+        Value::String(revision.to_string()),
+    );
+    let node = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "knob-number".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props,
+        children: Vec::new(),
+        focusable: false,
+    };
+
+    assert!(editor.open_source_for_inspected_node(&node).unwrap());
+    assert!(editor.active_buffer().read_only);
+    assert_eq!(editor.active_buffer().path, None);
+    assert_eq!(editor.active_buffer().text(), evaluated_source);
+    assert_eq!(
+        editor.active_buffer().cursor,
+        super::offset_to_position(evaluated_source, start)
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn inspect_source_span_opens_sampler_base_knob_fixture() {
+    use std::collections::HashMap;
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sequencer/metal-seq-fx/sampler-panel.lisp")
+        .canonicalize()
+        .unwrap();
+    let source = std::fs::read_to_string(&path).unwrap();
+    let def_start = source.find("(def sampler-param-knob").unwrap();
+    let start = source[def_start..]
+        .find("(knob-number")
+        .map(|offset| def_start + offset)
+        .unwrap();
+    let end = source[start..]
+        .find(')')
+        .map(|offset| start + offset + 1)
+        .unwrap();
+
+    let mut props = HashMap::new();
+    props.insert(
+        crate::vm::SOURCE_MODULE_PATH_PROP.to_string(),
+        Value::String(path.display().to_string()),
+    );
+    props.insert(
+        crate::vm::SOURCE_START_BYTE_PROP.to_string(),
+        Value::Number(start as f64),
+    );
+    props.insert(
+        crate::vm::SOURCE_END_BYTE_PROP.to_string(),
+        Value::Number(end as f64),
+    );
+    props.insert(
+        crate::vm::SOURCE_REVISION_PROP.to_string(),
+        Value::String(crate::hot_reload::hash_source(&source).to_string()),
+    );
+    props.insert(
+        "debug-name".to_string(),
+        Value::String("sampler-param-base-base".to_string()),
+    );
+    let node = crate::layout::LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "knob-number".to_string(),
+        rect: crate::layout::Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        props,
+        children: Vec::new(),
+        focusable: true,
+    };
+
+    assert!(editor.open_source_for_inspected_node(&node).unwrap());
+    let expected_cursor = super::offset_to_position(&source, start);
+    assert_eq!(editor.active_buffer().path.as_ref(), Some(&path));
+    assert_eq!(editor.active_buffer().cursor, expected_cursor);
+    assert!(
+        editor.active_buffer().lines[expected_cursor.0].contains("(knob-number"),
+        "sampler inspect target must be the constructor form, not the file top"
+    );
+}
+
+#[test]
 fn inspect_source_lookup_finds_debug_named_widget_form() {
     use std::collections::HashMap;
 

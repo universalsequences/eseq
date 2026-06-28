@@ -11520,6 +11520,11 @@ mod tests {
         runtime
             .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
             .expect("install sequencer tab registration test stub");
+        runtime
+            .eval_str(
+                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+            )
+            .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
             "{}/scripts/graph-neural-8x8-demo.lisp",
@@ -11565,6 +11570,7 @@ mod tests {
         for matrix in &matrices {
             assert_measured(matrix);
         }
+
         let matrix = find_by_stable_key(&layout, "graph-8x8-weight-matrix")
             .expect("weight matrix stable key");
         assert_measured(matrix);
@@ -11572,11 +11578,16 @@ mod tests {
             "graph-8x8-trigger-matrix",
             "graph-8x8-energy-matrix",
             "graph-8x8-dampening-matrix",
+            "graph-8x8-event-view",
+            "graph-8x8-track-event-view",
         ] {
-            let widget = find_by_stable_key(&layout, key)
-                .unwrap_or_else(|| panic!("missing telemetry matrix {key}"));
+            let widget =
+                find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing widget {key}"));
             assert_measured(widget);
         }
+        let mut event_views = Vec::new();
+        collect_widgets(&layout, "event-view", &mut event_views);
+        assert_eq!(event_views.len(), 2, "expected two event-view widgets");
 
         // Five number-pickers per node (delay + transpose + vel-decay + dampening +
         // recovery) plus the two top-of-panel config pickers (reset-bars + max-poly);
@@ -11993,6 +12004,11 @@ mod tests {
         runtime
             .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
             .expect("install sequencer tab registration test stub");
+        runtime
+            .eval_str(
+                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+            )
+            .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
             "{}/scripts/graph-neural-8x8-reset-demo.lisp",
@@ -12042,6 +12058,11 @@ mod tests {
             assert_measured(matrix);
         }
 
+        let mut event_views = Vec::new();
+        collect_widgets(&layout, "event-view", &mut event_views);
+        assert_eq!(event_views.len(), 1, "expected graph event history view");
+        assert_measured(event_views[0]);
+
         let mut pickers = Vec::new();
         collect_widgets(&layout, "number-picker", &mut pickers);
         assert_eq!(
@@ -12070,6 +12091,7 @@ mod tests {
             "graph-8x8-reset-delay-factor",
             "graph-8x8-reset-timebase-factor",
             "graph-8x8-reset-weight-matrix",
+            "graph-8x8-reset-event-view",
         ] {
             let widget = find_by_stable_key(&layout, key)
                 .unwrap_or_else(|| panic!("missing reset/global control {key}"));
@@ -12404,6 +12426,8 @@ mod tests {
                       (filter (lambda (tab) (not (= (nth tab 1) buffer)))
                         seq-registered-step-tabs)
                       (list (list label buffer)))))
+                (def seq-register-script-step-sequencer-tab (label buffer sequencer icon)
+                  (seq-register-step-sequencer-tab label buffer))
                 "#,
             )
             .expect("install sequencer tab registration test stub");
@@ -12467,11 +12491,15 @@ mod tests {
             "graph-16-energy-matrix",
             "graph-16-weight-matrix",
             "graph-16-dampening-matrix",
+            "graph-16-event-view",
         ] {
             let widget =
                 find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
             assert_measured(widget);
         }
+        let mut event_views = Vec::new();
+        collect_widgets(&layout, "event-view", &mut event_views);
+        assert_eq!(event_views.len(), 1, "expected one event-view");
         let trigger_matrix =
             find_by_stable_key(&layout, "graph-16-trigger-matrix").expect("trigger matrix");
         assert_number_prop(trigger_matrix, "height", 24.0);
@@ -12651,6 +12679,8 @@ mod tests {
                 (def seq-register-step-sequencer-tab (label buffer)
                   (set! seq-registered-step-tabs
                     (append seq-registered-step-tabs (list (list label buffer)))))
+                (def seq-register-script-step-sequencer-tab (label buffer sequencer icon)
+                  (seq-register-step-sequencer-tab label buffer))
                 "#,
             )
             .expect("install sequencer tab registration test stub");
@@ -12701,6 +12731,16 @@ mod tests {
         let layout = runtime
             .layout_snapshot_for_tree_with_viewport(&tree, Some((44.0, 56.0)))
             .expect("cycle demo widget tree should lay out");
+        let event_view =
+            find_by_stable_key(&layout, "graph-16c-event-view").expect("cycle event-view");
+        assert!(
+            event_view.rect.width > 0.0 && event_view.rect.height > 0.0,
+            "{:?}",
+            event_view.rect
+        );
+        let mut event_views = Vec::new();
+        collect_widgets(&layout, "event-view", &mut event_views);
+        assert_eq!(event_views.len(), 1, "expected one event-view");
         let mut text_inputs = Vec::new();
         collect_widgets(&layout, "text-input", &mut text_inputs);
         assert_eq!(

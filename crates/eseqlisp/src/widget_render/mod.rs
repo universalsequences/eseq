@@ -3,6 +3,7 @@ pub mod box_widget;
 pub mod button;
 pub mod cable;
 pub mod dropdown;
+pub mod event_view;
 pub mod grid;
 pub mod hslider;
 pub mod hstack;
@@ -835,6 +836,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &vslider::VSLIDER_WIDGET,
     &button::BUTTON_WIDGET,
     &toggle::TOGGLE_WIDGET,
+    &event_view::EVENT_VIEW_WIDGET,
     &matrix::MATRIX_WIDGET,
     &knob::KNOB_WIDGET,
     &knob_number::KNOB_NUMBER_WIDGET,
@@ -1043,7 +1045,10 @@ fn value_contains_reactive_ref(value: &Value) -> bool {
 
 #[cfg(target_os = "macos")]
 fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
-    let mut keys = props.keys().collect::<Vec<_>>();
+    let mut keys = props
+        .keys()
+        .filter(|key| !is_internal_source_prop(key))
+        .collect::<Vec<_>>();
     keys.sort();
     keys.len().hash(hasher);
     for key in keys {
@@ -1052,6 +1057,19 @@ fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
             hash_value(value, hasher);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn is_internal_source_prop(key: &str) -> bool {
+    matches!(
+        key,
+        crate::vm::SOURCE_BUFFER_ID_PROP
+            | crate::vm::SOURCE_MODULE_PATH_PROP
+            | crate::vm::SOURCE_SYMBOL_PROP
+            | crate::vm::SOURCE_START_BYTE_PROP
+            | crate::vm::SOURCE_END_BYTE_PROP
+            | crate::vm::SOURCE_REVISION_PROP
+    )
 }
 
 #[cfg(target_os = "macos")]

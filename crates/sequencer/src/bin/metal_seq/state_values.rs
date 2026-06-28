@@ -3119,6 +3119,20 @@ pub(crate) fn sync_neural_visualization_fields(
             build_graph_visualizations_value(state),
         )
         .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "track-events",
+            build_track_output_events_value(state),
+        )
+        .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "track-event-current-beat",
+            build_track_output_current_beat_value(state),
+        )
+        .effects_dirty;
     effects_dirty
 }
 
@@ -3386,6 +3400,16 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "graph-visualizations",
         build_graph_visualizations_value(state),
     );
+    rt.set_reactive(
+        "SEQ",
+        "track-events",
+        build_track_output_events_value(state),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-event-current-beat",
+        build_track_output_current_beat_value(state),
+    );
 }
 
 pub(crate) fn build_neural_networks_value(state: &Arc<SequencerState>) -> Value {
@@ -3445,6 +3469,31 @@ pub(crate) fn build_graph_visualizations_value(state: &Arc<SequencerState>) -> V
     )
 }
 
+pub(crate) fn build_track_output_events_value(state: &Arc<SequencerState>) -> Value {
+    Value::List(
+        state
+            .track_output_events()
+            .into_iter()
+            .map(|event| Rc::new(RefCell::new(track_output_event_value(event))))
+            .collect(),
+    )
+}
+
+pub(crate) fn build_track_output_current_beat_value(state: &Arc<SequencerState>) -> Value {
+    Value::Number(state.track_output_current_beat())
+}
+
+fn track_output_event_value(event: sequencer::sequencer::TrackOutputEvent) -> Value {
+    map_value([
+        ("node", Value::Nil),
+        ("track", Value::Number(event.track as f64)),
+        ("sample", Value::Number(event.sample_time as f64)),
+        ("beat", Value::Number(event.beat)),
+        ("transpose", Value::Number(event.transpose as f64)),
+        ("velocity", Value::Number(event.velocity as f64)),
+    ])
+}
+
 fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisualizationSnapshot) -> Value {
     let mut map = HashMap::new();
     map.insert(
@@ -3458,6 +3507,10 @@ fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisualizationSnap
     map.insert(
         "active".to_string(),
         value_cell(Value::Bool(snapshot.active)),
+    );
+    map.insert(
+        "current-beat".to_string(),
+        value_cell(Value::Number(snapshot.current_beat)),
     );
     map.insert(
         "num-nodes".to_string(),
@@ -3532,6 +3585,17 @@ fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisualizationSnap
                 .flatten()
                 .copied()
                 .map(|event| Rc::new(RefCell::new(graph_event_value(event))))
+                .collect(),
+        )),
+    );
+    map.insert(
+        "event-history".to_string(),
+        value_cell(Value::List(
+            snapshot
+                .event_history
+                .iter()
+                .copied()
+                .map(|event| Rc::new(RefCell::new(graph_raw_event_value(event))))
                 .collect(),
         )),
     );
@@ -3632,6 +3696,37 @@ fn graph_event_value(event: sequencer::graph::GraphVisualizationEvent) -> Value 
     map.insert(
         "velocity".to_string(),
         value_cell(Value::Number(neural_trigger_display_value(event.velocity))),
+    );
+    Value::Map(map)
+}
+
+fn graph_raw_event_value(event: sequencer::graph::GraphVisualizationEvent) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "node".to_string(),
+        value_cell(Value::Number(event.node_index as f64)),
+    );
+    map.insert(
+        "track".to_string(),
+        value_cell(
+            event
+                .track
+                .map(|track| Value::Number(track as f64))
+                .unwrap_or(Value::Nil),
+        ),
+    );
+    map.insert(
+        "sample".to_string(),
+        value_cell(Value::Number(event.sample_time as f64)),
+    );
+    map.insert("beat".to_string(), value_cell(Value::Number(event.beat)));
+    map.insert(
+        "transpose".to_string(),
+        value_cell(Value::Number(event.transpose as f64)),
+    );
+    map.insert(
+        "velocity".to_string(),
+        value_cell(Value::Number(event.velocity as f64)),
     );
     Value::Map(map)
 }
@@ -7490,6 +7585,7 @@ mod tests {
             id: 9,
             name: "graph".to_string(),
             active: true,
+            current_beat: 2.5,
             num_nodes: 2,
             energy: vec![0.125, 8.0],
             trigger_activity: vec![0.0, 1.0],
@@ -7504,6 +7600,14 @@ mod tests {
                     velocity: 0.625,
                 }),
             ],
+            event_history: vec![sequencer::graph::GraphVisualizationEvent {
+                node_index: 1,
+                track: Some(3),
+                sample_time: 12_345,
+                beat: 1.5,
+                transpose: -7.25,
+                velocity: 0.625,
+            }],
             edges: vec![sequencer::graph::GraphVisualizationEdge {
                 from: 0,
                 to: 1,
@@ -7524,6 +7628,12 @@ mod tests {
         assert_eq!(
             graph.get("name").map(|value| value.borrow().clone()),
             Some(Value::String("graph".to_string()))
+        );
+        assert_eq!(
+            graph
+                .get("current-beat")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(2.5))
         );
 
         let Value::List(weight_rows) = &*graph.get("weight-matrix").unwrap().borrow() else {
@@ -7577,6 +7687,77 @@ mod tests {
         assert_eq!(
             event.get("velocity").map(|value| value.borrow().clone()),
             Some(Value::Number(0.625))
+        );
+
+        let Value::List(event_history) = &*graph.get("event-history").unwrap().borrow() else {
+            panic!("expected event history");
+        };
+        let Value::Map(history_event) = &*event_history[0].borrow() else {
+            panic!("expected event history map");
+        };
+        assert_eq!(
+            history_event
+                .get("transpose")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(-7.25))
+        );
+        assert_eq!(
+            history_event
+                .get("velocity")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(0.625))
+        );
+    }
+
+    #[test]
+    fn track_output_events_value_reflects_scheduler_output_telemetry() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.set_track_output_current_beat(8.5);
+        state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
+            track: 1,
+            sample_time: 48_000,
+            beat: 8.25,
+            transpose: 7.0,
+            velocity: 0.75,
+        }]);
+
+        assert_eq!(
+            build_track_output_current_beat_value(&state),
+            Value::Number(8.5)
+        );
+        let Value::List(events) = build_track_output_events_value(&state) else {
+            panic!("expected track output events");
+        };
+        assert_eq!(events.len(), 1);
+        let Value::Map(event) = &*events[0].borrow() else {
+            panic!("expected track output event map");
+        };
+        assert_eq!(
+            event.get("node").map(|value| value.borrow().clone()),
+            Some(Value::Nil)
+        );
+        assert_eq!(
+            event.get("track").map(|value| value.borrow().clone()),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            event.get("sample").map(|value| value.borrow().clone()),
+            Some(Value::Number(48_000.0))
+        );
+        assert_eq!(
+            event.get("beat").map(|value| value.borrow().clone()),
+            Some(Value::Number(8.25))
+        );
+        assert_eq!(
+            event.get("transpose").map(|value| value.borrow().clone()),
+            Some(Value::Number(7.0))
+        );
+        assert_eq!(
+            event.get("velocity").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.75))
         );
     }
 
@@ -7797,6 +7978,7 @@ mod tests {
             "metal-seq-fx/modulator-panel.lisp",
             "metal-seq-fx/instrument-panel.lisp",
             "metal-seq-fx/buffers.lisp",
+            "metal-seq-fx/step-buffer.lisp",
             "metal-seq-piano-roll.lisp",
             "metal-seq-mixer-v2.lisp",
             "metal-seq-transport.lisp",
@@ -13215,6 +13397,16 @@ mod tests {
             .set_reactive("SEQ", &track_playhead_page_field(0), Value::Number(0.0));
         set_test_expanded_step_slot_projection(&mut editor, 0, 0, 0, 0, 16, 0, 0);
         register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                "#,
+            )
+            .expect("install default custom UI dispatchers");
 
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
         editor.runtime_mut().eval_str(&src).expect("load grid lisp");

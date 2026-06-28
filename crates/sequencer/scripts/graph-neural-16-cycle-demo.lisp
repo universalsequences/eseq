@@ -364,6 +364,26 @@
                 (do
                   (set! g16c-swing v)
                   (g16c-edit-global-param :swing v)))))
+          (event-view
+            :key "graph-16c-event-view"
+            :events (if viz (get viz :event-history) (list))
+            :current-beat (if viz (get viz :current-beat) 0)
+            :renderer :isometric
+            :x :transpose
+            :x-min -24
+            :x-max 24
+            :y :node
+            :y-min 0
+            :y-max 15
+            :z :beat-phase
+            :z-min 0
+            :z-max 16
+            :phase-beats 16
+            :window-beats 16
+            :brightness :velocity
+            :cube-padding 0
+            :width 34
+            :height 16)
           (h-stack
             (v-stack :gap 0.5
               (h-stack :gap 0.5 :align :center

@@ -58,18 +58,10 @@
 (effect-buffer "*track*"
   (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
-    (box :padding 0.6
-      (v-stack :gap 0.1
+    (box :padding 1.0
+      (v-stack :gap 0.2
         (fx-track-parameters-panel)
         (fx-track-accumulator-panel)))))
-
-(effect-buffer "*step*"
-  (if (= SEQ.num-tracks 0)
-    (fx-empty-track-fallback)
-    (box :padding 0.6
-      (v-stack :gap 0.1
-        (fx-step-parameters-panel)
-        (fx-track-plocks-panel)))))
 
 (effect-buffer "*fx*"
   (if (fx-has-selected-bus?)

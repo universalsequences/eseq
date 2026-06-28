@@ -1,7 +1,7 @@
 use crate::compiler::{Chunk, Compiler, MacroDef, OpCode};
 use crate::host::BufferId;
-use crate::hot_reload::{SourceManager, extract_defined_symbols_from_source};
-use crate::parser::{ASTParser, Parser};
+use crate::hot_reload::{ModuleStackEntry, SourceManager, extract_defined_symbols_from_source};
+use crate::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -15,6 +15,10 @@ static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 pub const SOURCE_BUFFER_ID_PROP: &str = "__source-buffer-id";
 pub const SOURCE_MODULE_PATH_PROP: &str = "__source-module-path";
 pub const SOURCE_SYMBOL_PROP: &str = "__source-symbol";
+pub const SOURCE_START_BYTE_PROP: &str = "__source-start-byte";
+pub const SOURCE_END_BYTE_PROP: &str = "__source-end-byte";
+pub const SOURCE_REVISION_PROP: &str = "__source-revision";
+const SOURCE_ORIGIN_NATIVE: &str = "__source-origin";
 
 #[derive(Debug, PartialEq)]
 pub enum VMError {
@@ -139,6 +143,7 @@ pub enum ReactiveNode {
         callable: Option<Value>,
         source_buffer_id: Option<BufferId>,
         source_module: Option<std::path::PathBuf>,
+        source_revision: Option<u64>,
         target: EffectTarget,
         subtree_root_id: Option<u64>,
         parent_subtree_root_id: Option<u64>,
@@ -633,6 +638,486 @@ impl Clone for Value {
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
         }
     }
+}
+
+fn expr_head_symbol(expr: &Expr) -> Option<&str> {
+    match &expr.kind {
+        ExprKind::List(items) => items.first().and_then(|head| match &head.kind {
+            ExprKind::Symbol(symbol) => Some(symbol.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+fn collect_defwidget_names(expr: &Expr, out: &mut HashSet<String>) {
+    let ExprKind::List(items) = &expr.kind else {
+        return;
+    };
+    if matches!(items.first().map(|item| &item.kind), Some(ExprKind::Symbol(head)) if head == "defwidget")
+        && let Some(ExprKind::Symbol(name)) = items.get(1).map(|item| &item.kind)
+    {
+        out.insert(name.clone());
+    }
+    for item in items {
+        collect_defwidget_names(item, out);
+    }
+}
+
+fn collect_defmacro_names(expr: &Expr, out: &mut HashSet<String>) {
+    let ExprKind::List(items) = &expr.kind else {
+        return;
+    };
+    if matches!(items.first().map(|item| &item.kind), Some(ExprKind::Symbol(head)) if head == "defmacro")
+        && let Some(ExprKind::Symbol(name)) = items.get(1).map(|item| &item.kind)
+    {
+        out.insert(name.clone());
+    }
+    for item in items {
+        collect_defmacro_names(item, out);
+    }
+}
+
+fn is_source_prop_keyword(expr: &Expr) -> bool {
+    matches!(
+        &expr.kind,
+        ExprKind::Keyword(key)
+            if key == SOURCE_START_BYTE_PROP
+                || key == SOURCE_END_BYTE_PROP
+                || key == SOURCE_REVISION_PROP
+    )
+}
+
+fn is_widget_constructor_name(name: &str, local_defwidgets: &HashSet<String>) -> bool {
+    crate::widgets::is_builtin_widget_name(name)
+        || local_defwidgets.contains(name)
+        || crate::widget_render::sdf_widget::sdf_widget_def(name).is_some()
+}
+
+fn is_source_quoted_prop_key(key: &str) -> bool {
+    matches!(key, "shader" | "material" | "state" | "bindable")
+}
+
+fn convert_source_data_expr(
+    expr: &Expr,
+    source_revision: u64,
+    local_defwidgets: &HashSet<String>,
+    macro_names: &HashSet<String>,
+) -> Expression {
+    convert_source_expr(expr, source_revision, local_defwidgets, macro_names, false)
+}
+
+fn convert_let_bindings(
+    expr: &Expr,
+    source_revision: u64,
+    local_defwidgets: &HashSet<String>,
+    macro_names: &HashSet<String>,
+) -> Expression {
+    let ExprKind::List(bindings) = &expr.kind else {
+        return convert_source_data_expr(expr, source_revision, local_defwidgets, macro_names);
+    };
+    Expression::List(
+        bindings
+            .iter()
+            .map(|binding| {
+                let ExprKind::List(parts) = &binding.kind else {
+                    return convert_source_data_expr(
+                        binding,
+                        source_revision,
+                        local_defwidgets,
+                        macro_names,
+                    );
+                };
+                Expression::List(
+                    parts
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, part)| {
+                            convert_source_expr(
+                                part,
+                                source_revision,
+                                local_defwidgets,
+                                macro_names,
+                                idx > 0,
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn convert_list_with_code_from_idx(
+    items: &[Expr],
+    source_revision: u64,
+    local_defwidgets: &HashSet<String>,
+    macro_names: &HashSet<String>,
+    code_start_idx: usize,
+) -> Expression {
+    Expression::List(
+        items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                convert_source_expr(
+                    item,
+                    source_revision,
+                    local_defwidgets,
+                    macro_names,
+                    idx >= code_start_idx,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn convert_defwidget_list(
+    items: &[Expr],
+    source_revision: u64,
+    local_defwidgets: &HashSet<String>,
+    macro_names: &HashSet<String>,
+) -> Expression {
+    let mut converted = Vec::with_capacity(items.len());
+    let mut idx = 0;
+    while idx < items.len() {
+        let item = &items[idx];
+        converted.push(convert_source_expr(
+            item,
+            source_revision,
+            local_defwidgets,
+            macro_names,
+            idx > 1,
+        ));
+        if let ExprKind::Keyword(key) = &item.kind
+            && is_source_quoted_prop_key(key)
+            && let Some(next) = items.get(idx + 1)
+        {
+            converted.push(convert_source_data_expr(
+                next,
+                source_revision,
+                local_defwidgets,
+                macro_names,
+            ));
+            idx += 2;
+            continue;
+        }
+        idx += 1;
+    }
+    Expression::List(converted)
+}
+
+fn convert_match_list(
+    items: &[Expr],
+    source_revision: u64,
+    local_defwidgets: &HashSet<String>,
+    macro_names: &HashSet<String>,
+) -> Expression {
+    Expression::List(
+        items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                let is_code = idx == 1 || (idx > 2 && idx % 2 == 1);
+                convert_source_expr(
+                    item,
+                    source_revision,
+                    local_defwidgets,
+                    macro_names,
+                    is_code,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn convert_source_expr(
+    expr: &Expr,
+    source_revision: u64,
+    local_defwidgets: &HashSet<String>,
+    macro_names: &HashSet<String>,
+    annotate_widgets: bool,
+) -> Expression {
+    match &expr.kind {
+        ExprKind::Symbol(value) => Expression::Symbol(value.clone()),
+        ExprKind::Keyword(value) => Expression::Keyword(value.clone()),
+        ExprKind::String(value) => Expression::String(value.clone()),
+        ExprKind::QuoteSymbol(value) => Expression::QuoteSymbol(value.clone()),
+        ExprKind::QuoteList(items) => {
+            Expression::QuoteList(items.iter().map(Expr::to_legacy).collect())
+        }
+        ExprKind::Number(value) => Expression::Number(*value),
+        ExprKind::Quasiquote(inner) => Expression::Quasiquote(Box::new(inner.to_legacy())),
+        ExprKind::Unquote(inner) => Expression::Unquote(Box::new(convert_source_expr(
+            inner,
+            source_revision,
+            local_defwidgets,
+            macro_names,
+            annotate_widgets,
+        ))),
+        ExprKind::List(items) => {
+            let mut converted = Vec::with_capacity(items.len() + 6);
+            let head_name = expr_head_symbol(expr);
+            if !annotate_widgets {
+                return Expression::List(
+                    items
+                        .iter()
+                        .map(|item| {
+                            convert_source_data_expr(
+                                item,
+                                source_revision,
+                                local_defwidgets,
+                                macro_names,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            match head_name {
+                Some("let" | "let*") if items.len() >= 2 => {
+                    converted.push(convert_source_data_expr(
+                        &items[0],
+                        source_revision,
+                        local_defwidgets,
+                        macro_names,
+                    ));
+                    converted.push(convert_let_bindings(
+                        &items[1],
+                        source_revision,
+                        local_defwidgets,
+                        macro_names,
+                    ));
+                    converted.extend(items[2..].iter().map(|item| {
+                        convert_source_expr(
+                            item,
+                            source_revision,
+                            local_defwidgets,
+                            macro_names,
+                            true,
+                        )
+                    }));
+                    return Expression::List(converted);
+                }
+                Some("lambda") if items.len() >= 2 => {
+                    return convert_list_with_code_from_idx(
+                        items,
+                        source_revision,
+                        local_defwidgets,
+                        macro_names,
+                        2,
+                    );
+                }
+                Some("def") if items.len() >= 3 => {
+                    let body_start_idx =
+                        if matches!(items.get(2).map(|item| &item.kind), Some(ExprKind::List(_)))
+                            && items.len() >= 4
+                        {
+                            3
+                        } else {
+                            2
+                        };
+                    return convert_list_with_code_from_idx(
+                        items,
+                        source_revision,
+                        local_defwidgets,
+                        macro_names,
+                        body_start_idx,
+                    );
+                }
+                Some("defmacro") => {
+                    return Expression::List(
+                        items
+                            .iter()
+                            .map(|item| {
+                                convert_source_data_expr(
+                                    item,
+                                    source_revision,
+                                    local_defwidgets,
+                                    macro_names,
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+                Some("defwidget") => {
+                    return convert_defwidget_list(
+                        items,
+                        source_revision,
+                        local_defwidgets,
+                        macro_names,
+                    );
+                }
+                Some("match") => {
+                    return convert_match_list(
+                        items,
+                        source_revision,
+                        local_defwidgets,
+                        macro_names,
+                    );
+                }
+                _ => {}
+            }
+            let is_macro_call =
+                annotate_widgets && head_name.is_some_and(|name| macro_names.contains(name));
+            let should_annotate = annotate_widgets
+                && !is_macro_call
+                && head_name.is_some_and(|name| is_widget_constructor_name(name, local_defwidgets));
+            let mut idx = 0;
+            while idx < items.len() {
+                let item = &items[idx];
+                if should_annotate && idx > 0 && is_source_prop_keyword(item) {
+                    idx += 2;
+                    continue;
+                }
+                converted.push(convert_source_expr(
+                    item,
+                    source_revision,
+                    local_defwidgets,
+                    macro_names,
+                    annotate_widgets,
+                ));
+                if let ExprKind::Keyword(key) = &item.kind
+                    && is_source_quoted_prop_key(key)
+                    && let Some(next) = items.get(idx + 1)
+                {
+                    converted.push(convert_source_expr(
+                        next,
+                        source_revision,
+                        local_defwidgets,
+                        macro_names,
+                        false,
+                    ));
+                    idx += 2;
+                    continue;
+                }
+                idx += 1;
+            }
+            if should_annotate && !converted.is_empty() {
+                converted.push(Expression::Keyword(SOURCE_START_BYTE_PROP.to_string()));
+                converted.push(Expression::Number(
+                    expr.origin.primary_span.start_byte as f64,
+                ));
+                converted.push(Expression::Keyword(SOURCE_END_BYTE_PROP.to_string()));
+                converted.push(Expression::Number(expr.origin.primary_span.end_byte as f64));
+                converted.push(Expression::Keyword(SOURCE_REVISION_PROP.to_string()));
+                converted.push(Expression::String(source_revision.to_string()));
+            }
+            let converted = Expression::List(converted);
+            if is_macro_call {
+                Expression::List(vec![
+                    Expression::Symbol(SOURCE_ORIGIN_NATIVE.to_string()),
+                    Expression::Number(expr.origin.primary_span.start_byte as f64),
+                    Expression::Number(expr.origin.primary_span.end_byte as f64),
+                    Expression::String(source_revision.to_string()),
+                    converted,
+                ])
+            } else {
+                converted
+            }
+        }
+    }
+}
+
+fn convert_source_exprs_with_origins(
+    exprs: &[Expr],
+    source_revision: u64,
+    existing_macros: &HashSet<String>,
+) -> Vec<Expression> {
+    let mut local_defwidgets = HashSet::new();
+    let mut macro_names = existing_macros.clone();
+    for expr in exprs {
+        collect_defwidget_names(expr, &mut local_defwidgets);
+        collect_defmacro_names(expr, &mut macro_names);
+    }
+    exprs
+        .iter()
+        .map(|expr| {
+            convert_source_expr(expr, source_revision, &local_defwidgets, &macro_names, true)
+        })
+        .collect()
+}
+
+fn source_origin_number_arg(value: &Value) -> Option<usize> {
+    match value {
+        Value::Number(number) if number.is_finite() && *number >= 0.0 => Some(*number as usize),
+        _ => None,
+    }
+}
+
+fn source_origin_revision_arg(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) if value.parse::<u64>().is_ok() => Some(value.clone()),
+        Value::Number(number) if number.is_finite() && *number >= 0.0 => {
+            Some((*number as u64).to_string())
+        }
+        _ => None,
+    }
+}
+
+fn stamp_source_origin_value(value: &Value, start: usize, end: usize, revision: &str) -> Value {
+    match value {
+        Value::Map(map) => {
+            let mut stamped = map
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        Rc::new(RefCell::new(stamp_source_origin_value(
+                            &value.borrow(),
+                            start,
+                            end,
+                            revision,
+                        ))),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            if stamped.contains_key("type") && !stamped.contains_key(SOURCE_START_BYTE_PROP) {
+                stamped.insert(
+                    SOURCE_START_BYTE_PROP.to_string(),
+                    Rc::new(RefCell::new(Value::Number(start as f64))),
+                );
+                stamped.insert(
+                    SOURCE_END_BYTE_PROP.to_string(),
+                    Rc::new(RefCell::new(Value::Number(end as f64))),
+                );
+                stamped.insert(
+                    SOURCE_REVISION_PROP.to_string(),
+                    Rc::new(RefCell::new(Value::String(revision.to_string()))),
+                );
+            }
+            Value::Map(stamped)
+        }
+        Value::List(items) => Value::List(
+            items
+                .iter()
+                .map(|item| {
+                    Rc::new(RefCell::new(stamp_source_origin_value(
+                        &item.borrow(),
+                        start,
+                        end,
+                        revision,
+                    )))
+                })
+                .collect(),
+        ),
+        other => other.deep_clone(),
+    }
+}
+
+fn source_origin_native(args: Vec<Value>) -> Value {
+    let [start, end, revision, value] = args.as_slice() else {
+        return args.last().cloned().unwrap_or(Value::Nil);
+    };
+    let Some(start) = source_origin_number_arg(start) else {
+        return value.deep_clone();
+    };
+    let Some(end) = source_origin_number_arg(end) else {
+        return value.deep_clone();
+    };
+    let Some(revision) = source_origin_revision_arg(revision) else {
+        return value.deep_clone();
+    };
+    stamp_source_origin_value(value, start, end, &revision)
 }
 
 impl Value {
@@ -2258,7 +2743,7 @@ impl ReactiveDag {
 
 impl VM {
     pub fn new(chunks: Vec<Chunk>) -> Self {
-        VM {
+        let mut vm = VM {
             chunks,
             current_chunk: 0,
             globals: vec![None; 4096],
@@ -2286,7 +2771,9 @@ impl VM {
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
             preserve_state_on_redefinition: false,
-        }
+        };
+        vm.register_native(SOURCE_ORIGIN_NATIVE, source_origin_native);
+        vm
     }
 
     /// Register a Rust function as a named global callable from Lisp.
@@ -2319,11 +2806,21 @@ impl VM {
     /// Compile and run `code` in this VM's existing context (globals persist).
     pub fn eval_str(&mut self, code: &str) -> Result<Option<Value>, VMError> {
         let tokens = Parser::new(code.to_string())
+            .parse_spanned()
+            .map_err(|_| VMError::ParseError)?;
+        let spanned_exprs = SpannedASTParser::new(tokens)
             .parse()
             .map_err(|_| VMError::ParseError)?;
-        let exprs = ASTParser::new(tokens)
-            .parse()
-            .map_err(|_| VMError::ParseError)?;
+        let source_revision = self
+            .source_manager
+            .current_revision()
+            .unwrap_or_else(|| crate::hot_reload::hash_source(code));
+        let existing_macro_names = self.macros.keys().cloned().collect::<HashSet<_>>();
+        let exprs = convert_source_exprs_with_origins(
+            &spanned_exprs,
+            source_revision,
+            &existing_macro_names,
+        );
 
         let entry_idx = self.chunks.len();
         let existing = self.chunks.clone();
@@ -2375,7 +2872,9 @@ impl VM {
             VMError::ParseError
         })?;
         self.clear_effects_for_module(&path);
-        self.source_manager.enter_module(path.clone());
+        self.source_manager
+            .remember_evaluated_source(path.clone(), revision, source);
+        self.source_manager.enter_module(path.clone(), revision);
         let result = self.eval_str(source);
         self.source_manager.leave_module();
         if result.is_ok() {
@@ -2475,14 +2974,24 @@ impl VM {
 
         let parse_started = std::time::Instant::now();
         let tokens = Parser::new(code.to_string())
-            .parse()
+            .parse_spanned()
             .map_err(|_| VMError::ParseError)?;
         profile.parse = parse_started.elapsed();
 
         let ast_started = std::time::Instant::now();
-        let exprs = ASTParser::new(tokens)
+        let spanned_exprs = SpannedASTParser::new(tokens)
             .parse()
             .map_err(|_| VMError::ParseError)?;
+        let source_revision = self
+            .source_manager
+            .current_revision()
+            .unwrap_or_else(|| crate::hot_reload::hash_source(code));
+        let existing_macro_names = self.macros.keys().cloned().collect::<HashSet<_>>();
+        let exprs = convert_source_exprs_with_origins(
+            &spanned_exprs,
+            source_revision,
+            &existing_macro_names,
+        );
         profile.ast = ast_started.elapsed();
 
         let entry_idx = self.chunks.len();
@@ -2647,12 +3156,14 @@ impl VM {
     ) {
         let source_buffer_id = self.current_effect_source_buffer_id;
         let source_module = self.source_manager.current_module();
+        let source_revision = self.source_manager.current_revision();
         match self.dag.nodes.get_mut(&node_id) {
             Some(ReactiveNode::Effect {
                 chunk_idx: current_chunk_idx,
                 callable,
                 source_buffer_id: current_source_buffer_id,
                 source_module: current_source_module,
+                source_revision: current_source_revision,
                 target: current_target,
                 subtree_root_id: None,
                 parent_subtree_root_id,
@@ -2664,6 +3175,7 @@ impl VM {
                 *callable = None;
                 *current_source_buffer_id = source_buffer_id;
                 *current_source_module = source_module;
+                *current_source_revision = source_revision;
                 *current_target = target;
                 *parent_subtree_root_id = None;
                 *stable_key = None;
@@ -2678,6 +3190,7 @@ impl VM {
                     callable: None,
                     source_buffer_id,
                     source_module,
+                    source_revision,
                     target,
                     subtree_root_id: None,
                     parent_subtree_root_id: None,
@@ -2693,6 +3206,7 @@ impl VM {
                     callable: None,
                     source_buffer_id,
                     source_module,
+                    source_revision,
                     target,
                     subtree_root_id: None,
                     parent_subtree_root_id: None,
@@ -2832,6 +3346,7 @@ impl VM {
             callable: Some(callable.clone()),
             source_buffer_id: self.current_effect_source_buffer_id,
             source_module: self.source_manager.current_module(),
+            source_revision: self.source_manager.current_revision(),
             target: self.current_effect_target.clone(),
             subtree_root_id: Some(root_id),
             parent_subtree_root_id: parent_root_id,
@@ -2992,7 +3507,7 @@ impl VM {
             }
             Value::NativeFunction(f) => {
                 let result = f(args, self);
-                if !self.processing_reactive {
+                if self.execution_depth == 0 && !self.processing_reactive {
                     self.process_dirty_reactive()?;
                 }
                 Ok(Some(result))
@@ -3295,28 +3810,36 @@ impl VM {
                         self.source_manager.module_stack_snapshot(),
                         self.current_effect_target.clone(),
                     );
-                    if let Some((source_buffer_id, source_module, target, subtree_root_id)) =
-                        self.dag.nodes.get(&node_id).and_then(|node| match node {
-                            ReactiveNode::Effect {
-                                source_buffer_id,
-                                source_module,
-                                target,
-                                subtree_root_id,
-                                ..
-                            } => Some((
-                                *source_buffer_id,
-                                source_module.clone(),
-                                target.clone(),
-                                *subtree_root_id,
-                            )),
-                            _ => None,
-                        })
-                    {
+                    if let Some((
+                        source_buffer_id,
+                        source_module,
+                        source_revision,
+                        target,
+                        subtree_root_id,
+                    )) = self.dag.nodes.get(&node_id).and_then(|node| match node {
+                        ReactiveNode::Effect {
+                            source_buffer_id,
+                            source_module,
+                            source_revision,
+                            target,
+                            subtree_root_id,
+                            ..
+                        } => Some((
+                            *source_buffer_id,
+                            source_module.clone(),
+                            *source_revision,
+                            target.clone(),
+                            *subtree_root_id,
+                        )),
+                        _ => None,
+                    }) {
                         self.current_effect_source_buffer_id = source_buffer_id;
-                        let source_module_stack = source_module
-                            .clone()
-                            .map(|module| vec![module])
-                            .unwrap_or_default();
+                        let source_module_stack = match (source_module.clone(), source_revision) {
+                            (Some(path), Some(revision)) => {
+                                vec![ModuleStackEntry { path, revision }]
+                            }
+                            _ => Vec::new(),
+                        };
                         self.source_manager
                             .restore_module_stack(source_module_stack);
                         self.current_effect_target = target;
@@ -4403,7 +4926,8 @@ mod tests {
 
     use super::{
         EffectTarget, PendingUiUpdate, ReactiveDag, ReactiveNode, ReactiveSource,
-        SOURCE_BUFFER_ID_PROP, SOURCE_MODULE_PATH_PROP, SOURCE_SYMBOL_PROP, VM, Value,
+        SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP, SOURCE_REVISION_PROP,
+        SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
     };
 
     fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
@@ -4419,6 +4943,29 @@ mod tests {
             return None;
         };
         children.first().map(|child| child.borrow().clone())
+    }
+
+    fn child_values(value: &Value) -> Vec<Value> {
+        let Some(children) = map_prop(value, "children") else {
+            return Vec::new();
+        };
+        let Value::List(children) = &*children else {
+            return Vec::new();
+        };
+        children
+            .iter()
+            .map(|child| child.borrow().clone())
+            .collect()
+    }
+
+    fn source_byte_prop(value: &Value, key: &str) -> usize {
+        let Some(prop) = map_prop(value, key) else {
+            panic!("missing {key}");
+        };
+        let Value::Number(number) = *prop else {
+            panic!("{key} is not a number: {prop:?}");
+        };
+        number as usize
     }
 
     #[test]
@@ -4502,6 +5049,250 @@ mod tests {
     }
 
     #[test]
+    fn source_metadata_marks_exact_widget_constructor_span() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-span-direct-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"(effect
+  (box
+    (knob-number :label "base")))"#;
+
+        vm.eval_module_source(path, source, 11)
+            .expect("module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        let child = first_child(&pending.tree).expect("child widget");
+        let expected_start = source.find("(knob-number").expect("widget form");
+        let expected_end = source[expected_start..]
+            .find("))")
+            .map(|offset| expected_start + offset + 1)
+            .expect("widget form end");
+        assert_eq!(
+            source_byte_prop(&child, SOURCE_START_BYTE_PROP),
+            expected_start
+        );
+        assert_eq!(source_byte_prop(&child, SOURCE_END_BYTE_PROP), expected_end);
+        assert_eq!(
+            map_prop(&child, SOURCE_REVISION_PROP).as_deref(),
+            Some(&Value::String("11".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_metadata_does_not_treat_widget_named_let_bindings_as_widget_calls() {
+        let mut vm = VM::new(Vec::new());
+
+        vm.eval_str(
+            r#"
+            (def local-widget-names ()
+              (let ((tabs (list 1 2))
+                    (label (list 3 4)))
+                (list tabs label)))
+            "#,
+        )
+        .expect("widget-named bindings should compile as let bindings");
+    }
+
+    #[test]
+    fn source_metadata_marks_helper_returned_widget_constructor_span() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-span-helper-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"(def sampler-param-knob ()
+  (knob-number :label "base"))
+(effect (sampler-param-knob))"#;
+
+        vm.eval_module_source(path, source, 12)
+            .expect("module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        let expected_start = source.find("(knob-number").expect("widget form");
+        assert_eq!(
+            source_byte_prop(&pending.tree, SOURCE_START_BYTE_PROP),
+            expected_start
+        );
+        assert_eq!(
+            map_prop(&pending.tree, SOURCE_SYMBOL_PROP).as_deref(),
+            Some(&Value::String("sampler-param-knob".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_metadata_marks_each_items_with_template_widget_span() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        crate::widgets::register_widget_natives(&mut vm);
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-span-each-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"(effect
+  (h-stack
+    (each (list 1 2) |x|
+      (knob-number :label "base"))))"#;
+
+        vm.eval_module_source(path, source, 13)
+            .expect("module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        let expected_start = source.find("(knob-number").expect("widget form");
+        let children = child_values(&pending.tree);
+        assert_eq!(children.len(), 2);
+        for child in children {
+            assert_eq!(
+                source_byte_prop(&child, SOURCE_START_BYTE_PROP),
+                expected_start
+            );
+            assert_eq!(
+                map_prop(&child, SOURCE_REVISION_PROP).as_deref(),
+                Some(&Value::String("13".to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn source_metadata_marks_destructuring_zip_each_items_with_template_widget_span() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        crate::widgets::register_widget_natives(&mut vm);
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-span-zip-each-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"(effect
+  (h-stack
+    (each (zip '(0 1) '(2 3)) |(enabled level)|
+      (knob-number :label "zip" :value level))))"#;
+
+        vm.eval_module_source(path, source, 14)
+            .expect("module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        let expected_start = source.find("(knob-number").expect("widget form");
+        let children = child_values(&pending.tree);
+        assert_eq!(children.len(), 2);
+        for child in children {
+            assert_eq!(
+                source_byte_prop(&child, SOURCE_START_BYTE_PROP),
+                expected_start
+            );
+            assert_eq!(
+                map_prop(&child, SOURCE_REVISION_PROP).as_deref(),
+                Some(&Value::String("14".to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn source_metadata_marks_dynamic_sdf_widget_constructor_span() {
+        let mut runtime = crate::runtime::Runtime::new();
+        let source = r#"
+            (defwidget sdf-source-test
+              :width 3 :height 3
+              :shader (sdf/layer
+                        (sdf/fill (sdf/circle 0.7) :accent)))
+            (sdf-source-test)
+        "#;
+
+        let value = runtime
+            .eval_str(source)
+            .expect("dynamic SDF widget eval")
+            .expect("widget value");
+
+        let expected_start = source.find("(sdf-source-test)").expect("widget call");
+        assert_eq!(
+            source_byte_prop(&value, SOURCE_START_BYTE_PROP),
+            expected_start
+        );
+        assert_eq!(
+            map_prop(&value, SOURCE_REVISION_PROP).as_deref(),
+            Some(&Value::String(
+                crate::hot_reload::hash_source(source).to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn source_metadata_marks_macro_generated_widget_with_macro_callsite_span() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-span-macro-generated-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"(defmacro make-base ()
+  `(knob-number :label "base"))
+(effect (make-base))"#;
+
+        vm.eval_module_source(path, source, 15)
+            .expect("module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        let expected_start = source.find("(make-base)").expect("macro call");
+        assert_eq!(
+            source_byte_prop(&pending.tree, SOURCE_START_BYTE_PROP),
+            expected_start
+        );
+        assert_eq!(
+            map_prop(&pending.tree, SOURCE_REVISION_PROP).as_deref(),
+            Some(&Value::String("15".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_metadata_preserves_unquoted_macro_arg_widget_span() {
+        let mut vm = VM::new(Vec::new());
+        crate::widgets::register_widget_natives(&mut vm);
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-span-macro-arg-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"(defmacro wrap-control (child)
+  `(box ,child))
+(effect
+  (wrap-control
+    (knob-number :label "base")))"#;
+
+        vm.eval_module_source(path, source, 16)
+            .expect("module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        let call_start = source.find("(wrap-control").expect("macro call");
+        let child_start = source.rfind("(knob-number").expect("widget arg");
+        assert_eq!(
+            source_byte_prop(&pending.tree, SOURCE_START_BYTE_PROP),
+            call_start
+        );
+        let child = first_child(&pending.tree).expect("child widget");
+        assert_eq!(
+            source_byte_prop(&child, SOURCE_START_BYTE_PROP),
+            child_start
+        );
+        assert_eq!(
+            map_prop(&child, SOURCE_REVISION_PROP).as_deref(),
+            Some(&Value::String("16".to_string()))
+        );
+    }
+
+    #[test]
     fn source_metadata_marks_named_function_that_created_widget() {
         let mut vm = VM::new(Vec::new());
         crate::widgets::register_widget_natives(&mut vm);
@@ -4566,6 +5357,33 @@ mod tests {
     }
 
     #[test]
+    fn source_metadata_file_load_before_effect_buffer_keeps_later_defs_available() {
+        let mut runtime = crate::runtime::Runtime::new();
+        let root = std::env::temp_dir().join(format!(
+            "eseqlisp-nested-load-effect-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp lisp dir");
+        let dep_path = root.join("dep.lisp");
+        let main_path = root.join("main.lisp");
+        std::fs::write(&dep_path, r#"(def dep-ready () true)"#).expect("write dep source");
+        let source = r#"(load "dep.lisp")
+(def render-row (x)
+  (label (str "row-" x)))
+(effect-buffer "*nested-load-effect*"
+  (v-stack
+    (each (list 1 2) |x|
+      (render-row x))))"#;
+
+        let report = runtime.eval_source_transactional(Some(main_path), source, Vec::new());
+        assert!(
+            report.success,
+            "nested load before effect-buffer failed: {}",
+            report.failure_message()
+        );
+    }
+
+    #[test]
     fn reactive_dag_indexes_source_nodes() {
         let mut dag = ReactiveDag::new();
         let source = ReactiveSource::NamespaceField {
@@ -4587,6 +5405,7 @@ mod tests {
             callable: None,
             source_buffer_id: None,
             source_module: None,
+            source_revision: None,
             target: EffectTarget::BufferId(None),
             subtree_root_id: None,
             parent_subtree_root_id: None,

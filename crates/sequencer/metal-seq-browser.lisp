@@ -304,10 +304,13 @@
     (button name
       :variant :ghost
       :background-color (if selected 
-         (rgba 0.95 0.68 0.28 1.0)
-         '(rgba 1 1 1 0.1))
+        (rgba 1 0.6 0.3 1)
+        '(rgba 1 1 1 0.1))
       :color (if selected :black :white)
-      :border-color (if selected (rgba 0.85 0.78 0.95 0.0) '(rgba 1 1 1 0.2))
+      :border-color (if selected 
+        (rgba 0.95 0.98 0.05 1.0) 
+        (rgba 1 1 1 0.3)
+        )
       :height 0.9
       :padding 0.532
       :font-size 11.0

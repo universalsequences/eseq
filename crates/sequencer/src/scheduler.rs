@@ -20,7 +20,7 @@ use crate::scheduled_event::{
 };
 use crate::sequencer::{
     sync_beats, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState, StepParam,
-    SwingResolution, MAX_STEPS, MAX_TRACKS,
+    SwingResolution, TrackOutputEvent, MAX_STEPS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
@@ -984,11 +984,15 @@ fn seed_graph_runtimes(
     }
 }
 
-fn publish_graph_visualizations(state: &SequencerState, graphs: &[crate::graph::GraphRuntime]) {
+fn publish_graph_visualizations(
+    state: &SequencerState,
+    graphs: &[crate::graph::GraphRuntime],
+    current_beat: f64,
+) {
     state.set_graph_visualizations(
         graphs
             .iter()
-            .map(crate::graph::GraphRuntime::visualization_snapshot)
+            .map(|graph| graph.visualization_snapshot_at(current_beat))
             .collect(),
     );
 }
@@ -1004,6 +1008,22 @@ fn same_coincident_note(
     existing_sample_time == incoming_sample_time
         && existing_track == incoming_track
         && existing_transpose == incoming_transpose
+}
+
+fn record_track_output_event(
+    events: &mut Vec<TrackOutputEvent>,
+    track: usize,
+    sample_time: u64,
+    beat: f64,
+    resolved: ResolvedStep,
+) {
+    events.push(TrackOutputEvent {
+        track,
+        sample_time,
+        beat,
+        transpose: resolved.transpose,
+        velocity: resolved.velocity,
+    });
 }
 
 fn neural_outputs_are_same_accent(existing: &NeuralOutput, incoming: &NeuralOutput) -> bool {
@@ -1436,8 +1456,11 @@ fn track_active_note_spans_at_beat(
 fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
     pattern_epoch: u64,
     sample_time: u64,
+    event_beat: f64,
+    samples_per_quarter: f32,
     track_idx: usize,
     step_idx: usize,
     samples_per_step: f32,
@@ -1491,11 +1514,21 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                     ok = false;
                     break;
                 }
+                let note_beat = event_beat
+                    + (note_sample_time.saturating_sub(sample_time) as f64)
+                        / samples_per_quarter.max(1.0) as f64;
+                record_track_output_event(
+                    track_output_events,
+                    track_idx,
+                    note_sample_time,
+                    note_beat,
+                    resolved,
+                );
             }
             return ok;
         }
     }
-    queue
+    let enqueued = queue
         .push(ScheduledEvent {
             pattern_epoch,
             sample_time,
@@ -1510,7 +1543,17 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                 instrument_fingerprint,
             },
         })
-        .is_ok()
+        .is_ok();
+    if enqueued {
+        record_track_output_event(
+            track_output_events,
+            track_idx,
+            sample_time,
+            event_beat,
+            resolved,
+        );
+    }
+    enqueued
 }
 
 fn step_event_from_resolved(
@@ -1544,16 +1587,22 @@ fn step_event_from_resolved(
 fn enqueue_step_event<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
     pattern_epoch: u64,
     sample_time: u64,
+    event_beat: f64,
+    samples_per_quarter: f32,
     mut event: StepEvent,
 ) -> bool {
     match event.source.clone() {
         EventSource::Step { step, .. } => enqueue_resolved_trigger(
             queue,
             snapshot,
+            track_output_events,
             pattern_epoch,
             sample_time,
+            event_beat,
+            samples_per_quarter,
             event.track,
             step,
             event.samples_per_step,
@@ -1569,8 +1618,11 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
             enqueue_network_trigger(
                 queue,
                 snapshot,
+                track_output_events,
                 pattern_epoch,
                 sample_time,
+                event_beat,
+                samples_per_quarter,
                 event.track,
                 neuron,
                 seed,
@@ -1601,10 +1653,12 @@ fn midi_fx_step_for_step_event(snapshot: &SequencerSnapshot, event: &StepEvent) 
 fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
     runtime: Option<&mut lisp_host::ScratchControlRuntime>,
     quantizer_state: Option<&mut MidiFxQuantizerState>,
     pattern_epoch: u64,
     sample_time: u64,
+    event_beat: f64,
     samples_per_quarter: f32,
     arp_phase_beats: f32,
     mut event: StepEvent,
@@ -1634,7 +1688,16 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
                 snapshot.tracks[event.track].params.midi_fx_chain
             );
         }
-        return enqueue_step_event(queue, snapshot, pattern_epoch, sample_time, event);
+        return enqueue_step_event(
+            queue,
+            snapshot,
+            track_output_events,
+            pattern_epoch,
+            sample_time,
+            event_beat,
+            samples_per_quarter,
+            event,
+        );
     };
     if !run_midi_fx {
         if debug_routing_enabled() {
@@ -1647,7 +1710,16 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
                 snapshot.tracks[event.track].params.midi_fx_chain
             );
         }
-        return enqueue_step_event(queue, snapshot, pattern_epoch, sample_time, event);
+        return enqueue_step_event(
+            queue,
+            snapshot,
+            track_output_events,
+            pattern_epoch,
+            sample_time,
+            event_beat,
+            samples_per_quarter,
+            event,
+        );
     }
     if let EventSource::Network { seed, neuron, .. } = event.source.clone() {
         normalize_network_event_destination(snapshot, neuron, seed, &mut event);
@@ -1695,8 +1767,10 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
     enqueue_midi_fx_events(
         queue,
         snapshot,
+        track_output_events,
         pattern_epoch,
         sample_time,
+        event_beat,
         samples_per_quarter,
         events,
     )
@@ -1755,6 +1829,7 @@ fn enqueue_neuron_parameter_events<const QUEUE_CAP: usize>(
 fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
     runtime: Option<&mut lisp_host::ScratchControlRuntime>,
     mut quantizer_state: Option<&mut MidiFxQuantizerState>,
     pattern_epoch: u64,
@@ -1772,10 +1847,12 @@ fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
                 && enqueue_step_event_with_midi_fx(
                     queue,
                     snapshot,
+                    track_output_events,
                     runtime,
                     quantizer_state.as_deref_mut(),
                     pattern_epoch,
                     sample_time,
+                    arp_phase_beats as f64,
                     samples_per_quarter,
                     arp_phase_beats,
                     event,
@@ -1798,10 +1875,12 @@ fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
     enqueue_step_event_with_midi_fx(
         queue,
         snapshot,
+        track_output_events,
         runtime,
         quantizer_state,
         pattern_epoch,
         sample_time,
+        arp_phase_beats as f64,
         samples_per_quarter,
         arp_phase_beats,
         event,
@@ -1855,6 +1934,7 @@ impl EmittedNetworkEventSource {
 fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
     runtime: Option<&mut lisp_host::ScratchControlRuntime>,
     quantizer_state: Option<&mut MidiFxQuantizerState>,
     pattern_epoch: u64,
@@ -1938,10 +2018,12 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
     enqueue_step_event_with_midi_fx(
         queue,
         snapshot,
+        track_output_events,
         runtime,
         quantizer_state,
         pattern_epoch,
         sample_time,
+        arp_phase_beats as f64,
         samples_per_quarter,
         arp_phase_beats,
         event,
@@ -2277,8 +2359,11 @@ fn apply_fit_to_scale_to_trigger(
 fn enqueue_network_trigger<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
     pattern_epoch: u64,
     sample_time: u64,
+    event_beat: f64,
+    samples_per_quarter: f32,
     track_idx: usize,
     source_neuron: usize,
     seed: Option<(usize, usize)>,
@@ -2335,11 +2420,21 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                     ok = false;
                     break;
                 }
+                let note_beat = event_beat
+                    + (note_sample_time.saturating_sub(sample_time) as f64)
+                        / samples_per_quarter.max(1.0) as f64;
+                record_track_output_event(
+                    track_output_events,
+                    track_idx,
+                    note_sample_time,
+                    note_beat,
+                    resolved,
+                );
             }
             return ok;
         }
     }
-    queue
+    let enqueued = queue
         .push(ScheduledEvent {
             pattern_epoch,
             sample_time,
@@ -2356,7 +2451,17 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                 instrument_fingerprint,
             },
         })
-        .is_ok()
+        .is_ok();
+    if enqueued {
+        record_track_output_event(
+            track_output_events,
+            track_idx,
+            sample_time,
+            event_beat,
+            resolved,
+        );
+    }
+    enqueued
 }
 
 #[derive(Clone)]
@@ -3147,8 +3252,10 @@ fn run_midi_fx_chain_for_track_inner(
 fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
     pattern_epoch: u64,
     base_sample_time: u64,
+    base_beat: f64,
     samples_per_quarter: f32,
     events: Vec<MidiFxEvent>,
 ) -> bool {
@@ -3188,8 +3295,11 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
             EventSource::Network { seed, neuron, .. } => enqueue_network_trigger(
                 queue,
                 snapshot,
+                track_output_events,
                 pattern_epoch,
                 sample_time,
+                base_beat + event.offset_beats as f64,
+                samples_per_quarter,
                 event.track,
                 neuron,
                 seed,
@@ -3204,8 +3314,11 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
             EventSource::Step { .. } => enqueue_resolved_trigger(
                 queue,
                 snapshot,
+                track_output_events,
                 pattern_epoch,
                 sample_time,
+                base_beat + event.offset_beats as f64,
+                samples_per_quarter,
                 event.track,
                 event.step,
                 event.samples_per_step,
@@ -3340,6 +3453,7 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
     let samples_per_quarter = sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
     let horizon = rendered_sample.saturating_add(lookahead_samples);
     let midi_fx_descriptors = runtime.midi_fx_descriptors();
+    let mut track_output_events = Vec::new();
 
     for track_idx in 0..snapshot.tracks.len().min(MAX_TRACKS) {
         if live_tracks[track_idx].notes.is_empty()
@@ -3438,8 +3552,10 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
             if !enqueue_midi_fx_events(
                 queue,
                 snapshot,
+                &mut track_output_events,
                 pattern_epoch,
                 rendered_sample,
+                rendered_total_beats,
                 samples_per_quarter,
                 events,
             ) {
@@ -3555,8 +3671,10 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
             if !enqueue_midi_fx_events(
                 queue,
                 snapshot,
+                &mut track_output_events,
                 pattern_epoch,
                 live_tracks[track_idx].next_tick_sample,
+                rendered_total_beats + tick_offset_beats,
                 samples_per_quarter,
                 events,
             ) {
@@ -3568,6 +3686,8 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
         }
     }
 
+    state.set_track_output_current_beat(rendered_total_beats);
+    state.append_track_output_events(track_output_events);
     live_active
 }
 
@@ -3746,6 +3866,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let graph_runtimes = &mut scheduler.graph_runtimes;
     let mut debug_graph_drive_chunks = scheduler.debug_graph_drive_chunks;
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
+    let mut track_output_events = Vec::new();
 
     let midi_fx_descriptors_for_scheduling = scratch_runtime
         .as_ref()
@@ -4076,8 +4197,15 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 if !enqueue_midi_fx_events(
                                     queue,
                                     snapshot,
+                                    &mut track_output_events,
                                     pattern_epoch,
                                     sample_time,
+                                    sample_time_to_beats(
+                                        chunk_start_beats,
+                                        scheduled_until_sample,
+                                        sample_time,
+                                        samples_per_quarter.into(),
+                                    ),
                                     samples_per_quarter,
                                     final_events,
                                 ) {
@@ -4180,8 +4308,15 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         if !enqueue_midi_fx_events(
                             queue,
                             snapshot,
+                            &mut track_output_events,
                             pattern_epoch,
                             sample_time,
+                            sample_time_to_beats(
+                                chunk_start_beats,
+                                scheduled_until_sample,
+                                sample_time,
+                                samples_per_quarter.into(),
+                            ),
                             samples_per_quarter.into(),
                             events,
                         ) {
@@ -4211,8 +4346,16 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         let ok = enqueue_step_event(
                             queue,
                             snapshot,
+                            &mut track_output_events,
                             pattern_epoch,
                             sample_time,
+                            sample_time_to_beats(
+                                chunk_start_beats,
+                                scheduled_until_sample,
+                                sample_time,
+                                samples_per_quarter.into(),
+                            ),
+                            samples_per_quarter,
                             step_event.clone(),
                         );
                         let seed_beats = trigger.absolute_beats;
@@ -4243,8 +4386,16 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     let ok = enqueue_step_event(
                         queue,
                         snapshot,
+                        &mut track_output_events,
                         pattern_epoch,
                         sample_time,
+                        sample_time_to_beats(
+                            chunk_start_beats,
+                            scheduled_until_sample,
+                            sample_time,
+                            samples_per_quarter.into(),
+                        ),
+                        samples_per_quarter,
                         step_event.clone(),
                     );
                     let seed_beats = trigger.absolute_beats;
@@ -4312,6 +4463,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if !enqueue_neural_output_with_midi_fx(
                 queue,
                 snapshot,
+                &mut track_output_events,
                 scratch_runtime.as_mut(),
                 Some(&mut *midi_fx_quantizer_state),
                 pattern_epoch,
@@ -4390,6 +4542,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 if !enqueue_emitted_network_event_with_midi_fx(
                     queue,
                     snapshot,
+                    &mut track_output_events,
                     scratch_runtime.as_mut(),
                     Some(&mut *midi_fx_quantizer_state),
                     pattern_epoch,
@@ -4507,6 +4660,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 if !enqueue_emitted_network_event_with_midi_fx(
                     queue,
                     snapshot,
+                    &mut track_output_events,
                     scratch_runtime.as_mut(),
                     Some(&mut *midi_fx_quantizer_state),
                     pattern_epoch,
@@ -4528,7 +4682,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 break;
             }
         }
-        publish_graph_visualizations(state, &graph_runtimes);
+        publish_graph_visualizations(state, &graph_runtimes, chunk_end_beats);
         if log_graph_drive_chunk {
             debug_graph_drive_chunks += 1;
         }
@@ -4556,8 +4710,10 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 if !enqueue_midi_fx_events(
                     queue,
                     snapshot,
+                    &mut track_output_events,
                     pattern_epoch,
                     deadline_sample,
+                    pending.deadline_beats,
                     samples_per_quarter as f32,
                     events,
                 ) {
@@ -4575,6 +4731,8 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
 
     scheduler.debug_graph_drive_chunks = debug_graph_drive_chunks;
     scheduler.debug_accum_invocations = debug_accum_invocations;
+    state.set_track_output_current_beat(scheduler.clock.total_beats);
+    state.append_track_output_events(track_output_events);
     SchedulerLookaheadResult {
         scheduled_until_sample,
     }
@@ -4715,7 +4873,11 @@ pub fn spawn_scheduler_thread(
                         &mut lookahead_state.graph_manifests,
                         lookahead_state.clock.total_beats,
                     );
-                    publish_graph_visualizations(&state, &lookahead_state.graph_runtimes);
+                    publish_graph_visualizations(
+                        &state,
+                        &lookahead_state.graph_runtimes,
+                        lookahead_state.clock.total_beats,
+                    );
                     if debug_graph {
                         eprintln!(
                             "[graph-reconcile] published={} graph_manifests={} runtimes={} overrides={}",
@@ -4736,7 +4898,11 @@ pub fn spawn_scheduler_thread(
                         &mut lookahead_state.graph_manifests,
                         lookahead_state.clock.total_beats,
                     );
-                    publish_graph_visualizations(&state, &lookahead_state.graph_runtimes);
+                    publish_graph_visualizations(
+                        &state,
+                        &lookahead_state.graph_runtimes,
+                        lookahead_state.clock.total_beats,
+                    );
                     loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
                 }
 
@@ -4815,7 +4981,7 @@ pub fn spawn_scheduler_thread(
                     for graph in &mut lookahead_state.graph_runtimes {
                         graph.reset(0.0);
                     }
-                    publish_graph_visualizations(&state, &lookahead_state.graph_runtimes);
+                    publish_graph_visualizations(&state, &lookahead_state.graph_runtimes, 0.0);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
                     thread::sleep(Duration::from_millis(if live_active { 1 } else { 2 }));
                     continue;
@@ -5522,12 +5688,16 @@ mod tests {
         };
         chord.notes[1] = 7.0;
         chord.delays[1] = 0.5;
+        let mut track_output_events = Vec::new();
 
         assert!(enqueue_resolved_trigger(
             &queue,
             &snapshot,
+            &mut track_output_events,
             0,
             1_000,
+            0.0,
+            48_000.0,
             0,
             0,
             6_000.0,
@@ -5541,6 +5711,9 @@ mod tests {
         let second = queue.pop().expect("second note event");
         assert_eq!(first.sample_time, 1_000);
         assert_eq!(second.sample_time, 4_000);
+        assert_eq!(track_output_events.len(), 2);
+        assert_eq!(track_output_events[0].beat, 0.0);
+        assert_eq!(track_output_events[1].beat, 0.0625);
         assert!(queue.pop().is_none());
     }
 
@@ -5624,14 +5797,17 @@ mod tests {
                 instrument_fingerprint: 0,
             },
         };
+        let mut track_output_events = Vec::new();
 
         assert!(enqueue_step_event_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             Some(&mut runtime),
             None,
             0,
             1_000,
+            0.0,
             48_000.0,
             0.0,
             event,
@@ -5651,6 +5827,9 @@ mod tests {
             }
             other => panic!("expected network trigger, got {other:?}"),
         }
+        assert_eq!(track_output_events.len(), 1);
+        assert_eq!(track_output_events[0].track, 0);
+        assert_eq!(track_output_events[0].transpose, 12.0);
         assert!(queue.pop().is_none());
     }
 
@@ -5680,10 +5859,12 @@ mod tests {
             )
             .unwrap();
         let queue = ScheduledEventQueue::<8>::new();
+        let mut track_output_events = Vec::new();
 
         assert!(super::enqueue_emitted_network_event_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             Some(&mut runtime),
             None,
             0,
@@ -5725,6 +5906,8 @@ mod tests {
             other => panic!("expected network trigger, got {other:?}"),
         }
         assert!(queue.pop().is_none());
+        assert_eq!(track_output_events.len(), 1);
+        assert_eq!(track_output_events[0].transpose, 12.0);
     }
 
     #[test]
@@ -5762,10 +5945,12 @@ mod tests {
             .eval(&lisp_host::load_midi_fx_library_source())
             .unwrap();
         let queue = ScheduledEventQueue::<8>::new();
+        let mut track_output_events = Vec::new();
 
         assert!(super::enqueue_emitted_network_event_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             Some(&mut runtime),
             None,
             0,
@@ -5812,6 +5997,12 @@ mod tests {
             .collect::<Vec<_>>();
         tracks_and_transposes.sort_by_key(|(track, _)| *track);
         assert_eq!(tracks_and_transposes, vec![(0, 7.0), (4, 7.0)]);
+        let mut telemetry_tracks = track_output_events
+            .iter()
+            .map(|event| event.track)
+            .collect::<Vec<_>>();
+        telemetry_tracks.sort_unstable();
+        assert_eq!(telemetry_tracks, vec![0, 4]);
     }
 
     #[test]
@@ -6124,10 +6315,12 @@ mod tests {
             .eval(&lisp_host::load_midi_fx_library_source())
             .unwrap();
         let queue = ScheduledEventQueue::<8>::new();
+        let mut track_output_events = Vec::new();
 
         assert!(super::enqueue_emitted_network_event_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             Some(&mut runtime),
             None,
             0,
@@ -6153,6 +6346,12 @@ mod tests {
         }
         tracks_and_transposes.sort_by_key(|(track, _)| *track);
         assert_eq!(tracks_and_transposes, vec![(1, 7.0), (4, 7.0)]);
+        let mut telemetry_tracks = track_output_events
+            .iter()
+            .map(|event| event.track)
+            .collect::<Vec<_>>();
+        telemetry_tracks.sort_unstable();
+        assert_eq!(telemetry_tracks, vec![1, 4]);
     }
 
     #[test]
@@ -6168,10 +6367,12 @@ mod tests {
         state.pattern.midi_fx_slots[0][0].defaults.set(0, 2.0);
         let snapshot = state.publish_scheduler_snapshot();
         let queue = ScheduledEventQueue::<8>::new();
+        let mut track_output_events = Vec::new();
 
         assert!(super::enqueue_emitted_network_event_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             None,
             None,
             0,
@@ -6202,6 +6403,7 @@ mod tests {
             queue.pop().is_none(),
             "graph route Off must not enqueue a source-track event or run source-track MIDI FX"
         );
+        assert!(track_output_events.is_empty());
     }
 
     #[test]
@@ -6230,10 +6432,12 @@ mod tests {
             .eval(&lisp_host::load_midi_fx_library_source())
             .unwrap();
         let queue = ScheduledEventQueue::<16>::new();
+        let mut track_output_events = Vec::new();
 
         assert!(super::enqueue_emitted_network_event_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             Some(&mut runtime),
             None,
             0,
@@ -6631,10 +6835,12 @@ mod tests {
             },
         };
         event.resolved.transpose = 3.2;
+        let mut track_output_events = Vec::new();
 
         assert!(super::enqueue_neural_output_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             None,
             None,
             0,
@@ -6711,14 +6917,17 @@ mod tests {
                 instrument_fingerprint: 0,
             },
         };
+        let mut track_output_events = Vec::new();
 
         assert!(enqueue_step_event_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             Some(&mut runtime),
             None,
             0,
             1_000,
+            0.0,
             48_000.0,
             0.0,
             event,
@@ -6784,14 +6993,17 @@ mod tests {
                 instrument_fingerprint: 0,
             },
         };
+        let mut track_output_events = Vec::new();
 
         assert!(enqueue_step_event_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             Some(&mut runtime),
             None,
             0,
             1_000,
+            0.0,
             48_000.0,
             0.0,
             event,
@@ -7411,10 +7623,12 @@ mod tests {
             },
         };
         let queue = ScheduledEventQueue::<8>::new();
+        let mut track_output_events = Vec::new();
 
         assert!(super::enqueue_neural_output_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             None,
             None,
             7,
@@ -7530,10 +7744,12 @@ mod tests {
             },
         };
         let queue = ScheduledEventQueue::<8>::new();
+        let mut track_output_events = Vec::new();
 
         assert!(super::enqueue_neural_output_with_midi_fx(
             &queue,
             &snapshot,
+            &mut track_output_events,
             None,
             None,
             7,

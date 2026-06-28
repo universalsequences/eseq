@@ -1175,10 +1175,11 @@ impl Runtime {
                     return Value::String(message);
                 }
             };
+            let loaded_path_display = loaded.path.display().to_string();
             match vm.eval_module_source(loaded.path, &loaded.text, loaded.revision) {
                 Ok(v) => v.unwrap_or(Value::Bool(true)),
                 Err(e) => {
-                    let message = format!("load: eval error: {e:?}");
+                    let message = format!("load: {loaded_path_display}: eval error: {e:?}");
                     vm.source_load_errors.push(message.clone());
                     Value::String(message)
                 }
@@ -1955,6 +1956,13 @@ impl Runtime {
 
     pub fn lisp_source_revision(&self) -> u64 {
         self.vm.source_manager.module_graph().revision()
+    }
+
+    pub fn evaluated_source_text(&self, path: &std::path::Path, revision: u64) -> Option<String> {
+        self.vm
+            .source_manager
+            .evaluated_source(path, revision)
+            .map(str::to_string)
     }
 
     #[cfg(test)]

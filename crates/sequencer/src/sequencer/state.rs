@@ -2061,6 +2061,8 @@ pub struct SequencerState {
     scheduler_snapshot_version: AtomicU64,
     neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
+    track_output_events: Mutex<Vec<TrackOutputEvent>>,
+    track_output_current_beat_bits: AtomicU64,
     scratch_source: Mutex<String>,
     scratch_source_version: AtomicU64,
     published_sequencers: Mutex<Vec<PublishedSequencer>>,
@@ -2070,6 +2072,17 @@ pub struct SequencerState {
     pending_accumulator_reset_all: AtomicBool,
     pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackOutputEvent {
+    pub track: usize,
+    pub sample_time: u64,
+    pub beat: f64,
+    pub transpose: f32,
+    pub velocity: f32,
+}
+
+const TRACK_OUTPUT_EVENT_HISTORY_CAP: usize = 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct PatternSwitchProfile {
@@ -2296,6 +2309,8 @@ impl SequencerState {
             scheduler_snapshot_version: AtomicU64::new(0),
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             graph_visualizations: Mutex::new(Vec::new()),
+            track_output_events: Mutex::new(Vec::new()),
+            track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
@@ -2930,6 +2945,32 @@ impl SequencerState {
 
     pub fn graph_visualizations(&self) -> Vec<GraphVisualizationSnapshot> {
         self.graph_visualizations.lock().unwrap().clone()
+    }
+
+    pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
+        let mut history = self.track_output_events.lock().unwrap();
+        history.extend(events);
+        let overflow = history.len().saturating_sub(TRACK_OUTPUT_EVENT_HISTORY_CAP);
+        if overflow > 0 {
+            history.drain(0..overflow);
+        }
+    }
+
+    pub fn clear_track_output_events(&self) {
+        self.track_output_events.lock().unwrap().clear();
+    }
+
+    pub fn track_output_events(&self) -> Vec<TrackOutputEvent> {
+        self.track_output_events.lock().unwrap().clone()
+    }
+
+    pub fn set_track_output_current_beat(&self, beat: f64) {
+        self.track_output_current_beat_bits
+            .store(beat.max(0.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn track_output_current_beat(&self) -> f64 {
+        f64::from_bits(self.track_output_current_beat_bits.load(Ordering::Relaxed))
     }
 
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {

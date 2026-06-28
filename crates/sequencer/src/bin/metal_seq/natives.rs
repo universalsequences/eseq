@@ -366,6 +366,11 @@ pub(crate) fn init_runtime(
                     "graph-visualizations",
                     build_graph_visualizations_value(&state),
                 ),
+                ("track-events", build_track_output_events_value(&state)),
+                (
+                    "track-event-current-beat",
+                    build_track_output_current_beat_value(&state),
+                ),
                 ("auto-follow", Value::Bool(true)),
                 ("playhead", Value::Number(0.0)),
                 ("transport-playhead", Value::Number(0.0)),

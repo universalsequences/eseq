@@ -276,12 +276,11 @@
 
 (def g8r-row-height 1.0)
 (def g8r-node-width 1.4)
-(def g8r-control-width 7.0)
+(def g8r-control-width 6.0)
 
 (def g8r-num (key value lo hi stp dec on-change)
   (number-picker
     :key key
-    :border-color '(rgba 1 1 1 1)
     :value value :min lo :max hi :step stp :decimals dec
     :width g8r-control-width :height g8r-row-height :font-size 9
     :on-change on-change))
@@ -290,7 +289,7 @@
   (dropdown
     :key key
     :value-index value-index :options options
-    :width g8r-control-width :height g8r-row-height :font-size 9
+    :width g8r-control-width :height g8r-row-height :font-size 6
     :on-change on-change))
 
 (def g8r-reset-value (n field)
@@ -311,7 +310,7 @@
 
 (def g8r-row (n)
   (h-stack :gap 0.4 :align :center
-    (label (str n) :width g8r-node-width :height g8r-row-height :font-size 9 :h-align :center :color :dim)
+    (label (str n) :width g8r-node-width :height g8r-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
     (g8r-pick (str "graph-8x8-reset-route-" n)
       (bind-graph g8r-name n :route g8r-route-options) g8r-route-options
       (lambda (v) (g8r-edit-enum n :route g8r-route-options v (g8r-route->internal v))))
@@ -370,36 +369,34 @@
       (box 
         :padding 0.85
         :gap 0.6
-        :width 37
-        :height 45
         (v-stack :gap 0.5
           ;; ── sequencer-level config (on top) ──
           (box 
-            :width 60
-            :background-color :black :padding 1 :corner-radius 16
+            :width 61
+            :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
             
             (h-stack
               (v-stack
                 (h-stack :gap 0.6 :align :center
-                  (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground)
-                  (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (label "8x8 graph" :width 8 :height 1.2 :font-size 11 :color :foreground :bg :transparent)
+                  (label "reset bars" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
                   (g8r-num "graph-8x8-reset-reset-bars"
                     (bind-graph-config g8r-name :reset-bars) 0 64 1 0
                     (lambda (v) (g8r-edit-config :reset-bars v))))
                 (h-stack :gap 0.6 :align :center
-                  (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (label "max poly" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
                   (g8r-num "graph-8x8-reset-max-poly"
                     (bind-graph-config g8r-name :max-poly) 0 16 1 0
                     (lambda (v) (g8r-edit-config :max-poly v))))
                 (h-stack :gap 0.6 :align :center
-                  (label "global trn" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (label "global trn" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
                   (g8r-num "graph-8x8-reset-global-transpose"
                     g8r-global-transpose -48 48 1 0
                     (lambda (v)
                       (do
                         (set! g8r-global-transpose v)
                         (g8r-edit-global-param :global-transpose v))))
-                  (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (label "dur x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
                   (g8r-num "graph-8x8-reset-dur-factor"
                     g8r-dur-factor 0 8 0.25 2
                     (lambda (v)
@@ -407,11 +404,11 @@
                         (set! g8r-dur-factor v)
                         (g8r-edit-global-param :dur-factor v)))))
                 (h-stack :gap 0.6 :align :center
-                  (label "delay x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (label "delay x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
                   (g8r-pick "graph-8x8-reset-delay-factor"
                     g8r-delay-factor-index g8r-factor-options
                     (lambda (v) (g8r-apply-delay-factor v)))
-                  (label "res/q x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim)
+                  (label "res/q x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
                   (g8r-pick "graph-8x8-reset-timebase-factor"
                     g8r-timebase-factor-index g8r-factor-options
                     (lambda (v) (g8r-apply-timebase-factor v))))
@@ -420,23 +417,44 @@
                 :key "graph-8x8-reset-dampening-matrix"
                 :rows 8
                 :cols 8
-                :width 20
+                :width 11
                 :height 5
                 
                 :control :grid
-                :background :black
+                :background (rgba 0.1 0.1 0.1 0.6)
                 :fill :primary
                 :min 0
                 :max 1
                 :value (g8r-viz-matrix viz :dampening-matrix (g8r-zero-matrix))
                 )
+              
+              (event-view
+                :key "graph-8x8-reset-event-view"
+                :events (if viz (get viz :event-history) (list))
+                :current-beat (if viz (get viz :current-beat) 0)
+                :renderer :isometric
+                :x :transpose
+                :x-min -24
+                :x-max 24
+                :y :node
+                :y-min 0
+                :y-max 7
+                :z :beat-phase
+                :z-min 0
+                :z-max 16
+                :phase-beats 16
+                :window-beats 16
+                :brightness :velocity
+                :background (rgba 0.1 0.1 0.1 0.7)
+                :width 20
+                :height 8)              
               ))
           
           (h-stack
             (box 
               :padding 1
-              :border-color (rgba 0.2 0.2 0.2 1)
-              :background-color :black :corner-radius 16
+              :border-color :mixer-strip-border
+              :background-color :mixer-strip-bg :corner-radius 16
               (v-stack :gap 0.5
                 (v-stack :gap 0.2
                   (g8r-header)
@@ -484,9 +502,6 @@
                   (do
                     (set! g8r-weights (g8r-set-cell g8r-weights r c v))
                     (graph-edge g8r-name :from r :to c :weight v))))))
-          
-          
-          
           
           
           )))))

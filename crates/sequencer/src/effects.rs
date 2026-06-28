@@ -909,6 +909,13 @@ mod tests {
     }
 
     #[test]
+    fn builtin_reverb_insert_is_stereo_in_and_stereo_out() {
+        let desc = EffectDescriptor::builtin_insert("Reverb").unwrap();
+        assert_eq!(desc.input_channels, 2);
+        assert_eq!(desc.output_channels, 2);
+    }
+
+    #[test]
     fn default_full_chain_contains_only_empty_insert_slots() {
         let chain = EffectDescriptor::default_full_chain();
         assert_eq!(chain.len(), crate::lisp_host::MAX_CUSTOM_FX);
@@ -3008,12 +3015,11 @@ impl EffectDescriptor {
         desc
     }
 
-    /// Built-in reverb as an insert effect. The DSP node is mono-in/stereo-out,
-    /// so stereo predecessors are currently folded to its mono input by graph wiring.
+    /// Built-in reverb as a stereo insert effect.
     pub fn builtin_reverb_insert() -> Self {
         Self {
             name: "Reverb".to_string(),
-            input_channels: 1,
+            input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),

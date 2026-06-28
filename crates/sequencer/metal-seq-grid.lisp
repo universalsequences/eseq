@@ -18,10 +18,48 @@
 (defstate samples-sidebar-visible true)
 (defstate mixer-panel-visible true)
 
+; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
+(defstate param-mode 0)
+
+(def page-size 16)
+
+;; Step cursor helpers are used by the FX step buffer root, so define them
+;; before loading render roots.
+(defstate cursor-step 0)
+
+(def cursor-num-steps ()
+  (if (seq-has-selected-bus?)
+    (nth SEQ.bus-num-steps selected-bus)
+    SEQ.tp-num-steps))
+
+(def current-step ()
+  (mod cursor-step (max 1 (cursor-num-steps))))
+
+(def page-count ()
+  (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
+
+(def current-page ()
+  (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
+
+(def visible-page ()
+  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
+    (playhead-page)
+    (current-page)))
+
+(def playhead-page ()
+  (min SEQ.playhead-page
+    (- (page-count) 1)))
+
+(def page-offset ()
+  (* (visible-page) page-size))
+
+(def cool-off-follow ()
+  (seq-pause-auto-follow))
+
 (load "metal-seq-browser.lisp")
+(load "metal-seq-mixer-v2.lisp")
 (load "metal-seq-fx.lisp")
 (load "metal-seq-piano-roll.lisp")
-(load "metal-seq-mixer-v2.lisp")
 (load "metal-seq-transport.lisp")
 (load "metal-seq-agent.lisp")
 
@@ -634,43 +672,6 @@
 (bind-key "Tab" "seq-toggle-mixer-panel")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
-; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
-(defstate param-mode 0)
-
-(def page-size 16)
-
-;; ── Step cursor ──
-(defstate cursor-step 0)
-
-(def cursor-num-steps ()
-  (if (seq-has-selected-bus?)
-    (nth SEQ.bus-num-steps selected-bus)
-    SEQ.tp-num-steps))
-
-(def current-step ()
-  (mod cursor-step (max 1 (cursor-num-steps))))
-
-(def page-count ()
-  (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
-
-(def current-page ()
-  (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
-
-(def visible-page ()
-  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
-    (playhead-page)
-    (current-page)))
-
-(def playhead-page ()
-  (min SEQ.playhead-page
-    (- (page-count) 1)))
-
-(def page-offset ()
-  (* (visible-page) page-size))
-
-(def cool-off-follow ()
-  (seq-pause-auto-follow))
-
 (def page-button-width 2.8)
 
 (def page-button-gap 0.4)
@@ -1259,6 +1260,7 @@
 
 (load "metal-seq-metal.lisp")
 (load "metal-seq-sequencer.lisp")
+(load "metal-seq-fx/step-buffer.lisp")
 
 ; Startup layout is applied by Rust after this file loads. Keep this file free of
 ; top-level layout side effects so hot reload and buffer re-evaluation do not

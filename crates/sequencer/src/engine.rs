@@ -348,16 +348,18 @@ fn init_engine_parts(
             reverb::reverb_vtable(),
             reverb::REVERB_STATE_SIZE * std::mem::size_of::<f32>(),
             reverb_node_name.as_ptr(),
-            1,
-            2, // 1 mono input, 2 stereo outputs
+            2,
+            2,
             std::ptr::null(),
             0,
         )
     };
 
-    // Wire: reverb_bus → reverb_node → bus_L / bus_R
+    // The global send remains mono; feed both reverb inputs so the native
+    // stereo node preserves its two-input contract.
     unsafe {
         audiograph::graph_connect(lg, reverb_bus_id, 0, reverb_node_id, 0);
+        audiograph::graph_connect(lg, reverb_bus_id, 0, reverb_node_id, 1);
         audiograph::graph_connect(lg, reverb_node_id, 0, bus_l_id, 0);
         audiograph::graph_connect(lg, reverb_node_id, 1, bus_r_id, 0);
     }
