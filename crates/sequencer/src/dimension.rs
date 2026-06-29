@@ -505,6 +505,7 @@ pub fn dimension_vtable() -> NodeVTable {
         init: Some(dimension_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

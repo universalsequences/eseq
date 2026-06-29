@@ -736,6 +736,7 @@ pub fn space_echo_vtable() -> NodeVTable {
         init: Some(space_echo_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

@@ -479,6 +479,7 @@ pub fn str8_delay_vtable() -> NodeVTable {
         init: Some(str8_delay_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

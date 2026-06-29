@@ -568,6 +568,7 @@ pub fn dj_mixer_vtable() -> NodeVTable {
         init: Some(dj_mixer_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

@@ -122,6 +122,7 @@ void process_next_block(LiveGraph *lg, float *output_buffer, int nframes);
 
 // Thread-safe parameter updates (non-blocking)
 bool params_push(ParamRing *r, ParamMsg m);
+bool push_block_event(LiveGraph *lg, GraphBlockEvent event);
 
 // ===================== Watch List API =====================
 

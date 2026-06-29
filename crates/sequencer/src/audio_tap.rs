@@ -333,6 +333,7 @@ pub fn audio_tap_vtable() -> NodeVTable {
         init: Some(audio_tap_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

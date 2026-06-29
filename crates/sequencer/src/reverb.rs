@@ -541,6 +541,7 @@ pub fn reverb_vtable() -> NodeVTable {
         init: Some(reverb_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

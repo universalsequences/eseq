@@ -1,28 +1,31 @@
+use arrayvec::ArrayVec;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
-use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BinaryHeap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::audiograph::*;
-use crate::effects::EffectSlotSnapshot;
+use crate::effects::{EffectSlotSnapshot, MAX_SLOT_PARAMS};
 use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
-    PARAM_ATTACK_SAMPLES, PARAM_ENABLED, PARAM_END_POINT, PARAM_GATE_MODE, PARAM_GATE_SAMPLES,
-    PARAM_LOOP_MODE, PARAM_LOOP_XFADE_SAMPLES, PARAM_PLAYHEAD, PARAM_RELEASE_SAMPLES,
-    PARAM_REVERSE, PARAM_SPEED, PARAM_SR_HZ, PARAM_START_POINT, PARAM_TRANSPOSE, PARAM_TRIGGER,
-    PARAM_VELOCITY, PARAM_WARP_ENABLED, PARAM_WARP_MODE, PARAM_WARP_ONSET_TABLE_PTR_HI,
-    PARAM_WARP_ONSET_TABLE_PTR_LO, PARAM_WARP_PROJECT_BPM, PARAM_WARP_RATIO, PARAM_WARP_SAMPLE_BPM,
+    PARAM_ATTACK_SAMPLES, PARAM_LOOP_XFADE_SAMPLES, PARAM_RELEASE_SAMPLES, PARAM_WARP_PROJECT_BPM,
+    SAMPLER_EVENT_AUX_ATTACK_SAMPLES, SAMPLER_EVENT_AUX_ENABLED, SAMPLER_EVENT_AUX_END_POINT,
+    SAMPLER_EVENT_AUX_GATE_MODE, SAMPLER_EVENT_AUX_GATE_SAMPLES, SAMPLER_EVENT_AUX_LOOP_MODE,
+    SAMPLER_EVENT_AUX_LOOP_XFADE_SAMPLES, SAMPLER_EVENT_AUX_NOTE_ON_COUNT,
+    SAMPLER_EVENT_AUX_RELEASE_SAMPLES, SAMPLER_EVENT_AUX_REVERSE, SAMPLER_EVENT_AUX_SCRUB_OFFSET,
+    SAMPLER_EVENT_AUX_SPEED, SAMPLER_EVENT_AUX_SR_HZ, SAMPLER_EVENT_AUX_START_POINT,
+    SAMPLER_EVENT_AUX_TRANSPOSE, SAMPLER_EVENT_AUX_VELOCITY, SAMPLER_EVENT_AUX_WARP_ENABLED,
+    SAMPLER_EVENT_AUX_WARP_MODE, SAMPLER_EVENT_AUX_WARP_PROJECT_BPM, SAMPLER_EVENT_AUX_WARP_PTR_HI,
+    SAMPLER_EVENT_AUX_WARP_PTR_LO, SAMPLER_EVENT_AUX_WARP_RATIO, SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM,
 };
 use crate::scheduled_event::{
     resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
-    ScheduledInstrumentParams, ScheduledSamplerParams, TimedEvent,
+    ScheduledInstrumentParams, ScheduledSamplerParams,
 };
 use crate::sequencer::{
     sync_beats, BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState,
@@ -33,6 +36,11 @@ use crate::voice::{VoicePool, MAX_VOICES};
 
 pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
+const SCHEDULED_EVENT_QUEUE_CAPACITY: usize = 4096;
+const SCHEDULED_COUNTDOWN_CAPACITY: usize =
+    SCHEDULED_EVENT_QUEUE_CAPACITY + MAX_TRACKS * MAX_VOICES * 2 + MAX_TRACKS;
+const SCHEDULED_BLOCK_SCRATCH_CAPACITY: usize =
+    SCHEDULED_EVENT_QUEUE_CAPACITY + MAX_TRACKS * MAX_VOICES * 2 + MAX_TRACKS;
 
 unsafe fn push_param_span(lg: *mut LiveGraph, logical_id: u64, idx: u64, span: u32, value: f32) {
     for lane in 0..span.max(1) as u64 {
@@ -45,6 +53,37 @@ unsafe fn push_param_span(lg: *mut LiveGraph, logical_id: u64, idx: u64, span: u
             },
         );
     }
+}
+
+fn next_block_event_sequence(data: &mut AudioCallbackData) -> u32 {
+    next_event_sequence_from(&mut data.event_seq)
+}
+
+fn next_event_sequence_from(event_seq: &mut u64) -> u32 {
+    let seq = *event_seq as u32;
+    *event_seq = event_seq.wrapping_add(1);
+    seq
+}
+
+unsafe fn push_graph_block_event(
+    lg: *mut LiveGraph,
+    logical_id: u64,
+    frame_offset: u32,
+    sequence: u32,
+    kind: u32,
+    aux: &[f32],
+) -> bool {
+    let mut event = GraphBlockEvent {
+        logical_id,
+        frame_offset,
+        sequence,
+        kind,
+        aux_count: aux.len().min(GBE_AUX_CAP) as u32,
+        aux: [0.0; GBE_AUX_CAP],
+    };
+    let aux_count = event.aux_count as usize;
+    event.aux[..aux_count].copy_from_slice(&aux[..aux_count]);
+    push_block_event(lg, event)
 }
 
 unsafe fn dispatch_voice_modulator_transport(lg: *mut LiveGraph, modulator_id: u64, bpm: f32) {
@@ -160,71 +199,55 @@ fn env_flag(name: &str, default: bool) -> bool {
     }
 }
 
-/// Per-track chop re-trigger state.
-struct ChopTracker {
-    /// How many chop triggers remain (excluding the initial trigger).
-    remaining: u32,
-    /// Samples countdown until next chop trigger.
-    counter: f64,
-    /// Samples between each chop trigger.
-    interval: f64,
-    /// The step whose params to re-use.
+#[derive(Clone, Copy, Debug)]
+enum GateOffTarget {
+    Custom { engine_id: usize, free_patch: bool },
+    Sampler { gatepitch_id: i32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GateOffEvent {
+    track_idx: usize,
+    logical_id: u64,
+    target: GateOffTarget,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChopEvent {
+    track_idx: usize,
     step: usize,
-    /// Gate length in samples for each chop subdivision.
     chop_gate: f32,
 }
 
-/// Pending gate-off events for custom instrument voices.
-struct GateOffPending {
-    lid: u64,
-    countdown: f64,
+#[derive(Debug)]
+enum CountdownEventKind {
+    Scheduled(ScheduledEvent),
+    GateOff(GateOffEvent),
+    Chop(ChopEvent),
 }
 
-/// Per-track gate-off queue for custom instruments.
-struct GateOffTracker {
-    pending: Vec<GateOffPending>,
+#[derive(Debug)]
+struct CountdownEvent {
+    remaining_samples: f64,
+    period_samples: f64,
+    repeats: u32,
+    pattern_epoch: u64,
+    seq: u64,
+    kind: CountdownEventKind,
 }
 
-impl GateOffTracker {
-    fn new() -> Self {
-        Self {
-            pending: Vec::new(),
-        }
-    }
+#[derive(Debug)]
+enum BlockEventKind {
+    Scheduled(ScheduledEvent),
+    GateOff(GateOffEvent),
+    Chop(ChopEvent),
+}
 
-    /// Schedule a gate-off after `delay_samples` for the given voice LID.
-    fn schedule(&mut self, lid: u64, delay_samples: f64) {
-        // If there's already a pending gate-off for this LID, replace it
-        for p in &mut self.pending {
-            if p.lid == lid {
-                p.countdown = delay_samples;
-                return;
-            }
-        }
-        self.pending.push(GateOffPending {
-            lid,
-            countdown: delay_samples,
-        });
-    }
-
-    fn cancel(&mut self, lid: u64) {
-        self.pending.retain(|p| p.lid != lid);
-    }
-
-    /// Advance all countdowns by nframes. Returns LIDs that expired.
-    fn process(&mut self, nframes: usize) -> Vec<u64> {
-        let mut expired = Vec::new();
-        self.pending.retain_mut(|p| {
-            p.countdown -= nframes as f64;
-            if p.countdown <= 0.0 {
-                expired.push(p.lid);
-                false
-            } else {
-                true
-            }
-        });
-        expired
-    }
+#[derive(Debug)]
+struct BlockEvent {
+    frame_offset: u32,
+    seq: u64,
+    kind: BlockEventKind,
 }
 
 fn swing_delay_samples(
@@ -238,10 +261,34 @@ fn swing_delay_samples(
     ((swing_pct as f64 / 100.0) - 0.5) * 2.0 * resolution_samples
 }
 
-fn cancel_gate_off_for_lid(gate_off_state: &mut [GateOffTracker], lid: u64) {
-    for tracker in gate_off_state {
-        tracker.cancel(lid);
+fn countdown_event_track(kind: &CountdownEventKind) -> Option<usize> {
+    match kind {
+        CountdownEventKind::Scheduled(event) => scheduled_trigger_track(event),
+        CountdownEventKind::GateOff(event) => Some(event.track_idx),
+        CountdownEventKind::Chop(event) => Some(event.track_idx),
     }
+}
+
+fn cancel_gate_off_for_lid(countdown_events: &mut Vec<CountdownEvent>, lid: u64) {
+    countdown_events.retain(|event| {
+        !matches!(
+            event.kind,
+            CountdownEventKind::GateOff(GateOffEvent { logical_id, .. }) if logical_id == lid
+        )
+    });
+}
+
+fn cancel_chops_for_track(countdown_events: &mut Vec<CountdownEvent>, track_idx: usize) {
+    countdown_events.retain(|event| {
+        !matches!(
+            event.kind,
+            CountdownEventKind::Chop(ChopEvent { track_idx: event_track, .. }) if event_track == track_idx
+        )
+    });
+}
+
+fn cancel_track_countdown_events(countdown_events: &mut Vec<CountdownEvent>, track_idx: usize) {
+    countdown_events.retain(|event| countdown_event_track(&event.kind) != Some(track_idx));
 }
 
 #[derive(Clone, Copy, Default)]
@@ -254,8 +301,6 @@ struct AudioCallbackData {
     lg: LiveGraphPtr,
     state: Arc<SequencerState>,
     num_channels: usize,
-    chop_state: Vec<ChopTracker>,
-    gate_off_state: Vec<GateOffTracker>,
     sample_rate: f64,
     last_bpm: u32,
     last_mod_reset_counter: u32,
@@ -274,7 +319,11 @@ struct AudioCallbackData {
     free_patch_transport_routes: [FreePatchTransportRouteState; MAX_TRACKS],
     /// Per-track flag set on pattern switch/play-start; each track clears its own flag at step 0.
     pending_accum_reset: [bool; MAX_TRACKS],
-    scheduled_events: Arc<ScheduledEventQueue<4096>>,
+    scheduled_events: Arc<ScheduledEventQueue<SCHEDULED_EVENT_QUEUE_CAPACITY>>,
+    countdown_events: Vec<CountdownEvent>,
+    block_events: Vec<BlockEvent>,
+    block_events_need_sort: bool,
+    current_callback_nframes: usize,
     rendered_samples: Arc<AtomicU64>,
     bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
     bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
@@ -283,7 +332,6 @@ struct AudioCallbackData {
     bus_gate_play_start_sample: u64,
     dropped_scheduled_events: u64,
     late_scheduled_events: u64,
-    events_heap: BinaryHeap<Reverse<TimedEvent>>,
     event_seq: u64,
     trace_audio: bool,
     trace_callback_counter: u64,
@@ -864,8 +912,9 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
             let lid =
                 data.state.runtime.engine_voice_lids[engine_id][voice_idx].load(Ordering::Acquire);
             if lid != 0 {
+                let seq = next_block_event_sequence(data);
                 unsafe {
-                    send_custom_note_off(data.lg.0, lid);
+                    send_custom_note_off(data.lg.0, lid, 0, seq);
                 }
             }
         }
@@ -878,20 +927,10 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
         pool.reset();
         crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
     }
-    for tracker in &mut data.gate_off_state {
-        tracker.pending.clear();
-    }
-    for chop in &mut data.chop_state {
-        chop.remaining = 0;
-        chop.counter = 0.0;
-        chop.interval = 0.0;
-        chop.step = 0;
-        chop.chop_gate = 0.0;
-    }
     data.active_keyboard_notes = [[None; MAX_VOICES]; MAX_TRACKS];
     data.pending_accum_reset = [true; MAX_TRACKS];
     data.scheduled_events.clear();
-    data.events_heap.clear();
+    clear_countdown_events(data);
     data.event_seq = 0;
     data.last_num_tracks = num_tracks;
     data.last_topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
@@ -947,12 +986,12 @@ fn release_track_active_voices(
     data: &mut AudioCallbackData,
     track_idx: usize,
     release_sample: u64,
+    frame_offset: u32,
 ) {
     if track_idx >= MAX_TRACKS || track_idx >= data.state.active_track_count() {
         return;
     }
-    data.chop_state[track_idx].remaining = 0;
-    data.gate_off_state[track_idx].pending.clear();
+    cancel_track_countdown_events(&mut data.countdown_events, track_idx);
     data.active_keyboard_notes[track_idx] = [None; MAX_VOICES];
 
     let instrument_type = InstrumentType::from_runtime_flag(
@@ -984,9 +1023,10 @@ fn release_track_active_voices(
                 data.custom_engine_pools[engine_id]
                     .release_voice_by_logical_id(lid, release_sample);
             }
-            cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
+            cancel_gate_off_for_lid(&mut data.countdown_events, lid);
+            let seq = next_block_event_sequence(data);
             unsafe {
-                send_custom_note_off(data.lg.0, lid);
+                send_custom_note_off(data.lg.0, lid, frame_offset, seq);
             }
         }
         return;
@@ -1000,19 +1040,14 @@ fn release_track_active_voices(
         .collect();
     for (lid, gatepitch_id) in active {
         data.voice_pools[track_idx].release_voice_by_logical_id(lid);
-        cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
+        cancel_gate_off_for_lid(&mut data.countdown_events, lid);
+        let gatepitch_seq = next_block_event_sequence(data);
+        let sampler_seq = next_block_event_sequence(data);
         unsafe {
             if gatepitch_id > 0 {
-                send_custom_note_off(data.lg.0, gatepitch_id as u64);
+                send_custom_note_off(data.lg.0, gatepitch_id as u64, frame_offset, gatepitch_seq);
             }
-            params_push_wrapper(
-                data.lg.0,
-                ParamMsg {
-                    idx: PARAM_GATE_SAMPLES,
-                    logical_id: lid,
-                    fvalue: 0.0,
-                },
-            );
+            send_sampler_note_off(data.lg.0, lid, frame_offset, sampler_seq);
         }
     }
 }
@@ -1021,6 +1056,7 @@ fn enforce_mute_group_for_winning_track(
     data: &mut AudioCallbackData,
     winning_track: usize,
     release_sample: u64,
+    frame_offset: u32,
 ) {
     if winning_track >= data.state.active_track_count() {
         return;
@@ -1035,7 +1071,7 @@ fn enforce_mute_group_for_winning_track(
             continue;
         }
         if data.state.pattern.track_params[track_idx].get_mute_group() == group {
-            release_track_active_voices(data, track_idx, release_sample);
+            release_track_active_voices(data, track_idx, release_sample, frame_offset);
         }
     }
 }
@@ -1044,6 +1080,8 @@ fn enforce_mute_group_for_winning_track(
 unsafe fn send_trigger(
     lg: *mut LiveGraph,
     lid: u64,
+    frame_offset: u32,
+    sequence: u32,
     velocity: f32,
     speed: f32,
     gate_samples: f32,
@@ -1065,199 +1103,43 @@ unsafe fn send_trigger(
     warp_project_bpm: f32,
     warp_ptr_lo: f32,
     warp_ptr_hi: f32,
+    scrub_offset: f32,
 ) {
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_ENABLED,
-            logical_id: lid,
-            fvalue: enabled,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_VELOCITY,
-            logical_id: lid,
-            fvalue: velocity,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_SPEED,
-            logical_id: lid,
-            fvalue: speed,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_GATE_SAMPLES,
-            logical_id: lid,
-            fvalue: gate_samples,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_TRANSPOSE,
-            logical_id: lid,
-            fvalue: transpose,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_ATTACK_SAMPLES,
-            logical_id: lid,
-            fvalue: attack_samples,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_RELEASE_SAMPLES,
-            logical_id: lid,
-            fvalue: release_samples,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_GATE_MODE,
-            logical_id: lid,
-            fvalue: gate_mode,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_START_POINT,
-            logical_id: lid,
-            fvalue: start_point,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_END_POINT,
-            logical_id: lid,
-            fvalue: end_point,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_REVERSE,
-            logical_id: lid,
-            fvalue: reverse,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_LOOP_MODE,
-            logical_id: lid,
-            fvalue: loop_mode,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_LOOP_XFADE_SAMPLES,
-            logical_id: lid,
-            fvalue: loop_xfade_samples,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_SR_HZ,
-            logical_id: lid,
-            fvalue: sr_hz,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_ENABLED,
-            logical_id: lid,
-            fvalue: warp_enabled,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_MODE,
-            logical_id: lid,
-            fvalue: warp_mode,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_RATIO,
-            logical_id: lid,
-            fvalue: warp_ratio,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_SAMPLE_BPM,
-            logical_id: lid,
-            fvalue: warp_sample_bpm,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_PROJECT_BPM,
-            logical_id: lid,
-            fvalue: warp_project_bpm,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_ONSET_TABLE_PTR_LO,
-            logical_id: lid,
-            fvalue: warp_ptr_lo,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_ONSET_TABLE_PTR_HI,
-            logical_id: lid,
-            fvalue: warp_ptr_hi,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_PLAYHEAD,
-            logical_id: lid,
-            fvalue: 0.0,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_TRIGGER,
-            logical_id: lid,
-            fvalue: 1.0,
-        },
-    );
+    let mut aux = [0.0f32; SAMPLER_EVENT_AUX_NOTE_ON_COUNT];
+    aux[SAMPLER_EVENT_AUX_ENABLED] = enabled;
+    aux[SAMPLER_EVENT_AUX_VELOCITY] = velocity;
+    aux[SAMPLER_EVENT_AUX_SPEED] = speed;
+    aux[SAMPLER_EVENT_AUX_GATE_SAMPLES] = gate_samples;
+    aux[SAMPLER_EVENT_AUX_TRANSPOSE] = transpose;
+    aux[SAMPLER_EVENT_AUX_ATTACK_SAMPLES] = attack_samples;
+    aux[SAMPLER_EVENT_AUX_RELEASE_SAMPLES] = release_samples;
+    aux[SAMPLER_EVENT_AUX_GATE_MODE] = gate_mode;
+    aux[SAMPLER_EVENT_AUX_START_POINT] = start_point;
+    aux[SAMPLER_EVENT_AUX_END_POINT] = end_point;
+    aux[SAMPLER_EVENT_AUX_REVERSE] = reverse;
+    aux[SAMPLER_EVENT_AUX_LOOP_MODE] = loop_mode;
+    aux[SAMPLER_EVENT_AUX_LOOP_XFADE_SAMPLES] = loop_xfade_samples;
+    aux[SAMPLER_EVENT_AUX_SR_HZ] = sr_hz;
+    aux[SAMPLER_EVENT_AUX_WARP_ENABLED] = warp_enabled;
+    aux[SAMPLER_EVENT_AUX_WARP_MODE] = warp_mode;
+    aux[SAMPLER_EVENT_AUX_WARP_RATIO] = warp_ratio;
+    aux[SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM] = warp_sample_bpm;
+    aux[SAMPLER_EVENT_AUX_WARP_PROJECT_BPM] = warp_project_bpm;
+    aux[SAMPLER_EVENT_AUX_WARP_PTR_LO] = warp_ptr_lo;
+    aux[SAMPLER_EVENT_AUX_WARP_PTR_HI] = warp_ptr_hi;
+    aux[SAMPLER_EVENT_AUX_SCRUB_OFFSET] = scrub_offset;
+    push_graph_block_event(lg, lid, frame_offset, sequence, GBE_NOTE_ON, &aux);
 }
 
 /// Send a keyboard trigger directly to a voice (no step data lookup).
 unsafe fn send_keyboard_trigger(
     lg: *mut LiveGraph,
     lid: u64,
+    frame_offset: u32,
+    sequence: u32,
     transpose: f32,
     velocity: f32,
+    speed: f32,
     attack_samples: f32,
     release_samples: f32,
     gate_mode: f32,
@@ -1275,190 +1157,35 @@ unsafe fn send_keyboard_trigger(
     warp_project_bpm: f32,
     warp_ptr_lo: f32,
     warp_ptr_hi: f32,
+    scrub_offset: f32,
 ) {
-    params_push_wrapper(
+    send_trigger(
         lg,
-        ParamMsg {
-            idx: PARAM_ENABLED,
-            logical_id: lid,
-            fvalue: enabled,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_VELOCITY,
-            logical_id: lid,
-            fvalue: velocity,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_SPEED,
-            logical_id: lid,
-            fvalue: 1.0,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_GATE_SAMPLES,
-            logical_id: lid,
-            fvalue: f32::MAX,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_TRANSPOSE,
-            logical_id: lid,
-            fvalue: transpose,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_ATTACK_SAMPLES,
-            logical_id: lid,
-            fvalue: attack_samples,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_RELEASE_SAMPLES,
-            logical_id: lid,
-            fvalue: release_samples,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_GATE_MODE,
-            logical_id: lid,
-            fvalue: gate_mode,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_START_POINT,
-            logical_id: lid,
-            fvalue: start_point,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_END_POINT,
-            logical_id: lid,
-            fvalue: end_point,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_REVERSE,
-            logical_id: lid,
-            fvalue: reverse,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_LOOP_MODE,
-            logical_id: lid,
-            fvalue: loop_mode,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_LOOP_XFADE_SAMPLES,
-            logical_id: lid,
-            fvalue: loop_xfade_samples,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_SR_HZ,
-            logical_id: lid,
-            fvalue: sr_hz,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_ENABLED,
-            logical_id: lid,
-            fvalue: warp_enabled,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_MODE,
-            logical_id: lid,
-            fvalue: warp_mode,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_RATIO,
-            logical_id: lid,
-            fvalue: warp_ratio,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_SAMPLE_BPM,
-            logical_id: lid,
-            fvalue: warp_sample_bpm,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_PROJECT_BPM,
-            logical_id: lid,
-            fvalue: warp_project_bpm,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_ONSET_TABLE_PTR_LO,
-            logical_id: lid,
-            fvalue: warp_ptr_lo,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_WARP_ONSET_TABLE_PTR_HI,
-            logical_id: lid,
-            fvalue: warp_ptr_hi,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_PLAYHEAD,
-            logical_id: lid,
-            fvalue: 0.0,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: PARAM_TRIGGER,
-            logical_id: lid,
-            fvalue: 1.0,
-        },
+        lid,
+        frame_offset,
+        sequence,
+        velocity,
+        speed,
+        f32::MAX,
+        attack_samples,
+        release_samples,
+        gate_mode,
+        transpose,
+        start_point,
+        end_point,
+        enabled,
+        reverse,
+        loop_mode,
+        loop_xfade_samples,
+        sr_hz,
+        warp_enabled,
+        warp_mode,
+        warp_ratio,
+        warp_sample_bpm,
+        warp_project_bpm,
+        warp_ptr_lo,
+        warp_ptr_hi,
+        scrub_offset,
     );
 }
 
@@ -1466,53 +1193,38 @@ unsafe fn send_keyboard_trigger(
 unsafe fn send_custom_trigger(
     lg: *mut LiveGraph,
     gatepitch_lid: u64,
+    frame_offset: u32,
+    sequence: u32,
     pitch_hz: f32,
     velocity: f32,
 ) {
-    params_push_wrapper(
+    push_graph_block_event(
         lg,
-        ParamMsg {
-            idx: gatepitch::PARAM_TRIGGER,
-            logical_id: gatepitch_lid,
-            fvalue: 1.0,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: gatepitch::PARAM_PITCH,
-            logical_id: gatepitch_lid,
-            fvalue: pitch_hz,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: gatepitch::PARAM_VELOCITY,
-            logical_id: gatepitch_lid,
-            fvalue: velocity,
-        },
-    );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: gatepitch::PARAM_GATE,
-            logical_id: gatepitch_lid,
-            fvalue: 1.0,
-        },
+        gatepitch_lid,
+        frame_offset,
+        sequence,
+        GBE_NOTE_ON,
+        &[pitch_hz, velocity],
     );
 }
 
 /// Send a gate-off to a GatePitch node.
-unsafe fn send_custom_note_off(lg: *mut LiveGraph, gatepitch_lid: u64) {
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: gatepitch::PARAM_GATE,
-            logical_id: gatepitch_lid,
-            fvalue: 0.0,
-        },
-    );
+unsafe fn send_custom_note_off(
+    lg: *mut LiveGraph,
+    gatepitch_lid: u64,
+    frame_offset: u32,
+    sequence: u32,
+) {
+    push_graph_block_event(lg, gatepitch_lid, frame_offset, sequence, GBE_GATE_OFF, &[]);
+}
+
+unsafe fn send_sampler_note_off(
+    lg: *mut LiveGraph,
+    sampler_lid: u64,
+    frame_offset: u32,
+    sequence: u32,
+) {
+    push_graph_block_event(lg, sampler_lid, frame_offset, sequence, GBE_GATE_OFF, &[]);
 }
 
 unsafe fn set_modulator_gate(lg: *mut LiveGraph, modulator_lid: u64, gate: f32) {
@@ -1529,33 +1241,112 @@ unsafe fn set_modulator_gate(lg: *mut LiveGraph, modulator_lid: u64, gate: f32) 
 unsafe fn trigger_modulator_pulse(
     lg: *mut LiveGraph,
     modulator_lid: u64,
+    frame_offset: u32,
+    sequence: u32,
     pulse_samples: f32,
     pulse_level: f32,
 ) {
-    params_push_wrapper(
+    push_graph_block_event(
         lg,
-        ParamMsg {
-            idx: crate::track_modulator::PARAM_PULSE_SAMPLES,
-            logical_id: modulator_lid,
-            fvalue: pulse_samples.max(1.0),
-        },
+        modulator_lid,
+        frame_offset,
+        sequence,
+        GBE_PULSE,
+        &[pulse_samples.max(1.0), pulse_level.clamp(0.0, 1.0)],
     );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: crate::track_modulator::PARAM_PULSE_LEVEL,
-            logical_id: modulator_lid,
-            fvalue: pulse_level.clamp(0.0, 1.0),
-        },
+}
+
+fn schedule_gate_off_event(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    logical_id: u64,
+    source_frame_offset: u32,
+    delay_samples: f64,
+    target: GateOffTarget,
+) {
+    cancel_gate_off_for_lid(&mut data.countdown_events, logical_id);
+    let event_offset = source_frame_offset as f64 + delay_samples.max(0.0);
+    schedule_countdown_or_block_event(
+        data,
+        event_offset,
+        0.0,
+        1,
+        data.state.transport.pattern_epoch.load(Ordering::Relaxed),
+        CountdownEventKind::GateOff(GateOffEvent {
+            track_idx,
+            logical_id,
+            target,
+        }),
     );
-    params_push_wrapper(
-        lg,
-        ParamMsg {
-            idx: crate::track_modulator::PARAM_TRIGGER,
-            logical_id: modulator_lid,
-            fvalue: 1.0,
-        },
+}
+
+fn schedule_chop_events(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    source_frame_offset: u32,
+    first_delay_samples: f64,
+    interval_samples: f64,
+    repeats: u32,
+    step: usize,
+    chop_gate: f32,
+) {
+    cancel_chops_for_track(&mut data.countdown_events, track_idx);
+    if repeats == 0 {
+        return;
+    }
+    schedule_countdown_or_block_event(
+        data,
+        source_frame_offset as f64 + first_delay_samples.max(0.0),
+        interval_samples.max(1.0),
+        repeats,
+        data.state.transport.pattern_epoch.load(Ordering::Relaxed),
+        CountdownEventKind::Chop(ChopEvent {
+            track_idx,
+            step,
+            chop_gate,
+        }),
     );
+}
+
+fn dispatch_gate_off_event(
+    data: &mut AudioCallbackData,
+    event: GateOffEvent,
+    frame_offset: u32,
+    block_start_sample: u64,
+) {
+    match event.target {
+        GateOffTarget::Custom {
+            engine_id,
+            free_patch,
+        } => {
+            if free_patch {
+                data.custom_engine_pools[engine_id]
+                    .release_free_patch_voice_by_logical_id(event.logical_id);
+            } else {
+                data.custom_engine_pools[engine_id].release_voice_by_logical_id(
+                    event.logical_id,
+                    block_start_sample + frame_offset as u64,
+                );
+            }
+            let seq = next_block_event_sequence(data);
+            unsafe {
+                send_custom_note_off(data.lg.0, event.logical_id, frame_offset, seq);
+            }
+        }
+        GateOffTarget::Sampler { gatepitch_id } => {
+            if gatepitch_id > 0 {
+                let seq = next_block_event_sequence(data);
+                unsafe {
+                    send_custom_note_off(data.lg.0, gatepitch_id as u64, frame_offset, seq);
+                }
+            }
+            data.voice_pools[event.track_idx].release_voice_by_logical_id(event.logical_id);
+            let seq = next_block_event_sequence(data);
+            unsafe {
+                send_sampler_note_off(data.lg.0, event.logical_id, frame_offset, seq);
+            }
+        }
+    }
 }
 
 unsafe fn dispatch_modulator_params(
@@ -1746,11 +1537,10 @@ fn instrument_sound_fingerprint(
 
 unsafe fn dispatch_effect_chain_for_track(
     lg: *mut LiveGraph,
-    effect_params: &[ScheduledEffectParam],
+    effect_params: &mut [ScheduledEffectParam],
 ) {
-    let mut sorted_params = effect_params.iter().collect::<Vec<_>>();
-    sorted_params.sort_by_key(|param| (param.logical_id, param.idx));
-    for param in sorted_params {
+    effect_params.sort_by_key(|param| (param.logical_id, param.idx));
+    for param in effect_params {
         params_push_wrapper(
             lg,
             ParamMsg {
@@ -1841,7 +1631,10 @@ unsafe fn dispatch_instrument_defaults_to_voice(
 ) {
     let slot = &state.pattern.instrument_slots[track_idx];
     let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-    let mut param_indices = (0..num_params).collect::<Vec<_>>();
+    let mut param_indices: ArrayVec<usize, MAX_SLOT_PARAMS> = ArrayVec::new();
+    for param_idx in 0..num_params.min(MAX_SLOT_PARAMS) {
+        param_indices.push(param_idx);
+    }
     param_indices.sort_by_key(|param_idx| slot.resolve_node_idx(*param_idx));
     for param_idx in param_indices {
         let idx = slot.resolve_node_idx(param_idx);
@@ -2049,20 +1842,22 @@ unsafe fn dispatch_sampler_extra_defaults_to_voice(
 
 fn dispatch_scheduled_step(
     data: &mut AudioCallbackData,
+    frame_offset: u32,
     track_idx: usize,
     step: usize,
     samples_per_step: f32,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
-    effect_params: Vec<ScheduledEffectParam>,
+    mut effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
     instrument_fingerprint: u64,
 ) {
     unsafe {
-        dispatch_effect_chain_for_track(data.lg.0, &effect_params);
+        dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
     }
     fire_resolved(
         data,
+        frame_offset,
         track_idx,
         step,
         samples_per_step as f64,
@@ -2076,20 +1871,22 @@ fn dispatch_scheduled_step(
 
 fn dispatch_scheduled_network_step(
     data: &mut AudioCallbackData,
+    frame_offset: u32,
     track_idx: usize,
     samples_per_step: f32,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
-    effect_params: Vec<ScheduledEffectParam>,
+    mut effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
     sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
 ) {
     unsafe {
-        dispatch_effect_chain_for_track(data.lg.0, &effect_params);
+        dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
     }
     fire_resolved(
         data,
+        frame_offset,
         track_idx,
         0,
         samples_per_step as f64,
@@ -2101,7 +1898,11 @@ fn dispatch_scheduled_network_step(
     );
 }
 
-fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent) {
+fn dispatch_scheduled_event(
+    data: &mut AudioCallbackData,
+    event: ScheduledEvent,
+    frame_offset: u32,
+) {
     match event.kind {
         ScheduledEventKind::ResolvedTrigger {
             track,
@@ -2115,6 +1916,7 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
         } => {
             dispatch_scheduled_step(
                 data,
+                frame_offset,
                 track,
                 step,
                 samples_per_step,
@@ -2131,8 +1933,10 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
         } => {
             dispatch_instrument_params_to_active_voices(data, track, &instrument_params);
         }
-        ScheduledEventKind::EffectParams { effect_params, .. } => unsafe {
-            dispatch_effect_chain_for_track(data.lg.0, &effect_params);
+        ScheduledEventKind::EffectParams {
+            mut effect_params, ..
+        } => unsafe {
+            dispatch_effect_chain_for_track(data.lg.0, &mut effect_params);
         },
         ScheduledEventKind::NetworkTrigger {
             track,
@@ -2147,6 +1951,7 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
         } => {
             dispatch_scheduled_network_step(
                 data,
+                frame_offset,
                 track,
                 samples_per_step,
                 resolved,
@@ -2170,67 +1975,390 @@ fn scheduled_trigger_track(event: &ScheduledEvent) -> Option<usize> {
     }
 }
 
-fn mute_group_winner_for_track(
+fn frame_offset_from_remaining(remaining_samples: f64, nframes: usize) -> u32 {
+    remaining_samples
+        .floor()
+        .max(0.0)
+        .min(nframes.saturating_sub(1) as f64) as u32
+}
+
+fn block_event_priority(kind: &BlockEventKind) -> u8 {
+    match kind {
+        BlockEventKind::GateOff(_) => 0,
+        BlockEventKind::Scheduled(ScheduledEvent {
+            kind:
+                ScheduledEventKind::InstrumentParams { .. } | ScheduledEventKind::EffectParams { .. },
+            ..
+        }) => 1,
+        BlockEventKind::Scheduled(_) | BlockEventKind::Chop(_) => 2,
+    }
+}
+
+fn try_push_block_event(
+    data: &mut AudioCallbackData,
+    frame_offset: u32,
+    seq: u64,
+    kind: BlockEventKind,
+) {
+    if data.block_events.len() >= SCHEDULED_BLOCK_SCRATCH_CAPACITY {
+        data.dropped_scheduled_events = data.dropped_scheduled_events.saturating_add(1);
+        if data.trace_audio {
+            eprintln!(
+                "audio-trace: dropped countdown event; block scratch full capacity={SCHEDULED_BLOCK_SCRATCH_CAPACITY}"
+            );
+        }
+        return;
+    }
+    data.block_events.push(BlockEvent {
+        frame_offset,
+        seq,
+        kind,
+    });
+    data.block_events_need_sort = true;
+}
+
+fn try_push_countdown_event(
+    data: &mut AudioCallbackData,
+    remaining_samples: f64,
+    period_samples: f64,
+    repeats: u32,
+    pattern_epoch: u64,
+    seq: u64,
+    kind: CountdownEventKind,
+) {
+    if data.countdown_events.len() >= SCHEDULED_COUNTDOWN_CAPACITY {
+        data.dropped_scheduled_events = data.dropped_scheduled_events.saturating_add(1);
+        if data.trace_audio {
+            eprintln!(
+                "audio-trace: dropped countdown event; countdown pool full capacity={SCHEDULED_COUNTDOWN_CAPACITY}"
+            );
+        }
+        return;
+    }
+    data.countdown_events.push(CountdownEvent {
+        remaining_samples,
+        period_samples,
+        repeats,
+        pattern_epoch,
+        seq,
+        kind,
+    });
+}
+
+fn schedule_countdown_or_block_event(
+    data: &mut AudioCallbackData,
+    event_offset: f64,
+    period_samples: f64,
+    repeats: u32,
+    pattern_epoch: u64,
+    kind: CountdownEventKind,
+) {
+    if repeats == 0 {
+        return;
+    }
+    let nframes = data.current_callback_nframes;
+    match kind {
+        CountdownEventKind::Scheduled(event) => {
+            let seq = data.event_seq;
+            data.event_seq = data.event_seq.wrapping_add(1);
+            if event_offset < nframes as f64 {
+                let frame_offset = frame_offset_from_remaining(event_offset, nframes);
+                try_push_block_event(data, frame_offset, seq, BlockEventKind::Scheduled(event));
+            } else {
+                try_push_countdown_event(
+                    data,
+                    event_offset - nframes as f64,
+                    0.0,
+                    1,
+                    pattern_epoch,
+                    seq,
+                    CountdownEventKind::Scheduled(event),
+                );
+            }
+        }
+        CountdownEventKind::GateOff(event) => {
+            let seq = data.event_seq;
+            data.event_seq = data.event_seq.wrapping_add(1);
+            if event_offset < nframes as f64 {
+                let frame_offset = frame_offset_from_remaining(event_offset, nframes);
+                try_push_block_event(data, frame_offset, seq, BlockEventKind::GateOff(event));
+            } else {
+                try_push_countdown_event(
+                    data,
+                    event_offset - nframes as f64,
+                    0.0,
+                    1,
+                    pattern_epoch,
+                    seq,
+                    CountdownEventKind::GateOff(event),
+                );
+            }
+        }
+        CountdownEventKind::Chop(event) => {
+            let mut next_offset = event_offset;
+            let mut remaining_repeats = repeats;
+            while remaining_repeats > 0 && next_offset < nframes as f64 {
+                let seq = data.event_seq;
+                data.event_seq = data.event_seq.wrapping_add(1);
+                let frame_offset = frame_offset_from_remaining(next_offset, nframes);
+                try_push_block_event(data, frame_offset, seq, BlockEventKind::Chop(event));
+                remaining_repeats -= 1;
+                next_offset += period_samples.max(1.0);
+            }
+            if remaining_repeats > 0 {
+                let seq = data.event_seq;
+                data.event_seq = data.event_seq.wrapping_add(1);
+                try_push_countdown_event(
+                    data,
+                    next_offset - nframes as f64,
+                    period_samples.max(1.0),
+                    remaining_repeats,
+                    pattern_epoch,
+                    seq,
+                    CountdownEventKind::Chop(event),
+                );
+            }
+        }
+    }
+}
+
+fn enqueue_scheduled_event_for_callback(
+    data: &mut AudioCallbackData,
+    event: ScheduledEvent,
+    block_start_sample: u64,
+    nframes: usize,
+    current_pattern_epoch: u64,
+) {
+    if event.pattern_epoch != current_pattern_epoch {
+        return;
+    }
+    let seq = data.event_seq;
+    data.event_seq = data.event_seq.wrapping_add(1);
+    let remaining_samples = if event.sample_time >= block_start_sample {
+        (event.sample_time - block_start_sample) as f64
+    } else {
+        data.late_scheduled_events = data.late_scheduled_events.saturating_add(1);
+        0.0
+    };
+    if remaining_samples < nframes as f64 {
+        let frame_offset = frame_offset_from_remaining(remaining_samples, nframes);
+        try_push_block_event(data, frame_offset, seq, BlockEventKind::Scheduled(event));
+    } else {
+        try_push_countdown_event(
+            data,
+            remaining_samples - nframes as f64,
+            0.0,
+            1,
+            event.pattern_epoch,
+            seq,
+            CountdownEventKind::Scheduled(event),
+        );
+    }
+}
+
+fn drain_scheduled_events_for_callback(
+    data: &mut AudioCallbackData,
+    block_start_sample: u64,
+    nframes: usize,
+    current_pattern_epoch: u64,
+) {
+    while let Some(event) = data.scheduled_events.pop() {
+        enqueue_scheduled_event_for_callback(
+            data,
+            event,
+            block_start_sample,
+            nframes,
+            current_pattern_epoch,
+        );
+    }
+}
+
+fn collect_due_countdown_events(
+    data: &mut AudioCallbackData,
+    nframes: usize,
+    current_pattern_epoch: u64,
+) {
+    let block_len = nframes as f64;
+    let mut i = 0usize;
+    while i < data.countdown_events.len() {
+        let stale = match data.countdown_events[i].kind {
+            CountdownEventKind::GateOff(_) => false,
+            CountdownEventKind::Scheduled(_) | CountdownEventKind::Chop(_) => {
+                data.countdown_events[i].pattern_epoch != current_pattern_epoch
+            }
+        };
+        if stale {
+            data.countdown_events.swap_remove(i);
+            continue;
+        }
+        if data.countdown_events[i].remaining_samples < block_len {
+            let mut due = data.countdown_events.swap_remove(i);
+            match due.kind {
+                CountdownEventKind::Chop(event) => {
+                    while due.repeats > 0 && due.remaining_samples < block_len {
+                        let frame_offset =
+                            frame_offset_from_remaining(due.remaining_samples, nframes);
+                        try_push_block_event(
+                            data,
+                            frame_offset,
+                            due.seq,
+                            BlockEventKind::Chop(event),
+                        );
+                        due.repeats -= 1;
+                        due.seq = data.event_seq;
+                        data.event_seq = data.event_seq.wrapping_add(1);
+                        due.remaining_samples += due.period_samples;
+                    }
+                    if due.repeats > 0 {
+                        due.remaining_samples -= block_len;
+                        data.countdown_events.push(due);
+                    }
+                }
+                CountdownEventKind::Scheduled(event) => {
+                    let frame_offset = frame_offset_from_remaining(due.remaining_samples, nframes);
+                    try_push_block_event(
+                        data,
+                        frame_offset,
+                        due.seq,
+                        BlockEventKind::Scheduled(event),
+                    );
+                }
+                CountdownEventKind::GateOff(event) => {
+                    let frame_offset = frame_offset_from_remaining(due.remaining_samples, nframes);
+                    try_push_block_event(
+                        data,
+                        frame_offset,
+                        due.seq,
+                        BlockEventKind::GateOff(event),
+                    );
+                }
+            }
+            continue;
+        }
+        data.countdown_events[i].remaining_samples -= block_len;
+        i += 1;
+    }
+}
+
+fn clear_countdown_events(data: &mut AudioCallbackData) {
+    data.countdown_events.clear();
+    data.block_events.clear();
+    data.block_events_need_sort = false;
+}
+
+fn clear_transport_countdown_events(data: &mut AudioCallbackData) {
+    data.countdown_events
+        .retain(|event| matches!(event.kind, CountdownEventKind::GateOff(_)));
+    data.block_events
+        .retain(|event| matches!(event.kind, BlockEventKind::GateOff(_)));
+    data.block_events_need_sort = true;
+}
+
+fn mute_group_winner_for_block_events(
     track: usize,
     group: u8,
-    batch: &[TimedEvent],
+    batch: &[BlockEvent],
     track_mute_groups: impl Fn(usize) -> u8,
 ) -> usize {
     batch
         .iter()
-        .filter_map(|event| scheduled_trigger_track(&event.event))
+        .filter_map(|event| match &event.kind {
+            BlockEventKind::Scheduled(scheduled) => scheduled_trigger_track(scheduled),
+            BlockEventKind::GateOff(_) | BlockEventKind::Chop(_) => None,
+        })
         .filter(|&candidate| track_mute_groups(candidate) == group)
         .max()
         .unwrap_or(track)
 }
 
-fn dispatch_scheduled_event_batch(
-    data: &mut AudioCallbackData,
-    batch: Vec<TimedEvent>,
-    release_sample: u64,
-) {
-    let mut winning_group_tracks = Vec::new();
-    for event in &batch {
-        let Some(track) = scheduled_trigger_track(&event.event) else {
-            continue;
+fn dispatch_block_events(data: &mut AudioCallbackData, block_start_sample: u64) {
+    while !data.block_events.is_empty() {
+        if data.block_events_need_sort {
+            data.block_events.sort_unstable_by(|a, b| {
+                (b.frame_offset, block_event_priority(&b.kind), b.seq).cmp(&(
+                    a.frame_offset,
+                    block_event_priority(&a.kind),
+                    a.seq,
+                ))
+            });
+            data.block_events_need_sort = false;
+        }
+
+        let Some(frame_offset) = data.block_events.last().map(|event| event.frame_offset) else {
+            break;
         };
-        if track >= data.state.active_track_count() {
-            continue;
+        let mut group_start = data.block_events.len();
+        while group_start > 0 && data.block_events[group_start - 1].frame_offset == frame_offset {
+            group_start -= 1;
         }
-        let group = data.state.pattern.track_params[track].get_mute_group();
-        if group == 0 {
-            continue;
-        }
-        let winner = mute_group_winner_for_track(track, group, &batch, |candidate| {
-            data.state
-                .pattern
-                .track_params
-                .get(candidate)
-                .map(|params| params.get_mute_group())
-                .unwrap_or(0)
-        });
-        if winner == track && !winning_group_tracks.contains(&track) {
-            winning_group_tracks.push(track);
-        }
-    }
 
-    for &track in &winning_group_tracks {
-        enforce_mute_group_for_winning_track(data, track, release_sample);
-    }
-
-    for event in batch {
-        let dispatch = match scheduled_trigger_track(&event.event) {
-            Some(track) if track < data.state.active_track_count() => {
-                let group = data.state.pattern.track_params[track].get_mute_group();
-                group == 0 || winning_group_tracks.contains(&track)
+        let mut winning_group_tracks = [false; MAX_TRACKS];
+        {
+            let group = &data.block_events[group_start..];
+            for event in group {
+                let Some(track) = (match &event.kind {
+                    BlockEventKind::Scheduled(scheduled) => scheduled_trigger_track(scheduled),
+                    BlockEventKind::GateOff(_) | BlockEventKind::Chop(_) => None,
+                }) else {
+                    continue;
+                };
+                if track >= data.state.active_track_count() {
+                    continue;
+                }
+                let group_id = data.state.pattern.track_params[track].get_mute_group();
+                if group_id == 0 {
+                    continue;
+                }
+                let winner =
+                    mute_group_winner_for_block_events(track, group_id, group, |candidate| {
+                        data.state
+                            .pattern
+                            .track_params
+                            .get(candidate)
+                            .map(|params| params.get_mute_group())
+                            .unwrap_or(0)
+                    });
+                if winner < MAX_TRACKS {
+                    winning_group_tracks[winner] = true;
+                }
             }
-            Some(_) => false,
-            None => true,
-        };
-        if !dispatch {
-            continue;
         }
-        dispatch_scheduled_event(data, event.event);
+
+        let release_sample = block_start_sample + frame_offset as u64;
+        for (track, is_winner) in winning_group_tracks.iter().copied().enumerate() {
+            if is_winner {
+                enforce_mute_group_for_winning_track(data, track, release_sample, frame_offset);
+            }
+        }
+
+        while data
+            .block_events
+            .last()
+            .is_some_and(|event| event.frame_offset == frame_offset)
+        {
+            let event = data.block_events.pop().unwrap();
+            match event.kind {
+                BlockEventKind::Scheduled(scheduled) => {
+                    let dispatch = match scheduled_trigger_track(&scheduled) {
+                        Some(track) if track < data.state.active_track_count() => {
+                            let group = data.state.pattern.track_params[track].get_mute_group();
+                            group == 0 || winning_group_tracks[track]
+                        }
+                        Some(_) => false,
+                        None => true,
+                    };
+                    if dispatch {
+                        dispatch_scheduled_event(data, scheduled, frame_offset);
+                    }
+                }
+                BlockEventKind::GateOff(gate_off) => {
+                    dispatch_gate_off_event(data, gate_off, frame_offset, block_start_sample);
+                }
+                BlockEventKind::Chop(chop) => {
+                    dispatch_chop_event(data, chop, frame_offset);
+                }
+            }
+        }
     }
 }
 
@@ -2340,7 +2468,10 @@ unsafe fn dispatch_bus_effect_params_at_step(
             continue;
         }
         let num_params = slot.num_params as usize;
-        let mut param_indices = (0..num_params).collect::<Vec<_>>();
+        let mut param_indices: ArrayVec<usize, MAX_SLOT_PARAMS> = ArrayVec::new();
+        for param_idx in 0..num_params.min(MAX_SLOT_PARAMS) {
+            param_indices.push(param_idx);
+        }
         param_indices.sort_by_key(|param_idx| {
             slot.param_node_indices
                 .get(*param_idx)
@@ -2594,6 +2725,7 @@ fn zero_output_frames(output: &mut [f32], start_frame: usize, num_channels: usiz
 /// Uses voice pool allocation for polyphonic playback.
 fn fire_resolved(
     data: &mut AudioCallbackData,
+    frame_offset: u32,
     track_idx: usize,
     step: usize,
     samples_per_step: f64,
@@ -2690,6 +2822,7 @@ fn fire_resolved(
     let attack_samples = attack_ms * data.sample_rate as f32 / 1000.0;
     let release_samples = release_ms * data.sample_rate as f32 / 1000.0;
     let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
+    let track_send = tp.get_send();
     let start_point = sampler_params.start_point;
     let end_point = sampler_params.end_point;
     let instrument_enabled = sampler_params.instrument_enabled;
@@ -2736,20 +2869,31 @@ fn fire_resolved(
         if lid == 0 {
             return;
         }
+        let seq = next_block_event_sequence(data);
         unsafe {
             dispatch_modulator_params(data.lg.0, lid, &instrument_params);
-            trigger_modulator_pulse(data.lg.0, lid, chop_gate, resolved.velocity);
+            trigger_modulator_pulse(
+                data.lg.0,
+                lid,
+                frame_offset,
+                seq,
+                chop_gate,
+                resolved.velocity,
+            );
         }
         if chop > 1 {
-            data.chop_state[track_idx] = ChopTracker {
-                remaining: chop - 1,
-                counter: chop_gate as f64,
-                interval: chop_gate as f64,
+            schedule_chop_events(
+                data,
+                track_idx,
+                frame_offset,
+                chop_gate as f64,
+                chop_gate as f64,
+                chop - 1,
                 step,
                 chop_gate,
-            };
+            );
         } else {
-            data.chop_state[track_idx].remaining = 0;
+            cancel_chops_for_track(&mut data.countdown_events, track_idx);
         }
         data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
         return;
@@ -2819,10 +2963,11 @@ fn fire_resolved(
                     data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
                 }
                 let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
-                cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
+                cancel_gate_off_for_lid(&mut data.countdown_events, lid);
                 if allocation.stole_active_voice || !track_polyphonic || free_patch {
+                    let off_seq = next_event_sequence_from(&mut data.event_seq);
                     unsafe {
-                        send_custom_note_off(data.lg.0, lid);
+                        send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
                         route_custom_voice_to_track(
                             data.lg.0,
                             &data.state,
@@ -2864,11 +3009,22 @@ fn fire_resolved(
                 }
                 data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint =
                     instrument_fingerprint;
+                let on_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
-                    send_custom_trigger(data.lg.0, lid, pitch_hz, velocity);
+                    send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
                 }
                 if gate_mode > 0.5 {
-                    data.gate_off_state[track_idx].schedule(lid, note_total_gate as f64);
+                    schedule_gate_off_event(
+                        data,
+                        track_idx,
+                        lid,
+                        frame_offset,
+                        note_total_gate as f64,
+                        GateOffTarget::Custom {
+                            engine_id,
+                            free_patch,
+                        },
+                    );
                 }
             } else {
                 let voice =
@@ -2879,7 +3035,9 @@ fn fire_resolved(
                 } else {
                     sampler_lid
                 };
+                let gatepitch_id = voice.gatepitch_id;
                 if voice.modulator_id > 0 {
+                    let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
                     unsafe {
                         dispatch_sampler_modulator_params_to_voice(
                             data.lg.0,
@@ -2889,16 +3047,21 @@ fn fire_resolved(
                         send_custom_trigger(
                             data.lg.0,
                             voice.gatepitch_id as u64,
+                            frame_offset,
+                            gatepitch_seq,
                             custom_pitch_hz(transpose + base_note_offset, 0.0),
                             velocity,
                         );
                     }
                 }
+                let sampler_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
                     dispatch_sampler_extra_params_to_voice(data.lg.0, lid, &instrument_params);
                     send_trigger(
                         data.lg.0,
                         lid,
+                        frame_offset,
+                        sampler_seq,
                         velocity,
                         resolved.speed * playback_speed,
                         note_chop_gate,
@@ -2920,18 +3083,18 @@ fn fire_resolved(
                         warp_project_bpm,
                         warp_ptr_lo,
                         warp_ptr_hi,
-                    );
-                    params_push_wrapper(
-                        data.lg.0,
-                        ParamMsg {
-                            idx: crate::sampler::PARAM_SCRUB_OFFSET,
-                            logical_id: lid,
-                            fvalue: scrub,
-                        },
+                        scrub,
                     );
                 }
                 if gate_mode > 0.5 {
-                    data.gate_off_state[track_idx].schedule(lid, note_total_gate as f64);
+                    schedule_gate_off_event(
+                        data,
+                        track_idx,
+                        lid,
+                        frame_offset,
+                        note_total_gate as f64,
+                        GateOffTarget::Sampler { gatepitch_id },
+                    );
                 }
             }
         }
@@ -2976,10 +3139,11 @@ fn fire_resolved(
                 data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
             }
             let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
-            cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
+            cancel_gate_off_for_lid(&mut data.countdown_events, lid);
             if allocation.stole_active_voice || !track_polyphonic || free_patch {
+                let off_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
-                    send_custom_note_off(data.lg.0, lid);
+                    send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
                     route_custom_voice_to_track(
                         data.lg.0,
                         &data.state,
@@ -3021,11 +3185,22 @@ fn fire_resolved(
             }
             data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint =
                 instrument_fingerprint;
+            let on_seq = next_event_sequence_from(&mut data.event_seq);
             unsafe {
-                send_custom_trigger(data.lg.0, lid, pitch_hz, velocity);
+                send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
             }
             if gate_mode > 0.5 {
-                data.gate_off_state[track_idx].schedule(lid, total_gate as f64);
+                schedule_gate_off_event(
+                    data,
+                    track_idx,
+                    lid,
+                    frame_offset,
+                    total_gate as f64,
+                    GateOffTarget::Custom {
+                        engine_id,
+                        free_patch,
+                    },
+                );
             }
         } else {
             let voice =
@@ -3036,7 +3211,9 @@ fn fire_resolved(
             } else {
                 sampler_lid
             };
+            let gatepitch_id = voice.gatepitch_id;
             if voice.modulator_id > 0 {
+                let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
                     dispatch_sampler_modulator_params_to_voice(
                         data.lg.0,
@@ -3046,16 +3223,21 @@ fn fire_resolved(
                     send_custom_trigger(
                         data.lg.0,
                         voice.gatepitch_id as u64,
+                        frame_offset,
+                        gatepitch_seq,
                         custom_pitch_hz(transpose + base_note_offset, 0.0),
                         velocity,
                     );
                 }
             }
+            let sampler_seq = next_event_sequence_from(&mut data.event_seq);
             unsafe {
                 dispatch_sampler_extra_params_to_voice(data.lg.0, lid, &instrument_params);
                 send_trigger(
                     data.lg.0,
                     lid,
+                    frame_offset,
+                    sampler_seq,
                     velocity,
                     resolved.speed * playback_speed,
                     chop_gate,
@@ -3077,18 +3259,18 @@ fn fire_resolved(
                     warp_project_bpm,
                     warp_ptr_lo,
                     warp_ptr_hi,
-                );
-                params_push_wrapper(
-                    data.lg.0,
-                    ParamMsg {
-                        idx: crate::sampler::PARAM_SCRUB_OFFSET,
-                        logical_id: lid,
-                        fvalue: scrub,
-                    },
+                    scrub,
                 );
             }
             if gate_mode > 0.5 {
-                data.gate_off_state[track_idx].schedule(lid, total_gate as f64);
+                schedule_gate_off_event(
+                    data,
+                    track_idx,
+                    lid,
+                    frame_offset,
+                    total_gate as f64,
+                    GateOffTarget::Sampler { gatepitch_id },
+                );
             }
         }
     }
@@ -3102,7 +3284,7 @@ fn fire_resolved(
                 ParamMsg {
                     idx: 0,
                     logical_id: send_lid,
-                    fvalue: tp.get_send(),
+                    fvalue: track_send,
                 },
             );
         }
@@ -3112,21 +3294,221 @@ fn fire_resolved(
 
     // Setup chop re-triggers (sampler only — custom instruments handle gate duration internally)
     if !is_custom && chop > 1 {
-        data.chop_state[track_idx] = ChopTracker {
-            remaining: chop - 1,
-            counter: samples_per_step / chop as f64,
-            interval: samples_per_step / chop as f64,
+        schedule_chop_events(
+            data,
+            track_idx,
+            frame_offset,
+            samples_per_step / chop as f64,
+            samples_per_step / chop as f64,
+            chop - 1,
             step,
             chop_gate,
-        };
+        );
     } else {
-        data.chop_state[track_idx].remaining = 0;
+        cancel_chops_for_track(&mut data.countdown_events, track_idx);
     }
+}
+
+fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent, frame_offset: u32) {
+    let track_idx = event.track_idx;
+    if track_idx >= data.state.active_track_count() {
+        return;
+    }
+    if InstrumentType::from_runtime_flag(
+        data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+    ) == InstrumentType::Modulator
+    {
+        let lid = data.state.runtime.modulator_lids[track_idx].load(Ordering::Acquire);
+        if lid == 0 {
+            return;
+        }
+        let slot = &data.state.pattern.instrument_slots[track_idx];
+        let rise = slot
+            .plocks
+            .get(event.step, 0)
+            .unwrap_or_else(|| slot.defaults.get(0));
+        let fall = slot
+            .plocks
+            .get(event.step, 1)
+            .unwrap_or_else(|| slot.defaults.get(1));
+        let velocity = data.state.pattern.step_data[track_idx].get(event.step, StepParam::Velocity);
+        let seq = next_event_sequence_from(&mut data.event_seq);
+        unsafe {
+            params_push_wrapper(
+                data.lg.0,
+                ParamMsg {
+                    idx: crate::track_modulator::PARAM_RISE_MS,
+                    logical_id: lid,
+                    fvalue: rise,
+                },
+            );
+            params_push_wrapper(
+                data.lg.0,
+                ParamMsg {
+                    idx: crate::track_modulator::PARAM_FALL_MS,
+                    logical_id: lid,
+                    fvalue: fall,
+                },
+            );
+            trigger_modulator_pulse(data.lg.0, lid, frame_offset, seq, event.chop_gate, velocity);
+        }
+        data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
+        return;
+    }
+
+    let tp = &data.state.pattern.track_params[track_idx];
+    let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
+    let chop_inst_slot = &data.state.pattern.instrument_slots[track_idx];
+    let attack_samples = chop_inst_slot
+        .plocks
+        .get(event.step, 0)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(0))
+        * data.sample_rate as f32
+        / 1000.0;
+    let release_samples = chop_inst_slot
+        .plocks
+        .get(event.step, 1)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(1))
+        * data.sample_rate as f32
+        / 1000.0;
+    let chop_start = chop_inst_slot
+        .plocks
+        .get(event.step, 2)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(2));
+    let chop_end = chop_inst_slot
+        .plocks
+        .get(event.step, 3)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(3));
+    let chop_reverse = chop_inst_slot
+        .plocks
+        .get(event.step, 5)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(5));
+    let chop_loop_mode = chop_inst_slot
+        .plocks
+        .get(event.step, 6)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(6));
+    let chop_loop_xfade_samples = chop_inst_slot
+        .plocks
+        .get(event.step, 7)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(7))
+        * data.sample_rate as f32
+        / 1000.0;
+    let chop_sr_hz = chop_inst_slot
+        .plocks
+        .get(event.step, 8)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(8));
+    let chop_warp_enabled = chop_inst_slot
+        .plocks
+        .get(event.step, 9)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(9));
+    let chop_warp_mode = chop_inst_slot
+        .plocks
+        .get(event.step, 10)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(10));
+    let chop_sample_bpm = chop_inst_slot
+        .plocks
+        .get(event.step, 11)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(11));
+    let chop_playback_speed = chop_inst_slot
+        .plocks
+        .get(event.step, 12)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(12));
+    let chop_scrub = chop_inst_slot
+        .plocks
+        .get(event.step, 13)
+        .unwrap_or_else(|| chop_inst_slot.defaults.get(13));
+    let (
+        chop_warp_enabled,
+        chop_warp_mode,
+        chop_warp_ratio,
+        chop_warp_sample_bpm,
+        chop_warp_project_bpm,
+        chop_warp_ptr_lo,
+        chop_warp_ptr_hi,
+    ) = sampler_warp_runtime(
+        &data.state,
+        track_idx,
+        chop_warp_enabled,
+        chop_warp_mode,
+        chop_sample_bpm,
+    );
+    let chop_base_note_offset = f32::from_bits(
+        data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
+    );
+    let sd = &data.state.pattern.step_data[track_idx];
+    let transpose = sd.get(event.step, StepParam::Transpose);
+    let voice = data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
+    let voice_lid = voice.logical_id;
+    let sampler_lid = data.state.runtime.sampler_lids[track_idx].load(Ordering::Acquire);
+    let lid = if voice_lid != 0 {
+        voice_lid
+    } else {
+        sampler_lid
+    };
+    if lid == 0 {
+        return;
+    }
+    if voice.modulator_id > 0 {
+        let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
+        unsafe {
+            dispatch_sampler_modulator_defaults_to_voice(
+                data.lg.0,
+                &data.state,
+                track_idx,
+                voice.modulator_id as u64,
+            );
+            send_custom_trigger(
+                data.lg.0,
+                voice.gatepitch_id as u64,
+                frame_offset,
+                gatepitch_seq,
+                custom_pitch_hz(transpose + chop_base_note_offset, 0.0),
+                sd.get(event.step, StepParam::Velocity),
+            );
+        }
+    }
+    let sampler_seq = next_event_sequence_from(&mut data.event_seq);
+    unsafe {
+        dispatch_sampler_extra_defaults_to_voice(data.lg.0, &data.state, track_idx, lid);
+        send_trigger(
+            data.lg.0,
+            lid,
+            frame_offset,
+            sampler_seq,
+            sd.get(event.step, StepParam::Velocity),
+            sd.get(event.step, StepParam::Speed) * chop_playback_speed,
+            event.chop_gate,
+            attack_samples,
+            release_samples,
+            gate_mode,
+            transpose + chop_base_note_offset,
+            chop_start,
+            chop_end,
+            chop_inst_slot
+                .plocks
+                .get(event.step, 4)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(4)),
+            chop_reverse,
+            chop_loop_mode,
+            chop_loop_xfade_samples,
+            chop_sr_hz,
+            chop_warp_enabled,
+            chop_warp_mode,
+            chop_warp_ratio,
+            chop_warp_sample_bpm,
+            chop_warp_project_bpm,
+            chop_warp_ptr_lo,
+            chop_warp_ptr_hi,
+            chop_scrub,
+        );
+    }
+    data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
 }
 
 fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let callback_start = Instant::now();
     let nframes = output.len() / data.num_channels;
+    data.current_callback_nframes = nframes;
     data.trace_callback_counter = data.trace_callback_counter.wrapping_add(1);
     let num_tracks = data.state.active_track_count();
     let topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
@@ -3146,7 +3528,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     if data.state.topology_edit_in_flight() {
         data.scheduled_events.clear();
-        data.events_heap.clear();
+        clear_countdown_events(data);
         data.event_seq = 0;
     }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
@@ -3208,8 +3590,9 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     pool.release_voice_by_logical_id(active_note.logical_id, block_end_sample);
                 }
                 if active_note.logical_id != 0 {
+                    let seq = next_block_event_sequence(data);
                     unsafe {
-                        send_custom_note_off(data.lg.0, active_note.logical_id);
+                        send_custom_note_off(data.lg.0, active_note.logical_id, 0, seq);
                     }
                 }
             } else {
@@ -3221,23 +3604,28 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     let pool = &mut data.voice_pools[kt.track];
                     pool.release_voice_by_logical_id(active_note.logical_id);
                     if active_note.logical_id != 0 {
+                        let gatepitch_id = pool
+                            .voices
+                            .iter()
+                            .find(|voice| voice.logical_id == active_note.logical_id)
+                            .map(|voice| voice.gatepitch_id)
+                            .unwrap_or(0);
+                        let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
+                        let sampler_seq = next_event_sequence_from(&mut data.event_seq);
                         unsafe {
-                            let gatepitch_id = pool
-                                .voices
-                                .iter()
-                                .find(|voice| voice.logical_id == active_note.logical_id)
-                                .map(|voice| voice.gatepitch_id)
-                                .unwrap_or(0);
                             if gatepitch_id > 0 {
-                                send_custom_note_off(data.lg.0, gatepitch_id as u64);
+                                send_custom_note_off(
+                                    data.lg.0,
+                                    gatepitch_id as u64,
+                                    0,
+                                    gatepitch_seq,
+                                );
                             }
-                            params_push_wrapper(
+                            send_sampler_note_off(
                                 data.lg.0,
-                                ParamMsg {
-                                    idx: PARAM_GATE_SAMPLES,
-                                    logical_id: active_note.logical_id,
-                                    fvalue: 0.0,
-                                },
+                                active_note.logical_id,
+                                0,
+                                sampler_seq,
                             );
                         }
                     }
@@ -3245,7 +3633,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             }
         } else {
             // Note-on: allocate voice and trigger
-            enforce_mute_group_for_winning_track(data, kt.track, block_start_sample);
+            enforce_mute_group_for_winning_track(data, kt.track, block_start_sample, 0);
             let resolved_transpose = resolve_live_keyboard_transpose(
                 &data.state,
                 data.accumulator_states[kt.track],
@@ -3296,7 +3684,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
                 }
                 let pitch_hz = custom_pitch_hz(resolved_transpose, base_note_offset);
-                cancel_gate_off_for_lid(&mut data.gate_off_state, voice_lid);
+                cancel_gate_off_for_lid(&mut data.countdown_events, voice_lid);
                 unsafe {
                     route_custom_voice_to_track(
                         data.lg.0,
@@ -3319,12 +3707,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 }
                 data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint = fingerprint;
                 if allocation.stole_active_voice || !track_polyphonic || free_patch {
+                    let off_seq = next_block_event_sequence(data);
                     unsafe {
-                        send_custom_note_off(data.lg.0, voice_lid);
+                        send_custom_note_off(data.lg.0, voice_lid, 0, off_seq);
                     }
                 }
+                let on_seq = next_block_event_sequence(data);
                 unsafe {
-                    send_custom_trigger(data.lg.0, voice_lid, pitch_hz, kt.velocity);
+                    send_custom_trigger(data.lg.0, voice_lid, 0, on_seq, pitch_hz, kt.velocity);
                 }
                 store_active_keyboard_note(
                     &mut data.active_keyboard_notes,
@@ -3371,6 +3761,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     kb_inst_slot.defaults.get(11),
                 );
                 if voice.modulator_id > 0 {
+                    let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
                     unsafe {
                         dispatch_sampler_modulator_defaults_to_voice(
                             data.lg.0,
@@ -3381,17 +3772,23 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         send_custom_trigger(
                             data.lg.0,
                             voice.gatepitch_id as u64,
+                            0,
+                            gatepitch_seq,
                             custom_pitch_hz(resolved_transpose + base_note_offset, 0.0),
                             kt.velocity,
                         );
                     }
                 }
+                let sampler_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
                     send_keyboard_trigger(
                         data.lg.0,
                         voice_lid,
+                        0,
+                        sampler_seq,
                         resolved_transpose + base_note_offset,
                         kt.velocity,
+                        kb_playback_speed,
                         attack_samples,
                         release_samples,
                         gate_mode,
@@ -3409,14 +3806,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         kb_warp_project_bpm,
                         kb_warp_ptr_lo,
                         kb_warp_ptr_hi,
-                    );
-                    params_push_wrapper(
-                        data.lg.0,
-                        ParamMsg {
-                            idx: crate::sampler::PARAM_SPEED,
-                            logical_id: voice_lid,
-                            fvalue: kb_playback_speed,
-                        },
+                        kb_inst_slot.defaults.get(13),
                     );
                     dispatch_sampler_extra_defaults_to_voice(
                         data.lg.0,
@@ -3453,7 +3843,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         }
         if !playing && data.last_playing {
             data.scheduled_events.clear();
-            data.events_heap.clear();
+            clear_transport_countdown_events(data);
         }
         data.last_playing = playing;
         data.last_pattern = pattern;
@@ -3528,242 +3918,11 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         }
     }
 
-    // Process pending chop re-triggers (voice-aware)
-    for track_idx in 0..num_tracks {
-        let cs = &mut data.chop_state[track_idx];
-        if cs.remaining > 0 {
-            cs.counter -= nframes as f64;
-            if InstrumentType::from_runtime_flag(
-                data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
-            ) == InstrumentType::Modulator
-            {
-                let lid = data.state.runtime.modulator_lids[track_idx].load(Ordering::Acquire);
-                let slot = &data.state.pattern.instrument_slots[track_idx];
-                while cs.counter <= 0.0 && cs.remaining > 0 {
-                    if lid != 0 {
-                        let rise = slot
-                            .plocks
-                            .get(cs.step, 0)
-                            .unwrap_or_else(|| slot.defaults.get(0));
-                        let fall = slot
-                            .plocks
-                            .get(cs.step, 1)
-                            .unwrap_or_else(|| slot.defaults.get(1));
-                        unsafe {
-                            params_push_wrapper(
-                                data.lg.0,
-                                ParamMsg {
-                                    idx: crate::track_modulator::PARAM_RISE_MS,
-                                    logical_id: lid,
-                                    fvalue: rise,
-                                },
-                            );
-                            params_push_wrapper(
-                                data.lg.0,
-                                ParamMsg {
-                                    idx: crate::track_modulator::PARAM_FALL_MS,
-                                    logical_id: lid,
-                                    fvalue: fall,
-                                },
-                            );
-                            let velocity = data.state.pattern.step_data[track_idx]
-                                .get(cs.step, StepParam::Velocity);
-                            trigger_modulator_pulse(data.lg.0, lid, cs.chop_gate, velocity);
-                        }
-                        data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
-                    }
-                    cs.remaining -= 1;
-                    cs.counter += cs.interval;
-                }
-                continue;
-            }
-            let tp = &data.state.pattern.track_params[track_idx];
-            let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
-            let chop_inst_slot = &data.state.pattern.instrument_slots[track_idx];
-            let attack_samples = chop_inst_slot
-                .plocks
-                .get(cs.step, 0)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(0))
-                * data.sample_rate as f32
-                / 1000.0;
-            let release_samples = chop_inst_slot
-                .plocks
-                .get(cs.step, 1)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(1))
-                * data.sample_rate as f32
-                / 1000.0;
-            let chop_start = chop_inst_slot
-                .plocks
-                .get(cs.step, 2)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(2));
-            let chop_end = chop_inst_slot
-                .plocks
-                .get(cs.step, 3)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(3));
-            let chop_reverse = chop_inst_slot
-                .plocks
-                .get(cs.step, 5)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(5));
-            let chop_loop_mode = chop_inst_slot
-                .plocks
-                .get(cs.step, 6)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(6));
-            let chop_loop_xfade_samples = chop_inst_slot
-                .plocks
-                .get(cs.step, 7)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(7))
-                * data.sample_rate as f32
-                / 1000.0;
-            let chop_sr_hz = chop_inst_slot
-                .plocks
-                .get(cs.step, 8)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(8));
-            let chop_warp_enabled = chop_inst_slot
-                .plocks
-                .get(cs.step, 9)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(9));
-            let chop_warp_mode = chop_inst_slot
-                .plocks
-                .get(cs.step, 10)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(10));
-            let chop_sample_bpm = chop_inst_slot
-                .plocks
-                .get(cs.step, 11)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(11));
-            let chop_playback_speed = chop_inst_slot
-                .plocks
-                .get(cs.step, 12)
-                .unwrap_or_else(|| chop_inst_slot.defaults.get(12));
-            let (
-                chop_warp_enabled,
-                chop_warp_mode,
-                chop_warp_ratio,
-                chop_warp_sample_bpm,
-                chop_warp_project_bpm,
-                chop_warp_ptr_lo,
-                chop_warp_ptr_hi,
-            ) = sampler_warp_runtime(
-                &data.state,
-                track_idx,
-                chop_warp_enabled,
-                chop_warp_mode,
-                chop_sample_bpm,
-            );
-            let chop_base_note_offset = f32::from_bits(
-                data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
-            );
-            let sd = &data.state.pattern.step_data[track_idx];
-            while cs.counter <= 0.0 && cs.remaining > 0 {
-                // Allocate a voice for the chop re-trigger
-                let transpose = sd.get(cs.step, StepParam::Transpose);
-                let voice =
-                    data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
-                let voice_lid = voice.logical_id;
-                let sampler_lid =
-                    data.state.runtime.sampler_lids[track_idx].load(Ordering::Acquire);
-                let lid = if voice_lid != 0 {
-                    voice_lid
-                } else {
-                    sampler_lid
-                };
-                if voice.modulator_id > 0 {
-                    unsafe {
-                        dispatch_sampler_modulator_defaults_to_voice(
-                            data.lg.0,
-                            &data.state,
-                            track_idx,
-                            voice.modulator_id as u64,
-                        );
-                        send_custom_trigger(
-                            data.lg.0,
-                            voice.gatepitch_id as u64,
-                            custom_pitch_hz(transpose + chop_base_note_offset, 0.0),
-                            sd.get(cs.step, StepParam::Velocity),
-                        );
-                    }
-                }
-                unsafe {
-                    dispatch_sampler_extra_defaults_to_voice(
-                        data.lg.0,
-                        &data.state,
-                        track_idx,
-                        lid,
-                    );
-                    send_trigger(
-                        data.lg.0,
-                        lid,
-                        sd.get(cs.step, StepParam::Velocity),
-                        sd.get(cs.step, StepParam::Speed) * chop_playback_speed,
-                        cs.chop_gate,
-                        attack_samples,
-                        release_samples,
-                        gate_mode,
-                        transpose + chop_base_note_offset,
-                        chop_start,
-                        chop_end,
-                        chop_inst_slot
-                            .plocks
-                            .get(cs.step, 4)
-                            .unwrap_or_else(|| chop_inst_slot.defaults.get(4)),
-                        chop_reverse,
-                        chop_loop_mode,
-                        chop_loop_xfade_samples,
-                        chop_sr_hz,
-                        chop_warp_enabled,
-                        chop_warp_mode,
-                        chop_warp_ratio,
-                        chop_warp_sample_bpm,
-                        chop_warp_project_bpm,
-                        chop_warp_ptr_lo,
-                        chop_warp_ptr_hi,
-                    );
-                }
-                data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
-                cs.remaining -= 1;
-                cs.counter += cs.interval;
-            }
-        }
-    }
+    let current_pattern_epoch = data.state.transport.pattern_epoch.load(Ordering::Relaxed);
+    collect_due_countdown_events(data, nframes, current_pattern_epoch);
+    drain_scheduled_events_for_callback(data, block_start_sample, nframes, current_pattern_epoch);
+    dispatch_block_events(data, block_start_sample);
 
-    // Process pending gate-off events for custom instruments
-    for track_idx in 0..num_tracks {
-        let expired = data.gate_off_state[track_idx].process(nframes);
-        for lid in expired {
-            if InstrumentType::from_runtime_flag(
-                data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
-            ) == InstrumentType::Modulator
-            {
-                unsafe {
-                    set_modulator_gate(data.lg.0, lid, 0.0);
-                }
-            } else if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
-                if track_custom_run_mode(&data.state, track_idx)
-                    == CustomInstrumentRunMode::FreePatch
-                {
-                    data.custom_engine_pools[engine_id].release_free_patch_voice_by_logical_id(lid);
-                } else {
-                    data.custom_engine_pools[engine_id]
-                        .release_voice_by_logical_id(lid, block_end_sample);
-                }
-                unsafe {
-                    send_custom_note_off(data.lg.0, lid);
-                }
-            } else {
-                if let Some(voice) = data.voice_pools[track_idx].voices
-                    [..data.voice_pools[track_idx].num_voices]
-                    .iter()
-                    .find(|voice| voice.logical_id == lid)
-                {
-                    if voice.gatepitch_id > 0 {
-                        unsafe {
-                            send_custom_note_off(data.lg.0, voice.gatepitch_id as u64);
-                        }
-                    }
-                }
-                data.voice_pools[track_idx].release_voice_by_logical_id(lid);
-            }
-        }
-    }
     let custom_release_tail_samples =
         (CUSTOM_ENGINE_RELEASE_TAIL_SECONDS * data.sample_rate).round() as u64;
     for engine_id in 0..MAX_TRACKS {
@@ -3777,114 +3936,32 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         );
     }
 
-    let mut rendered_frames = 0usize;
-    let mut zero_chunk_spins = 0usize;
-    const RENDER_CHUNK_ALIGNMENT: u64 = 4;
-    while rendered_frames < nframes {
-        let current_sample = block_start_sample + rendered_frames as u64;
-        let current_pattern_epoch = data.state.transport.pattern_epoch.load(Ordering::Relaxed);
-
-        // drain queue and add to binary heap (to sort events)
-        while let Some(event) = data.scheduled_events.pop() {
-            if event.pattern_epoch != current_pattern_epoch {
-                continue;
-            }
-            data.events_heap.push(std::cmp::Reverse(TimedEvent {
-                seq: data.event_seq,
-                sample_time: event.sample_time,
-                event,
-            }));
-            data.event_seq += 1;
-        }
-
-        let dispatch_horizon =
-            (current_sample + (RENDER_CHUNK_ALIGNMENT - 1)).min(block_end_sample);
-        while let Some(std::cmp::Reverse(event)) = data.events_heap.peek() {
-            if event.event.pattern_epoch != current_pattern_epoch {
-                let _ = data.events_heap.pop();
-                continue;
-            }
-            if event.sample_time > dispatch_horizon {
-                break;
-            }
-            let sample_time = event.sample_time;
-            let mut batch = Vec::new();
-            while let Some(std::cmp::Reverse(next)) = data.events_heap.peek() {
-                if next.event.pattern_epoch != current_pattern_epoch {
-                    let _ = data.events_heap.pop();
-                    continue;
-                }
-                if next.sample_time != sample_time {
-                    break;
-                }
-                let event = data.events_heap.pop().unwrap().0;
-                if event.sample_time < current_sample {
-                    data.late_scheduled_events += 1;
-                }
-                batch.push(event);
-            }
-            dispatch_scheduled_event_batch(data, batch, sample_time.max(current_sample));
-        }
-
-        let next_sample = data
-            .events_heap
-            .peek()
-            .map(|rev| rev.0.sample_time.min(block_end_sample))
-            .unwrap_or(block_end_sample);
-        let mut chunk_frames = next_sample.saturating_sub(current_sample);
-        chunk_frames -= chunk_frames % RENDER_CHUNK_ALIGNMENT;
-        let chunk_frames = chunk_frames as usize;
-        if chunk_frames == 0 {
-            if block_end_sample.saturating_sub(current_sample) < RENDER_CHUNK_ALIGNMENT {
-                zero_output_frames(output, rendered_frames, data.num_channels);
-                break;
-            }
-            zero_chunk_spins += 1;
-            if zero_chunk_spins >= 32 {
-                let next_event_sample = data.events_heap.peek().map(|rev| rev.0.sample_time);
-                eprintln!(
-                    "audio: zero-chunk livelock guard tripped; rendered_frames={rendered_frames} nframes={nframes} current_sample={current_sample} next_event_sample={next_event_sample:?} heap_len={} late_events={}",
-                    data.events_heap.len(),
-                    data.late_scheduled_events,
-                );
-                zero_output_frames(output, rendered_frames, data.num_channels);
-                break;
-            }
-            continue;
-        }
-        zero_chunk_spins = 0;
-
-        let start = rendered_frames * data.num_channels;
-        let end = (rendered_frames + chunk_frames) * data.num_channels;
-        let probe_render = data.trace_audio && data.trace_render_probe_blocks > 0;
-        if probe_render {
-            eprintln!(
-                "audio-trace: render-start callback={} chunk_frames={chunk_frames} rendered_frames={rendered_frames} tracks={num_tracks} heap_len={} rendered_samples={current_sample}",
-                data.trace_callback_counter,
-                data.events_heap.len(),
-            );
-        }
-        let render_start = Instant::now();
-        render_chunk(data, &mut output[start..end]);
-        let render_elapsed = render_start.elapsed();
-        if probe_render {
-            let (chunk_peak_l, chunk_peak_r) =
-                interleaved_peak(&output[start..end], data.num_channels);
-            eprintln!(
-                "audio-trace: render-done callback={} chunk_frames={chunk_frames} elapsed_us={} peak_l={chunk_peak_l:.6} peak_r={chunk_peak_r:.6}",
-                data.trace_callback_counter,
-                render_elapsed.as_micros(),
-            );
-            data.trace_render_probe_blocks -= 1;
-        }
-        if render_elapsed.as_millis() >= 10 {
-            eprintln!(
-                "audio: slow render_chunk; chunk_frames={chunk_frames} rendered_frames={rendered_frames} elapsed_ms={} heap_len={} current_sample={current_sample}",
-                render_elapsed.as_millis(),
-                data.events_heap.len(),
-            );
-        }
-        rendered_frames += chunk_frames;
+    let probe_render = data.trace_audio && data.trace_render_probe_blocks > 0;
+    if probe_render {
+        eprintln!(
+            "audio-trace: render-start callback={} nframes={nframes} tracks={num_tracks} countdown_len={} rendered_samples={block_start_sample}",
+            data.trace_callback_counter,
+            data.countdown_events.len(),
+        );
+    }
+    let render_start = Instant::now();
+    render_chunk(data, output);
+    let render_elapsed = render_start.elapsed();
+    if probe_render {
+        let (chunk_peak_l, chunk_peak_r) = interleaved_peak(output, data.num_channels);
+        eprintln!(
+            "audio-trace: render-done callback={} nframes={nframes} elapsed_us={} peak_l={chunk_peak_l:.6} peak_r={chunk_peak_r:.6}",
+            data.trace_callback_counter,
+            render_elapsed.as_micros(),
+        );
+        data.trace_render_probe_blocks -= 1;
+    }
+    if render_elapsed.as_millis() >= 10 {
+        eprintln!(
+            "audio: slow render_chunk; nframes={nframes} elapsed_ms={} countdown_len={} block_start_sample={block_start_sample}",
+            render_elapsed.as_millis(),
+            data.countdown_events.len(),
+        );
     }
     data.rendered_samples
         .store(block_end_sample, Ordering::Release);
@@ -3933,13 +4010,13 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 || data.trace_silent_active_callbacks % 128 == 0
             {
                 eprintln!(
-                    "audio-trace: silent while voices active callbacks={} streak={} tracks={num_tracks} custom_active={active_custom_voices} sampler_active={active_sampler_voices} rendered_samples={} topology_epoch={} playing={} heap_len={} late_events={} dropped_events={}",
+                    "audio-trace: silent while voices active callbacks={} streak={} tracks={num_tracks} custom_active={active_custom_voices} sampler_active={active_sampler_voices} rendered_samples={} topology_epoch={} playing={} countdown_len={} late_events={} dropped_events={}",
                     data.trace_callback_counter,
                     data.trace_silent_active_callbacks,
                     data.rendered_samples.load(Ordering::Acquire),
                     topology_epoch,
                     data.state.transport.playing.load(Ordering::Relaxed),
-                    data.events_heap.len(),
+                    data.countdown_events.len(),
                     data.late_scheduled_events,
                     data.dropped_scheduled_events,
                 );
@@ -4036,16 +4113,6 @@ pub fn build_output_stream(
     bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
     bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
 ) -> Result<Stream, String> {
-    let chop_state = (0..MAX_TRACKS)
-        .map(|_| ChopTracker {
-            remaining: 0,
-            counter: 0.0,
-            interval: 0.0,
-            step: 0,
-            chop_gate: 0.0,
-        })
-        .collect();
-
     // Initialize voice pools from state
     let mut voice_pools: Vec<VoicePool> = (0..MAX_TRACKS).map(|_| VoicePool::new()).collect();
     let mut custom_engine_pools: Vec<CustomEnginePool> =
@@ -4061,7 +4128,6 @@ pub fn build_output_stream(
         }
     }
 
-    let gate_off_state = (0..MAX_TRACKS).map(|_| GateOffTracker::new()).collect();
     let scheduled_events = Arc::new(ScheduledEventQueue::new());
     let rendered_samples = Arc::new(AtomicU64::new(0));
     let (audio_keyboard_tx, audio_keyboard_rx) = std::sync::mpsc::channel();
@@ -4101,8 +4167,6 @@ pub fn build_output_stream(
         lg: LiveGraphPtr(lg),
         state,
         num_channels,
-        chop_state,
-        gate_off_state,
         sample_rate: sample_rate as f64,
         last_bpm: 0,
         last_mod_reset_counter: 0,
@@ -4121,6 +4185,10 @@ pub fn build_output_stream(
         free_patch_transport_routes: [FreePatchTransportRouteState::default(); MAX_TRACKS],
         pending_accum_reset: [false; MAX_TRACKS],
         scheduled_events: Arc::clone(&scheduled_events),
+        countdown_events: Vec::with_capacity(SCHEDULED_COUNTDOWN_CAPACITY),
+        block_events: Vec::with_capacity(SCHEDULED_BLOCK_SCRATCH_CAPACITY),
+        block_events_need_sort: false,
+        current_callback_nframes: block_size,
         rendered_samples: Arc::clone(&rendered_samples),
         bus_gate_runtime,
         bus_gate_playheads,
@@ -4129,7 +4197,6 @@ pub fn build_output_stream(
         bus_gate_play_start_sample: 0,
         dropped_scheduled_events: 0,
         late_scheduled_events: 0,
-        events_heap: BinaryHeap::with_capacity(4096),
         event_seq: 0,
         trace_audio,
         trace_callback_counter: 0,
@@ -4220,18 +4287,18 @@ mod tests {
     use super::{
         bus_gate_target_at, free_patch_transport_route_cache_is_fresh,
         free_patch_transport_route_target, instrument_sound_fingerprint,
-        mute_group_winner_for_track, resolve_live_keyboard_transpose, resolved_chord_transpose,
-        sampler_warp_runtime, select_output_channels, select_output_config, swing_delay_samples,
-        track_accepts_scheduled_trigger, CustomEnginePool, FreePatchTransportRouteState,
-        FreePatchTransportRouteTarget, GateOffTracker, OutputDeviceConfig, OutputFormatRange,
-        FALLBACK_SAMPLE_RATE,
+        mute_group_winner_for_block_events, resolve_live_keyboard_transpose,
+        resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
+        select_output_config, swing_delay_samples, track_accepts_scheduled_trigger, BlockEvent,
+        BlockEventKind, CountdownEvent, CountdownEventKind, CustomEnginePool,
+        FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
+        OutputDeviceConfig, OutputFormatRange, FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
     use crate::analysis::{pack_ptr, OnsetTableShared};
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot, EffectSlotState};
     use crate::scheduled_event::{
         ScheduledChordData, ScheduledEvent, ScheduledEventKind, ScheduledInstrumentParams,
-        TimedEvent,
     };
     use crate::sequencer::{
         CustomInstrumentRunMode, InstrumentType, SequencerState, SwingResolution,
@@ -4440,11 +4507,11 @@ mod tests {
         assert_eq!(select_output_config(48_000, 2, ranges), None);
     }
 
-    fn test_timed_trigger(seq: u64, track: usize) -> TimedEvent {
-        TimedEvent {
-            sample_time: 128,
+    fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
+        BlockEvent {
+            frame_offset: 128,
             seq,
-            event: ScheduledEvent {
+            kind: BlockEventKind::Scheduled(ScheduledEvent {
                 pattern_epoch: 1,
                 sample_time: 128,
                 kind: ScheduledEventKind::ResolvedTrigger {
@@ -4472,15 +4539,15 @@ mod tests {
                     instrument_params: ScheduledInstrumentParams::new(),
                     instrument_fingerprint: 0,
                 },
-            },
+            }),
         }
     }
 
     #[test]
     fn mute_group_same_sample_uses_highest_track_as_winner() {
-        let batch = vec![test_timed_trigger(0, 0), test_timed_trigger(1, 2)];
+        let batch = vec![test_block_trigger(0, 0), test_block_trigger(1, 2)];
 
-        let winner = mute_group_winner_for_track(0, 1, &batch, |track| match track {
+        let winner = mute_group_winner_for_block_events(0, 1, &batch, |track| match track {
             0 | 2 => 1,
             _ => 0,
         });
@@ -4491,12 +4558,12 @@ mod tests {
     #[test]
     fn mute_group_winner_ignores_off_and_other_groups() {
         let batch = vec![
-            test_timed_trigger(0, 0),
-            test_timed_trigger(1, 1),
-            test_timed_trigger(2, 2),
+            test_block_trigger(0, 0),
+            test_block_trigger(1, 1),
+            test_block_trigger(2, 2),
         ];
 
-        let winner = mute_group_winner_for_track(0, 1, &batch, |track| match track {
+        let winner = mute_group_winner_for_block_events(0, 1, &batch, |track| match track {
             0 => 1,
             1 => 0,
             2 => 2,
@@ -4817,14 +4884,41 @@ mod tests {
     }
 
     #[test]
-    fn gate_off_tracker_cancel_removes_matching_pending_lids() {
-        let mut tracker = GateOffTracker::new();
-        tracker.schedule(10, 100.0);
-        tracker.schedule(20, 100.0);
-        tracker.cancel(10);
+    fn countdown_gate_off_cancel_removes_matching_pending_lids() {
+        let mut events = vec![
+            CountdownEvent {
+                remaining_samples: 100.0,
+                period_samples: 0.0,
+                repeats: 1,
+                pattern_epoch: 1,
+                seq: 0,
+                kind: CountdownEventKind::GateOff(GateOffEvent {
+                    track_idx: 0,
+                    logical_id: 10,
+                    target: GateOffTarget::Sampler { gatepitch_id: 100 },
+                }),
+            },
+            CountdownEvent {
+                remaining_samples: 100.0,
+                period_samples: 0.0,
+                repeats: 1,
+                pattern_epoch: 1,
+                seq: 1,
+                kind: CountdownEventKind::GateOff(GateOffEvent {
+                    track_idx: 0,
+                    logical_id: 20,
+                    target: GateOffTarget::Sampler { gatepitch_id: 200 },
+                }),
+            },
+        ];
 
-        let expired = tracker.process(200);
-        assert_eq!(expired, vec![20]);
+        super::cancel_gate_off_for_lid(&mut events, 10);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].kind,
+            CountdownEventKind::GateOff(GateOffEvent { logical_id: 20, .. })
+        ));
     }
 
     #[test]

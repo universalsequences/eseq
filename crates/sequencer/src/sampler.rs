@@ -110,8 +110,41 @@ const STATE_RETRIGGER_SR_HELD_L: usize = 101;
 const STATE_RETRIGGER_SR_HELD_R: usize = 102;
 const STATE_LAST_READ_HEAD: usize = 103;
 const STATE_RETRIGGER_FADE_REMAINING: usize = 104;
-pub const SAMPLER_STATE_SIZE: usize = 105;
+const STATE_TIMELINE_COUNT: usize = 105;
+const STATE_TIMELINE_BASE: usize = 106;
+const TIMELINE_EVENT_WIDTH: usize = 3 + GBE_AUX_CAP;
+const TIMELINE_FRAME: usize = 0;
+const TIMELINE_KIND: usize = 1;
+const TIMELINE_AUX_COUNT: usize = 2;
+const TIMELINE_AUX_BASE: usize = 3;
+pub const SAMPLER_TIMELINE_CAPACITY: usize = crate::sequencer::MAX_STEPS;
+pub const SAMPLER_STATE_SIZE: usize =
+    STATE_TIMELINE_BASE + SAMPLER_TIMELINE_CAPACITY * TIMELINE_EVENT_WIDTH;
 pub const SAMPLER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
+
+pub const SAMPLER_EVENT_AUX_ENABLED: usize = 0;
+pub const SAMPLER_EVENT_AUX_VELOCITY: usize = 1;
+pub const SAMPLER_EVENT_AUX_SPEED: usize = 2;
+pub const SAMPLER_EVENT_AUX_GATE_SAMPLES: usize = 3;
+pub const SAMPLER_EVENT_AUX_TRANSPOSE: usize = 4;
+pub const SAMPLER_EVENT_AUX_ATTACK_SAMPLES: usize = 5;
+pub const SAMPLER_EVENT_AUX_RELEASE_SAMPLES: usize = 6;
+pub const SAMPLER_EVENT_AUX_GATE_MODE: usize = 7;
+pub const SAMPLER_EVENT_AUX_START_POINT: usize = 8;
+pub const SAMPLER_EVENT_AUX_END_POINT: usize = 9;
+pub const SAMPLER_EVENT_AUX_REVERSE: usize = 10;
+pub const SAMPLER_EVENT_AUX_LOOP_MODE: usize = 11;
+pub const SAMPLER_EVENT_AUX_LOOP_XFADE_SAMPLES: usize = 12;
+pub const SAMPLER_EVENT_AUX_SR_HZ: usize = 13;
+pub const SAMPLER_EVENT_AUX_WARP_ENABLED: usize = 14;
+pub const SAMPLER_EVENT_AUX_WARP_MODE: usize = 15;
+pub const SAMPLER_EVENT_AUX_WARP_RATIO: usize = 16;
+pub const SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM: usize = 17;
+pub const SAMPLER_EVENT_AUX_WARP_PROJECT_BPM: usize = 18;
+pub const SAMPLER_EVENT_AUX_WARP_PTR_LO: usize = 19;
+pub const SAMPLER_EVENT_AUX_WARP_PTR_HI: usize = 20;
+pub const SAMPLER_EVENT_AUX_SCRUB_OFFSET: usize = 21;
+pub const SAMPLER_EVENT_AUX_NOTE_ON_COUNT: usize = 22;
 
 // Envelope phase constants
 const ENV_IDLE: f32 = 0.0;
@@ -670,6 +703,7 @@ unsafe extern "C" fn sampler_init(
     *s.add(STATE_SCRUB_OFFSET) = 0.0;
     *s.add(STATE_SCRUB_SMOOTH) = 0.0;
     *s.add(STATE_SCRUB_SMOOTH_TIME_MS) = SCRUB_SMOOTH_TIME_MS_DEFAULT;
+    *s.add(STATE_TIMELINE_COUNT) = 0.0;
     for (source_idx, depth_idx) in ALL_MOD_LANES {
         *s.add(source_idx) = 0.0;
         *s.add(depth_idx) = 0.0;
@@ -683,7 +717,7 @@ unsafe extern "C" fn sampler_init(
 ///
 /// gate_samples=0 is treated as an explicit note-off regardless of gate_mode,
 /// so keyboard release always triggers the release phase.
-unsafe extern "C" fn sampler_process(
+unsafe fn sampler_process_segment(
     inp: *const *mut f32,
     out: *const *mut f32,
     nframes: c_int,
@@ -1327,12 +1361,165 @@ unsafe extern "C" fn sampler_process(
     *s.add(STATE_LAST_READ_HEAD) = last_read_head;
 }
 
+unsafe extern "C" fn sampler_begin_event_slice(
+    state: *mut c_void,
+    _block_serial: u64,
+    _slice_start: c_int,
+    _slice_nframes: c_int,
+) {
+    *(state as *mut f32).add(STATE_TIMELINE_COUNT) = 0.0;
+}
+
+unsafe extern "C" fn sampler_schedule_event(
+    state: *mut c_void,
+    event: *const GraphBlockEvent,
+) -> bool {
+    if event.is_null() {
+        return false;
+    }
+    let event = &*event;
+    if event.kind != GBE_NOTE_ON && event.kind != GBE_GATE_OFF {
+        return false;
+    }
+    if event.kind == GBE_NOTE_ON && event.aux_count < SAMPLER_EVENT_AUX_NOTE_ON_COUNT as u32 {
+        return false;
+    }
+    let s = state as *mut f32;
+    let count = (*s.add(STATE_TIMELINE_COUNT)).max(0.0) as usize;
+    if count >= SAMPLER_TIMELINE_CAPACITY {
+        return false;
+    }
+    let base = STATE_TIMELINE_BASE + count * TIMELINE_EVENT_WIDTH;
+    *s.add(base + TIMELINE_FRAME) = event.frame_offset as f32;
+    *s.add(base + TIMELINE_KIND) = event.kind as f32;
+    let aux_count = (event.aux_count as usize).min(GBE_AUX_CAP);
+    *s.add(base + TIMELINE_AUX_COUNT) = aux_count as f32;
+    for i in 0..aux_count {
+        *s.add(base + TIMELINE_AUX_BASE + i) = event.aux[i];
+    }
+    *s.add(STATE_TIMELINE_COUNT) = (count + 1) as f32;
+    true
+}
+
+unsafe fn sampler_apply_timeline_event(state: *mut f32, base: usize) -> bool {
+    let kind = *state.add(base + TIMELINE_KIND) as u32;
+    if kind == GBE_GATE_OFF {
+        *state.add(STATE_GATE_SAMPLES) = 0.0;
+        return true;
+    }
+    if kind != GBE_NOTE_ON {
+        return false;
+    }
+
+    let aux_count = (*state.add(base + TIMELINE_AUX_COUNT)).max(0.0) as usize;
+    if aux_count < SAMPLER_EVENT_AUX_NOTE_ON_COUNT {
+        return false;
+    }
+    let aux = |idx: usize| *state.add(base + TIMELINE_AUX_BASE + idx);
+    *state.add(STATE_ENABLED) = aux(SAMPLER_EVENT_AUX_ENABLED);
+    *state.add(STATE_VELOCITY) = aux(SAMPLER_EVENT_AUX_VELOCITY);
+    *state.add(STATE_SPEED) = aux(SAMPLER_EVENT_AUX_SPEED);
+    *state.add(STATE_GATE_SAMPLES) = aux(SAMPLER_EVENT_AUX_GATE_SAMPLES);
+    *state.add(STATE_TRANSPOSE) = aux(SAMPLER_EVENT_AUX_TRANSPOSE);
+    *state.add(STATE_ATTACK_SAMPLES) = aux(SAMPLER_EVENT_AUX_ATTACK_SAMPLES);
+    *state.add(STATE_RELEASE_SAMPLES) = aux(SAMPLER_EVENT_AUX_RELEASE_SAMPLES);
+    *state.add(STATE_GATE_MODE) = aux(SAMPLER_EVENT_AUX_GATE_MODE);
+    *state.add(STATE_START_POINT) = aux(SAMPLER_EVENT_AUX_START_POINT);
+    *state.add(STATE_END_POINT) = aux(SAMPLER_EVENT_AUX_END_POINT);
+    *state.add(STATE_REVERSE) = aux(SAMPLER_EVENT_AUX_REVERSE);
+    *state.add(STATE_LOOP_MODE) = aux(SAMPLER_EVENT_AUX_LOOP_MODE);
+    *state.add(STATE_LOOP_XFADE_SAMPLES) = aux(SAMPLER_EVENT_AUX_LOOP_XFADE_SAMPLES);
+    *state.add(STATE_SR_HZ) = aux(SAMPLER_EVENT_AUX_SR_HZ);
+    *state.add(STATE_WARP_ENABLED) = aux(SAMPLER_EVENT_AUX_WARP_ENABLED);
+    *state.add(STATE_WARP_MODE) = aux(SAMPLER_EVENT_AUX_WARP_MODE);
+    *state.add(STATE_WARP_RATIO) = aux(SAMPLER_EVENT_AUX_WARP_RATIO);
+    *state.add(STATE_WARP_SAMPLE_BPM) = aux(SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM);
+    *state.add(STATE_WARP_PROJECT_BPM) = aux(SAMPLER_EVENT_AUX_WARP_PROJECT_BPM);
+    *state.add(STATE_WARP_ONSET_TABLE_PTR_LO) = aux(SAMPLER_EVENT_AUX_WARP_PTR_LO);
+    *state.add(STATE_WARP_ONSET_TABLE_PTR_HI) = aux(SAMPLER_EVENT_AUX_WARP_PTR_HI);
+    *state.add(STATE_SCRUB_OFFSET) = aux(SAMPLER_EVENT_AUX_SCRUB_OFFSET);
+    *state.add(STATE_PLAYHEAD) = 0.0;
+    *state.add(STATE_PLAYING) = 1.0;
+    true
+}
+
+unsafe fn sampler_process_segment_at(
+    inp: *const *mut f32,
+    out: *const *mut f32,
+    offset: usize,
+    nframes: usize,
+    state: *mut c_void,
+    buffers: *mut c_void,
+) {
+    if nframes == 0 {
+        return;
+    }
+
+    let mut shifted_inputs = [std::ptr::null_mut(); MOD_INPUT_COUNT];
+    let shifted_input_ptr = if inp.is_null() {
+        std::ptr::null()
+    } else {
+        for (i, slot) in shifted_inputs.iter_mut().enumerate() {
+            let ptr = *inp.add(i);
+            *slot = if ptr.is_null() { ptr } else { ptr.add(offset) };
+        }
+        shifted_inputs.as_ptr()
+    };
+
+    let shifted_outputs = [(*out.add(0)).add(offset), (*out.add(1)).add(offset)];
+    sampler_process_segment(
+        shifted_input_ptr,
+        shifted_outputs.as_ptr(),
+        nframes as c_int,
+        state,
+        buffers,
+    );
+}
+
+unsafe extern "C" fn sampler_process(
+    inp: *const *mut f32,
+    out: *const *mut f32,
+    nframes: c_int,
+    state: *mut c_void,
+    buffers: *mut c_void,
+) {
+    if nframes <= 0 {
+        return;
+    }
+    let nf = nframes as usize;
+    let s = state as *mut f32;
+    let event_count = (*s.add(STATE_TIMELINE_COUNT))
+        .max(0.0)
+        .min(SAMPLER_TIMELINE_CAPACITY as f32) as usize;
+    if event_count == 0 {
+        sampler_process_segment(inp, out, nframes, state, buffers);
+        return;
+    }
+
+    let mut rendered = 0usize;
+    for event_index in 0..event_count {
+        let base = STATE_TIMELINE_BASE + event_index * TIMELINE_EVENT_WIDTH;
+        let event_frame = (*s.add(base + TIMELINE_FRAME)).max(0.0) as usize;
+        let event_frame = event_frame.min(nf);
+        if event_frame > rendered {
+            sampler_process_segment_at(inp, out, rendered, event_frame - rendered, state, buffers);
+            rendered = event_frame;
+        }
+        let _ = sampler_apply_timeline_event(s, base);
+    }
+    if rendered < nf {
+        sampler_process_segment_at(inp, out, rendered, nf - rendered, state, buffers);
+    }
+}
+
 pub fn sampler_vtable() -> NodeVTable {
     NodeVTable {
         process: Some(sampler_process),
         init: Some(sampler_init),
         reset: None,
         migrate: None,
+        begin_event_slice: Some(sampler_begin_event_slice),
+        schedule_event: Some(sampler_schedule_event),
     }
 }
 
@@ -1503,14 +1690,59 @@ pub fn create_sampler_track(lg: *mut LiveGraph, wav_path: &Path) -> Result<Sampl
 mod tests {
     use super::{
         accumulated_scrub_read_head, advance_retrigger_playhead, modulation_lane_sum,
-        retrigger_fade_samples, sampler_init, sampler_playback_step, sampler_process,
-        source_frames_to_host_frames, BufferDesc, SAMPLER_MOD_LANES_PER_PARAM, SAMPLER_STATE_SIZE,
+        retrigger_fade_samples, sampler_begin_event_slice, sampler_init, sampler_playback_step,
+        sampler_process, sampler_schedule_event, source_frames_to_host_frames, BufferDesc,
+        SAMPLER_EVENT_AUX_ATTACK_SAMPLES, SAMPLER_EVENT_AUX_ENABLED, SAMPLER_EVENT_AUX_END_POINT,
+        SAMPLER_EVENT_AUX_GATE_MODE, SAMPLER_EVENT_AUX_GATE_SAMPLES, SAMPLER_EVENT_AUX_LOOP_MODE,
+        SAMPLER_EVENT_AUX_LOOP_XFADE_SAMPLES, SAMPLER_EVENT_AUX_NOTE_ON_COUNT,
+        SAMPLER_EVENT_AUX_RELEASE_SAMPLES, SAMPLER_EVENT_AUX_REVERSE,
+        SAMPLER_EVENT_AUX_SCRUB_OFFSET, SAMPLER_EVENT_AUX_SPEED, SAMPLER_EVENT_AUX_SR_HZ,
+        SAMPLER_EVENT_AUX_START_POINT, SAMPLER_EVENT_AUX_TRANSPOSE, SAMPLER_EVENT_AUX_VELOCITY,
+        SAMPLER_EVENT_AUX_WARP_ENABLED, SAMPLER_EVENT_AUX_WARP_MODE,
+        SAMPLER_EVENT_AUX_WARP_PROJECT_BPM, SAMPLER_EVENT_AUX_WARP_PTR_HI,
+        SAMPLER_EVENT_AUX_WARP_PTR_LO, SAMPLER_EVENT_AUX_WARP_RATIO,
+        SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM, SAMPLER_MOD_LANES_PER_PARAM, SAMPLER_STATE_SIZE,
         SCRUB_SMOOTH_TIME_MS_DEFAULT, STATE_ATTACK_SAMPLES, STATE_BUFFER_ID, STATE_END_POINT,
         STATE_GAIN, STATE_GATE_SAMPLES, STATE_MOD_SPEED_DEPTH, STATE_MOD_SPEED_LANE2_DEPTH,
         STATE_MOD_SPEED_LANE2_SOURCE, STATE_MOD_SPEED_SOURCE, STATE_PLAYHEAD, STATE_PLAYING,
         STATE_SAMPLE_RATE, STATE_SOURCE_SAMPLE_RATE, STATE_VELOCITY,
     };
+    use crate::audiograph::{GraphBlockEvent, GBE_AUX_CAP, GBE_NOTE_ON};
     use std::ffi::c_void;
+
+    fn sampler_note_on_event(frame_offset: u32) -> GraphBlockEvent {
+        let mut event = GraphBlockEvent {
+            logical_id: 1,
+            frame_offset,
+            sequence: 0,
+            kind: GBE_NOTE_ON,
+            aux_count: SAMPLER_EVENT_AUX_NOTE_ON_COUNT as u32,
+            aux: [0.0; GBE_AUX_CAP],
+        };
+        event.aux[SAMPLER_EVENT_AUX_ENABLED] = 1.0;
+        event.aux[SAMPLER_EVENT_AUX_VELOCITY] = 1.0;
+        event.aux[SAMPLER_EVENT_AUX_SPEED] = 1.0;
+        event.aux[SAMPLER_EVENT_AUX_GATE_SAMPLES] = 64.0;
+        event.aux[SAMPLER_EVENT_AUX_TRANSPOSE] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_ATTACK_SAMPLES] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_RELEASE_SAMPLES] = 64.0;
+        event.aux[SAMPLER_EVENT_AUX_GATE_MODE] = 1.0;
+        event.aux[SAMPLER_EVENT_AUX_START_POINT] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_END_POINT] = 1.0;
+        event.aux[SAMPLER_EVENT_AUX_REVERSE] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_LOOP_MODE] = 1.0;
+        event.aux[SAMPLER_EVENT_AUX_LOOP_XFADE_SAMPLES] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_SR_HZ] = 44_100.0;
+        event.aux[SAMPLER_EVENT_AUX_WARP_ENABLED] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_WARP_MODE] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_WARP_RATIO] = 1.0;
+        event.aux[SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM] = 120.0;
+        event.aux[SAMPLER_EVENT_AUX_WARP_PROJECT_BPM] = 120.0;
+        event.aux[SAMPLER_EVENT_AUX_WARP_PTR_LO] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_WARP_PTR_HI] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_SCRUB_OFFSET] = 0.0;
+        event
+    }
 
     #[test]
     fn playback_step_preserves_44100_wav_pitch_at_48000_host_rate() {
@@ -1639,6 +1871,53 @@ mod tests {
             "right channel was silent during retrigger tail: {right:?}"
         );
         assert_ne!(left[0], right[0]);
+    }
+
+    #[test]
+    fn sampler_scheduled_note_on_starts_at_local_frame() {
+        let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
+        let initial = [0.0_f32, 44_100.0];
+        unsafe {
+            sampler_init(
+                state.as_mut_ptr() as *mut c_void,
+                44_100,
+                64,
+                initial.as_ptr() as *const c_void,
+            );
+        }
+
+        let mut sample = [
+            1.0_f32, 1.0, 0.8, 0.8, 0.6, 0.6, 0.4, 0.4, 0.2, 0.2, 0.0, 0.0,
+        ];
+        let mut buffers = [BufferDesc {
+            buffer: sample.as_mut_ptr(),
+            size: 6,
+            channel_count: 2,
+        }];
+
+        unsafe {
+            sampler_begin_event_slice(state.as_mut_ptr().cast(), 1, 0, 8);
+            let event = sampler_note_on_event(3);
+            assert!(sampler_schedule_event(state.as_mut_ptr().cast(), &event));
+        }
+
+        let mut left = [0.0f32; 8];
+        let mut right = [0.0f32; 8];
+        let outputs = [left.as_mut_ptr(), right.as_mut_ptr()];
+        unsafe {
+            sampler_process(
+                std::ptr::null(),
+                outputs.as_ptr(),
+                8,
+                state.as_mut_ptr().cast(),
+                buffers.as_mut_ptr().cast(),
+            );
+        }
+
+        assert_eq!(&left[..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(&right[..3], &[0.0, 0.0, 0.0]);
+        assert!((left[3] - 0.8).abs() < 0.0001, "left={left:?}");
+        assert!((right[3] - 0.8).abs() < 0.0001, "right={right:?}");
     }
 
     #[test]

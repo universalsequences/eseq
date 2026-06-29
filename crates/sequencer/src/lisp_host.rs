@@ -286,6 +286,7 @@ fn dgenlisp_vtable() -> NodeVTable {
         init: Some(dgenlisp_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 
@@ -2135,6 +2136,7 @@ pub fn dgenlisp_instrument_vtable() -> NodeVTable {
         init: Some(dgenlisp_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

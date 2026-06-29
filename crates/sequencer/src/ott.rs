@@ -252,6 +252,7 @@ pub fn ott_vtable() -> NodeVTable {
         init: Some(ott_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 

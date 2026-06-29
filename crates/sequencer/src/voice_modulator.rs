@@ -1311,6 +1311,7 @@ pub fn voice_modulator_vtable() -> NodeVTable {
         init: Some(voice_modulator_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 
@@ -1320,6 +1321,7 @@ pub fn effect_modulator_vtable() -> NodeVTable {
         init: Some(effect_modulator_init),
         reset: None,
         migrate: None,
+        ..NodeVTable::default()
     }
 }
 
