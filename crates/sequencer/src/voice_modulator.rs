@@ -932,6 +932,38 @@ unsafe fn clear_output_slot(out: *const *mut f32, slot: usize, nf: usize) {
     }
 }
 
+unsafe fn clear_output_frame(out: *const *mut f32, frame: usize) {
+    if out.is_null() {
+        return;
+    }
+    for slot in 0..NUM_OUTPUTS {
+        let out_slot = *out.add(slot);
+        if !out_slot.is_null() {
+            *out_slot.add(frame) = 0.0;
+        }
+    }
+}
+
+unsafe fn gate_timeline_has_activity(
+    gate_in: *const f32,
+    trigger_in: *const f32,
+    nf: usize,
+    prev_gate: f32,
+) -> bool {
+    if prev_gate > 0.5 {
+        return true;
+    }
+    if gate_in.is_null() || trigger_in.is_null() {
+        return false;
+    }
+    for i in 0..nf {
+        if (*gate_in.add(i)).clamp(0.0, 1.0) > 0.5 || (*trigger_in.add(i)).max(0.0) > 0.5 {
+            return true;
+        }
+    }
+    false
+}
+
 unsafe fn slot_source(s: *const f32, slot: usize) -> usize {
     let source = (*s.add(slot_source_param_idx(slot))).round() as usize;
     if source <= SOURCE_EXT4 {
@@ -1218,13 +1250,6 @@ unsafe extern "C" fn voice_modulator_process(
         }
     }
     let sampler_identity = sampler_identity(s);
-    if let Some((track_idx, voice_idx)) = sampler_identity {
-        if !sampler_voice_is_active(track_idx, voice_idx) {
-            record_disabled_sampler_skip(track_idx, nf);
-            clear_outputs(out, nf);
-            return;
-        }
-    }
 
     let gate_in = *inp.add(0);
     let velocity_in = *inp.add(2);
@@ -1232,6 +1257,15 @@ unsafe extern "C" fn voice_modulator_process(
     let ext_inputs = [*inp.add(4), *inp.add(5), *inp.add(6), *inp.add(7)];
 
     let mut prev_gate = *s.add(IDX_PREV_GATE);
+    if let Some((track_idx, voice_idx)) = sampler_identity {
+        let sampler_active = sampler_voice_is_active(track_idx, voice_idx);
+        if !sampler_active && !gate_timeline_has_activity(gate_in, trigger_in, nf, prev_gate) {
+            record_disabled_sampler_skip(track_idx, nf);
+            clear_outputs(out, nf);
+            return;
+        }
+    }
+
     let mut last_reset_counter = *s.add(IDX_LAST_RESET_COUNTER);
     let sample_rate = (*s.add(IDX_SAMPLE_RATE)).max(1.0);
     let bpm = (*s.add(PARAM_BPM)).clamp(20.0, 400.0);
@@ -1273,10 +1307,19 @@ unsafe extern "C" fn voice_modulator_process(
         }
     }
 
+    let mut sampler_voice_started = sampler_identity.is_none() || prev_gate > 0.5;
     for i in 0..nf {
         let gate = (*gate_in.add(i)).clamp(0.0, 1.0);
         let velocity = (*velocity_in.add(i)).clamp(0.0, 1.0);
         let trigger = (*trigger_in.add(i)).max(0.0);
+        if !sampler_voice_started && gate <= 0.5 && trigger <= 0.5 {
+            clear_output_frame(out, i);
+            prev_gate = gate;
+            continue;
+        }
+        if sampler_identity.is_some() && (gate > 0.5 || trigger > 0.5) {
+            sampler_voice_started = true;
+        }
         let note_on = (gate > 0.5 && prev_gate <= 0.5) || trigger > 0.5;
 
         for (slot, source) in slot_sources.iter().copied().enumerate() {
@@ -1375,12 +1418,23 @@ mod tests {
         frames: usize,
         ext: [[f32; 64]; EXT_INPUT_COUNT],
     ) -> [[f32; 64]; NUM_OUTPUTS] {
-        assert!(frames <= 64);
-
         let gate = [1.0f32; 64];
-        let pitch = [440.0f32; 64];
         let velocity = [1.0f32; 64];
         let trigger = [0.0f32; 64];
+        render_voice_modulator_with_gate(state, frames, gate, velocity, trigger, ext)
+    }
+
+    fn render_voice_modulator_with_gate(
+        state: &mut [f32; STATE_SIZE],
+        frames: usize,
+        gate: [f32; 64],
+        velocity: [f32; 64],
+        trigger: [f32; 64],
+        ext: [[f32; 64]; EXT_INPUT_COUNT],
+    ) -> [[f32; 64]; NUM_OUTPUTS] {
+        assert!(frames <= 64);
+
+        let pitch = [440.0f32; 64];
         let inputs = [
             gate.as_ptr() as *mut f32,
             pitch.as_ptr() as *mut f32,
@@ -1646,8 +1700,18 @@ mod tests {
         let mut state = init_sampler_voice_state(track_idx, 2);
         let before_lfo_phase = state[slot_state_idx(0, IDX_LFO_PHASE)];
         let before_rand_phase = state[slot_state_idx(2, IDX_RAND_PHASE)];
+        let gate = [0.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let trigger = [0.0f32; 64];
 
-        let outputs = render_voice_modulator(&mut state, 64, [[0.0; 64]; EXT_INPUT_COUNT]);
+        let outputs = render_voice_modulator_with_gate(
+            &mut state,
+            64,
+            gate,
+            velocity,
+            trigger,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
 
         assert!(outputs
             .iter()
@@ -1660,5 +1724,97 @@ mod tests {
 
         assert!(outputs[0].iter().any(|value| *value > 0.0));
         set_sampler_active_mask(track_idx, 0);
+    }
+
+    #[test]
+    fn active_sampler_voice_starts_modulating_at_in_block_trigger_frame() {
+        let track_idx = 61;
+        set_sampler_active_mask(track_idx, 1u64 << 1);
+        let mut state = init_sampler_voice_state(track_idx, 1);
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        for slot in 1..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+        }
+        let mut gate = [0.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let mut trigger = [0.0f32; 64];
+        for sample in gate.iter_mut().skip(3) {
+            *sample = 1.0;
+        }
+        trigger[3] = 1.0;
+
+        let outputs = render_voice_modulator_with_gate(
+            &mut state,
+            8,
+            gate,
+            velocity,
+            trigger,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
+
+        assert_eq!(&outputs[0][..3], &[0.0, 0.0, 0.0]);
+        assert!(outputs[0][3] > 0.0);
+        set_sampler_active_mask(track_idx, 0);
+    }
+
+    #[test]
+    fn inactive_sampler_voice_with_in_block_gate_activity_does_not_skip_whole_block() {
+        let track_idx = 60;
+        set_sampler_active_mask(track_idx, 0);
+        let mut state = init_sampler_voice_state(track_idx, 0);
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        for slot in 1..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+        }
+        let mut gate = [0.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let mut trigger = [0.0f32; 64];
+        gate[2] = 1.0;
+        gate[3] = 1.0;
+        trigger[2] = 1.0;
+
+        let outputs = render_voice_modulator_with_gate(
+            &mut state,
+            6,
+            gate,
+            velocity,
+            trigger,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
+
+        assert_eq!(&outputs[0][..2], &[0.0, 0.0]);
+        assert!(outputs[0][2] > 0.0);
+        assert!(state[slot_state_idx(0, IDX_LFO_PHASE)] > 0.0);
+    }
+
+    #[test]
+    fn inactive_sampler_voice_with_previous_gate_renders_until_in_block_release() {
+        let track_idx = 59;
+        set_sampler_active_mask(track_idx, 0);
+        let mut state = init_sampler_voice_state(track_idx, 0);
+        state[slot_source_param_idx(0)] = SOURCE_LFO as f32;
+        for slot in 1..SLOT_COUNT {
+            state[slot_source_param_idx(slot)] = SOURCE_OFF as f32;
+        }
+        state[IDX_PREV_GATE] = 1.0;
+        let mut gate = [0.0f32; 64];
+        let velocity = [1.0f32; 64];
+        let trigger = [0.0f32; 64];
+        gate[0] = 1.0;
+        gate[1] = 1.0;
+        gate[2] = 1.0;
+
+        let outputs = render_voice_modulator_with_gate(
+            &mut state,
+            6,
+            gate,
+            velocity,
+            trigger,
+            [[0.0; 64]; EXT_INPUT_COUNT],
+        );
+
+        assert!(outputs[0][0] > 0.0);
+        assert!(outputs[0][2] > 0.0);
+        assert_eq!(state[IDX_PREV_GATE], 0.0);
     }
 }

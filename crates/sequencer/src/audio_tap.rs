@@ -437,12 +437,10 @@ mod tests {
         let second = processor.update_from_tap_state(&state).unwrap();
         assert_eq!(second.write_head, 2);
         assert!(second.revision > first.revision);
-        assert!(
-            second
-                .smoothed
-                .iter()
-                .zip(first.smoothed.iter())
-                .any(|(a, b)| a < b)
-        );
+        assert!(second
+            .smoothed
+            .iter()
+            .zip(first.smoothed.iter())
+            .any(|(a, b)| a < b));
     }
 }

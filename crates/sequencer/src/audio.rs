@@ -261,34 +261,42 @@ fn swing_delay_samples(
     ((swing_pct as f64 / 100.0) - 0.5) * 2.0 * resolution_samples
 }
 
-fn countdown_event_track(kind: &CountdownEventKind) -> Option<usize> {
-    match kind {
-        CountdownEventKind::Scheduled(event) => scheduled_trigger_track(event),
-        CountdownEventKind::GateOff(event) => Some(event.track_idx),
-        CountdownEventKind::Chop(event) => Some(event.track_idx),
-    }
-}
-
-fn cancel_gate_off_for_lid(countdown_events: &mut Vec<CountdownEvent>, lid: u64) {
+fn cancel_gate_off_for_lid(
+    countdown_events: &mut Vec<CountdownEvent>,
+    block_events: &mut Vec<BlockEvent>,
+    lid: u64,
+) {
     countdown_events.retain(|event| {
         !matches!(
             event.kind,
             CountdownEventKind::GateOff(GateOffEvent { logical_id, .. }) if logical_id == lid
         )
     });
+    block_events.retain(|event| {
+        !matches!(
+            event.kind,
+            BlockEventKind::GateOff(GateOffEvent { logical_id, .. }) if logical_id == lid
+        )
+    });
 }
 
-fn cancel_chops_for_track(countdown_events: &mut Vec<CountdownEvent>, track_idx: usize) {
+fn cancel_chops_for_track(
+    countdown_events: &mut Vec<CountdownEvent>,
+    block_events: &mut Vec<BlockEvent>,
+    track_idx: usize,
+) {
     countdown_events.retain(|event| {
         !matches!(
             event.kind,
             CountdownEventKind::Chop(ChopEvent { track_idx: event_track, .. }) if event_track == track_idx
         )
     });
-}
-
-fn cancel_track_countdown_events(countdown_events: &mut Vec<CountdownEvent>, track_idx: usize) {
-    countdown_events.retain(|event| countdown_event_track(&event.kind) != Some(track_idx));
+    block_events.retain(|event| {
+        !matches!(
+            event.kind,
+            BlockEventKind::Chop(ChopEvent { track_idx: event_track, .. }) if event_track == track_idx
+        )
+    });
 }
 
 #[derive(Clone, Copy, Default)]
@@ -991,7 +999,11 @@ fn release_track_active_voices(
     if track_idx >= MAX_TRACKS || track_idx >= data.state.active_track_count() {
         return;
     }
-    cancel_track_countdown_events(&mut data.countdown_events, track_idx);
+    cancel_chops_for_track(
+        &mut data.countdown_events,
+        &mut data.block_events,
+        track_idx,
+    );
     data.active_keyboard_notes[track_idx] = [None; MAX_VOICES];
 
     let instrument_type = InstrumentType::from_runtime_flag(
@@ -1023,7 +1035,7 @@ fn release_track_active_voices(
                 data.custom_engine_pools[engine_id]
                     .release_voice_by_logical_id(lid, release_sample);
             }
-            cancel_gate_off_for_lid(&mut data.countdown_events, lid);
+            cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
             let seq = next_block_event_sequence(data);
             unsafe {
                 send_custom_note_off(data.lg.0, lid, frame_offset, seq);
@@ -1040,7 +1052,7 @@ fn release_track_active_voices(
         .collect();
     for (lid, gatepitch_id) in active {
         data.voice_pools[track_idx].release_voice_by_logical_id(lid);
-        cancel_gate_off_for_lid(&mut data.countdown_events, lid);
+        cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
         let gatepitch_seq = next_block_event_sequence(data);
         let sampler_seq = next_block_event_sequence(data);
         unsafe {
@@ -1264,7 +1276,11 @@ fn schedule_gate_off_event(
     delay_samples: f64,
     target: GateOffTarget,
 ) {
-    cancel_gate_off_for_lid(&mut data.countdown_events, logical_id);
+    cancel_gate_off_for_lid(
+        &mut data.countdown_events,
+        &mut data.block_events,
+        logical_id,
+    );
     let event_offset = source_frame_offset as f64 + delay_samples.max(0.0);
     schedule_countdown_or_block_event(
         data,
@@ -1290,7 +1306,11 @@ fn schedule_chop_events(
     step: usize,
     chop_gate: f32,
 ) {
-    cancel_chops_for_track(&mut data.countdown_events, track_idx);
+    cancel_chops_for_track(
+        &mut data.countdown_events,
+        &mut data.block_events,
+        track_idx,
+    );
     if repeats == 0 {
         return;
     }
@@ -2893,7 +2913,11 @@ fn fire_resolved(
                 chop_gate,
             );
         } else {
-            cancel_chops_for_track(&mut data.countdown_events, track_idx);
+            cancel_chops_for_track(
+                &mut data.countdown_events,
+                &mut data.block_events,
+                track_idx,
+            );
         }
         data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
         return;
@@ -2963,7 +2987,7 @@ fn fire_resolved(
                     data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
                 }
                 let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
-                cancel_gate_off_for_lid(&mut data.countdown_events, lid);
+                cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
                 if allocation.stole_active_voice || !track_polyphonic || free_patch {
                     let off_seq = next_event_sequence_from(&mut data.event_seq);
                     unsafe {
@@ -3139,7 +3163,7 @@ fn fire_resolved(
                 data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
             }
             let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
-            cancel_gate_off_for_lid(&mut data.countdown_events, lid);
+            cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
             if allocation.stole_active_voice || !track_polyphonic || free_patch {
                 let off_seq = next_event_sequence_from(&mut data.event_seq);
                 unsafe {
@@ -3305,7 +3329,11 @@ fn fire_resolved(
             chop_gate,
         );
     } else {
-        cancel_chops_for_track(&mut data.countdown_events, track_idx);
+        cancel_chops_for_track(
+            &mut data.countdown_events,
+            &mut data.block_events,
+            track_idx,
+        );
     }
 }
 
@@ -3684,7 +3712,11 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
                 }
                 let pitch_hz = custom_pitch_hz(resolved_transpose, base_note_offset);
-                cancel_gate_off_for_lid(&mut data.countdown_events, voice_lid);
+                cancel_gate_off_for_lid(
+                    &mut data.countdown_events,
+                    &mut data.block_events,
+                    voice_lid,
+                );
                 unsafe {
                     route_custom_voice_to_track(
                         data.lg.0,
@@ -4290,7 +4322,7 @@ mod tests {
         mute_group_winner_for_block_events, resolve_live_keyboard_transpose,
         resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
         select_output_config, swing_delay_samples, track_accepts_scheduled_trigger, BlockEvent,
-        BlockEventKind, CountdownEvent, CountdownEventKind, CustomEnginePool,
+        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
         FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
         OutputDeviceConfig, OutputFormatRange, FALLBACK_SAMPLE_RATE,
     };
@@ -4299,6 +4331,7 @@ mod tests {
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot, EffectSlotState};
     use crate::scheduled_event::{
         ScheduledChordData, ScheduledEvent, ScheduledEventKind, ScheduledInstrumentParams,
+        ScheduledSamplerParams,
     };
     use crate::sequencer::{
         CustomInstrumentRunMode, InstrumentType, SequencerState, SwingResolution,
@@ -4543,9 +4576,59 @@ mod tests {
         }
     }
 
+    fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
+        BlockEvent {
+            frame_offset: 128,
+            seq,
+            kind: BlockEventKind::Scheduled(ScheduledEvent {
+                pattern_epoch: 1,
+                sample_time: 128,
+                kind: ScheduledEventKind::NetworkTrigger {
+                    track,
+                    source_neuron: 0,
+                    seed: None,
+                    samples_per_step: 1024.0,
+                    resolved: ResolvedStep {
+                        duration: 1.0,
+                        velocity: 1.0,
+                        speed: 1.0,
+                        aux_a: 0.0,
+                        aux_b: 0.0,
+                        transpose: 0.0,
+                        pan: 0.0,
+                        chop: 1.0,
+                    },
+                    chord: ScheduledChordData {
+                        count: 0,
+                        notes: [0.0; crate::voice::MAX_VOICES],
+                        durations: [0.0; crate::voice::MAX_VOICES],
+                        delays: [0.0; crate::voice::MAX_VOICES],
+                        step_transpose: 0.0,
+                    },
+                    effect_params: Vec::new(),
+                    instrument_params: ScheduledInstrumentParams::new(),
+                    sampler_params: ScheduledSamplerParams::default(),
+                    instrument_fingerprint: 0,
+                },
+            }),
+        }
+    }
+
     #[test]
     fn mute_group_same_sample_uses_highest_track_as_winner() {
         let batch = vec![test_block_trigger(0, 0), test_block_trigger(1, 2)];
+
+        let winner = mute_group_winner_for_block_events(0, 1, &batch, |track| match track {
+            0 | 2 => 1,
+            _ => 0,
+        });
+
+        assert_eq!(winner, 2);
+    }
+
+    #[test]
+    fn mute_group_same_sample_considers_neural_and_step_triggers_together() {
+        let batch = vec![test_block_network_trigger(0, 0), test_block_trigger(1, 2)];
 
         let winner = mute_group_winner_for_block_events(0, 1, &batch, |track| match track {
             0 | 2 => 1,
@@ -4911,14 +4994,91 @@ mod tests {
                 }),
             },
         ];
+        let mut block_events = vec![
+            BlockEvent {
+                frame_offset: 12,
+                seq: 2,
+                kind: BlockEventKind::GateOff(GateOffEvent {
+                    track_idx: 0,
+                    logical_id: 10,
+                    target: GateOffTarget::Sampler { gatepitch_id: 100 },
+                }),
+            },
+            BlockEvent {
+                frame_offset: 16,
+                seq: 3,
+                kind: BlockEventKind::GateOff(GateOffEvent {
+                    track_idx: 0,
+                    logical_id: 20,
+                    target: GateOffTarget::Sampler { gatepitch_id: 200 },
+                }),
+            },
+        ];
 
-        super::cancel_gate_off_for_lid(&mut events, 10);
+        super::cancel_gate_off_for_lid(&mut events, &mut block_events, 10);
 
         assert_eq!(events.len(), 1);
         assert!(matches!(
             events[0].kind,
             CountdownEventKind::GateOff(GateOffEvent { logical_id: 20, .. })
         ));
+        assert_eq!(block_events.len(), 1);
+        assert!(matches!(
+            block_events[0].kind,
+            BlockEventKind::GateOff(GateOffEvent { logical_id: 20, .. })
+        ));
+    }
+
+    #[test]
+    fn chop_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
+        let scheduled_countdown = match test_block_trigger(0, 1).kind {
+            BlockEventKind::Scheduled(event) => event,
+            _ => unreachable!(),
+        };
+        let mut countdown_events = vec![
+            CountdownEvent {
+                remaining_samples: 32.0,
+                period_samples: 0.0,
+                repeats: 1,
+                pattern_epoch: 1,
+                seq: 0,
+                kind: CountdownEventKind::Scheduled(scheduled_countdown),
+            },
+            CountdownEvent {
+                remaining_samples: 48.0,
+                period_samples: 16.0,
+                repeats: 1,
+                pattern_epoch: 1,
+                seq: 1,
+                kind: CountdownEventKind::Chop(ChopEvent {
+                    track_idx: 1,
+                    step: 0,
+                    chop_gate: 16.0,
+                }),
+            },
+        ];
+        let mut block_events = vec![
+            test_block_trigger(2, 1),
+            BlockEvent {
+                frame_offset: 20,
+                seq: 3,
+                kind: BlockEventKind::Chop(ChopEvent {
+                    track_idx: 1,
+                    step: 0,
+                    chop_gate: 16.0,
+                }),
+            },
+        ];
+
+        super::cancel_chops_for_track(&mut countdown_events, &mut block_events, 1);
+
+        assert_eq!(countdown_events.len(), 1);
+        assert!(matches!(
+            countdown_events[0].kind,
+            CountdownEventKind::Scheduled(_)
+        ));
+        assert_eq!(block_events.len(), 1);
+        assert!(matches!(block_events[0].kind, BlockEventKind::Scheduled(_)));
     }
 
     #[test]
