@@ -65,8 +65,9 @@ use sequencer::agent::actions::{
 use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
-    CustomInstrumentRunMode, KeyboardTrigger, MidiFxPosition, PatternId, SequencerState, StepParam,
-    SwingResolution, Timebase, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
+    CustomInstrumentRunMode, KeyboardTrigger, MAX_STEPS, MidiFxPosition, PatternId,
+    SYNC_RESOLUTIONS, SequencerState, StepParam, SwingResolution, Timebase, TrackOutput,
+    TrackSendSnapshot,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
@@ -2986,13 +2987,13 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
+        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP, Runtime, StepParam, Value,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
         escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
-        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -4854,6 +4855,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &key,
                         &state,
                         &current_track,
+                        &expanded_step_projection,
                         &mut soft_step_param_edit,
                     ) {
                         ui_loop_stats.note_event(event_started.elapsed());

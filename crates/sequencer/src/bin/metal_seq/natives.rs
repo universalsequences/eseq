@@ -1555,7 +1555,7 @@ pub(crate) fn init_runtime(
                 None => {
                     return Err(
                         format!("seq-toggle-group-collapsed: group {group_id} not found").into(),
-                    )
+                    );
                 }
             }
         };
