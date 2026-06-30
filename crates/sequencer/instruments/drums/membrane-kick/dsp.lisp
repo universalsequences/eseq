@@ -26,6 +26,7 @@
 (param feedback @default 8.9376 @min 0 @max 20)
 (param coupling @default 0.5769 @min 0 @max 0.8)
 (param shape @default 3.9555 @min 0.01 @max 8)
+
 ; Tune offsets the host note pitch. The default maps A4/440 Hz to the original
 ; kick neighborhood near 64 Hz while still tracking note changes exactly.
 (param tune @default -33.3347 @min -60 @max 24 @unit st)
@@ -45,7 +46,7 @@
 ; clean output level (replaces the over-driven makeup; no tanh saturation).
 ; Low default because the membrane self-oscillates at the faithful param defaults
 ; with the approximate masks — turn up once the tone is tamed.
-(param level @default 0.03 @min 0 @max 1)
+(param level @default 0.06 @min 0 @max 1)
 
 ; ── Feedback state ─────────────────────────────────────────────────────────
 (make-tensor-history h3 @shape [4 4])      ; primary membrane state (t)
