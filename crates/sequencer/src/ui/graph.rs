@@ -27,6 +27,15 @@ fn first_graph_node_identity(ids: &[i32]) -> u32 {
         .unwrap_or(0)
 }
 
+/// Default polyphony for a slot being appended to a rack, sized so the
+/// rack's total voice budget stays in line with a singleton track's
+/// (MAX_VOICES). Splits the remaining budget evenly across the slot count
+/// that will exist after the append; clamped to at least 1 voice.
+fn appended_rack_slot_max_polyphony(existing_slots: &[RackSlotSnapshot]) -> usize {
+    let total_slots_after_append = existing_slots.len() + 1;
+    (MAX_VOICES / total_slots_after_append).max(1)
+}
+
 fn instrument_display_name(name: &str) -> String {
     std::path::Path::new(name)
         .file_name()
@@ -919,6 +928,7 @@ impl GraphController<'_> {
             shell.voice_sum_id,
             shell.voice_sum_r_id,
             shell.mod_in_clip_ids,
+            MAX_VOICES,
         )?;
         self.finish_track_registration(TrackRegistration {
             idx,
@@ -963,6 +973,7 @@ impl GraphController<'_> {
             shell.voice_sum_id,
             shell.voice_sum_r_id,
             shell.mod_in_clip_ids,
+            MAX_VOICES,
         )?;
         self.finish_track_registration(TrackRegistration {
             idx,
@@ -1098,6 +1109,7 @@ impl GraphController<'_> {
                         mixer.slot_sum_l_id,
                         mixer.slot_sum_r_id,
                         shell.mod_in_clip_ids,
+                        max_polyphony,
                     )?;
                     self.publish_sampler_voice_runtime(
                         pool_id,
@@ -1275,6 +1287,9 @@ impl GraphController<'_> {
         } else {
             "Instrument Rack".to_string()
         };
+        // Match a singleton track's total voice budget: split MAX_VOICES across
+        // the slots instead of giving each slot its own full 12-voice fan.
+        let per_slot_max_polyphony = (MAX_VOICES / loaded_slots.len().max(1)).max(1);
         let specs: Vec<RackSlotBuildSpec<'_>> = loaded_slots
             .iter()
             .map(
@@ -1289,7 +1304,7 @@ impl GraphController<'_> {
                     pan: 0.0,
                     mute: false,
                     solo: false,
-                    max_polyphony: MAX_VOICES,
+                    max_polyphony: per_slot_max_polyphony,
                     instrument_slot: None,
                     track_sound_state: None,
                 },
@@ -1338,6 +1353,7 @@ impl GraphController<'_> {
             false,
             rack.slots.iter().any(|slot| slot.solo),
         )?;
+        let max_polyphony = appended_rack_slot_max_polyphony(&rack.slots);
         let voices = self.build_sampler_voices(
             pool_id,
             &slot_name,
@@ -1346,6 +1362,7 @@ impl GraphController<'_> {
             mixer.slot_sum_l_id,
             mixer.slot_sum_r_id,
             track_nodes.mod_in_clip_ids,
+            max_polyphony,
         )?;
         self.publish_sampler_voice_runtime(
             pool_id,
@@ -1373,7 +1390,7 @@ impl GraphController<'_> {
             pan: 0.0,
             mute: false,
             solo: false,
-            max_polyphony: MAX_VOICES,
+            max_polyphony,
             instrument_slot,
             track_sound_state: TrackSoundState::default(),
             sample_id: Some((loaded.buffer_id, sample_name.clone(), loaded.sample_rate)),
@@ -3210,6 +3227,7 @@ impl GraphController<'_> {
                             mixer.slot_sum_l_id,
                             mixer.slot_sum_r_id,
                             track_nodes.mod_in_clip_ids,
+                            slot.max_polyphony,
                         )?;
                         self.publish_sampler_voice_runtime(
                             pool_id,
@@ -3705,18 +3723,20 @@ impl GraphController<'_> {
         voice_sum_id: i32,
         voice_sum_r_id: i32,
         track_mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
+        voice_count: usize,
     ) -> Result<SamplerVoiceSetup, String> {
         if sampler_pool_id >= MAX_SAMPLER_POOLS {
             return Err(format!(
                 "Sampler pool {sampler_pool_id} is unavailable; maximum sampler pools is {MAX_SAMPLER_POOLS}"
             ));
         }
-        let mut sampler_ids = Vec::with_capacity(MAX_VOICES);
-        let mut gatepitch_ids = Vec::with_capacity(MAX_VOICES);
-        let mut modulator_ids = Vec::with_capacity(MAX_VOICES);
-        let mut voice_lids = Vec::with_capacity(MAX_VOICES);
+        let voice_count = voice_count.clamp(1, MAX_VOICES);
+        let mut sampler_ids = Vec::with_capacity(voice_count);
+        let mut gatepitch_ids = Vec::with_capacity(voice_count);
+        let mut modulator_ids = Vec::with_capacity(voice_count);
+        let mut voice_lids = Vec::with_capacity(voice_count);
 
-        for v in 0..MAX_VOICES {
+        for v in 0..voice_count {
             let gp_name = CString::new(format!("{}_gp_{}", track_name, v)).unwrap();
             let gp_id = unsafe {
                 crate::audiograph::add_node(

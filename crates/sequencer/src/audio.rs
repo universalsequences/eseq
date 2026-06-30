@@ -2934,14 +2934,22 @@ fn render_chunk(data: &mut AudioCallbackData, output: &mut [f32]) {
 }
 
 fn publish_sampler_modulator_activity(data: &AudioCallbackData) {
-    for (track_idx, pool) in data.voice_pools.iter().enumerate().take(MAX_TRACKS) {
+    // Covers both per-track pools (0..MAX_TRACKS) and per-rack-slot pools
+    // (rack_slot_pool_index, >= MAX_TRACKS) — previously capped at
+    // MAX_TRACKS, which left every rack slot's mask permanently zero and
+    // forced its voice_modulator nodes through an O(nframes) gate-timeline
+    // scan every block instead of the O(1) active-mask check.
+    for (pool_id, pool) in data.voice_pools.iter().enumerate() {
+        if pool.num_voices == 0 {
+            continue;
+        }
         let mut mask = 0u64;
         for voice_idx in 0..pool.num_voices.min(MAX_VOICES) {
             if pool.voices[voice_idx].active {
                 mask |= 1u64 << voice_idx;
             }
         }
-        crate::voice_modulator::set_sampler_active_mask(track_idx, mask);
+        crate::voice_modulator::set_sampler_active_mask(pool_id, mask);
     }
 }
 

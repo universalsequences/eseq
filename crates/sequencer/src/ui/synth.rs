@@ -1194,8 +1194,20 @@ impl App {
         slot_idx: usize,
         value: usize,
     ) -> bool {
+        // Polyphony can't exceed the voice nodes actually built for this slot
+        // (build_sampler_voices sizes the fan at slot-creation time; raising
+        // this value past that ceiling would silently do nothing useful since
+        // there's no node to allocate from).
+        let built_voice_count = self
+            .graph
+            .track_node_ids
+            .get(track)
+            .and_then(|nodes| nodes.rack_slots.get(slot_idx))
+            .map(|slot| slot.sampler_voice_lids.len())
+            .filter(|&count| count > 0)
+            .unwrap_or(crate::voice::MAX_VOICES);
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
-            slot.max_polyphony = value.clamp(1, crate::voice::MAX_VOICES);
+            slot.max_polyphony = value.clamp(1, built_voice_count);
         })
     }
 
