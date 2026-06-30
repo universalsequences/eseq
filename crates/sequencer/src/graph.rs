@@ -478,6 +478,8 @@ pub struct ProjectGraphNodeIntrinsicOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_from: Option<ProjectGraphSeedFrom>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_on_reset: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<GraphDurationSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swing: Option<GraphSwingSpec>,
@@ -515,6 +517,8 @@ pub struct ProjectGraphOverrides {
     pub reset_every_beats: Option<f64>,
     #[serde(default)]
     pub max_poly: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -539,6 +543,10 @@ pub struct GraphNode {
     pub event_select: EventSelect,
     /// Initial value of the `energy` state cell on reset/seed (per-node, spec §3.3).
     pub seed_on_reset: f64,
+    /// Per-node authoring override that also emits a track hit at periodic reset
+    /// boundaries. Manifest-wide reset energy remains energy-only for compatibility
+    /// with graphs that use it as a bias.
+    pub trigger_on_reset: bool,
     /// Semitone offset added to the carried payload note each time this node fires
     /// (Ext 1). Mirrors `neural`'s per-neuron `transpose`; the engine applies it on the
     /// default emit path so the cascade works with a bare threshold `:update`.
@@ -564,6 +572,7 @@ impl Default for GraphNode {
             reduce: Reduce::Sum,
             event_select: EventSelect::Newest,
             seed_on_reset: 0.0,
+            trigger_on_reset: false,
             transpose: 0.0,
             threshold: 1.0,
             duration: GraphDurationSpec::default(),
@@ -827,6 +836,7 @@ pub struct GraphRuntime {
     last_eval_indices: Vec<u64>,
     last_decay_index: u64,
     next_reset_beat: f64,
+    pending_reset_seed_emit_beat: Option<f64>,
 }
 
 impl GraphRuntime {
@@ -929,6 +939,7 @@ impl GraphRuntime {
             last_eval_indices: vec![0; num_nodes],
             last_decay_index: 0,
             next_reset_beat: 0.0,
+            pending_reset_seed_emit_beat: None,
         };
         runtime.reset(0.0);
         runtime
@@ -1131,6 +1142,8 @@ impl GraphRuntime {
         }
         self.last_decay_index = self.finest_decay_index(total_beats);
         self.next_reset_beat = next_reset_beat_after(total_beats, self.reset_interval_beats);
+        self.pending_reset_seed_emit_beat =
+            (preserve_external_seeds && self.has_reset_seed_triggers()).then_some(total_beats);
     }
 
     /// Realign every node's clock to the current transport position without firing
@@ -1186,18 +1199,39 @@ impl GraphRuntime {
             return;
         }
         let appended_from = out.len();
+        self.emit_pending_reset_seeded_nodes(
+            start_beats,
+            end_beats,
+            block_start_sample,
+            samples_per_quarter,
+            max_poly,
+            &mut update_fn,
+            out,
+        );
         while let Some(boundary_beats) = self.next_eval_boundary(start_beats, end_beats) {
             // Periodic reset lands on a boundary: decay up to it, then reset.
             if self.next_reset_beat > 0.0 && self.next_reset_beat <= boundary_beats + 1e-9 {
-                self.apply_energy_decay(self.next_reset_beat);
-                self.reset(self.next_reset_beat);
+                let reset_beat = self.next_reset_beat;
+                self.apply_energy_decay(reset_beat);
+                self.reset(reset_beat);
+                self.emit_pending_reset_seeded_nodes(
+                    start_beats,
+                    end_beats,
+                    block_start_sample,
+                    samples_per_quarter,
+                    max_poly,
+                    &mut update_fn,
+                    out,
+                );
                 continue;
             }
 
-            let sample_offset = ((boundary_beats - start_beats) * samples_per_quarter)
-                .round()
-                .max(0.0) as u64;
-            let sample_time = block_start_sample.saturating_add(sample_offset);
+            let sample_time = sample_time_for_beat(
+                start_beats,
+                block_start_sample,
+                samples_per_quarter,
+                boundary_beats,
+            );
 
             // Which nodes hit their own grid boundary here?
             let mut due = vec![false; self.num_nodes];
@@ -1368,8 +1402,18 @@ impl GraphRuntime {
 
         // Resets and decay between the last boundary and the block end.
         while self.next_reset_beat > 0.0 && self.next_reset_beat <= end_beats + 1e-9 {
-            self.apply_energy_decay(self.next_reset_beat);
-            self.reset(self.next_reset_beat);
+            let reset_beat = self.next_reset_beat;
+            self.apply_energy_decay(reset_beat);
+            self.reset(reset_beat);
+            self.emit_pending_reset_seeded_nodes(
+                start_beats,
+                end_beats,
+                block_start_sample,
+                samples_per_quarter,
+                max_poly,
+                &mut update_fn,
+                out,
+            );
         }
         self.apply_energy_decay(end_beats);
         self.refresh_trigger_activity(end_beats);
@@ -1544,6 +1588,114 @@ impl GraphRuntime {
         (sample_time.saturating_add(offset_samples), quantized_beats)
     }
 
+    fn has_reset_seed_triggers(&self) -> bool {
+        self.nodes
+            .iter()
+            .any(|node| node.trigger_on_reset && node.seed_on_reset > 0.0)
+    }
+
+    fn emit_pending_reset_seeded_nodes<F>(
+        &mut self,
+        start_beats: f64,
+        end_beats: f64,
+        block_start_sample: u64,
+        samples_per_quarter: f64,
+        max_poly: u32,
+        update_fn: &mut F,
+        out: &mut Vec<GraphEmission>,
+    ) where
+        F: FnMut(&NodeEval) -> NodeFire,
+    {
+        let Some(reset_beats) = self.pending_reset_seed_emit_beat else {
+            return;
+        };
+        if reset_beats + 1e-9 < start_beats {
+            self.pending_reset_seed_emit_beat = None;
+            return;
+        }
+        if reset_beats > end_beats + 1e-9 {
+            return;
+        }
+        self.pending_reset_seed_emit_beat = None;
+        let reset_sample = sample_time_for_beat(
+            start_beats,
+            block_start_sample,
+            samples_per_quarter,
+            reset_beats,
+        );
+        self.emit_reset_seeded_nodes(
+            reset_beats,
+            reset_sample,
+            samples_per_quarter,
+            max_poly,
+            update_fn,
+            out,
+        );
+    }
+
+    fn emit_reset_seeded_nodes<F>(
+        &mut self,
+        reset_beats: f64,
+        reset_sample: u64,
+        samples_per_quarter: f64,
+        max_poly: u32,
+        update_fn: &mut F,
+        out: &mut Vec<GraphEmission>,
+    ) where
+        F: FnMut(&NodeEval) -> NodeFire,
+    {
+        let mut candidates = Vec::new();
+        for idx in 0..self.num_nodes {
+            if !self.nodes[idx].trigger_on_reset || self.nodes[idx].seed_on_reset <= 0.0 {
+                continue;
+            }
+            let eval = NodeEval {
+                node_index: idx,
+                input: 0.0,
+                energy: self.energy[idx],
+                tick_index: self.tick_count[idx],
+                beat: reset_beats,
+                resolution: self.nodes[idx].resolution,
+                delay_steps: self.nodes[idx].delay_steps,
+                input_event: None,
+                params: self.node_params[idx].clone(),
+            };
+            self.tick_count[idx] = self.tick_count[idx].saturating_add(1);
+            let decision = update_fn(&eval);
+            if !decision.fired {
+                continue;
+            }
+            let swing = decision
+                .emit
+                .as_ref()
+                .and_then(|emit| emit.swing)
+                .unwrap_or(self.nodes[idx].swing);
+            let (fire_sample, fire_beats) =
+                swing.apply_to_timing(reset_sample, reset_beats, samples_per_quarter);
+            let payload = self.resolve_emission_payload(idx, decision.emit.as_ref());
+            candidates.push(GraphFiringCandidate {
+                node_index: idx,
+                fire_sample,
+                fire_beats,
+                emit: decision.emit,
+                reset_graph_state: false,
+                dampen_incoming: None,
+                velocity: payload.velocity,
+                note: payload.note,
+                from_seed: true,
+            });
+        }
+
+        candidates.sort_by_key(|c| (c.fire_sample, c.node_index));
+        let accepted = self.max_poly_accept(&candidates, max_poly);
+        for (cand_idx, candidate) in candidates.iter().enumerate() {
+            if accepted[cand_idx] {
+                self.commit_reset_seed_emission(candidate, out);
+                self.advance_cycle(candidate.node_index, reset_beats);
+            }
+        }
+    }
+
     /// Emit the firing, reset the node's energy, and schedule its delayed scatter.
     ///
     /// The emitted event *and* the payload that rides the outgoing scatter are one and
@@ -1558,8 +1710,25 @@ impl GraphRuntime {
     /// `transpose`, preserving the native-neuron drop-in.
     fn commit_firing(&mut self, candidate: &GraphFiringCandidate, out: &mut Vec<GraphEmission>) {
         let node_index = candidate.node_index;
+        let payload = self.resolve_emission_payload(node_index, candidate.emit.as_ref());
+        self.push_emission_event(
+            node_index,
+            candidate.fire_sample,
+            candidate.fire_beats,
+            payload,
+            out,
+        );
+        self.energy[node_index] = 0.0;
+        if let Some(amount) = candidate.dampen_incoming {
+            self.dampen_incoming(node_index, amount);
+        }
+        self.clear_incoming_triggers(node_index);
+        self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, false);
+    }
+
+    fn resolve_emission_payload(&self, node_index: usize, emit: Option<&EmitSpec>) -> GraphPayload {
         let incoming = self.source_event[node_index].unwrap_or_default();
-        let payload = match &candidate.emit {
+        match emit {
             Some(spec) => GraphPayload {
                 note: spec.note.unwrap_or(incoming.note),
                 velocity: spec.velocity.unwrap_or(incoming.velocity),
@@ -1582,7 +1751,17 @@ impl GraphRuntime {
                     incoming,
                 ),
             },
-        };
+        }
+    }
+
+    fn push_emission_event(
+        &mut self,
+        node_index: usize,
+        sample_time: u64,
+        beat: f64,
+        payload: GraphPayload,
+        out: &mut Vec<GraphEmission>,
+    ) {
         let mut event = EmittedAccumulatorEvent {
             offset_beats: 0.0,
             track: self.nodes[node_index].route,
@@ -1599,8 +1778,8 @@ impl GraphRuntime {
         let visualization_event = GraphVisualizationEvent {
             node_index,
             track: event.track,
-            sample_time: candidate.fire_sample,
-            beat: candidate.fire_beats,
+            sample_time,
+            beat,
             transpose: payload.note,
             velocity: payload.velocity,
         };
@@ -1614,20 +1793,32 @@ impl GraphRuntime {
             self.event_history.drain(0..overflow);
         }
         out.push(GraphEmission {
-            sample_time: candidate.fire_sample,
+            sample_time,
             node_index,
             event,
         });
         self.trigger_activity[node_index] = 1.0;
-        self.trigger_visual_until_beats[node_index] = self.trigger_visual_until_beats[node_index]
-            .max(candidate.fire_beats + TRIGGER_VISUAL_HOLD_BEATS);
+        self.trigger_visual_until_beats[node_index] =
+            self.trigger_visual_until_beats[node_index].max(beat + TRIGGER_VISUAL_HOLD_BEATS);
+    }
+
+    fn commit_reset_seed_emission(
+        &mut self,
+        candidate: &GraphFiringCandidate,
+        out: &mut Vec<GraphEmission>,
+    ) {
+        let node_index = candidate.node_index;
+        let payload = self.resolve_emission_payload(node_index, candidate.emit.as_ref());
+        self.push_emission_event(
+            node_index,
+            candidate.fire_sample,
+            candidate.fire_beats,
+            payload,
+            out,
+        );
         self.energy[node_index] = 0.0;
-        if let Some(amount) = candidate.dampen_incoming {
-            self.dampen_incoming(node_index, amount);
-        }
-        let note = payload.note;
         self.clear_incoming_triggers(node_index);
-        self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, false);
+        self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, true);
     }
 
     fn drop_firing(&mut self, node_index: usize) {
@@ -1928,6 +2119,18 @@ fn grid_index_at(total_beats: f64, step_beats: f64) -> u64 {
     (total_beats / step_beats.max(1e-9)).floor().max(0.0) as u64
 }
 
+fn sample_time_for_beat(
+    start_beats: f64,
+    block_start_sample: u64,
+    samples_per_quarter: f64,
+    beat: f64,
+) -> u64 {
+    let sample_offset = ((beat - start_beats) * samples_per_quarter)
+        .round()
+        .max(0.0) as u64;
+    block_start_sample.saturating_add(sample_offset)
+}
+
 fn next_reset_beat_after(total_beats: f64, reset_interval_beats: f64) -> f64 {
     if reset_interval_beats > 0.0 {
         ((total_beats / reset_interval_beats).floor() + 1.0) * reset_interval_beats
@@ -1975,6 +2178,13 @@ pub enum ShapeSpec {
     Grid { rows: usize, cols: usize },
     /// `N` nodes, index `0..N`.
     Line(usize),
+    /// `default` active nodes by default, expandable up to `max` while retaining
+    /// dormant per-pattern overrides for inactive nodes and edges.
+    VariableLine {
+        default: usize,
+        min: usize,
+        max: usize,
+    },
     /// Like line, with wrap semantics for neighbor topologies.
     Ring(usize),
 }
@@ -1984,7 +2194,37 @@ impl ShapeSpec {
         match *self {
             ShapeSpec::Grid { rows, cols } => rows * cols,
             ShapeSpec::Line(n) | ShapeSpec::Ring(n) => n,
+            ShapeSpec::VariableLine { default, .. } => default,
         }
+    }
+
+    pub fn capacity_num_nodes(&self) -> usize {
+        match *self {
+            ShapeSpec::VariableLine { max, .. } => max,
+            _ => self.num_nodes(),
+        }
+    }
+
+    pub fn resolved_node_count(&self, overrides: Option<&ProjectGraphOverrides>) -> usize {
+        match *self {
+            ShapeSpec::VariableLine { default, min, max } => overrides
+                .and_then(|overrides| overrides.node_count)
+                .map(|count| count as usize)
+                .unwrap_or(default)
+                .clamp(min, max),
+            _ => self.num_nodes(),
+        }
+    }
+
+    pub fn variable_line_bounds(&self) -> Option<(usize, usize, usize)> {
+        match *self {
+            ShapeSpec::VariableLine { default, min, max } => Some((default, min, max)),
+            _ => None,
+        }
+    }
+
+    pub fn is_variable_line(&self) -> bool {
+        matches!(self, ShapeSpec::VariableLine { .. })
     }
 }
 
@@ -2159,7 +2399,7 @@ impl GraphManifest {
         &self,
         overrides: Option<&ProjectGraphOverrides>,
     ) -> GraphRuntimeConfig {
-        let num_nodes = self.shape.num_nodes();
+        let num_nodes = self.shape.resolved_node_count(overrides);
         let proto_params = self
             .node
             .params
@@ -2174,6 +2414,8 @@ impl GraphManifest {
             let mut resolution_cycle = vec![self.node.resolution];
             let mut delay_steps = self.node.delay_steps;
             let mut quantize_cycle = vec![self.node.quantize];
+            let mut seed_on_reset = self.seed_on_reset;
+            let mut trigger_on_reset = false;
             let mut duration = self
                 .node
                 .duration
@@ -2204,6 +2446,12 @@ impl GraphManifest {
                     if let Some(value) = &intrinsic.seed_from {
                         seed_from = SeedFrom::from(value);
                     }
+                    if let Some(value) = intrinsic.seed_on_reset {
+                        if value.is_finite() {
+                            seed_on_reset = value.max(0.0);
+                            trigger_on_reset = seed_on_reset > 0.0;
+                        }
+                    }
                     if let Some(value) = &intrinsic.duration {
                         duration = value.clone();
                     }
@@ -2233,7 +2481,8 @@ impl GraphManifest {
                 seed_track_mask,
                 reduce: self.node.reduce,
                 event_select: self.node.event_select,
-                seed_on_reset: self.seed_on_reset,
+                seed_on_reset,
+                trigger_on_reset,
                 transpose: node_params[idx].get("transpose").copied().unwrap_or(0.0) as f32,
                 threshold: node_params[idx].get("threshold").copied().unwrap_or(1.0),
                 duration,
@@ -2931,6 +3180,42 @@ mod tests {
         let samples: Vec<u64> = out.iter().map(|e| e.sample_time).collect();
         assert_eq!(samples, vec![48_000, 240_000]);
         assert!(out.iter().all(|e| e.node_index == 0));
+    }
+
+    #[test]
+    fn per_node_reset_seed_emits_track_hit_consumes_energy_and_propagates() {
+        let mut n0 = node(Timebase::Quarter);
+        n0.route = Some(2);
+        n0.seed_on_reset = 1.0;
+        n0.trigger_on_reset = true;
+        let mut n1 = node(Timebase::Quarter);
+        n1.route = Some(3);
+        let nodes = vec![n0, n1];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 4.0);
+
+        let out = run(&mut runtime, 5.0, 0, vec![1.0, 1.0]);
+        let observed = out
+            .iter()
+            .map(|emission| {
+                (
+                    emission.sample_time,
+                    emission.node_index,
+                    emission.event.track,
+                    emission.event.resolved.velocity,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            observed,
+            vec![
+                (0, 0, Some(2), 1.0),
+                (48_000, 1, Some(3), 1.0),
+                (192_000, 0, Some(2), 1.0),
+                (240_000, 1, Some(3), 1.0),
+            ]
+        );
     }
 
     #[test]
@@ -3829,7 +4114,152 @@ mod tests {
     fn manifest_grid_shape_node_count() {
         assert_eq!(ShapeSpec::Grid { rows: 8, cols: 8 }.num_nodes(), 64);
         assert_eq!(ShapeSpec::Line(5).num_nodes(), 5);
+        assert_eq!(
+            ShapeSpec::VariableLine {
+                default: 8,
+                min: 1,
+                max: 16
+            }
+            .num_nodes(),
+            8
+        );
+        assert_eq!(
+            ShapeSpec::VariableLine {
+                default: 8,
+                min: 1,
+                max: 16
+            }
+            .capacity_num_nodes(),
+            16
+        );
         assert_eq!(ShapeSpec::Ring(3).num_nodes(), 3);
+    }
+
+    #[test]
+    fn variable_line_materialization_preserves_dormant_overrides() {
+        let manifest = GraphManifest {
+            id: 17,
+            name: "variable".into(),
+            shape: ShapeSpec::VariableLine {
+                default: 8,
+                min: 1,
+                max: 16,
+            },
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: GraphDurationSpec::default(),
+            swing: GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "nrn".into(),
+                params: vec![ParamSpec {
+                    name: "transpose".into(),
+                    min: -48.0,
+                    max: 48.0,
+                    default: 0.0,
+                    is_int: true,
+                }],
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "nrn".into(),
+                to: "nrn".into(),
+                topology: Topology::AllToAll,
+                distribution: EdgeDistribution::BroadcastWeighted,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    is_int: false,
+                }],
+            }],
+        };
+        let group = edge_set_group_id(&manifest.edge_sets[0]);
+        let mut overrides = ProjectGraphOverrides {
+            sequencer_id: manifest.id,
+            sequencer_name: manifest.name.clone(),
+            node_count: Some(16),
+            node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
+                group: "nrn".into(),
+                instance: 14,
+                resolution: None,
+                delay_steps: None,
+                quantize: None,
+                route: Some(ProjectGraphRouteOverride::Track(3)),
+                seed_from: Some(ProjectGraphSeedFrom::Route),
+                seed_on_reset: Some(1.25),
+                duration: None,
+                swing: None,
+            }],
+            node_params: vec![ProjectGraphNodeParamOverride {
+                group: "nrn".into(),
+                instance: 14,
+                param: "transpose".into(),
+                value: 7.0,
+            }],
+            edge_params: vec![
+                ProjectGraphEdgeParamOverride {
+                    group: group.clone(),
+                    from: 14,
+                    to: 3,
+                    param: "weight".into(),
+                    value: 0.8,
+                },
+                ProjectGraphEdgeParamOverride {
+                    group,
+                    from: 10,
+                    to: 3,
+                    param: "weight".into(),
+                    value: 0.4,
+                },
+            ],
+            ..ProjectGraphOverrides::default()
+        };
+
+        let grown = manifest.runtime_config_with_overrides(Some(&overrides));
+        assert_eq!(grown.nodes.len(), 16);
+        assert_eq!(grown.edges.len(), 16 * 16);
+        assert_eq!(grown.node_params[14]["transpose"], 7.0);
+        assert_eq!(grown.nodes[14].route, Some(3));
+        assert_eq!(grown.nodes[14].seed_track_mask, seed_track_mask(&[3]));
+        assert_eq!(grown.nodes[14].seed_on_reset, 1.25);
+        assert!(grown.nodes[14].trigger_on_reset);
+        assert_eq!(
+            grown
+                .edges
+                .iter()
+                .find(|edge| edge.from == 14 && edge.to == 3)
+                .expect("active dormant edge restored")
+                .weight,
+            0.8
+        );
+
+        overrides.node_count = Some(12);
+        let shrunk = manifest.runtime_config_with_overrides(Some(&overrides));
+        assert_eq!(shrunk.nodes.len(), 12);
+        assert_eq!(shrunk.edges.len(), 12 * 12);
+        assert_eq!(shrunk.node_params.len(), 12);
+        assert!(shrunk
+            .edges
+            .iter()
+            .all(|edge| edge.from < 12 && edge.to < 12));
+        assert_eq!(
+            shrunk
+                .edges
+                .iter()
+                .find(|edge| edge.from == 10 && edge.to == 3)
+                .expect("still-active edge override")
+                .weight,
+            0.4
+        );
+
+        overrides.node_count = Some(99);
+        let clamped = manifest.runtime_config_with_overrides(Some(&overrides));
+        assert_eq!(clamped.nodes.len(), 16);
     }
 
     #[test]

@@ -327,6 +327,72 @@ pub(super) fn graph_parse_state_list(value: &EValue) -> Vec<StateSpec> {
         .collect()
 }
 
+fn graph_shape_count(value: &EValue, context: &str) -> Result<usize, String> {
+    let n = graph_number(value).ok_or_else(|| format!("{context} expects a numeric count"))?;
+    if !n.is_finite() {
+        return Err(format!("{context} expects a finite count"));
+    }
+    let rounded = n.round();
+    if rounded < 1.0 {
+        return Err(format!("{context} expects a count >= 1"));
+    }
+    Ok(rounded as usize)
+}
+
+fn graph_parse_line_shape(items: &[EValue]) -> Result<ShapeSpec, String> {
+    if items.len() == 2 {
+        return Ok(ShapeSpec::Line(graph_shape_count(&items[1], "(line N)")?));
+    }
+
+    let mut default = None;
+    let mut min = None;
+    let mut max = None;
+    let mut idx = 1;
+    if let Some(value) = items.get(idx).and_then(graph_number) {
+        if !value.is_finite() {
+            return Err("(line DEFAULT :max MAX) expects a finite default".to_string());
+        }
+        let rounded = value.round();
+        if rounded < 1.0 {
+            return Err("(line DEFAULT :max MAX) expects a default >= 1".to_string());
+        }
+        default = Some(rounded as usize);
+        idx += 1;
+    }
+
+    while idx < items.len() {
+        let key = graph_keyword(&items[idx])
+            .ok_or_else(|| "(line ...) expects keyword/value pairs after default".to_string())?;
+        idx += 1;
+        let value = items
+            .get(idx)
+            .ok_or_else(|| format!("(line ...) missing value for :{key}"))?;
+        match key.as_str() {
+            "default" => default = Some(graph_shape_count(value, "(line :default)")?),
+            "min" => min = Some(graph_shape_count(value, "(line :min)")?),
+            "max" => max = Some(graph_shape_count(value, "(line :max)")?),
+            other => return Err(format!("line shape unknown key :{other}")),
+        }
+        idx += 1;
+    }
+
+    let default =
+        default.ok_or_else(|| "(line :default D :max M) requires :default".to_string())?;
+    let min = min.unwrap_or(1);
+    let max = max.ok_or_else(|| "(line :default D :max M) requires :max".to_string())?;
+    if min > max {
+        return Err(format!(
+            "line variable shape requires :min <= :max, got {min} > {max}"
+        ));
+    }
+    if default < min || default > max {
+        return Err(format!(
+            "line variable shape requires default within [{min}, {max}], got {default}"
+        ));
+    }
+    Ok(ShapeSpec::VariableLine { default, min, max })
+}
+
 pub(super) fn graph_parse_shape(value: &EValue) -> Result<ShapeSpec, String> {
     let items =
         graph_list_items(value).ok_or_else(|| ":shape expects a generator form".to_string())?;
@@ -341,7 +407,7 @@ pub(super) fn graph_parse_shape(value: &EValue) -> Result<ShapeSpec, String> {
             rows: n(1).ok_or("(grid R C) expects rows")?,
             cols: n(2).ok_or("(grid R C) expects cols")?,
         }),
-        Some("line") => Ok(ShapeSpec::Line(n(1).ok_or("(line N) expects N")?)),
+        Some("line") => graph_parse_line_shape(&items),
         Some("ring") => Ok(ShapeSpec::Ring(n(1).ok_or("(ring N) expects N")?)),
         other => Err(format!("unknown :shape generator: {other:?}")),
     }

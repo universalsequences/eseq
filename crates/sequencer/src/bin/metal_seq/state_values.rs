@@ -14794,12 +14794,9 @@ mod tests {
                 continue;
             };
             match items.as_slice() {
-                [
-                    Expression::Symbol(form),
-                    Expression::Symbol(name),
-                    Expression::String(value),
-                    ..,
-                ] if form == "def" && name == "script-buffer-name" => {
+                [Expression::Symbol(form), Expression::Symbol(name), Expression::String(value), ..]
+                    if form == "def" && name == "script-buffer-name" =>
+                {
                     script_buffer_name = Some(value.clone());
                 }
                 [Expression::Symbol(form), Expression::String(target), ..]
@@ -25176,9 +25173,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            vec![
-                "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"
-            ]
+            vec!["off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4"]
         );
     }
 

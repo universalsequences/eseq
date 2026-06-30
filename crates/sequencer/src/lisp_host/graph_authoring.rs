@@ -175,7 +175,7 @@ pub fn register_graph_authoring_natives(
             }
             let manifest = resolve_graph_manifest(&state_for_graph_node, &args[0])?;
             let instance = parse_nonnegative_usize(&args[1], "node index")?;
-            if instance >= manifest.shape.num_nodes() {
+            if instance >= graph_capacity_node_count(&manifest) {
                 return Err("graph-node node index out of range".to_string());
             }
             let edit = parse_graph_node_edit(&args[2..])?;
@@ -202,7 +202,7 @@ pub fn register_graph_authoring_natives(
             }
             let manifest = resolve_graph_manifest(&state_for_graph_param, &args[0])?;
             let instance = parse_nonnegative_usize(&args[1], "node index")?;
-            if instance >= manifest.shape.num_nodes() {
+            if instance >= graph_capacity_node_count(&manifest) {
                 return Err("graph-param node index out of range".to_string());
             }
             let param = graph_key_string(&args[2]).ok_or("graph-param expects param name")?;
@@ -258,7 +258,7 @@ pub fn register_graph_authoring_natives(
             }
             let manifest = resolve_graph_manifest(&state_for_bind_graph, &args[0])?;
             let instance = parse_nonnegative_usize(&args[1], "node index")?;
-            if instance >= manifest.shape.num_nodes() {
+            if instance >= graph_active_node_count(&state_for_bind_graph, &manifest) {
                 return Err("bind-graph node index out of range".to_string());
             }
             let field = graph_key_string(&args[2])
@@ -325,7 +325,8 @@ pub fn register_graph_authoring_natives(
                 .edge_sets
                 .first()
                 .ok_or_else(|| "bind-graph-edge requires an edge set".to_string())?;
-            if from >= manifest.shape.num_nodes() || to >= manifest.shape.num_nodes() {
+            let active_nodes = graph_active_node_count(&state_for_bind_graph_edge, &manifest);
+            if from >= active_nodes || to >= active_nodes {
                 return Err("bind-graph-edge from/to index out of range".to_string());
             }
             let query = GraphEdgeQuery {
@@ -374,7 +375,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config-value",
         "(graph-config-value sequencer :reset-bars)",
-        "Resolved sequencer-level config (:reset-bars or :max-poly), override-or-manifest.",
+        "Resolved sequencer-level config (:reset-bars, :max-poly, or :node-count), override-or-manifest.",
         move |args, _ctx| {
             if args.len() != 2 {
                 return Err("graph-config-value expects graph and field".to_string());
@@ -391,7 +392,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config",
         "(graph-config sequencer :reset-bars 4)",
-        "Set a sequencer-level config override (:reset-bars in bars, or :max-poly).",
+        "Set a sequencer-level config override (:reset-bars in bars, :max-poly, or :node-count).",
         move |args, ctx| {
             if args.len() != 3 {
                 return Err("graph-config expects graph, field, value".to_string());
@@ -456,6 +457,7 @@ struct GraphNodeEdit {
     quantize: Option<crate::graph::ProjectGraphQuantizeOverride>,
     route: Option<crate::graph::ProjectGraphRouteOverride>,
     seed_from: Option<crate::graph::ProjectGraphSeedFrom>,
+    seed_on_reset: Option<f64>,
     duration: Option<crate::graph::GraphDurationSpec>,
     swing: Option<crate::graph::GraphSwingSpec>,
 }
@@ -504,6 +506,17 @@ fn graph_runtime_config_for_current_pattern(
 ) -> crate::graph::GraphRuntimeConfig {
     let graph_overrides = resolved_graph_overrides_for_manifest(state, manifest);
     manifest.runtime_config_with_overrides(graph_overrides.as_ref())
+}
+
+fn graph_active_node_count(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+) -> usize {
+    cached_graph_runtime_config(state, manifest).nodes.len()
+}
+
+fn graph_capacity_node_count(manifest: &crate::graph::GraphManifest) -> usize {
+    manifest.shape.capacity_num_nodes()
 }
 
 /// Reactive namespace that mirrors resolved graph node/edge values so the UI can
@@ -593,7 +606,8 @@ fn graph_node_numeric_value(
     field: &str,
 ) -> Result<f64, String> {
     match field {
-        "delay" | "delay-steps" => {
+        "delay" | "delay-steps" | "seed-on-reset" | "reset-seed" | "seed-route"
+        | "seed-from-route" => {
             let value = resolved_graph_node_value(state, manifest, instance, field)?;
             graph_number(&value).ok_or_else(|| format!("bind-graph field :{field} is not numeric"))
         }
@@ -664,7 +678,8 @@ fn graph_config_reactive_field(manifest_id: u64, field: &str) -> String {
 }
 
 /// Resolve a sequencer-level config field (override-or-manifest) to a UI scalar.
-/// `:reset-bars` reports bars (engine stores beats); `:max-poly` reports the cap.
+/// `:reset-bars` reports bars (engine stores beats); `:max-poly` reports the cap;
+/// `:node-count` reports the resolved active count for variable line shapes.
 fn resolved_graph_config_value(
     state: &crate::sequencer::SequencerState,
     manifest: &crate::graph::GraphManifest,
@@ -686,8 +701,27 @@ fn resolved_graph_config_value(
                 .unwrap_or(manifest.max_poly);
             Ok(value as f64)
         }
+        "node-count" => {
+            if !manifest.shape.is_variable_line() {
+                return Err("graph config :node-count requires a variable line shape".to_string());
+            }
+            Ok(manifest.shape.resolved_node_count(overrides.as_ref()) as f64)
+        }
         other => Err(format!("graph config unknown field :{other}")),
     }
+}
+
+fn clamp_graph_node_count(
+    manifest: &crate::graph::GraphManifest,
+    value: f64,
+) -> Result<u32, String> {
+    let Some((_default, min, max)) = manifest.shape.variable_line_bounds() else {
+        return Err("graph config :node-count requires a variable line shape".to_string());
+    };
+    if !value.is_finite() {
+        return Err("graph config :node-count expects a finite value".to_string());
+    }
+    Ok((value.round() as i64).clamp(min as i64, max as i64) as u32)
 }
 
 fn set_graph_config_value(
@@ -696,16 +730,27 @@ fn set_graph_config_value(
     field: &str,
     value: f64,
 ) -> Result<(), String> {
+    enum ConfigEdit {
+        ResetEveryBeats(f64),
+        MaxPoly(u32),
+        NodeCount(u32),
+    }
+
+    let edit = match field {
+        "reset-bars" | "reset-every-bars" => {
+            ConfigEdit::ResetEveryBeats((value * GRAPH_BEATS_PER_BAR).max(0.0))
+        }
+        "max-poly" => ConfigEdit::MaxPoly(value.max(0.0).round() as u32),
+        "node-count" => ConfigEdit::NodeCount(clamp_graph_node_count(manifest, value)?),
+        other => return Err(format!("graph config unknown field :{other}")),
+    };
+
     state.edit_current_graph_overrides(|graphs| {
         let graph = ensure_graph_overrides(graphs, manifest);
-        match field {
-            "reset-bars" | "reset-every-bars" => {
-                graph.reset_every_beats = Some((value * GRAPH_BEATS_PER_BAR).max(0.0));
-            }
-            "max-poly" => {
-                graph.max_poly = Some(value.max(0.0).round() as u32);
-            }
-            other => return Err(format!("graph config unknown field :{other}")),
+        match edit {
+            ConfigEdit::ResetEveryBeats(value) => graph.reset_every_beats = Some(value),
+            ConfigEdit::MaxPoly(value) => graph.max_poly = Some(value),
+            ConfigEdit::NodeCount(value) => graph.node_count = Some(value),
         }
         Ok(())
     })
@@ -728,6 +773,24 @@ fn graph_seed_from_value(mask: u128) -> EValue {
             .map(|track| EValue::Number(track as f64))
             .collect(),
     )
+}
+
+fn resolved_graph_seed_from_route(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+) -> bool {
+    let mut seed_from = crate::graph::ProjectGraphSeedFrom::from(&manifest.node.seed_from);
+    if let Some(overrides) = resolved_graph_overrides_for_manifest(state, manifest) {
+        for intrinsic in overrides.node_intrinsics.iter().filter(|intrinsic| {
+            intrinsic.group == manifest.node.name && intrinsic.instance == instance
+        }) {
+            if let Some(value) = &intrinsic.seed_from {
+                seed_from = value.clone();
+            }
+        }
+    }
+    matches!(seed_from, crate::graph::ProjectGraphSeedFrom::Route)
 }
 
 fn resolved_graph_node_value(
@@ -769,6 +832,14 @@ fn resolved_graph_node_value(
         )),
         "route" => Ok(graph_route_value(node.route)),
         "seed-from" => Ok(graph_seed_from_value(node.seed_track_mask)),
+        "seed-route" | "seed-from-route" => Ok(EValue::Number(
+            if resolved_graph_seed_from_route(state, manifest, instance) {
+                1.0
+            } else {
+                0.0
+            },
+        )),
+        "seed-on-reset" | "reset-seed" => Ok(EValue::Number(node.seed_on_reset)),
         other => Err(format!("graph-node-value unknown field :{other}")),
     }
 }
@@ -806,7 +877,8 @@ fn parse_graph_edge_query(
         let to = parse_nonnegative_usize(&args[1], "to")?;
         let param = graph_key_string(&args[2])
             .ok_or_else(|| "graph-edge-value expects a param name".to_string())?;
-        if from >= manifest.shape.num_nodes() || to >= manifest.shape.num_nodes() {
+        if from >= graph_capacity_node_count(manifest) || to >= graph_capacity_node_count(manifest)
+        {
             return Err("graph-edge-value from/to index out of range".to_string());
         }
         return Ok(GraphEdgeQuery {
@@ -862,7 +934,7 @@ fn parse_graph_edge_query(
     if group != default_group {
         return Err(format!("graph-edge-value edge group not found: {group}"));
     }
-    if from >= manifest.shape.num_nodes() || to >= manifest.shape.num_nodes() {
+    if from >= graph_capacity_node_count(manifest) || to >= graph_capacity_node_count(manifest) {
         return Err("graph-edge-value from/to index out of range".to_string());
     }
     Ok(GraphEdgeQuery {
@@ -969,6 +1041,7 @@ fn ensure_graph_node_intrinsic<'a>(
             quantize: None,
             route: None,
             seed_from: None,
+            seed_on_reset: None,
             duration: None,
             swing: None,
         });
@@ -993,9 +1066,13 @@ fn parse_graph_route_override(
 fn parse_graph_seed_from(value: &EValue) -> Result<crate::graph::ProjectGraphSeedFrom, String> {
     match graph_keyword(value).as_deref() {
         Some("route") => return Ok(crate::graph::ProjectGraphSeedFrom::Route),
+        Some("off") | Some("none") | Some("nil") | Some("false") => {
+            return Ok(crate::graph::ProjectGraphSeedFrom::Tracks(Vec::new()));
+        }
         _ => {}
     }
     match value {
+        EValue::Nil => Ok(crate::graph::ProjectGraphSeedFrom::Tracks(Vec::new())),
         EValue::Number(_) => Ok(crate::graph::ProjectGraphSeedFrom::Tracks(vec![
             parse_nonnegative_usize(value, "seed-from")?,
         ])),
@@ -1006,8 +1083,16 @@ fn parse_graph_seed_from(value: &EValue) -> Result<crate::graph::ProjectGraphSee
                 .map(|value| parse_nonnegative_usize(value, "seed-from track"))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        _ => Err("seed-from expects :route, track, or track list".to_string()),
+        _ => Err("seed-from expects :route, :off, track, or track list".to_string()),
     }
+}
+
+fn parse_graph_seed_on_reset(value: &EValue) -> Result<f64, String> {
+    let value = graph_number(value).ok_or("seed-on-reset expects a number")?;
+    if !value.is_finite() {
+        return Err("seed-on-reset expects a finite number".to_string());
+    }
+    Ok(value.max(0.0))
 }
 
 /// Is this token an "off"/"none" marker rather than a timebase?
@@ -1083,6 +1168,9 @@ fn parse_graph_node_edit(args: &[EValue]) -> Result<GraphNodeEdit, String> {
             "quantize" | "q" => edit.quantize = Some(parse_graph_quantize_override(value)?),
             "route" => edit.route = Some(parse_graph_route_override(value)?),
             "seed-from" => edit.seed_from = Some(parse_graph_seed_from(value)?),
+            "seed-on-reset" | "reset-seed" => {
+                edit.seed_on_reset = Some(parse_graph_seed_on_reset(value)?)
+            }
             "duration" | "dur" => edit.duration = Some(graph_parse_duration_spec(value)?),
             "swing" => edit.swing = Some(graph_parse_swing_spec(value)?),
             other => return Err(format!("graph-node unknown argument :{other}")),
@@ -1110,6 +1198,9 @@ fn apply_graph_node_edit(
     }
     if edit.seed_from.is_some() {
         node.seed_from = edit.seed_from;
+    }
+    if edit.seed_on_reset.is_some() {
+        node.seed_on_reset = edit.seed_on_reset;
     }
     if edit.duration.is_some() {
         node.duration = edit.duration;
@@ -1181,7 +1272,7 @@ fn parse_graph_edge_edit(
     }
     let from = from.ok_or_else(|| "graph-edge requires :from".to_string())?;
     let to = to.ok_or_else(|| "graph-edge requires :to".to_string())?;
-    if from >= manifest.shape.num_nodes() || to >= manifest.shape.num_nodes() {
+    if from >= graph_capacity_node_count(manifest) || to >= graph_capacity_node_count(manifest) {
         return Err("graph-edge from/to index out of range".to_string());
     }
     Ok(GraphEdgeEdit {
@@ -1223,7 +1314,11 @@ fn graph_manifest_to_value(
     map.insert("name".to_string(), lisp_string(manifest.name.clone()));
     map.insert(
         "nodes".to_string(),
-        lisp_number(manifest.shape.num_nodes() as f64),
+        lisp_number(manifest.shape.resolved_node_count(overrides) as f64),
+    );
+    map.insert(
+        "capacity".to_string(),
+        lisp_number(manifest.shape.capacity_num_nodes() as f64),
     );
     map.insert(
         "max-poly".to_string(),

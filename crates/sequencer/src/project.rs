@@ -1530,6 +1530,7 @@ mod tests {
                         quantize: Some(crate::graph::ProjectGraphQuantizeOverride::Off),
                         route: Some(crate::graph::ProjectGraphRouteOverride::Track(1)),
                         seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
+                        seed_on_reset: None,
                         duration: None,
                         swing: None,
                     }],
@@ -1548,6 +1549,7 @@ mod tests {
                     }],
                     reset_every_beats: None,
                     max_poly: None,
+                    node_count: Some(12),
                 }],
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
@@ -1652,6 +1654,7 @@ mod tests {
         assert_eq!(graph.node_params[0].value, 0.75);
         assert_eq!(graph.edge_params[0].group, "nrn->nrn");
         assert_eq!(graph.edge_params[0].value, 0.5);
+        assert_eq!(graph.node_count, Some(12));
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);
         assert_eq!(restored.buses.len(), 3);
@@ -1664,6 +1667,20 @@ mod tests {
             restored.patterns[0].track_params[0].sends[0].destination,
             crate::sequencer::DEFAULT_BUS_B_ID
         );
+    }
+
+    #[test]
+    fn graph_overrides_missing_node_count_loads_as_manifest_default() {
+        let json = r#"{
+            "sequencer_id": 7,
+            "sequencer_name": "legacy",
+            "node_intrinsics": [],
+            "node_params": [],
+            "edge_params": []
+        }"#;
+        let overrides: ProjectGraphOverrides =
+            serde_json::from_str(json).expect("deserialize legacy graph overrides");
+        assert_eq!(overrides.node_count, None);
     }
 
     #[test]

@@ -5153,8 +5153,9 @@ mod tests {
     use crate::graph::{
         EdgeSetSpec, GraphDurationSpec, GraphEdge, GraphEmission, GraphManifest, GraphNode,
         GraphPayload, GraphRuntime, NodeEval, NodeFire, NodeProto, ParamSpec,
-        ProjectGraphEdgeParamOverride, ProjectGraphNodeIntrinsicOverride, ProjectGraphOverrides,
-        ProjectGraphRouteOverride, ProjectGraphSeedFrom, SeedFrom, ShapeSpec, Topology,
+        ProjectGraphEdgeParamOverride, ProjectGraphNodeIntrinsicOverride,
+        ProjectGraphNodeParamOverride, ProjectGraphOverrides, ProjectGraphRouteOverride,
+        ProjectGraphSeedFrom, SeedFrom, ShapeSpec, Topology,
     };
     use crate::lisp_host;
     use crate::neural::{
@@ -5383,6 +5384,7 @@ mod tests {
                 quantize: None,
                 route: Some(ProjectGraphRouteOverride::Track(route)),
                 seed_from: None,
+                seed_on_reset: None,
                 duration: None,
                 swing: None,
             }],
@@ -5390,6 +5392,7 @@ mod tests {
             edge_params: Vec::new(),
             reset_every_beats: None,
             max_poly: None,
+            node_count: None,
         }
     }
 
@@ -5523,6 +5526,88 @@ mod tests {
         assert_eq!(runtimes[0].num_nodes(), 2);
         let out = process_graph(&mut runtimes[0], 0.0, 1.0);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn graph_node_count_override_rebuilds_runtime_and_preserves_overrides() {
+        let mut manifests = Vec::new();
+        let mut runtimes = Vec::new();
+        let manifest = graph_manifest(
+            1,
+            "g",
+            ShapeSpec::VariableLine {
+                default: 8,
+                min: 1,
+                max: 16,
+            },
+        );
+        reconcile_graph_runtimes(
+            vec![manifest.clone()],
+            &[],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+        assert_eq!(runtimes[0].num_nodes(), 8);
+        runtimes[0].seed(0, 0.0, GraphPayload::default());
+
+        let overrides = vec![ProjectGraphOverrides {
+            sequencer_id: 1,
+            sequencer_name: "g".into(),
+            node_count: Some(12),
+            node_params: vec![ProjectGraphNodeParamOverride {
+                group: "n".into(),
+                instance: 14,
+                param: "threshold".into(),
+                value: 0.25,
+            }],
+            edge_params: vec![ProjectGraphEdgeParamOverride {
+                group: "n->n".into(),
+                from: 14,
+                to: 3,
+                param: "weight".into(),
+                value: 0.5,
+            }],
+            ..ProjectGraphOverrides::default()
+        }];
+        reconcile_graph_runtimes(
+            vec![manifest.clone()],
+            &overrides,
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+
+        assert_eq!(runtimes[0].num_nodes(), 12);
+        let out = process_graph(&mut runtimes[0], 0.0, 1.0);
+        assert!(
+            out.is_empty(),
+            "node-count change must clear pending seed state"
+        );
+        assert_eq!(overrides[0].node_count, Some(12));
+        assert_eq!(overrides[0].node_params[0].instance, 14);
+        assert_eq!(overrides[0].edge_params[0].from, 14);
+
+        let shrunk = manifest.runtime_config_with_overrides(Some(&overrides[0]));
+        assert_eq!(
+            shrunk.nodes.len(),
+            12,
+            "storage remains dormant until node_count grows"
+        );
+        let mut restored_overrides = overrides[0].clone();
+        restored_overrides.node_count = Some(16);
+        let restored = manifest.runtime_config_with_overrides(Some(&restored_overrides));
+        assert_eq!(restored.nodes.len(), 16);
+        assert_eq!(restored.node_params[14]["threshold"], 0.25);
+        assert_eq!(
+            restored
+                .edges
+                .iter()
+                .find(|edge| edge.from == 14 && edge.to == 3)
+                .expect("restored dormant edge")
+                .weight,
+            0.5
+        );
     }
 
     #[test]
@@ -6681,6 +6766,7 @@ mod tests {
                         quantize: None,
                         route: None,
                         seed_from: Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                        seed_on_reset: None,
                         duration: None,
                         swing: None,
                     }],
@@ -6694,6 +6780,7 @@ mod tests {
                     }],
                     reset_every_beats: None,
                     max_poly: None,
+                    node_count: None,
                 });
                 Ok(())
             })

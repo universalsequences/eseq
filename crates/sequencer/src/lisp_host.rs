@@ -10649,6 +10649,19 @@ mod tests {
         assert_eq!(node.swing, Some(GraphSwingSpec::new(62.0, 1)));
         assert_eq!(node.reduce, Reduce::Sum);
         assert_eq!(node.seed_from, SeedFrom::Tracks(vec![0]));
+        let off_manifest = super::parse_graph_manifest(&vec![
+            gv_sym("off-seed"),
+            gv_kw("shape"),
+            gv_list(vec![gv_sym("line"), gv_num(1.0)]),
+            gv_list(vec![
+                gv_sym("def-node"),
+                gv_sym("nrn"),
+                gv_kw("seed-from"),
+                gv_kw("off"),
+            ]),
+        ])
+        .expect("parse seed-from off");
+        assert_eq!(off_manifest.node.seed_from, SeedFrom::Tracks(Vec::new()));
         assert_eq!(node.param_default("threshold"), Some(1.0));
         let transpose = node.params.iter().find(|p| p.name == "transpose").unwrap();
         assert!(transpose.is_int);
@@ -10684,6 +10697,71 @@ mod tests {
             .iter()
             .all(|edge| edge.delay_steps == 3
                 && edge.distribution == EdgeDistribution::WeightedChoice));
+    }
+
+    #[test]
+    fn parse_graph_manifest_line_shape_keeps_fixed_and_variable_distinct() {
+        use crate::graph::ShapeSpec;
+
+        let fixed = super::parse_graph_manifest(&sample_graph_args()).expect("fixed parse");
+        assert_eq!(fixed.shape, ShapeSpec::Line(2));
+
+        let mut shorthand = sample_graph_args();
+        shorthand[2] = gv_list(vec![
+            gv_sym("line"),
+            gv_num(8.0),
+            gv_kw("max"),
+            gv_num(16.0),
+        ]);
+        let shorthand = super::parse_graph_manifest(&shorthand).expect("shorthand parse");
+        assert_eq!(
+            shorthand.shape,
+            ShapeSpec::VariableLine {
+                default: 8,
+                min: 1,
+                max: 16,
+            }
+        );
+
+        let mut keyword = sample_graph_args();
+        keyword[2] = gv_list(vec![
+            gv_sym("line"),
+            gv_kw("default"),
+            gv_num(8.0),
+            gv_kw("min"),
+            gv_num(4.0),
+            gv_kw("max"),
+            gv_num(16.0),
+        ]);
+        let keyword = super::parse_graph_manifest(&keyword).expect("keyword parse");
+        assert_eq!(
+            keyword.shape,
+            ShapeSpec::VariableLine {
+                default: 8,
+                min: 4,
+                max: 16,
+            }
+        );
+
+        let mut invalid = sample_graph_args();
+        invalid[2] = gv_list(vec![
+            gv_sym("line"),
+            gv_kw("default"),
+            gv_num(3.0),
+            gv_kw("min"),
+            gv_num(4.0),
+            gv_kw("max"),
+            gv_num(16.0),
+        ]);
+        assert!(super::parse_graph_manifest(&invalid)
+            .unwrap_err()
+            .contains("default within"));
+
+        let mut missing_max = sample_graph_args();
+        missing_max[2] = gv_list(vec![gv_sym("line"), gv_kw("default"), gv_num(8.0)]);
+        assert!(super::parse_graph_manifest(&missing_max)
+            .unwrap_err()
+            .contains("requires :max"));
     }
 
     #[test]
@@ -11842,6 +11920,7 @@ mod tests {
                     quantize: None,
                     route: None,
                     seed_from: None,
+                    seed_on_reset: None,
                     duration: None,
                     swing: None,
                 });
@@ -11855,6 +11934,7 @@ mod tests {
                     quantize: None,
                     route: Some(crate::graph::ProjectGraphRouteOverride::Track(0)),
                     seed_from: None,
+                    seed_on_reset: None,
                     duration: None,
                     swing: None,
                 });
@@ -12291,6 +12371,441 @@ mod tests {
     }
 
     #[test]
+    fn graph_variable_reset_demo_tracks_active_node_count_and_dormant_overrides() {
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+        }
+
+        fn assert_number_prop(node: &eseqlisp::layout::LayoutNode, prop: &str, expected: f64) {
+            assert_eq!(
+                node.props.get(prop),
+                Some(&Value::Number(expected)),
+                "expected {} {:?} to be {expected}",
+                node.widget_type,
+                prop
+            );
+        }
+
+        fn assert_close(actual: f32, expected: f32, context: &str) {
+            assert!(
+                (actual - expected).abs() < 0.001,
+                "{context}: expected {expected}, got {actual}"
+            );
+        }
+
+        fn assert_number_prop_close(
+            node: &eseqlisp::layout::LayoutNode,
+            prop: &str,
+            expected: f64,
+        ) {
+            let Some(Value::Number(actual)) = node.props.get(prop) else {
+                panic!(
+                    "expected {} {:?} to be number {expected}, got {:?}",
+                    node.widget_type,
+                    prop,
+                    node.props.get(prop)
+                );
+            };
+            assert!(
+                (actual - expected).abs() < 0.001,
+                "expected {} {:?} to be {expected}, got {actual}",
+                node.widget_type,
+                prop
+            );
+        }
+
+        fn value_list(items: Vec<Value>) -> Value {
+            Value::List(
+                items
+                    .into_iter()
+                    .map(|value| Rc::new(RefCell::new(value)))
+                    .collect(),
+            )
+        }
+
+        fn test_track_colors() -> Value {
+            let palette = [
+                [0.96, 0.28, 0.52],
+                [0.25, 0.56, 0.98],
+                [0.28, 0.84, 0.54],
+                [0.96, 0.72, 0.24],
+                [0.66, 0.42, 0.96],
+                [0.26, 0.78, 0.84],
+                [0.98, 0.44, 0.28],
+                [0.76, 0.82, 0.30],
+                [0.52, 0.48, 0.98],
+                [0.98, 0.36, 0.70],
+                [0.38, 0.72, 0.42],
+                [0.90, 0.58, 0.22],
+                [0.40, 0.64, 0.90],
+                [0.72, 0.46, 0.82],
+                [0.30, 0.76, 0.68],
+                [0.86, 0.34, 0.34],
+            ];
+            value_list(
+                palette
+                    .iter()
+                    .map(|color| {
+                        value_list(
+                            color
+                                .iter()
+                                .map(|channel| Value::Number(*channel))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+
+        fn assert_reactive_number(runtime: &mut Runtime, expr: &str, expected: f64) {
+            assert_eq!(
+                runtime.eval_str(expr).expect("read reactive number"),
+                Some(Value::Number(expected)),
+                "{expr}"
+            );
+        }
+
+        fn latest_layout(runtime: &mut Runtime) -> std::sync::Arc<eseqlisp::layout::LayoutNode> {
+            let tree = runtime
+                .take_pending_buffer_widget_trees()
+                .into_iter()
+                .rev()
+                .find_map(|pending| match pending {
+                    eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                    eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+                })
+                .expect("script should publish widget tree");
+            runtime
+                .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 64.0)))
+                .expect("variable graph widget tree should lay out")
+        }
+
+        fn assert_active_layout(layout: &eseqlisp::layout::LayoutNode, count: usize) {
+            for key in [
+                "graph-variable-reset-node-count",
+                "graph-variable-reset-route-color-0",
+                "graph-variable-reset-seed-route-0",
+                "graph-variable-reset-reset-seed-0",
+                "graph-variable-reset-trigger-matrix",
+                "graph-variable-reset-energy-matrix",
+                "graph-variable-reset-weight-matrix",
+                "graph-variable-reset-dampening-matrix",
+            ] {
+                let widget =
+                    find_by_stable_key(layout, key).unwrap_or_else(|| panic!("missing {key}"));
+                assert_measured(widget);
+            }
+            let weight = find_by_stable_key(layout, "graph-variable-reset-weight-matrix").unwrap();
+            assert_number_prop(weight, "rows", count as f64);
+            assert_number_prop(weight, "cols", count as f64);
+            let trigger =
+                find_by_stable_key(layout, "graph-variable-reset-trigger-matrix").unwrap();
+            assert_number_prop(trigger, "rows", count as f64);
+            assert_number_prop(trigger, "cols", 1.0);
+            let energy = find_by_stable_key(layout, "graph-variable-reset-energy-matrix").unwrap();
+            let expected_matrix_height = count as f64 + (count.saturating_sub(1) as f64 * 0.2);
+            for matrix in [trigger, energy, weight] {
+                assert_number_prop_close(matrix, "height", expected_matrix_height);
+            }
+            let first_row = find_by_stable_key(layout, "graph-variable-reset-transpose-0")
+                .expect("missing first active row control");
+            let active_row_key = format!("graph-variable-reset-transpose-{}", count - 1);
+            let final_row = find_by_stable_key(layout, &active_row_key)
+                .unwrap_or_else(|| panic!("missing final active row control {active_row_key}"));
+            let active_bar_key = format!("graph-variable-reset-route-color-{}", count - 1);
+            assert!(
+                find_by_stable_key(layout, &active_bar_key).is_some(),
+                "missing final active route color bar {active_bar_key}"
+            );
+            let active_seed_route_key = format!("graph-variable-reset-seed-route-{}", count - 1);
+            assert!(
+                find_by_stable_key(layout, &active_seed_route_key).is_some(),
+                "missing final active seed route toggle {active_seed_route_key}"
+            );
+            let active_reset_seed_key = format!("graph-variable-reset-reset-seed-{}", count - 1);
+            assert!(
+                find_by_stable_key(layout, &active_reset_seed_key).is_some(),
+                "missing final active reset seed toggle {active_reset_seed_key}"
+            );
+            let row_top = first_row.rect.row;
+            let row_bottom = final_row.rect.row + final_row.rect.height;
+            for matrix in [trigger, energy, weight] {
+                assert_close(
+                    matrix.rect.row,
+                    row_top,
+                    &format!("{} top should align with first row", matrix.widget_type),
+                );
+                assert_close(
+                    matrix.rect.row + matrix.rect.height,
+                    row_bottom,
+                    &format!("{} bottom should align with final row", matrix.widget_type),
+                );
+            }
+            let inactive_row_key = format!("graph-variable-reset-transpose-{count}");
+            assert!(
+                find_by_stable_key(layout, &inactive_row_key).is_none(),
+                "inactive row control {inactive_row_key} should not be visible"
+            );
+            let inactive_bar_key = format!("graph-variable-reset-route-color-{count}");
+            assert!(
+                find_by_stable_key(layout, &inactive_bar_key).is_none(),
+                "inactive route color bar {inactive_bar_key} should not be visible"
+            );
+            let inactive_seed_route_key = format!("graph-variable-reset-seed-route-{count}");
+            assert!(
+                find_by_stable_key(layout, &inactive_seed_route_key).is_none(),
+                "inactive seed route toggle {inactive_seed_route_key} should not be visible"
+            );
+            let inactive_reset_seed_key = format!("graph-variable-reset-reset-seed-{count}");
+            assert!(
+                find_by_stable_key(layout, &inactive_reset_seed_key).is_none(),
+                "inactive reset seed toggle {inactive_reset_seed_key} should not be visible"
+            );
+        }
+
+        let state = Arc::new(SequencerState::new(
+            16,
+            (0..16).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+                ("track-colors", test_track_colors()),
+            ],
+            true,
+        );
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
+            .expect("install sequencer tab registration test stub");
+        runtime
+            .eval_str(
+                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+            )
+            .expect("install script sequencer tab registration test stub");
+
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/graph-neural-variable-reset-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read graph variable reset demo script");
+        runtime
+            .eval_str(&source)
+            .expect("evaluate graph variable reset demo");
+        assert!(
+            state.current_graph_overrides().is_empty(),
+            "loading the variable demo must publish graph/UI without writing pattern overrides"
+        );
+        let manifest = state
+            .published_sequencers()
+            .into_iter()
+            .find_map(|published| published.graph)
+            .expect("published variable graph manifest");
+        assert_eq!(manifest.name, "neural-variable-reset-demo");
+        assert_eq!(manifest.shape.num_nodes(), 8);
+        assert_eq!(manifest.shape.capacity_num_nodes(), 16);
+
+        let layout = latest_layout(&mut runtime);
+        assert_active_layout(&layout, 8);
+        assert_reactive_number(
+            &mut runtime,
+            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 0 \"active\")))",
+            1.0,
+        );
+        assert_reactive_number(
+            &mut runtime,
+            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 0 \"r\")))",
+            0.96,
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph gvr-name 0 :seed-route))")
+                .expect("default seed route"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph gvr-name 0 :seed-on-reset))")
+                .expect("default reset seed"),
+            Some(Value::Number(0.0))
+        );
+        let route_change = find_by_stable_key(&layout, "graph-variable-reset-route-4")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("route callback");
+        runtime
+            .invoke(route_change.clone(), vec![Value::String("Track 3".into())])
+            .expect("route node 4 to track 3");
+        assert_reactive_number(
+            &mut runtime,
+            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"active\")))",
+            1.0,
+        );
+        assert_reactive_number(
+            &mut runtime,
+            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"r\")))",
+            0.28,
+        );
+        assert_reactive_number(
+            &mut runtime,
+            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"g\")))",
+            0.84,
+        );
+        assert_reactive_number(
+            &mut runtime,
+            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"b\")))",
+            0.54,
+        );
+        runtime
+            .invoke(route_change, vec![Value::String("Off".into())])
+            .expect("route node 4 off");
+        assert_reactive_number(
+            &mut runtime,
+            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"active\")))",
+            0.0,
+        );
+        assert_reactive_number(
+            &mut runtime,
+            "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 4 \"r\")))",
+            0.20,
+        );
+        let seed_route_change = find_by_stable_key(&layout, "graph-variable-reset-seed-route-1")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("seed route callback");
+        runtime
+            .invoke(seed_route_change.clone(), vec![Value::Bool(true)])
+            .expect("enable node 1 routed seeding");
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value gvr-name 1 :seed-route)")
+                .expect("node 1 seed route enabled"),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value gvr-name 1 :seed-from)")
+                .expect("node 1 seed-from routed track"),
+            Some(value_list(vec![Value::Number(0.0)]))
+        );
+        runtime
+            .invoke(seed_route_change, vec![Value::Bool(false)])
+            .expect("disable node 1 routed seeding");
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value gvr-name 1 :seed-route)")
+                .expect("node 1 seed route disabled"),
+            Some(Value::Number(0.0))
+        );
+        let reset_seed_change = find_by_stable_key(&layout, "graph-variable-reset-reset-seed-7")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("reset seed callback");
+        runtime
+            .invoke(reset_seed_change, vec![Value::Bool(true)])
+            .expect("enable node 7 reset seeding");
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value gvr-name 7 :seed-on-reset)")
+                .expect("node 7 reset seed enabled"),
+            Some(Value::Number(1.0))
+        );
+        let node_count_change = find_by_stable_key(&layout, "graph-variable-reset-node-count")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("node-count callback");
+
+        runtime
+            .invoke(node_count_change.clone(), vec![Value::Number(16.0)])
+            .expect("grow to 16");
+        runtime.run_reactive_cycle();
+        let layout = latest_layout(&mut runtime);
+        assert_active_layout(&layout, 16);
+
+        runtime
+            .eval_str("(graph-param gvr-name 14 :transpose 7)")
+            .expect("write node 14 override");
+        runtime
+            .eval_str("(graph-edge gvr-name :from 14 :to 3 :weight 0.5)")
+            .expect("write edge 14->3 override");
+
+        runtime
+            .invoke(node_count_change.clone(), vec![Value::Number(12.0)])
+            .expect("shrink to 12");
+        runtime.run_reactive_cycle();
+        let layout = latest_layout(&mut runtime);
+        assert_active_layout(&layout, 12);
+        assert!(find_by_stable_key(&layout, "graph-variable-reset-transpose-14").is_none());
+
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-variable-reset-demo")
+            .expect("variable graph overrides");
+        assert_eq!(graph.node_count, Some(12));
+        assert!(graph
+            .node_params
+            .iter()
+            .any(|param| param.instance == 14 && param.param == "transpose" && param.value == 7.0));
+        assert!(graph
+            .edge_params
+            .iter()
+            .any(|edge| edge.from == 14 && edge.to == 3 && edge.value == 0.5));
+        assert!(graph.node_intrinsics.iter().any(|node| {
+            node.instance == 7 && node.seed_on_reset == Some(1.0) && node.seed_from.is_none()
+        }));
+        let shrunk = manifest.runtime_config_with_overrides(Some(graph));
+        assert_eq!(shrunk.nodes.len(), 12);
+        assert_eq!(shrunk.nodes[7].seed_on_reset, 1.0);
+        assert!(shrunk.nodes[7].trigger_on_reset);
+        assert!(shrunk
+            .edges
+            .iter()
+            .all(|edge| edge.from < 12 && edge.to < 12));
+
+        runtime
+            .invoke(node_count_change, vec![Value::Number(16.0)])
+            .expect("restore to 16");
+        runtime.run_reactive_cycle();
+        let layout = latest_layout(&mut runtime);
+        assert_active_layout(&layout, 16);
+        assert!(find_by_stable_key(&layout, "graph-variable-reset-transpose-14").is_some());
+        assert_eq!(
+            runtime
+                .eval_str("(graph-param-value gvr-name 14 :transpose)")
+                .expect("read restored node 14"),
+            Some(Value::Number(7.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-edge-value gvr-name :from 14 :to 3 :weight)")
+                .expect("read restored edge 14->3"),
+            Some(Value::Number(0.5))
+        );
+    }
+
+    #[test]
     fn graph_markov_8x8_demo_loads_weight_matrix_and_node_delays() {
         fn collect_widgets<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
@@ -12344,6 +12859,11 @@ mod tests {
         runtime
             .eval_str("(def seq-register-step-sequencer-tab (label buffer) nil)")
             .expect("install sequencer tab registration test stub");
+        runtime
+            .eval_str(
+                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+            )
+            .expect("install script sequencer tab registration test stub");
 
         let source = std::fs::read_to_string(format!(
             "{}/scripts/graph-markov-8x8-demo.lisp",
@@ -12933,6 +13453,7 @@ mod tests {
                     quantize: None,
                     route: None,
                     seed_from: Some(crate::graph::ProjectGraphSeedFrom::Tracks(vec![0])),
+                    seed_on_reset: None,
                     duration: None,
                     swing: None,
                 },
@@ -12944,6 +13465,7 @@ mod tests {
                     quantize: None,
                     route: None,
                     seed_from: None,
+                    seed_on_reset: None,
                     duration: None,
                     swing: None,
                 },
@@ -12955,6 +13477,7 @@ mod tests {
                     quantize: None,
                     route: Some(crate::graph::ProjectGraphRouteOverride::Track(0)),
                     seed_from: None,
+                    seed_on_reset: None,
                     duration: None,
                     swing: None,
                 },
@@ -12974,6 +13497,7 @@ mod tests {
             }],
             reset_every_beats: None,
             max_poly: None,
+            node_count: None,
         };
         state
             .edit_current_graph_overrides(|overrides| {
@@ -13002,6 +13526,7 @@ mod tests {
             Some(workspace_root),
             r#"
             (def seq-register-step-sequencer-tab (label buffer) nil)
+            (def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
             (load "crates/sequencer/scripts/graph-neural-8x8-demo.lisp")
             "#,
             Vec::new(),
@@ -13114,7 +13639,7 @@ mod tests {
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
         runtime
             .eval_str(
-                "(graph-node \"neural\" 1 :delay 3 :route 0 :seed-from 0 :duration (beats :16) :swing (swing 60 :16))",
+                "(graph-node \"neural\" 1 :delay 3 :route 0 :seed-from :route :seed-on-reset 1 :duration (beats :16) :swing (swing 60 :16))",
             )
             .expect("graph-node");
         runtime
@@ -13130,6 +13655,11 @@ mod tests {
         let overrides = state.current_graph_overrides();
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].node_intrinsics[0].delay_steps, Some(3));
+        assert_eq!(
+            overrides[0].node_intrinsics[0].seed_from,
+            Some(crate::graph::ProjectGraphSeedFrom::Route)
+        );
+        assert_eq!(overrides[0].node_intrinsics[0].seed_on_reset, Some(1.0));
         assert_eq!(
             overrides[0].node_intrinsics[0].duration,
             Some(crate::graph::GraphDurationSpec::Beats { value: 0.25 })
@@ -13157,6 +13687,39 @@ mod tests {
             runtime
                 .eval_str("(graph-node-value \"neural\" 1 :route)")
                 .expect("graph-node-value route"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value \"neural\" 1 :seed-route)")
+                .expect("graph-node-value seed route"),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph \"neural\" 1 :seed-on-reset))")
+                .expect("bound seed-on-reset"),
+            Some(Value::Number(1.0))
+        );
+        runtime
+            .eval_str("(graph-node \"neural\" 1 :seed-from :off :seed-on-reset 0)")
+            .expect("disable seeding");
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value \"neural\" 1 :seed-route)")
+                .expect("graph-node-value seed route off"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value \"neural\" 1 :seed-from)")
+                .expect("graph-node-value seed-from off"),
+            Some(Value::List(Vec::new()))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value \"neural\" 1 :seed-on-reset)")
+                .expect("graph-node-value seed-on-reset off"),
             Some(Value::Number(0.0))
         );
         assert_eq!(
@@ -13408,6 +13971,160 @@ mod tests {
         let config = manifest.runtime_config_with_overrides(Some(&overrides[0]));
         assert_eq!(config.reset_interval_beats, 8.0);
         assert_eq!(config.max_poly, 1);
+    }
+
+    #[test]
+    fn graph_config_node_count_round_trips_and_restores_dormant_overrides() {
+        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
+        use crate::sequencer::{PublishedSequencer, Timebase};
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let manifest = GraphManifest {
+            id: 188,
+            name: "variable".into(),
+            shape: ShapeSpec::VariableLine {
+                default: 8,
+                min: 1,
+                max: 16,
+            },
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 4,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "nrn".into(),
+                params: vec![ParamSpec {
+                    name: "threshold".into(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "nrn".into(),
+                to: "nrn".into(),
+                topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    is_int: false,
+                }],
+            }],
+        };
+        let fixed = GraphManifest {
+            id: 189,
+            name: "fixed".into(),
+            shape: ShapeSpec::Line(8),
+            ..manifest.clone()
+        };
+        state.publish_sequencer(PublishedSequencer {
+            id: manifest.id,
+            name: manifest.name.clone(),
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            graph: Some(manifest.clone()),
+        });
+        state.publish_sequencer(PublishedSequencer {
+            id: fixed.id,
+            name: fixed.name.clone(),
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            graph: Some(fixed),
+        });
+
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"variable\" :node-count)")
+                .expect("node-count default"),
+            Some(Value::Number(8.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph-config \"variable\" :node-count))")
+                .expect("bound node-count default"),
+            Some(Value::Number(8.0))
+        );
+        let before_fixed_reject = state.current_graph_overrides();
+        let fixed_result = runtime
+            .eval_str("(graph-config \"fixed\" :node-count 4)")
+            .expect("fixed node-count diagnostic should not abort the VM");
+        assert_ne!(fixed_result, Some(Value::Bool(true)));
+        assert_eq!(state.current_graph_overrides(), before_fixed_reject);
+
+        let before = state.scheduler_snapshot_version();
+        runtime
+            .eval_str("(graph-config \"variable\" :node-count 12)")
+            .expect("set node-count");
+        assert!(state.scheduler_snapshot_version() > before);
+        runtime
+            .eval_str("(graph-param \"variable\" 14 :threshold 0.75)")
+            .expect("write dormant node param");
+        runtime
+            .eval_str("(graph-edge \"variable\" :from 14 :to 3 :weight 0.5)")
+            .expect("write dormant edge");
+        let inactive_bind = runtime
+            .eval_str("(reactive-value (bind-graph \"variable\" 14 :threshold))")
+            .expect("inactive bind diagnostic should not abort the VM");
+        assert_ne!(inactive_bind, Some(Value::Number(0.75)));
+
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "variable")
+            .expect("variable graph overrides");
+        assert_eq!(graph.node_count, Some(12));
+        assert!(graph
+            .node_params
+            .iter()
+            .any(|param| param.instance == 14 && param.value == 0.75));
+        assert!(graph
+            .edge_params
+            .iter()
+            .any(|edge| edge.from == 14 && edge.to == 3 && edge.value == 0.5));
+        assert_eq!(
+            manifest
+                .runtime_config_with_overrides(Some(graph))
+                .nodes
+                .len(),
+            12
+        );
+
+        runtime
+            .eval_str("(graph-config \"variable\" :node-count 16)")
+            .expect("grow node-count");
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph \"variable\" 14 :threshold))")
+                .expect("read restored dormant node"),
+            Some(Value::Number(0.75))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-edge-value \"variable\" :from 14 :to 3 :weight)")
+                .expect("read restored dormant edge"),
+            Some(Value::Number(0.5))
+        );
+
+        runtime
+            .eval_str("(graph-config \"variable\" :node-count 99)")
+            .expect("clamp node-count high");
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "variable")
+            .expect("variable graph overrides after clamp");
+        assert_eq!(graph.node_count, Some(16));
     }
 
     #[test]

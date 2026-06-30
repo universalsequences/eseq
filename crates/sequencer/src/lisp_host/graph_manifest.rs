@@ -34,13 +34,18 @@ fn graph_quantize(value: &EValue) -> Result<Option<Timebase>, String> {
     }
 }
 
-/// `:route`/`none` → follow route; a number → single track; a list → track set.
+/// `:route` → follow the node route; `:off`/`nil`/empty list → no track seed;
+/// a number → single track; a list → track set.
 fn graph_seed_from(value: &EValue) -> SeedFrom {
     match graph_keyword(value).as_deref() {
-        Some("route") | Some("none") | Some("nil") => return SeedFrom::Route,
+        Some("route") => return SeedFrom::Route,
+        Some("off") | Some("none") | Some("nil") | Some("false") => {
+            return SeedFrom::Tracks(Vec::new());
+        }
         _ => {}
     }
     match value {
+        EValue::Nil => SeedFrom::Tracks(Vec::new()),
         EValue::Number(n) if *n >= 0.0 => SeedFrom::Tracks(vec![*n as usize]),
         EValue::List(_) => {
             let tracks = graph_list_items(value)

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::{CString, c_void};
+use std::ffi::{c_void, CString};
 use std::sync::Arc;
 use std::time::Instant;
 
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
-use eseqlisp::widget_render::spectrogram::{SpectrogramRequest, collect_spectrogram_requests};
+use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, SpectrogramRequest};
 use sequencer::audio_tap::{self, SpectrogramProcessor};
 use sequencer::audiograph::{self, LiveGraphPtr};
 use sequencer::sequencer::BusId;

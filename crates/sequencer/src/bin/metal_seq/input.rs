@@ -1,7 +1,7 @@
 use super::*;
 use eseqlisp::widget_render::number_picker::{
-    NumberPickerEditOutcome, clear_number_picker_edit_state,
-    handle_number_picker_edit_key_for_widget, number_picker_edit_state,
+    clear_number_picker_edit_state, handle_number_picker_edit_key_for_widget,
+    number_picker_edit_state, NumberPickerEditOutcome,
 };
 
 #[derive(Clone, Debug)]
@@ -1273,19 +1273,19 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        ExpandedStepProjectionRegistry, ExpandedStepViewport, HeldKeyboardNote, SoftStepParamEdit,
         build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
-        held_note_for_key, note_from_key,
+        held_note_for_key, note_from_key, ExpandedStepProjectionRegistry, ExpandedStepViewport,
+        HeldKeyboardNote, SoftStepParamEdit,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use eseqlisp::HostCommand;
     use eseqlisp::editor::ViewMode;
     use eseqlisp::mode::BufferMode;
     use eseqlisp::vm::Value;
     use eseqlisp::widget_render::WidgetKeyEvent;
+    use eseqlisp::HostCommand;
     use eseqlisp::{Editor, EditorConfig, Runtime};
     use sequencer::sequencer::{SequencerState, StepParam, StepSnapshot};
     use std::cell::RefCell;

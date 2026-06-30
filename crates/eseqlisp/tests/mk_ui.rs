@@ -11,8 +11,10 @@ const P: &str = r#"
 (def ui-lego-column (a b c) (v-stack a b c))
 (def ui-lego-column-2 (a b) (v-stack a b))
 "#;
-#[test] fn mk_ui_evaluates() {
-    let ui = std::fs::read_to_string("../sequencer/instruments/drums/membrane-kick/ui.lisp").unwrap();
+#[test]
+fn mk_ui_evaluates() {
+    let ui =
+        std::fs::read_to_string("../sequencer/instruments/drums/membrane-kick/ui.lisp").unwrap();
     let mut rt = Runtime::new();
     rt.eval_str(P).expect("preamble");
     rt.eval_str(&ui).expect("ui evaluates");

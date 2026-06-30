@@ -580,7 +580,7 @@
 (def sbrowser-tabs ()
   (v-stack :key "browser-tabs" :width 9.0 :gap 0.25
     (sbrowser-tab-button "samples" "Samples")
-    (sbrowser-tab-button "instruments" "Instr")
+    (sbrowser-tab-button "instruments" "Instruments")
     (sbrowser-tab-button "audio-fx" "Audio FX")
     (sbrowser-tab-button "midi-fx" "MIDI FX")
     (sbrowser-tab-button "presets" "Presets")

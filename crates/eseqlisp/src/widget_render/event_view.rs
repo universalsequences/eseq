@@ -5,10 +5,10 @@ use std::rc::Rc;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    get_f32_prop, resolve_named_color, styled_cell, CellBuffer, MouseEventOutcome, WidgetDefinition,
+    CellBuffer, MouseEventOutcome, WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
-use crate::layout::{f64_to_f32, get_prop_num, Constraints, LayoutNode, MeasureCtx, Rect, Size};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
@@ -1004,9 +1004,11 @@ mod tests {
         );
         let prims =
             EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &layout_node(props), viewport());
-        assert!(prims
-            .iter()
-            .any(|prim| matches!(prim, MetalPrimitive::Rect(_))));
+        assert!(
+            prims
+                .iter()
+                .any(|prim| matches!(prim, MetalPrimitive::Rect(_)))
+        );
         assert!(prims.len() > 1);
     }
 
@@ -1064,9 +1066,11 @@ mod tests {
         );
         let prims =
             EVENT_VIEW_WIDGET.build_metal_primitives("event-view", &layout_node(props), viewport());
-        assert!(prims
-            .iter()
-            .any(|prim| matches!(prim, MetalPrimitive::PatchCable(_))));
+        assert!(
+            prims
+                .iter()
+                .any(|prim| matches!(prim, MetalPrimitive::PatchCable(_)))
+        );
         assert!(
             prims
                 .iter()
