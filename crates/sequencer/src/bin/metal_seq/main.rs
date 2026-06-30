@@ -11883,10 +11883,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let (tx, rx) = std::sync::mpsc::channel();
                         std::thread::spawn(move || {
                             let result =
-                                sequencer::lisp_host::compile_and_load_instrument_with_asset_base(
+                                sequencer::lisp_host::compile_and_load_instrument_with_origin(
                                     &compile_source,
                                     sample_rate,
                                     asset_base.as_deref(),
+                                    sequencer::lisp_host::DGenSourceOrigin::Draft,
                                 );
                             let _ = tx.send(result);
                         });
@@ -12037,10 +12038,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let asset_base = session.path.parent().map(|parent| parent.to_path_buf());
                         let (tx, rx) = std::sync::mpsc::channel();
                         std::thread::spawn(move || {
-                            let result = sequencer::lisp_host::compile_and_load_with_asset_base(
+                            let result = sequencer::lisp_host::compile_and_load_with_origin(
                                 &compile_source,
                                 sample_rate,
                                 asset_base.as_deref(),
+                                sequencer::lisp_host::DGenSourceOrigin::Draft,
                             );
                             let _ = tx.send(result);
                         });
@@ -12161,10 +12163,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        match sequencer::lisp_host::compile_and_load_with_asset_base(
+                        match sequencer::lisp_host::compile_and_load_with_origin(
                             sequencer::lisp_host::EFFECT_TEMPLATE,
                             app.graph.sample_rate,
                             file_path.parent(),
+                            sequencer::lisp_host::DGenSourceOrigin::Draft,
                         )
                         .and_then(|result| {
                             app.apply_compiled_effect_to_slot_sync(

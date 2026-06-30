@@ -822,20 +822,32 @@ impl App {
             return false;
         }
 
-        if let Some(bus) = self.buses.iter().find(|bus| bus.id == id) {
+        let Some(bus_idx) = self.buses.iter().position(|bus| bus.id == id) else {
+            return false;
+        };
+
+        if let Some(bus) = self.buses.get(bus_idx) {
             for slot in &bus.effect_slots {
                 if slot.node_id != 0 {
                     unsafe {
                         crate::audiograph::delete_node(self.graph.lg.0, slot.node_id as i32);
                     }
+                    crate::conv_reverb::clear_instance(slot.node_id as i32);
+                }
+                if slot.modulator_node_id != 0 {
+                    unsafe {
+                        crate::audiograph::delete_node(
+                            self.graph.lg.0,
+                            slot.modulator_node_id as i32,
+                        );
+                    }
                 }
             }
         }
 
-        let before = self.buses.len();
-        self.buses.retain(|bus| bus.id != id);
-        if self.buses.len() == before {
-            return false;
+        self.buses.remove(bus_idx);
+        if bus_idx < self.editor.bus_effect_leases.len() {
+            self.editor.bus_effect_leases.remove(bus_idx);
         }
 
         self.remove_bus_references_from_live_pattern(id);

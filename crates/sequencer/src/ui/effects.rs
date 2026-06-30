@@ -69,11 +69,163 @@ fn instrument_display_name(name: &str) -> String {
         .to_string()
 }
 
+fn empty_track_effect_lease_slots() -> Vec<Option<lisp_host::DylibLease>> {
+    std::iter::repeat_with(|| None)
+        .take(BUILTIN_SLOT_COUNT + MAX_CUSTOM_FX)
+        .collect()
+}
+
+fn empty_bus_effect_lease_slots() -> Vec<Option<lisp_host::DylibLease>> {
+    std::iter::repeat_with(|| None)
+        .take(MAX_CUSTOM_FX)
+        .collect()
+}
+
+fn insert_empty_lease_slot<T>(row: &mut [Option<T>], slot_idx: usize) {
+    if slot_idx >= row.len() {
+        return;
+    }
+    let last = row.len().saturating_sub(1);
+    for idx in (slot_idx + 1..=last).rev() {
+        row[idx] = row[idx - 1].take();
+    }
+    row[slot_idx] = None;
+}
+
+fn remove_lease_slot<T>(row: &mut [Option<T>], slot_idx: usize) {
+    if slot_idx >= row.len() {
+        return;
+    }
+    row[slot_idx] = None;
+    for idx in slot_idx..row.len().saturating_sub(1) {
+        row[idx] = row[idx + 1].take();
+    }
+    if let Some(last) = row.last_mut() {
+        *last = None;
+    }
+}
+
+fn move_lease_slot<T>(row: &mut [Option<T>], source_slot: usize, target_slot: usize) {
+    if source_slot >= row.len() || target_slot >= row.len() || source_slot == target_slot {
+        return;
+    }
+    let lease = row[source_slot].take();
+    if source_slot < target_slot {
+        for idx in source_slot..target_slot {
+            row[idx] = row[idx + 1].take();
+        }
+    } else {
+        for idx in (target_slot + 1..=source_slot).rev() {
+            row[idx] = row[idx - 1].take();
+        }
+    }
+    row[target_slot] = lease;
+}
+
 impl App {
+    fn ensure_track_effect_lease_capacity(&mut self, track: usize) {
+        while self.editor.track_effect_leases.len() <= track {
+            self.editor
+                .track_effect_leases
+                .push(empty_track_effect_lease_slots());
+        }
+        if self.editor.track_effect_leases[track].len() < BUILTIN_SLOT_COUNT + MAX_CUSTOM_FX {
+            self.editor.track_effect_leases[track]
+                .resize_with(BUILTIN_SLOT_COUNT + MAX_CUSTOM_FX, || None);
+        }
+    }
+
+    fn ensure_bus_effect_lease_capacity(&mut self, bus_idx: usize) {
+        while self.editor.bus_effect_leases.len() <= bus_idx {
+            self.editor
+                .bus_effect_leases
+                .push(empty_bus_effect_lease_slots());
+        }
+        if self.editor.bus_effect_leases[bus_idx].len() < MAX_CUSTOM_FX {
+            self.editor.bus_effect_leases[bus_idx].resize_with(MAX_CUSTOM_FX, || None);
+        }
+    }
+
+    pub(super) fn set_track_effect_lease(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        lease: Option<lisp_host::DylibLease>,
+    ) {
+        self.ensure_track_effect_lease_capacity(track);
+        if let Some(slot) = self
+            .editor
+            .track_effect_leases
+            .get_mut(track)
+            .and_then(|row| row.get_mut(slot_idx))
+        {
+            *slot = lease;
+        }
+    }
+
+    pub(super) fn set_bus_effect_lease(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        lease: Option<lisp_host::DylibLease>,
+    ) {
+        self.ensure_bus_effect_lease_capacity(bus_idx);
+        if let Some(slot) = self
+            .editor
+            .bus_effect_leases
+            .get_mut(bus_idx)
+            .and_then(|row| row.get_mut(slot_idx))
+        {
+            *slot = lease;
+        }
+    }
+
+    pub(super) fn insert_empty_track_effect_lease_slot(&mut self, track: usize, slot_idx: usize) {
+        self.ensure_track_effect_lease_capacity(track);
+        let row = &mut self.editor.track_effect_leases[track];
+        insert_empty_lease_slot(row, slot_idx);
+    }
+
+    pub(super) fn remove_track_effect_lease_slot(&mut self, track: usize, slot_idx: usize) {
+        self.ensure_track_effect_lease_capacity(track);
+        let row = &mut self.editor.track_effect_leases[track];
+        remove_lease_slot(row, slot_idx);
+    }
+
+    pub(super) fn move_track_effect_lease_slot(
+        &mut self,
+        track: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) {
+        self.ensure_track_effect_lease_capacity(track);
+        let row = &mut self.editor.track_effect_leases[track];
+        move_lease_slot(row, source_slot, target_slot);
+    }
+
+    pub(super) fn insert_empty_bus_effect_lease_slot(&mut self, bus_idx: usize, slot_idx: usize) {
+        self.ensure_bus_effect_lease_capacity(bus_idx);
+        let row = &mut self.editor.bus_effect_leases[bus_idx];
+        insert_empty_lease_slot(row, slot_idx);
+    }
+
+    pub(super) fn move_bus_effect_lease_slot(
+        &mut self,
+        bus_idx: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) {
+        self.ensure_bus_effect_lease_capacity(bus_idx);
+        let row = &mut self.editor.bus_effect_leases[bus_idx];
+        move_lease_slot(row, source_slot, target_slot);
+    }
+
     fn compile_saved_effect(&self, name: &str) -> Result<lisp_host::CompileResult, String> {
         let source_path = lisp_host::effect_source_path(name);
         let source = std::fs::read_to_string(&source_path).map_err(|e| e.to_string())?;
-        lisp_host::compile_and_load_with_asset_base(
+        self.editor.dylib_cache.acquire(
+            lisp_host::DGenCompileKind::Effect,
+            lisp_host::DGenSourceOrigin::Custom,
             &source,
             self.graph.sample_rate,
             source_path.parent(),
@@ -182,7 +334,8 @@ impl App {
             self.graph.sample_rate,
             asset_base.as_deref(),
         )?;
-        let cache_idx = self.cache_instrument_engine(name, &source, &result.manifest, result.lib);
+        let cache_idx =
+            self.cache_instrument_engine(name, &source, &result.manifest, result.lib, result.lease);
         let manifest = self.editor.engine_registry.engines[cache_idx]
             .manifest
             .clone();
@@ -232,7 +385,8 @@ impl App {
         run_mode: CustomInstrumentRunMode,
         result: lisp_host::CompileResult,
     ) -> Result<usize, String> {
-        let cache_idx = self.cache_instrument_engine(name, source, &result.manifest, result.lib);
+        let cache_idx =
+            self.cache_instrument_engine(name, source, &result.manifest, result.lib, result.lease);
         let manifest = self.editor.engine_registry.engines[cache_idx]
             .manifest
             .clone();
@@ -255,12 +409,14 @@ impl App {
         source: &str,
         asset_base: Option<&std::path::Path>,
     ) -> Result<usize, String> {
-        let result = lisp_host::compile_and_load_instrument_with_asset_base(
+        let result = lisp_host::compile_and_load_instrument_with_origin(
             source,
             self.graph.sample_rate,
             asset_base,
+            lisp_host::DGenSourceOrigin::Draft,
         )?;
-        let cache_idx = self.cache_instrument_engine(name, source, &result.manifest, result.lib);
+        let cache_idx =
+            self.cache_instrument_engine(name, source, &result.manifest, result.lib, result.lease);
         let manifest = self.editor.engine_registry.engines[cache_idx]
             .manifest
             .clone();
@@ -316,7 +472,7 @@ impl App {
             asset_base.as_deref(),
         )?;
         let manifest = result.manifest.clone();
-        let lib_index = self.push_instrument_lib(result.lib);
+        let lib_index = self.push_instrument_lib(result.lib, result.lease);
         let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         unsafe {
             self.graph_controller()
@@ -403,7 +559,7 @@ impl App {
         }
 
         let manifest = result.manifest.clone();
-        let lib_index = self.push_instrument_lib(result.lib);
+        let lib_index = self.push_instrument_lib(result.lib, result.lease);
         let lib_ptr: *const lisp_host::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         unsafe {
             self.graph_controller()
@@ -458,9 +614,9 @@ impl App {
         source: &str,
         manifest: &lisp_host::DGenManifest,
         lib: lisp_host::LoadedDGenLib,
+        lease: Option<lisp_host::DylibLease>,
     ) -> usize {
-        let lib_index = self.editor.instrument_libs.len();
-        self.editor.instrument_libs.push(lib);
+        let lib_index = self.push_instrument_lib(lib, lease);
         let entry = super::EngineDescriptor {
             name: name.to_string(),
             source: source.to_string(),
@@ -494,9 +650,14 @@ impl App {
         Ok(self.editor.engine_registry.upsert(entry))
     }
 
-    fn push_instrument_lib(&mut self, lib: lisp_host::LoadedDGenLib) -> usize {
+    fn push_instrument_lib(
+        &mut self,
+        lib: lisp_host::LoadedDGenLib,
+        lease: Option<lisp_host::DylibLease>,
+    ) -> usize {
         let lib_index = self.editor.instrument_libs.len();
         self.editor.instrument_libs.push(lib);
+        self.editor.instrument_lib_leases.push(lease);
         lib_index
     }
 
@@ -836,6 +997,7 @@ impl App {
         self.write_custom_effect_entries(track, &entries);
         self.reconnect_custom_effect_chain(old_edges, track);
         let slot_idx = BUILTIN_SLOT_COUNT + insert_offset;
+        self.insert_empty_track_effect_lease_slot(track, slot_idx);
         self.sync_other_pattern_effect_insert(track, slot_idx);
         Ok(slot_idx)
     }
@@ -904,6 +1066,7 @@ impl App {
         self.write_custom_effect_entries(track, &entries);
         self.reconnect_custom_effect_chain(old_edges, track);
         let slot_idx = BUILTIN_SLOT_COUNT + target_offset;
+        self.move_track_effect_lease_slot(track, source_slot, slot_idx);
         self.sync_other_pattern_effect_move(track, source_slot, slot_idx);
         self.publish_effect_reorder();
         Ok(slot_idx)
@@ -1419,6 +1582,7 @@ impl App {
         unsafe {
             if let Some(old_id) = existing {
                 lisp_host::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
+                crate::conv_reverb::clear_instance(old_id);
             }
             if let Some(old_mod_id) = existing_modulator {
                 lisp_host::remove_effect_modulator(self.graph.lg.0, old_mod_id);
@@ -1441,6 +1605,7 @@ impl App {
                 )?;
             }
         }
+        self.set_track_effect_lease(track, slot_idx, None);
         self.apply_builtin_effect_to_slot_with_modulator(
             track,
             slot_idx,
@@ -1470,8 +1635,13 @@ impl App {
         } else {
             return Err(format!("Unknown dgenlisp builtin '{name}'"));
         };
-        let result =
-            lisp_host::compile_and_load_with_asset_base(source, self.graph.sample_rate, None)?;
+        let result = self.editor.dylib_cache.acquire(
+            lisp_host::DGenCompileKind::Effect,
+            lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+            source,
+            self.graph.sample_rate,
+            None,
+        )?;
         // Capture IR tensor offsets before `result` is consumed by apply.
         let slots = crate::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
@@ -2042,14 +2212,21 @@ impl App {
         );
 
         if let Some(r) = result {
+            let lisp_host::EffectEditResult {
+                manifest,
+                lib,
+                source: _,
+                name,
+                lease,
+            } = r;
             let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
             let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
             match unsafe {
                 lisp_host::add_effect_to_chain_at(
                     self.graph.lg.0,
                     slot_id,
-                    &r.manifest,
-                    &r.lib,
+                    &manifest,
+                    &lib,
                     predecessor_id,
                     predecessor_outputs,
                     successor_id,
@@ -2060,13 +2237,17 @@ impl App {
                 )
             } {
                 Ok(node_ids) => {
-                    self.apply_effect_to_slot(track, slot_idx, node_ids, &r.name, &r.manifest);
+                    if let Some(old_node_id) = existing {
+                        crate::conv_reverb::clear_instance(old_node_id);
+                    }
+                    self.apply_effect_to_slot(track, slot_idx, node_ids, &name, &manifest);
                     self.ui.effect_tab = EffectTab::Slot(slot_idx);
                     self.ui.effect_param_cursor = 0;
                     self.ui.effect_scroll_offset = 0;
                     self.ui.focused_region = Region::Params;
                     self.ui.params_column = 1;
-                    self.editor.lisp_libs.push(r.lib);
+                    self.editor.lisp_libs.push(lib);
+                    self.set_track_effect_lease(track, slot_idx, lease);
                 }
                 Err(error) => {
                     self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
@@ -2087,8 +2268,11 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         let sample_rate = self.graph.sample_rate;
         let asset_base = source_path.parent().map(|path| path.to_path_buf());
+        let cache = self.editor.dylib_cache.clone();
         std::thread::spawn(move || {
-            let result = lisp_host::compile_and_load_with_asset_base(
+            let result = cache.acquire(
+                lisp_host::DGenCompileKind::Effect,
+                lisp_host::DGenSourceOrigin::Custom,
                 &source,
                 sample_rate,
                 asset_base.as_deref(),
@@ -2169,6 +2353,11 @@ impl App {
         if slot_idx >= self.graph.effect_descriptors[track].len() {
             return Err("Invalid effect slot".to_string());
         }
+        let lisp_host::CompileResult {
+            manifest,
+            lib,
+            lease,
+        } = result;
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
             self.resolve_custom_slot_wiring(track, slot_idx);
 
@@ -2178,8 +2367,8 @@ impl App {
             lisp_host::add_effect_to_chain_at(
                 self.graph.lg.0,
                 slot_id,
-                &result.manifest,
-                &result.lib,
+                &manifest,
+                &lib,
                 pred,
                 pred_outputs,
                 succ,
@@ -2189,8 +2378,12 @@ impl App {
                 ext_mod_inputs.as_ref(),
             )
         }?;
-        self.apply_effect_to_slot(track, slot_idx, node_ids, name, &result.manifest);
-        self.editor.lisp_libs.push(result.lib);
+        if let Some(old_node_id) = existing {
+            crate::conv_reverb::clear_instance(old_node_id);
+        }
+        self.apply_effect_to_slot(track, slot_idx, node_ids, name, &manifest);
+        self.editor.lisp_libs.push(lib);
+        self.set_track_effect_lease(track, slot_idx, lease);
         self.ui.effect_tab = EffectTab::Slot(slot_idx);
         self.ui.effect_param_cursor = 0;
         self.ui.effect_scroll_offset = 0;
@@ -2393,6 +2586,7 @@ impl App {
         let old_edges = self.bus_effect_edges(bus_idx)?;
         self.write_bus_effect_entries(bus_idx, &entries)?;
         self.reconnect_bus_effect_chain(old_edges, bus_idx)?;
+        self.insert_empty_bus_effect_lease_slot(bus_idx, insert_offset);
         self.sync_other_bus_pattern_effect_insert(bus_idx, insert_offset);
         Ok(insert_offset)
     }
@@ -2468,6 +2662,7 @@ impl App {
         entries.insert(target_offset, entry);
         self.write_bus_effect_entries(bus_idx, &entries)?;
         self.reconnect_bus_effect_chain(old_edges, bus_idx)?;
+        self.move_bus_effect_lease_slot(bus_idx, source_offset, target_offset);
         self.sync_other_bus_pattern_effect_move(bus_idx, source_offset, target_offset);
         self.push_all_delay_bpm();
         Ok(target_offset)
@@ -2485,8 +2680,13 @@ impl App {
         } else {
             return Err(format!("Unknown dgenlisp builtin '{name}'"));
         };
-        let result =
-            lisp_host::compile_and_load_with_asset_base(source, self.graph.sample_rate, None)?;
+        let result = self.editor.dylib_cache.acquire(
+            lisp_host::DGenCompileKind::Effect,
+            lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+            source,
+            self.graph.sample_rate,
+            None,
+        )?;
         let slots = crate::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
         self.apply_compiled_bus_effect_to_slot_sync(bus_idx, slot_idx, name, result)?;
         let node_id = self
@@ -2545,6 +2745,7 @@ impl App {
         unsafe {
             if let Some(old_id) = existing {
                 lisp_host::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
+                crate::conv_reverb::clear_instance(old_id);
             }
             if let Some(old_mod_id) = existing_modulator {
                 lisp_host::remove_effect_modulator(self.graph.lg.0, old_mod_id);
@@ -2567,6 +2768,7 @@ impl App {
                 )?;
             }
         }
+        self.set_bus_effect_lease(bus_idx, slot_idx, None);
         let bus = self
             .buses
             .get_mut(bus_idx)
@@ -2617,6 +2819,11 @@ impl App {
                 bus_idx + 1
             ));
         }
+        let lisp_host::CompileResult {
+            manifest,
+            lib,
+            lease,
+        } = result;
         let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
             self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
         let existing_modulator = self
@@ -2630,8 +2837,8 @@ impl App {
             lisp_host::add_effect_to_chain_at(
                 self.graph.lg.0,
                 slot_id,
-                &result.manifest,
-                &result.lib,
+                &manifest,
+                &lib,
                 pred,
                 pred_outputs,
                 succ,
@@ -2641,7 +2848,10 @@ impl App {
                 ext_mod_inputs.as_ref(),
             )
         }?;
-        let desc = self.build_bus_effect_descriptor(name, &result.manifest);
+        if let Some(old_node_id) = existing {
+            crate::conv_reverb::clear_instance(old_node_id);
+        }
+        let desc = self.build_bus_effect_descriptor(name, &manifest);
         let bus = self
             .buses
             .get_mut(bus_idx)
@@ -2658,7 +2868,8 @@ impl App {
         }
         self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
         self.push_all_delay_bpm();
-        self.editor.lisp_libs.push(result.lib);
+        self.editor.lisp_libs.push(lib);
+        self.set_bus_effect_lease(bus_idx, slot_idx, lease);
         Ok(())
     }
 
@@ -2697,6 +2908,7 @@ impl App {
                 lisp_host::remove_effect_from_chain(self.graph.lg.0, node_id as i32, pred, succ);
                 lisp_host::remove_effect_modulator(self.graph.lg.0, modulator_node_id as i32);
             }
+            crate::conv_reverb::clear_instance(node_id as i32);
             self.connect_bus_effect_gap(pred, pred_outputs, succ, succ_inputs);
         }
         let bus = self
@@ -2711,6 +2923,7 @@ impl App {
         if slot_idx < bus.custom_effect_names.len() {
             bus.custom_effect_names[slot_idx] = None;
         }
+        self.set_bus_effect_lease(bus_idx, slot_idx, None);
         Ok(())
     }
 
@@ -3144,7 +3357,12 @@ impl App {
         name: &str,
     ) {
         let source = lisp_host::load_instrument_source(name).unwrap_or_default();
-        let cache_idx = self.cache_instrument_engine(name, &source, &result.manifest, result.lib);
+        let lisp_host::CompileResult {
+            manifest,
+            lib,
+            lease,
+        } = result;
+        let cache_idx = self.cache_instrument_engine(name, &source, &manifest, lib, lease);
         let manifest = self.editor.engine_registry.engines[cache_idx]
             .manifest
             .clone();
@@ -3189,7 +3407,7 @@ impl App {
                     let runtime_engine_id =
                         self.graph.track_engine_ids.get(track).and_then(|id| *id);
                     let manifest = result.manifest.clone();
-                    let lib_index = self.push_instrument_lib(result.lib);
+                    let lib_index = self.push_instrument_lib(result.lib, result.lease);
                     let lib_ptr: *const lisp_host::LoadedDGenLib =
                         &self.editor.instrument_libs[lib_index];
                     unsafe {
@@ -3244,7 +3462,7 @@ impl App {
                 let track = self.ui.cursor_track;
                 let runtime_engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
                 let manifest = r.manifest.clone();
-                let lib_index = self.push_instrument_lib(r.lib);
+                let lib_index = self.push_instrument_lib(r.lib, r.lease);
                 let lib_ptr: *const lisp_host::LoadedDGenLib =
                     &self.editor.instrument_libs[lib_index];
                 match unsafe {
@@ -3291,7 +3509,7 @@ impl App {
                 }
             } else {
                 let cache_idx =
-                    self.cache_instrument_engine(&r.name, &r.source, &r.manifest, r.lib);
+                    self.cache_instrument_engine(&r.name, &r.source, &r.manifest, r.lib, r.lease);
                 let manifest = self.editor.engine_registry.engines[cache_idx]
                     .manifest
                     .clone();
@@ -3597,6 +3815,35 @@ mod tests {
         assert_eq!(adapted_audio_port_connections(2, 1), vec![(0, 0), (1, 0)]);
         assert_eq!(adapted_audio_port_connections(2, 2), vec![(0, 0), (1, 1)]);
         assert_eq!(adapted_audio_port_connections(4, 4), vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn dylib_cache_lease_slot_insert_shifts_right_and_drops_tail() {
+        let mut row = vec![Some(1), Some(2), None, Some(4)];
+
+        insert_empty_lease_slot(&mut row, 1);
+
+        assert_eq!(row, vec![Some(1), None, Some(2), None]);
+    }
+
+    #[test]
+    fn dylib_cache_lease_slot_remove_shifts_left_and_clears_tail() {
+        let mut row = vec![Some(1), Some(2), Some(3), None];
+
+        remove_lease_slot(&mut row, 1);
+
+        assert_eq!(row, vec![Some(1), Some(3), None, None]);
+    }
+
+    #[test]
+    fn dylib_cache_lease_slot_move_preserves_relative_order() {
+        let mut row = vec![Some(1), Some(2), Some(3), Some(4)];
+
+        move_lease_slot(&mut row, 0, 2);
+        assert_eq!(row, vec![Some(2), Some(3), Some(1), Some(4)]);
+
+        move_lease_slot(&mut row, 3, 1);
+        assert_eq!(row, vec![Some(2), Some(4), Some(3), Some(1)]);
     }
 
     #[test]

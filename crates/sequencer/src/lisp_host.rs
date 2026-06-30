@@ -30,11 +30,13 @@ use crate::sequencer::{
     CustomInstrumentRunMode, PublishedSequencer, StepParam, StepSnapshot, Timebase,
 };
 
+pub mod dylib_cache;
 mod graph_authoring;
 mod graph_dsl;
 mod graph_manifest;
 mod graph_update;
 
+pub use dylib_cache::{DGenCompileKind, DGenSourceOrigin, DylibLease};
 pub use graph_authoring::register_graph_authoring_natives;
 pub use graph_manifest::{graph_mode_present, parse_graph_manifest};
 use graph_update::{CompiledGraphUpdate, SharedGraphNodeContext};
@@ -433,6 +435,7 @@ unsafe impl Sync for LoadedDGenLib {}
 pub struct CompileResult {
     pub manifest: DGenManifest,
     pub lib: LoadedDGenLib,
+    pub lease: Option<DylibLease>,
 }
 
 #[derive(Clone, Debug)]
@@ -503,10 +506,37 @@ pub fn compile_and_load_with_asset_base(
     sample_rate: u32,
     asset_base: Option<&Path>,
 ) -> Result<CompileResult, String> {
+    compile_and_load_with_origin(source, sample_rate, asset_base, DGenSourceOrigin::Custom)
+}
+
+pub fn compile_and_load_with_origin(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+    origin: DGenSourceOrigin,
+) -> Result<CompileResult, String> {
+    dylib_cache::global_cache_manager().acquire(
+        DGenCompileKind::Effect,
+        origin,
+        source,
+        sample_rate,
+        asset_base,
+    )
+}
+
+pub fn compile_and_load_uncached_with_asset_base(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+) -> Result<CompileResult, String> {
     let json = compile_lisp_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
     let lib = load_dylib(&manifest.dylib_path)?;
-    Ok(CompileResult { manifest, lib })
+    Ok(CompileResult {
+        manifest,
+        lib,
+        lease: None,
+    })
 }
 
 // ── Effect library storage ──
@@ -630,8 +660,14 @@ pub fn edit_text(initial: &str) -> io::Result<String> {
 
 // ── Compile ──
 
-fn output_dir() -> PathBuf {
+pub(crate) fn output_dir() -> PathBuf {
     std::env::temp_dir().join("sequencer_dgenlisp")
+}
+
+pub(crate) fn dgenlisp_tool_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join("tools/DGenLisp")
 }
 
 pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
@@ -643,28 +679,65 @@ pub fn compile_lisp_with_asset_base(
     sample_rate: u32,
     asset_base: Option<&Path>,
 ) -> Result<String, String> {
-    let source = materialize_defmacro_imports(source)?;
     let dir = output_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
-
-    // Unique name per compile so dlopen doesn't return a stale cached handle
     let seq = COMPILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dylib_name = format!("effect_{}", seq);
+    let effective_source = effective_dgen_source(DGenCompileKind::Effect, source, sample_rate)?;
+    compile_effective_dgen_source_to_dir(
+        DGenCompileKind::Effect,
+        &effective_source,
+        sample_rate,
+        asset_base,
+        &dir,
+        &dylib_name,
+    )
+}
 
-    let src_path = dir.join("effect.lisp");
-    let source_with_preamble = format!("{}\n\n{source}", effect_preamble(sample_rate));
-    std::fs::write(&src_path, source_with_preamble)
+pub(crate) fn materialize_defmacro_imports(source: &str) -> Result<String, String> {
+    eseqlisp::defmacro_library::materialize_with_default_library(source)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn effective_dgen_source(
+    kind: DGenCompileKind,
+    source: &str,
+    sample_rate: u32,
+) -> Result<String, String> {
+    let source = materialize_defmacro_imports(source)?;
+    let preamble = match kind {
+        DGenCompileKind::Effect => effect_preamble(sample_rate),
+        DGenCompileKind::Instrument => instrument_preamble(sample_rate),
+    };
+    Ok(format!("{preamble}\n\n{source}"))
+}
+
+pub(crate) fn compile_effective_dgen_source_to_dir(
+    kind: DGenCompileKind,
+    effective_source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+    dir: &Path,
+    dylib_name: &str,
+) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
+    let source_name = match kind {
+        DGenCompileKind::Effect => "effect",
+        DGenCompileKind::Instrument => "instrument",
+    };
+    let src_path = dir.join(format!("{dylib_name}.lisp"));
+    std::fs::write(&src_path, effective_source)
         .map_err(|e| format!("Failed to write source: {e}"))?;
 
-    let tool_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("tools/DGenLisp");
+    let tool_path = dgenlisp_tool_path();
     let mut command = std::process::Command::new(&tool_path);
     command
         .args(["compile", src_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
-        .args(["--name", &dylib_name])
+        .args(["--name", dylib_name])
         .args(["--sample-rate", &sample_rate.to_string()]);
+    if kind == DGenCompileKind::Instrument {
+        command.args(["--voices", "12"]);
+    }
     if let Some(asset_base) = asset_base {
         command.args(["--asset-base", asset_base.to_str().unwrap_or(".")]);
     }
@@ -676,18 +749,13 @@ pub fn compile_lisp_with_asset_base(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let error = format!("{}{}", stderr, stdout);
-        log_dgenlisp_compile_failure("effect", &src_path, &error, &source);
+        log_dgenlisp_compile_failure(source_name, &src_path, &error, effective_source);
         return Err(error);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    log_dgenlisp_compile_manifest("effect", &src_path, &stdout);
+    log_dgenlisp_compile_manifest(source_name, &src_path, &stdout);
     Ok(stdout)
-}
-
-fn materialize_defmacro_imports(source: &str) -> Result<String, String> {
-    eseqlisp::defmacro_library::materialize_with_default_library(source)
-        .map_err(|error| error.to_string())
 }
 
 // ── Parse manifest ──
@@ -714,12 +782,15 @@ fn parse_dgen_param_span(param: &serde_json::Value) -> usize {
 }
 
 pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
+    parse_manifest_with_base(json, &output_dir())
+}
+
+pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManifest, String> {
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("Failed to parse manifest: {e}"))?;
 
-    let dir = output_dir();
     let dylib_name = v["dylib"].as_str().unwrap_or("effect.dylib");
-    let dylib_path = dir.join(dylib_name);
+    let dylib_path = base_dir.join(dylib_name);
     let version = v["version"].as_u64().unwrap_or(0) as u32;
     let process_abi = v["processAbi"].as_str().unwrap_or("").to_string();
 
@@ -2646,46 +2717,18 @@ pub fn compile_instrument_with_asset_base(
     sample_rate: u32,
     asset_base: Option<&Path>,
 ) -> Result<String, String> {
-    let source = materialize_defmacro_imports(source)?;
     let dir = output_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
-
     let seq = COMPILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dylib_name = format!("instrument_{}", seq);
-
-    let src_path = dir.join(format!("instrument_{seq}.lisp"));
-    let source_with_preamble = format!("{}\n\n{source}", instrument_preamble(sample_rate));
-    std::fs::write(&src_path, source_with_preamble)
-        .map_err(|e| format!("Failed to write source: {e}"))?;
-
-    let tool_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("tools/DGenLisp");
-    let mut command = std::process::Command::new(&tool_path);
-    command
-        .args(["compile", src_path.to_str().unwrap()])
-        .args(["-o", dir.to_str().unwrap()])
-        .args(["--name", &dylib_name])
-        .args(["--sample-rate", &sample_rate.to_string()])
-        .args(["--voices", "12"]);
-    if let Some(asset_base) = asset_base {
-        command.args(["--asset-base", asset_base.to_str().unwrap_or(".")]);
-    }
-    let output = command
-        .output()
-        .map_err(|e| format!("Failed to run DGenLisp: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let error = format!("{}{}", stderr, stdout);
-        log_dgenlisp_compile_failure("instrument", &src_path, &error, &source);
-        return Err(error);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    log_dgenlisp_compile_manifest("instrument", &src_path, &stdout);
-    Ok(stdout)
+    let effective_source = effective_dgen_source(DGenCompileKind::Instrument, source, sample_rate)?;
+    compile_effective_dgen_source_to_dir(
+        DGenCompileKind::Instrument,
+        &effective_source,
+        sample_rate,
+        asset_base,
+        &dir,
+        &dylib_name,
+    )
 }
 
 fn log_dgenlisp_compile_failure(kind: &str, src_path: &Path, error: &str, source: &str) {
@@ -2716,10 +2759,42 @@ pub fn compile_and_load_instrument_with_asset_base(
     sample_rate: u32,
     asset_base: Option<&Path>,
 ) -> Result<CompileResult, String> {
+    compile_and_load_instrument_with_origin(
+        source,
+        sample_rate,
+        asset_base,
+        DGenSourceOrigin::Custom,
+    )
+}
+
+pub fn compile_and_load_instrument_with_origin(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+    origin: DGenSourceOrigin,
+) -> Result<CompileResult, String> {
+    dylib_cache::global_cache_manager().acquire(
+        DGenCompileKind::Instrument,
+        origin,
+        source,
+        sample_rate,
+        asset_base,
+    )
+}
+
+pub fn compile_and_load_instrument_uncached_with_asset_base(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+) -> Result<CompileResult, String> {
     let json = compile_instrument_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
     let lib = load_dylib(&manifest.dylib_path)?;
-    Ok(CompileResult { manifest, lib })
+    Ok(CompileResult {
+        manifest,
+        lib,
+        lease: None,
+    })
 }
 
 pub fn render_instrument_source_for_test(
@@ -3154,6 +3229,7 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 pub struct InstrumentEditResult {
     pub manifest: DGenManifest,
     pub lib: LoadedDGenLib,
+    pub lease: Option<DylibLease>,
     pub source: String,
     pub params: Vec<DGenParam>,
     pub name: String,
@@ -3162,6 +3238,7 @@ pub struct InstrumentEditResult {
 pub struct EffectEditResult {
     pub manifest: DGenManifest,
     pub lib: LoadedDGenLib,
+    pub lease: Option<DylibLease>,
     pub source: String,
     pub name: String,
 }
@@ -10234,6 +10311,7 @@ where
     Some(EffectEditResult {
         manifest: result.manifest,
         lib: result.lib,
+        lease: result.lease,
         source,
         name,
     })
@@ -10263,6 +10341,7 @@ where
     Some(InstrumentEditResult {
         manifest: result.manifest,
         lib: result.lib,
+        lease: result.lease,
         source,
         params,
         name,
@@ -10352,6 +10431,7 @@ pub fn run_instrument_editor_flow(
                         return Some(InstrumentEditResult {
                             manifest,
                             lib,
+                            lease: None,
                             source,
                             params,
                             name,

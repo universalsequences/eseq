@@ -34,9 +34,18 @@ fn parse_value<T: std::str::FromStr>(flag: &str, value: Option<String>) -> Resul
 fn resolve_source(target: &str) -> Result<(String, Option<PathBuf>, String), String> {
     let path = Path::new(target);
     if path.exists() {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read '{}': {e}", path.display()))?;
-        let asset_base = path.parent().map(|parent| parent.to_path_buf());
+        let source_path = if path.is_dir() {
+            path.join("dsp.lisp")
+        } else {
+            path.to_path_buf()
+        };
+        let source = std::fs::read_to_string(&source_path)
+            .map_err(|e| format!("failed to read '{}': {e}", source_path.display()))?;
+        let asset_base = if path.is_dir() {
+            Some(path.to_path_buf())
+        } else {
+            path.parent().map(|parent| parent.to_path_buf())
+        };
         return Ok((source, asset_base, target.to_string()));
     }
 

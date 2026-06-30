@@ -1219,6 +1219,8 @@ impl GraphController<'_> {
         self.app.graph.effect_descriptors.clear();
         self.app.graph.instrument_descriptors.clear();
         self.app.graph.record_armed.clear();
+        self.app.editor.track_effect_leases.clear();
+        self.app.editor.bus_effect_leases.clear();
 
         self.app.ui.cursor_track = 0;
         self.app.ui.cursor_step = 0;
@@ -1286,6 +1288,7 @@ impl GraphController<'_> {
 
                 for effect_id in active_effect_ids {
                     crate::audiograph::delete_node(self.app.graph.lg.0, effect_id);
+                    crate::conv_reverb::clear_instance(effect_id);
                 }
                 for modulator_id in active_effect_modulator_ids {
                     crate::audiograph::delete_node(self.app.graph.lg.0, modulator_id);
@@ -1298,6 +1301,7 @@ impl GraphController<'_> {
             bus.effect_slots = super::BusChannelState::default_effect_slots();
             bus.custom_effect_names = vec![None; crate::lisp_host::MAX_CUSTOM_FX];
         }
+        self.app.editor.bus_effect_leases.clear();
 
         self.app.publish_bus_gate_runtime();
     }
@@ -1368,6 +1372,7 @@ impl GraphController<'_> {
         if track_idx >= self.app.tracks.len() {
             return Err("Invalid track index".to_string());
         }
+        let deleted_engine_id = self.app.graph.track_engine_ids[track_idx];
 
         if self.app.is_sampler_track(track_idx) {
             self.send_sample_to_all_voices(track_idx, -1, self.app.graph.sample_rate);
@@ -1400,6 +1405,17 @@ impl GraphController<'_> {
                             },
                         );
                     }
+                }
+            }
+        }
+
+        {
+            let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+            self.delete_custom_effect_chain(track_idx);
+            self.delete_track_engine_routes(track_idx);
+            if let Some(engine_id) = deleted_engine_id {
+                if !self.engine_is_still_referenced_excluding(engine_id, track_idx) {
+                    self.delete_engine_runtime(engine_id);
                 }
             }
         }
@@ -1612,6 +1628,7 @@ impl GraphController<'_> {
                     predecessor_id,
                     successor_id,
                 );
+                crate::conv_reverb::clear_instance(node_id as i32);
                 crate::lisp_host::remove_effect_modulator(
                     self.app.graph.lg.0,
                     modulator_node_id as i32,
@@ -1639,6 +1656,7 @@ impl GraphController<'_> {
         if let Some(last_slot) = self.app.state.pattern.effect_chains[track_idx].last() {
             last_slot.clear();
         }
+        self.app.remove_track_effect_lease_slot(track_idx, slot_idx);
 
         self.app
             .state
@@ -1686,10 +1704,12 @@ impl GraphController<'_> {
                     0,
                 );
                 crate::audiograph::delete_node(self.app.graph.lg.0, node_id as i32);
+                crate::conv_reverb::clear_instance(node_id as i32);
                 if modulator_node_id != 0 {
                     crate::audiograph::delete_node(self.app.graph.lg.0, modulator_node_id as i32);
                 }
             }
+            self.app.set_track_effect_lease(track_idx, slot_idx, None);
         }
     }
 
@@ -1891,6 +1911,9 @@ impl GraphController<'_> {
         self.app.graph.effect_descriptors.remove(track_idx);
         self.app.graph.instrument_descriptors.remove(track_idx);
         self.app.graph.record_armed.remove(track_idx);
+        if track_idx < self.app.editor.track_effect_leases.len() {
+            self.app.editor.track_effect_leases.remove(track_idx);
+        }
     }
 
     fn create_dedicated_engine_descriptor_from(

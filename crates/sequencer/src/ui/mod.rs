@@ -18,7 +18,9 @@ use crate::agent::ui_validate::validate_effect_ui_source;
 use crate::analysis::{AnalysisJob, AnalysisService};
 use crate::audiograph::LiveGraphPtr;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScaling};
-use crate::lisp_host::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
+use crate::lisp_host::{
+    dylib_cache::DylibCacheManager, DGenManifest, DylibLease, LoadedDGenLib, ScratchControlRuntime,
+};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
     BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
@@ -399,8 +401,12 @@ pub struct EditorState {
     pending_editor: Option<PendingEditor>,
     pending_compile: Option<PendingCompile>,
     pending_project_load: Option<PendingProjectLoad>,
+    pub dylib_cache: DylibCacheManager,
     lisp_libs: Vec<LoadedDGenLib>,
+    track_effect_leases: Vec<Vec<Option<DylibLease>>>,
+    bus_effect_leases: Vec<Vec<Option<DylibLease>>>,
     pub instrument_libs: Vec<LoadedDGenLib>,
+    instrument_lib_leases: Vec<Option<DylibLease>>,
     pub picker_cursor: usize,
     pub picker_filter: String,
     pub picker_items: Vec<String>,
@@ -1122,8 +1128,12 @@ impl App {
                 pending_editor: None,
                 pending_compile: None,
                 pending_project_load: None,
+                dylib_cache: DylibCacheManager::workspace_default(),
                 lisp_libs: Vec::new(),
+                track_effect_leases: Vec::new(),
+                bus_effect_leases: Vec::new(),
                 instrument_libs: Vec::new(),
+                instrument_lib_leases: Vec::new(),
                 picker_cursor: 0,
                 picker_filter: String::new(),
                 picker_items: Vec::new(),
