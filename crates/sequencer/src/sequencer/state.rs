@@ -124,6 +124,7 @@ pub struct StepSnapshot {
     pub swing_resolution: Option<SwingResolution>,
     pub effect_plocks: Vec<StepSlotPlocks>,
     pub instrument_plocks: StepSlotPlocks,
+    pub rack_slot_instrument_plocks: Vec<StepSlotPlocks>,
 }
 
 impl StepSnapshot {
@@ -136,6 +137,11 @@ impl StepSnapshot {
         }
         for value in &mut snapshot.instrument_plocks.params {
             *value = None;
+        }
+        for plocks in &mut snapshot.rack_slot_instrument_plocks {
+            for value in &mut plocks.params {
+                *value = None;
+            }
         }
         snapshot
     }
@@ -2297,7 +2303,7 @@ impl SequencerState {
                 record_quantize_thresh: AtomicU32::new(0.5_f32.to_bits()),
             },
             runtime: RuntimeBindingState {
-                sampler_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
+                sampler_lids: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU64::new(0)).collect(),
                 modulator_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 pan_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 delay_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
@@ -2668,6 +2674,122 @@ impl SequencerState {
             data.track_sound_state.engine_id = None;
             data.rack_track = Some(rack_track.clone());
         }
+    }
+
+    pub fn append_rack_slot_for_all_pattern_snapshots(
+        &self,
+        track: usize,
+        routing: RackRouting,
+        slot: RackSlotSnapshot,
+    ) {
+        if let Some(live_rack_track) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            match live_rack_track {
+                Some(rack_track) => rack_track.slots.push(slot.clone()),
+                None => {
+                    *live_rack_track = Some(RackTrackSnapshot {
+                        routing,
+                        slots: vec![slot.clone()],
+                    });
+                }
+            }
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return;
+        };
+        for data in pool.patterns.values_mut() {
+            data.instrument_type = InstrumentType::Rack;
+            data.instrument_run_mode = CustomInstrumentRunMode::Instrument;
+            data.instrument_slot = EffectSlotSnapshot::new_empty();
+            data.instrument_base_note_offset = 0.0;
+            data.track_sound_state.engine_id = None;
+            match data.rack_track.as_mut() {
+                Some(rack_track) => rack_track.slots.push(slot.clone()),
+                None => {
+                    data.rack_track = Some(RackTrackSnapshot {
+                        routing,
+                        slots: vec![slot.clone()],
+                    });
+                }
+            }
+        }
+    }
+
+    pub fn remove_rack_slot_from_all_pattern_snapshots(
+        &self,
+        track: usize,
+        slot_idx: usize,
+    ) -> bool {
+        let mut removed = false;
+        if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
+        {
+            if slot_idx < live_rack_track.slots.len() {
+                live_rack_track.slots.remove(slot_idx);
+                removed = true;
+            }
+        }
+        if !removed {
+            return false;
+        }
+
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        if let Some(pool) = scenes.track_pools.get_mut(track) {
+            for data in pool.patterns.values_mut() {
+                if let Some(rack_track) = data.rack_track.as_mut() {
+                    if slot_idx < rack_track.slots.len() {
+                        rack_track.slots.remove(slot_idx);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    pub fn sync_rack_slot_instrument_bindings_for_all_pattern_snapshots(
+        &self,
+        track: usize,
+        bindings: &[(EffectDescriptor, u32, u32)],
+    ) {
+        let sync_slots = |slots: &mut [RackSlotSnapshot]| {
+            for (slot, (descriptor, node_id, modulator_node_id)) in
+                slots.iter_mut().zip(bindings.iter())
+            {
+                slot.instrument_slot.sync_to_descriptor_with_modulator(
+                    descriptor,
+                    *node_id,
+                    *modulator_node_id,
+                );
+            }
+        };
+
+        if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
+        {
+            sync_slots(&mut live_rack_track.slots);
+        }
+
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        if let Some(pool) = scenes.track_pools.get_mut(track) {
+            for data in pool.patterns.values_mut() {
+                if let Some(rack_track) = data.rack_track.as_mut() {
+                    sync_slots(&mut rack_track.slots);
+                }
+            }
+        }
+    }
+
+    pub fn update_live_rack_slot<F>(&self, track: usize, slot_idx: usize, update: F) -> bool
+    where
+        F: FnOnce(&mut RackSlotSnapshot),
+    {
+        let mut rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+        let Some(Some(rack_track)) = rack_tracks.get_mut(track) else {
+            return false;
+        };
+        let Some(slot) = rack_track.slots.get_mut(slot_idx) else {
+            return false;
+        };
+        update(slot);
+        true
     }
 
     pub fn insert_effect_slot_in_other_track_patterns(&self, track: usize, slot_idx: usize) {
@@ -4332,6 +4454,11 @@ impl SequencerState {
                     .plocks
                     .clear_param(step, param_idx);
             }
+            if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+                for slot in &mut rack.slots {
+                    slot.instrument_slot.clear_step_plocks(step);
+                }
+            }
             self.pattern.chord_data[track].clear_step(step);
         }
         self.publish_scheduler_snapshot();
@@ -4369,6 +4496,33 @@ impl SequencerState {
         for param_idx in 0..instrument_param_count {
             instrument_plocks.push(instrument_slot.plocks.get(step, param_idx));
         }
+        let rack_slot_instrument_plocks = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(|rack| rack.as_ref())
+            .map(|rack| {
+                rack.slots
+                    .iter()
+                    .map(|slot| {
+                        let num_params = slot.instrument_slot.num_params as usize;
+                        let params = (0..num_params)
+                            .map(|param_idx| {
+                                slot.instrument_slot
+                                    .plocks
+                                    .get(step)
+                                    .and_then(|step_plocks| step_plocks.get(param_idx))
+                                    .copied()
+                                    .flatten()
+                            })
+                            .collect();
+                        StepSlotPlocks { params }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         StepSnapshot {
             active: self.pattern.patterns[track].is_active(step),
@@ -4384,6 +4538,7 @@ impl SequencerState {
             instrument_plocks: StepSlotPlocks {
                 params: instrument_plocks,
             },
+            rack_slot_instrument_plocks,
         }
     }
 
@@ -4408,6 +4563,11 @@ impl SequencerState {
             self.pattern.instrument_slots[track]
                 .plocks
                 .clear_param(step, param_idx);
+        }
+        if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            for slot in &mut rack.slots {
+                slot.instrument_slot.clear_step_plocks(step);
+            }
         }
     }
 
@@ -4517,6 +4677,27 @@ impl SequencerState {
             {
                 Some(val) => instrument_slot.set_plock(step, param_idx, val),
                 None => instrument_slot.plocks.clear_param(step, param_idx),
+            }
+        }
+
+        if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            for (slot_idx, slot) in rack.slots.iter_mut().enumerate() {
+                let saved = snapshot.rack_slot_instrument_plocks.get(slot_idx);
+                let num_params = slot.instrument_slot.num_params as usize;
+                for param_idx in 0..num_params {
+                    let value = saved
+                        .and_then(|plocks| plocks.params.get(param_idx))
+                        .copied()
+                        .flatten();
+                    match value {
+                        Some(value) => {
+                            slot.instrument_slot.set_plock(step, param_idx, value);
+                        }
+                        None => {
+                            slot.instrument_slot.clear_plock(step, param_idx);
+                        }
+                    }
+                }
             }
         }
     }
@@ -5160,6 +5341,85 @@ mod tests {
             Some("rack-lead")
         );
         assert_eq!(restored.slots[0].instrument_slot.node_id, 177);
+    }
+
+    #[test]
+    fn append_rack_slot_preserves_existing_rack_slots_in_pattern_pool() {
+        let state = SequencerState::new(1, Vec::new());
+        let initial = sample_rack_track_snapshot();
+        state.set_rack_track_for_all_pattern_snapshots(0, initial.clone());
+        let appended = RackSlotSnapshot {
+            instrument_type: InstrumentType::Sampler,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: -12.0,
+            gain: 0.5,
+            pan: 0.25,
+            mute: false,
+            solo: false,
+            max_polyphony: 2,
+            instrument_slot: sample_effect_slot_snapshot(88),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: Some((123, "layer".to_string(), 48_000)),
+        };
+
+        state.append_rack_slot_for_all_pattern_snapshots(0, RackRouting::Broadcast, appended);
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots.len(), 2);
+        assert_eq!(
+            live.slots[0].track_sound_state.loaded_preset,
+            Some("rack-lead".to_string())
+        );
+        assert_eq!(live.slots[1].sample_id.as_ref().unwrap().1, "layer");
+
+        let repository = state.export_pattern_repository();
+        let restored = repository[0].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(restored.slots.len(), 2);
+        assert_eq!(
+            restored.slots[0].track_sound_state.loaded_preset.as_deref(),
+            Some("rack-lead")
+        );
+        assert_eq!(restored.slots[1].instrument_base_note_offset, -12.0);
+        assert_eq!(restored.slots[1].max_polyphony, 2);
+    }
+
+    #[test]
+    fn remove_rack_slot_updates_live_and_pattern_pool_slots() {
+        let state = SequencerState::new(1, Vec::new());
+        let initial = sample_rack_track_snapshot();
+        state.set_rack_track_for_all_pattern_snapshots(0, initial);
+        let appended = RackSlotSnapshot {
+            instrument_type: InstrumentType::Sampler,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: -12.0,
+            gain: 0.5,
+            pan: 0.25,
+            mute: false,
+            solo: false,
+            max_polyphony: 2,
+            instrument_slot: sample_effect_slot_snapshot(88),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: Some((123, "layer".to_string(), 48_000)),
+        };
+        state.append_rack_slot_for_all_pattern_snapshots(0, RackRouting::Broadcast, appended);
+
+        assert!(state.remove_rack_slot_from_all_pattern_snapshots(0, 0));
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots.len(), 1);
+        assert_eq!(live.slots[0].sample_id.as_ref().unwrap().1, "layer");
+
+        let repository = state.export_pattern_repository();
+        let restored = repository[0].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(restored.slots.len(), 1);
+        assert_eq!(restored.slots[0].sample_id.as_ref().unwrap().1, "layer");
+        assert_eq!(restored.slots[0].instrument_base_note_offset, -12.0);
     }
 
     #[test]
@@ -5917,6 +6177,12 @@ mod tests {
         state
     }
 
+    fn make_state_with_rack_slot() -> SequencerState {
+        let state = make_state_with_instrument();
+        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
+        state
+    }
+
     fn make_state_with_tracks(num_tracks: usize) -> SequencerState {
         SequencerState::new(
             num_tracks,
@@ -6509,6 +6775,83 @@ mod tests {
         assert_eq!(
             state.pattern.instrument_slots[track].plocks.get(step, 0),
             None
+        );
+    }
+
+    fn rack_slot_plock_value(
+        state: &SequencerState,
+        track: usize,
+        slot_idx: usize,
+        step: usize,
+        param_idx: usize,
+    ) -> Option<f32> {
+        state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(|rack| rack.as_ref())
+            .and_then(|rack| rack.slots.get(slot_idx))
+            .and_then(|slot| slot.instrument_slot.plocks.get(step))
+            .and_then(|step_plocks| step_plocks.get(param_idx))
+            .copied()
+            .flatten()
+    }
+
+    #[test]
+    fn step_snapshot_capture_clear_restore_preserves_rack_slot_instrument_plocks() {
+        let state = make_state_with_rack_slot();
+        {
+            let mut racks = state.pattern.rack_tracks.lock().unwrap();
+            let slot = &mut racks[0].as_mut().unwrap().slots[0].instrument_slot;
+            assert!(slot.set_plock(2, 0, 0.42));
+            assert!(slot.set_plock(4, 0, 0.84));
+        }
+
+        let snap = state.capture_step_snapshot(0, 2);
+        assert_eq!(snap.rack_slot_instrument_plocks[0].params[0], Some(0.42));
+
+        state.clear_step_payload(0, 2);
+        assert_eq!(rack_slot_plock_value(&state, 0, 0, 2, 0), None);
+        assert_eq!(rack_slot_plock_value(&state, 0, 0, 4, 0), Some(0.84));
+
+        state.restore_step_snapshot(0, 5, &snap);
+        assert_eq!(rack_slot_plock_value(&state, 0, 0, 5, 0), Some(0.42));
+    }
+
+    #[test]
+    fn sampler_runtime_arrays_cover_rack_slot_pool_domain() {
+        let state = make_state_with_tracks(1);
+        let last_rack_pool = crate::sequencer::rack_slot_pool_index(
+            MAX_TRACKS - 1,
+            crate::sequencer::MAX_RACK_SLOTS - 1,
+        )
+        .expect("last rack slot pool should exist");
+        assert_eq!(last_rack_pool + 1, MAX_SAMPLER_POOLS);
+        assert_eq!(state.runtime.sampler_lids.len(), MAX_SAMPLER_POOLS);
+        assert_eq!(state.runtime.voice_counts.len(), MAX_SAMPLER_POOLS);
+        assert_eq!(state.runtime.voice_lids.len(), MAX_SAMPLER_POOLS);
+        assert_eq!(state.runtime.synth_node_ids.len(), MAX_SAMPLER_POOLS);
+        assert_eq!(
+            state.runtime.sampler_gatepitch_node_ids.len(),
+            MAX_SAMPLER_POOLS
+        );
+        assert_eq!(
+            state.runtime.sampler_modulator_node_ids.len(),
+            MAX_SAMPLER_POOLS
+        );
+
+        state.runtime.sampler_lids[last_rack_pool].store(123, Ordering::Relaxed);
+        state.runtime.voice_counts[last_rack_pool].store(1, Ordering::Relaxed);
+        state.runtime.voice_lids[last_rack_pool][0].store(456, Ordering::Relaxed);
+        state.runtime.synth_node_ids[last_rack_pool][0].store(789, Ordering::Relaxed);
+        state.runtime.sampler_gatepitch_node_ids[last_rack_pool][0].store(101, Ordering::Relaxed);
+        state.runtime.sampler_modulator_node_ids[last_rack_pool][0].store(112, Ordering::Relaxed);
+
+        assert_eq!(
+            state.runtime.sampler_lids[last_rack_pool].load(Ordering::Relaxed),
+            123
         );
     }
 

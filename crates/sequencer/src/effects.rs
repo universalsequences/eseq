@@ -4961,6 +4961,73 @@ impl EffectSlotSnapshot {
         *self = Self::new_empty();
     }
 
+    fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {
+        let raw_idx = self.param_node_indices.get(param_idx).copied()?;
+        ParamNodeId::from_slot_param(self.node_id, self.modulator_node_id, raw_idx)
+    }
+
+    fn ensure_plock_row_capacity(&mut self, step: usize, num_params: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        while self.plocks.len() <= step {
+            self.plocks.push(Vec::new());
+        }
+        while self.plock_param_ids.len() <= step {
+            self.plock_param_ids.push(Vec::new());
+        }
+        if self.plocks[step].len() < num_params {
+            self.plocks[step].resize(num_params, None);
+        }
+        if self.plock_param_ids[step].len() < num_params {
+            self.plock_param_ids[step].resize(num_params, None);
+        }
+        true
+    }
+
+    pub fn set_plock(&mut self, step: usize, param_idx: usize, value: f32) -> bool {
+        let num_params = self.num_params as usize;
+        if param_idx >= num_params || !self.ensure_plock_row_capacity(step, num_params) {
+            return false;
+        }
+        self.plocks[step][param_idx] = Some(value);
+        self.plock_param_ids[step][param_idx] = self.param_node_id(param_idx);
+        true
+    }
+
+    pub fn clear_plock(&mut self, step: usize, param_idx: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        if let Some(step_plocks) = self.plocks.get_mut(step) {
+            if param_idx < step_plocks.len() {
+                step_plocks[param_idx] = None;
+            }
+        }
+        if let Some(step_ids) = self.plock_param_ids.get_mut(step) {
+            if param_idx < step_ids.len() {
+                step_ids[param_idx] = None;
+            }
+        }
+        true
+    }
+
+    pub fn clear_step_plocks(&mut self, step: usize) {
+        if step >= MAX_STEPS {
+            return;
+        }
+        if let Some(step_plocks) = self.plocks.get_mut(step) {
+            for value in step_plocks {
+                *value = None;
+            }
+        }
+        if let Some(step_ids) = self.plock_param_ids.get_mut(step) {
+            for value in step_ids {
+                *value = None;
+            }
+        }
+    }
+
     pub fn sync_to_descriptor(&mut self, desc: &EffectDescriptor, node_id: u32) {
         self.sync_to_descriptor_with_modulator(desc, node_id, self.modulator_node_id);
     }

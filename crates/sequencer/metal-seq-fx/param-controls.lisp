@@ -1,19 +1,44 @@
 ;; Parameter value routing, modulation targeting, and wrappers.
+(def instrument-rack-target? (p)
+  (not (= (get p :rack-track) nil)))
+
+(def instrument-target-param-dict (source-p idx)
+  (if (instrument-rack-target? source-p)
+    (dict :idx idx :control "param"
+          :rack-track (get source-p :rack-track)
+          :rack-slot (get source-p :rack-slot))
+    (dict :idx idx :control "param")))
+
 (def fx-set-instrument-value (p v)
   (do
     (fx-clear-selected-effect)
-    (if (= (get p :control) "base-note")
-      (host-command "set-instrument-base-note" (dict :value v))
-      (host-command
-        (if (seq-has-selection?) "set-instrument-plock" "set-instrument-param")
-        (dict :param-idx (get p :idx) :value v)))))
+    (let ((rack-track (get p :rack-track))
+          (rack-slot (get p :rack-slot)))
+      (if (instrument-rack-target? p)
+        (if (= (get p :control) "base-note")
+          (host-command "set-rack-slot-base-note"
+            (dict :track rack-track :slot rack-slot :value v))
+          (host-command
+            (if (seq-has-selection?) "set-rack-slot-instrument-plock" "set-rack-slot-instrument-param")
+            (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :value v)))
+        (if (= (get p :control) "base-note")
+          (host-command "set-instrument-base-note" (dict :value v))
+          (host-command
+            (if (seq-has-selection?) "set-instrument-plock" "set-instrument-param")
+            (dict :param-idx (get p :idx) :value v)))))))
 
 (def fx-set-instrument-option (p label)
   (do
     (fx-clear-selected-effect)
-    (host-command
-      (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option")
-      (dict :param-idx (get p :idx) :label label))))
+    (let ((rack-track (get p :rack-track))
+          (rack-slot (get p :rack-slot)))
+      (if (instrument-rack-target? p)
+        (host-command
+          (if (seq-has-selection?) "set-rack-slot-instrument-plock-option" "set-rack-slot-instrument-param-option")
+          (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :label label))
+        (host-command
+          (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option")
+          (dict :param-idx (get p :idx) :label label))))))
 
 (def custom-ui-option-index (options label)
   (nth (filter |idx| (= (nth options idx) label) (range (len options))) 0))
@@ -37,8 +62,14 @@
 (def fx-toggle-instrument-value (p)
   (do
     (fx-clear-selected-effect)
-    (host-command "toggle-instrument-param"
-      (dict :param-idx (get p :idx)))))
+    (let ((rack-track (get p :rack-track))
+          (rack-slot (get p :rack-slot)))
+      (if (instrument-rack-target? p)
+        (host-command
+          (if (seq-has-selection?) "toggle-rack-slot-instrument-plock" "toggle-rack-slot-instrument-param")
+          (dict :track rack-track :slot rack-slot :param-idx (get p :idx)))
+        (host-command "toggle-instrument-param"
+          (dict :param-idx (get p :idx)))))))
 
 (def fx-toggle-effect-value (fx p)
   (do
@@ -141,15 +172,15 @@
           (if (= source-slot selected-slot)
             (if fx
               (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") v)
-              (fx-set-instrument-value (dict :idx (get target :depth-idx) :control "param") v))
+              (fx-set-instrument-value (instrument-target-param-dict p (get target :depth-idx)) v))
             (if (= source-slot 0)
               (do
                 (if fx
                   (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") selected-slot)
-                  (fx-set-instrument-value (dict :idx (get target :source-idx) :control "param") selected-slot))
+                  (fx-set-instrument-value (instrument-target-param-dict p (get target :source-idx)) selected-slot))
                 (if fx
                   (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") v)
-                  (fx-set-instrument-value (dict :idx (get target :depth-idx) :control "param") v))))))))
+                  (fx-set-instrument-value (instrument-target-param-dict p (get target :depth-idx)) v))))))))
     (if fx (fx-set-effect-value fx p v) (fx-set-instrument-value p v))))
 
 (def param-toggle-modulation (fx p)
@@ -160,19 +191,19 @@
         (if (get target :source-idx)
           (if fx
             (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") 0)
-            (fx-set-instrument-value (dict :idx (get target :source-idx) :control "param") 0))
+            (fx-set-instrument-value (instrument-target-param-dict p (get target :source-idx)) 0))
           (if fx
             (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0)
-            (fx-set-instrument-value (dict :idx (get target :depth-idx) :control "param") 0)))
+            (fx-set-instrument-value (instrument-target-param-dict p (get target :depth-idx)) 0)))
         (let ((target (param-empty-mod-target p)))
           (if target
             (do
               (if fx
                 (fx-set-effect-value fx (dict :idx (get target :source-idx) :control "param") selected-slot)
-                (fx-set-instrument-value (dict :idx (get target :source-idx) :control "param") selected-slot))
+                (fx-set-instrument-value (instrument-target-param-dict p (get target :source-idx)) selected-slot))
               (if fx
                 (fx-set-effect-value fx (dict :idx (get target :depth-idx) :control "param") 0)
-                (fx-set-instrument-value (dict :idx (get target :depth-idx) :control "param") 0)))))))))
+                (fx-set-instrument-value (instrument-target-param-dict p (get target :depth-idx)) 0)))))))))
 
 (def param-mod-bg (fx p)
   (if (and (param-mods-open? fx) (get p :modulatable))
@@ -338,15 +369,15 @@
         (let ((source-slot (instrument-mod-target-source-slot target)))
           (if (= source-slot (instrument-mod-selected-slot))
             (fx-set-instrument-value
-              (dict :idx (get target :depth-idx) :control "param")
+              (instrument-target-param-dict p (get target :depth-idx))
               v)
             (if (= source-slot 0)
               (do
                 (fx-set-instrument-value
-                  (dict :idx (get target :source-idx) :control "param")
+                  (instrument-target-param-dict p (get target :source-idx))
                   (instrument-mod-selected-slot))
                 (fx-set-instrument-value
-                  (dict :idx (get target :depth-idx) :control "param")
+                  (instrument-target-param-dict p (get target :depth-idx))
                   v)))))))
     (fx-set-instrument-value p v)))
 
@@ -356,19 +387,19 @@
       (if target
         (if (get target :source-idx)
           (fx-set-instrument-value
-            (dict :idx (get target :source-idx) :control "param")
+            (instrument-target-param-dict p (get target :source-idx))
             0)
           (fx-set-instrument-value
-            (dict :idx (get target :depth-idx) :control "param")
+            (instrument-target-param-dict p (get target :depth-idx))
             0))
         (let ((target (instrument-param-empty-mod-target p)))
           (if target
             (do
               (fx-set-instrument-value
-                (dict :idx (get target :source-idx) :control "param")
+                (instrument-target-param-dict p (get target :source-idx))
                 (instrument-mod-selected-slot))
               (fx-set-instrument-value
-                (dict :idx (get target :depth-idx) :control "param")
+                (instrument-target-param-dict p (get target :depth-idx))
                 0))))))))
 
 (def instrument-param-mod-bg (p)

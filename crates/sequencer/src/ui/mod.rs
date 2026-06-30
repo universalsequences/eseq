@@ -770,6 +770,7 @@ pub struct App {
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
     pub sampler_paths: Vec<Option<PathBuf>>,
+    pub rack_selected_slots: Vec<usize>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
     pub current_project_name: Option<String>,
@@ -830,6 +831,31 @@ impl App {
     pub fn replace_track_collapsed(&mut self, collapsed: Vec<bool>) {
         self.track_collapsed = collapsed;
         self.normalize_track_collapsed();
+    }
+
+    pub fn normalize_rack_selected_slots(&mut self) {
+        self.rack_selected_slots.truncate(self.tracks.len());
+        while self.rack_selected_slots.len() < self.tracks.len() {
+            self.rack_selected_slots.push(0);
+        }
+    }
+
+    pub fn rack_selected_slot(&self, track: usize, slot_count: usize) -> usize {
+        if slot_count == 0 {
+            return 0;
+        }
+        self.rack_selected_slots
+            .get(track)
+            .copied()
+            .unwrap_or(0)
+            .min(slot_count - 1)
+    }
+
+    pub fn set_rack_selected_slot(&mut self, track: usize, slot_idx: usize) {
+        self.normalize_rack_selected_slots();
+        if let Some(selected) = self.rack_selected_slots.get_mut(track) {
+            *selected = slot_idx;
+        }
     }
 
     pub fn submit_sample_analysis(&self, loaded: &crate::sampler::LoadedSample) {
@@ -1078,6 +1104,7 @@ impl App {
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
             sampler_paths: Vec::new(),
+            rack_selected_slots: Vec::new(),
             sample_path_registry: HashMap::new(),
             sample_buffer_path_registry: HashMap::new(),
             current_project_name: None,

@@ -519,6 +519,74 @@ pub enum AppCommand {
         value: f32,
     },
 
+    /// Set a rack layer's linear gain; also pushes to the layer panner.
+    SetRackSlotGain {
+        track: usize,
+        slot_idx: usize,
+        value: f32,
+    },
+
+    /// Set a rack layer's pan; also pushes to the layer panner.
+    SetRackSlotPan {
+        track: usize,
+        slot_idx: usize,
+        value: f32,
+    },
+
+    /// Set a rack layer's mute flag; also pushes to the layer panner.
+    SetRackSlotMute {
+        track: usize,
+        slot_idx: usize,
+        value: bool,
+    },
+
+    /// Set a rack layer's solo flag; also refreshes all layer solo mutes.
+    SetRackSlotSolo {
+        track: usize,
+        slot_idx: usize,
+        value: bool,
+    },
+
+    /// Set a rack layer's max voice count.
+    SetRackSlotMaxPolyphony {
+        track: usize,
+        slot_idx: usize,
+        value: usize,
+    },
+
+    /// Set a rack layer's instrument base-note offset.
+    SetRackSlotBaseNoteOffset {
+        track: usize,
+        slot_idx: usize,
+        value: f32,
+    },
+
+    /// Set a rack layer's underlying instrument default param.
+    SetRackSlotInstrumentParam {
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    },
+
+    /// Set a rack layer's underlying instrument step p-lock.
+    SetRackSlotInstrumentPlock {
+        track: usize,
+        slot_idx: usize,
+        step: usize,
+        param_idx: usize,
+        value: f32,
+    },
+
+    /// Set a rack layer's underlying instrument step p-lock across several steps.
+    SetRackSlotInstrumentPlockMulti {
+        track: usize,
+        slot_idx: usize,
+        steps: Vec<usize>,
+        param_idx: usize,
+        value: f32,
+    },
+
     // ── Transport ─────────────────────────────────────────────────────────────
     TogglePlay,
 
@@ -563,8 +631,9 @@ mod tests {
     };
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, SequencerState, StepSlotPlocks, StepSnapshot, SwingResolution,
-        Timebase, TrackSendSnapshot, NUM_PARAMS,
+        default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType, RackRouting,
+        RackSlotSnapshot, RackTrackSnapshot, SequencerState, StepSlotPlocks, StepSnapshot,
+        SwingResolution, Timebase, TrackSendSnapshot, TrackSoundState, NUM_PARAMS,
     };
     use crate::ui::{App, AudioBuses};
 
@@ -685,6 +754,55 @@ mod tests {
         app
     }
 
+    fn test_app_with_rack_sampler_slot() -> App {
+        let sampler_desc = EffectDescriptor::builtin_sampler();
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.set_rack_track_for_all_pattern_snapshots(
+            0,
+            RackTrackSnapshot {
+                routing: RackRouting::Broadcast,
+                slots: vec![RackSlotSnapshot {
+                    instrument_type: InstrumentType::Sampler,
+                    instrument_run_mode: CustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 8,
+                    instrument_slot: EffectSlotSnapshot::new_default_with_modulator(
+                        &sampler_desc,
+                        77,
+                        0,
+                    ),
+                    track_sound_state: TrackSoundState::default(),
+                    sample_id: Some((1, "test.wav".to_string(), 44_100)),
+                }],
+            },
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            state,
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Rack".to_string()];
+        app.graph.track_instrument_types = vec![InstrumentType::Rack];
+        app.graph.instrument_descriptors = vec![EffectDescriptor::empty_custom_slot()];
+        app
+    }
+
     #[test]
     fn live_mixer_commands_do_not_publish_scheduler_snapshots() {
         assert!(!command_mutates_sequencer_state(
@@ -724,6 +842,15 @@ mod tests {
                 value: 0.5,
             }
         ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetRackSlotInstrumentPlock {
+                track: 0,
+                slot_idx: 0,
+                step: 0,
+                param_idx: 8,
+                value: 22_050.0,
+            }
+        ));
         assert!(command_mutates_sequencer_state(&AppCommand::SetBpm {
             bpm: 128
         }));
@@ -749,6 +876,9 @@ mod tests {
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
             },
+            rack_slot_instrument_plocks: vec![StepSlotPlocks {
+                params: vec![Some(0.3), None, Some(0.7)],
+            }],
         };
 
         let sanitized = sanitize_pasted_step_snapshot(&snapshot, false);
@@ -772,6 +902,11 @@ mod tests {
             .params
             .iter()
             .all(Option::is_none));
+        assert!(sanitized
+            .rack_slot_instrument_plocks
+            .iter()
+            .flat_map(|plocks| plocks.params.iter())
+            .all(Option::is_none));
     }
 
     #[test]
@@ -792,6 +927,9 @@ mod tests {
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
             },
+            rack_slot_instrument_plocks: vec![StepSlotPlocks {
+                params: vec![Some(0.3), None, Some(0.7)],
+            }],
         };
 
         let sanitized = sanitize_pasted_step_snapshot(&snapshot, true);
@@ -804,6 +942,43 @@ mod tests {
             sanitized.instrument_plocks.params,
             vec![Some(0.2), Some(0.8)]
         );
+        assert_eq!(
+            sanitized.rack_slot_instrument_plocks[0].params,
+            vec![Some(0.3), None, Some(0.7)]
+        );
+    }
+
+    #[test]
+    fn rack_slot_instrument_plock_command_writes_slot_plocks_without_changing_default() {
+        let mut app = test_app_with_rack_sampler_slot();
+
+        apply_command(
+            &mut app,
+            AppCommand::SetRackSlotInstrumentPlockMulti {
+                track: 0,
+                slot_idx: 0,
+                steps: vec![2, 3],
+                param_idx: 8,
+                value: 22_050.0,
+            },
+        );
+
+        let rack_tracks = app.state.pattern.rack_tracks.lock().unwrap();
+        let rack = rack_tracks[0]
+            .as_ref()
+            .expect("test rack track should be present");
+        let slot = &rack.slots[0].instrument_slot;
+        assert_eq!(
+            slot.defaults[8], 44_100.0,
+            "editing selected rack sampler steps must not overwrite the default sample rate"
+        );
+        assert_eq!(slot.plocks[2][8], Some(22_050.0));
+        assert_eq!(slot.plocks[3][8], Some(22_050.0));
+        assert!(
+            slot.plock_param_ids[2][8].is_some(),
+            "rack sampler p-locks need node identity for scheduler/audio resolution"
+        );
+        assert!(rack.slots[0].track_sound_state.dirty);
     }
 
     #[test]
@@ -948,6 +1123,10 @@ fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
             | AppCommand::SetTrackSends { .. }
             | AppCommand::SetMasterVolume { .. }
             | AppCommand::AdjustMasterVolume { .. }
+            | AppCommand::SetRackSlotGain { .. }
+            | AppCommand::SetRackSlotPan { .. }
+            | AppCommand::SetRackSlotMute { .. }
+            | AppCommand::SetRackSlotSolo { .. }
     )
 }
 
@@ -1372,6 +1551,85 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         AppCommand::SetInstrumentBaseNoteOffset { track, value } => {
             app.state.pattern.instrument_base_note_offsets[track]
                 .store(value.to_bits(), Ordering::Relaxed);
+        }
+
+        AppCommand::SetRackSlotGain {
+            track,
+            slot_idx,
+            value,
+        } => {
+            app.set_rack_slot_gain(track, slot_idx, value);
+        }
+
+        AppCommand::SetRackSlotPan {
+            track,
+            slot_idx,
+            value,
+        } => {
+            app.set_rack_slot_pan(track, slot_idx, value);
+        }
+
+        AppCommand::SetRackSlotMute {
+            track,
+            slot_idx,
+            value,
+        } => {
+            app.set_rack_slot_mute(track, slot_idx, value);
+        }
+
+        AppCommand::SetRackSlotSolo {
+            track,
+            slot_idx,
+            value,
+        } => {
+            app.set_rack_slot_solo(track, slot_idx, value);
+        }
+
+        AppCommand::SetRackSlotMaxPolyphony {
+            track,
+            slot_idx,
+            value,
+        } => {
+            app.set_rack_slot_max_polyphony(track, slot_idx, value);
+        }
+
+        AppCommand::SetRackSlotBaseNoteOffset {
+            track,
+            slot_idx,
+            value,
+        } => {
+            app.set_rack_slot_base_note_offset(track, slot_idx, value);
+        }
+
+        AppCommand::SetRackSlotInstrumentParam {
+            track,
+            slot_idx,
+            param_idx,
+            value,
+        } => {
+            app.set_rack_slot_instrument_param(track, slot_idx, param_idx, value);
+        }
+
+        AppCommand::SetRackSlotInstrumentPlock {
+            track,
+            slot_idx,
+            step,
+            param_idx,
+            value,
+        } => {
+            app.set_rack_slot_instrument_plock(track, slot_idx, step, param_idx, value);
+        }
+
+        AppCommand::SetRackSlotInstrumentPlockMulti {
+            track,
+            slot_idx,
+            steps,
+            param_idx,
+            value,
+        } => {
+            for step in steps {
+                app.set_rack_slot_instrument_plock(track, slot_idx, step, param_idx, value);
+            }
         }
 
         // ── Transport ─────────────────────────────────────────────────────

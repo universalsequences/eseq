@@ -207,6 +207,7 @@ pub(crate) enum TrackParamInvalidation {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum InstrumentInvalidation {
     Param { param: usize },
+    Plock { param: usize },
     BaseNote,
     SamplerSelectionTime,
     PanelTopology,

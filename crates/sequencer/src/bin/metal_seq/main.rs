@@ -97,6 +97,10 @@ pub(crate) enum ActiveDeleteTarget {
         bus: Option<usize>,
         slot: usize,
     },
+    RackSlot {
+        track: usize,
+        slot: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -612,7 +616,7 @@ impl ActiveDeleteTarget {
             ActiveDeleteTarget::MixerTrack { .. }
             | ActiveDeleteTarget::TrackPattern { .. }
             | ActiveDeleteTarget::ModRoute { .. } => "*mixer*",
-            ActiveDeleteTarget::FxEffect { .. } => "*fx*",
+            ActiveDeleteTarget::FxEffect { .. } | ActiveDeleteTarget::RackSlot { .. } => "*fx*",
         }
     }
 }
@@ -932,6 +936,29 @@ fn map_bool(map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &s
         .unwrap_or(false)
 }
 
+fn map_usize(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Option<usize> {
+    map_number(map, key).map(|value| value as usize)
+}
+
+fn rack_slot_snapshot_for_host(
+    state: &Arc<SequencerState>,
+    track: usize,
+    slot_idx: usize,
+) -> Option<sequencer::sequencer::RackSlotSnapshot> {
+    state
+        .pattern
+        .rack_tracks
+        .lock()
+        .unwrap()
+        .get(track)
+        .and_then(|rack| rack.as_ref())
+        .and_then(|rack| rack.slots.get(slot_idx))
+        .cloned()
+}
+
 fn param_change_needs_fx_rebuild(param: &sequencer::effects::ParamDescriptor) -> bool {
     matches!(param.kind, ParamKind::Boolean | ParamKind::Enum { .. })
 }
@@ -1051,6 +1078,54 @@ fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     ] {
         editor.refresh_visible_layouts_for_buffer_named(buffer_name);
     }
+}
+
+fn refresh_instrument_panel_reactive(
+    editor: &mut Editor,
+    app: &ui::App,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    ui_epoch: &AtomicUsize,
+) {
+    if editor
+        .runtime_mut()
+        .set_reactive(
+            "SEQ",
+            "instrument-panel",
+            build_instrument_panel_value(app, track, selected_steps),
+        )
+        .effects_dirty
+    {
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+    }
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+fn sync_rack_slot_instrument_authoring_display(
+    editor: &mut Editor,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) {
+    let steps: Vec<usize> = selected_steps.lock().unwrap().iter().copied().collect();
+    let rt = editor.runtime_mut();
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            "instrument-panel",
+            build_instrument_panel_value(app, track, selected_steps),
+        )
+        .effects_dirty;
+    dirty |= sync_instrument_plock_presence_fields(
+        rt,
+        state,
+        &app.graph.effect_descriptors,
+        track,
+        &steps,
+    );
+    flush_reactive_display_edit(editor, dirty);
 }
 
 fn step_param_fields(param: StepParam) -> Option<(&'static str, &'static str, usize)> {
@@ -1314,6 +1389,36 @@ fn sync_track_plocks_for_neural_selection(
     .effects_dirty
 }
 
+fn sync_instrument_plock_presence_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    effect_descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    track: usize,
+    steps: &[usize],
+) -> bool {
+    let mut dirty = false;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "step-has-plocks",
+            build_step_has_plocks(state, track, effect_descriptors),
+        )
+        .effects_dirty;
+    for &step in steps {
+        if step >= MAX_STEPS {
+            continue;
+        }
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_plocked_field(track, step),
+                Value::Bool(track_step_has_plock(state, track, effect_descriptors, step)),
+            )
+            .effects_dirty;
+    }
+    dirty
+}
+
 fn record_selected_neural_instrument_plock(
     editor: &mut Editor,
     state: &Arc<SequencerState>,
@@ -1413,6 +1518,7 @@ struct InstrumentParamDisplaySync<'a> {
     param_idx: usize,
     display_step: Option<usize>,
     sync_plock_list: bool,
+    sync_plock_presence: bool,
     sync_sampler_times: bool,
 }
 
@@ -1429,6 +1535,22 @@ fn sync_instrument_param_authoring_display(
             sync.track,
             sync.selected_steps,
             sync.selection,
+        );
+    }
+    if sync.sync_plock_presence {
+        let steps: Vec<usize> = sync
+            .selected_steps
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        ui_dirty |= sync_instrument_plock_presence_fields(
+            editor.runtime_mut(),
+            sync.state,
+            &sync.app.graph.effect_descriptors,
+            sync.track,
+            &steps,
         );
     }
     ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
@@ -1992,6 +2114,21 @@ fn apply_ui_invalidations(
                     InstrumentInvalidation::Param { param } => {
                         needs_reactive_cycle |=
                             sync_instrument_param_value_field(rt, app, track, param, display_step);
+                    }
+                    InstrumentInvalidation::Plock { param } => {
+                        needs_reactive_cycle |=
+                            sync_instrument_param_value_field(rt, app, track, param, display_step);
+                        if track == current_track_idx {
+                            let steps: Vec<usize> =
+                                selected_steps.lock().unwrap().iter().copied().collect();
+                            needs_reactive_cycle |= sync_instrument_plock_presence_fields(
+                                rt,
+                                state,
+                                &app.graph.effect_descriptors,
+                                track,
+                                &steps,
+                            );
+                        }
                     }
                     InstrumentInvalidation::BaseNote => {
                         needs_reactive_cycle |=
@@ -3066,6 +3203,56 @@ mod tests {
                 .eval_str("(nth SEQ.selected-steps 3)")
                 .expect("read selected step"),
             Some(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn instrument_plock_presence_sync_updates_step_markers() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, vec![vec![]]));
+        state.pattern.track_params[0].set_num_steps(8);
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
+        state.pattern.instrument_slots[0].set_plock(2, 8, 22_050.0);
+        let effect_descriptors = vec![Vec::new()];
+        let mut runtime = Runtime::new();
+
+        super::sync_instrument_plock_presence_fields(
+            &mut runtime,
+            &state,
+            &effect_descriptors,
+            0,
+            &[2, 3],
+        );
+
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.step-has-plocks 2)")
+                .expect("read p-locked step"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.step-has-plocks 3)")
+                .expect("read unp-locked step"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval_str(&format!(
+                    r#"(reactive-get "SEQ" "{}")"#,
+                    super::track_step_plocked_field(0, 2)
+                ))
+                .expect("read selected p-locked step field"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            runtime
+                .eval_str(&format!(
+                    r#"(reactive-get "SEQ" "{}")"#,
+                    super::track_step_plocked_field(0, 3)
+                ))
+                .expect("read selected unp-locked step field"),
+            Some(Value::Bool(false))
         );
     }
 
@@ -5155,6 +5342,215 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                         }
                     },
+                    "add-track-rack" => match app.graph_controller().add_empty_rack_track() {
+                        Ok(idx) => {
+                            sync_after_instrument_track_apply(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                idx,
+                                &current_track,
+                                &mut track_names,
+                                &track_pan_ids,
+                                &record_armed,
+                                &selected_steps,
+                                &accumulator_names,
+                                &cached_track_peak_levels,
+                                &cached_bus_peak_levels,
+                                &ui_epoch,
+                                lg_raw,
+                            );
+                            let new_name = app.tracks[idx].clone();
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Added rack track {}: {new_name}",
+                                idx + 1
+                            )));
+                        }
+                        Err(e) => {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Error adding rack track: {e}"
+                            )));
+                        }
+                    },
+                    "add-track-rack-sample" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        match path_str {
+                            Some(path_str) => {
+                                let path = PathBuf::from(path_str);
+                                match app.graph_controller().add_sampler_rack_track(&[path]) {
+                                    Ok(idx) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            idx,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        let new_name = app.tracks[idx].clone();
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Added rack track {}: {new_name}",
+                                            idx + 1
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error adding rack track: {e}"
+                                        )));
+                                    }
+                                }
+                            }
+                            None => {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Rack track creation is missing a sample path".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    "add-rack-sample-slot" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let preserve_browser_context =
+                            extract_bool_from_payload(&payload, "preserve-browser-context");
+                        match (track, path_str) {
+                            (Some(track), Some(path_str)) => {
+                                if preserve_browser_context {
+                                    preserve_sample_browser_context_for_loaded_sample(
+                                        &mut editor,
+                                        &path_str,
+                                    );
+                                }
+                                let path = Path::new(&path_str);
+                                match app.graph_controller().add_sampler_slot_to_rack(track, path) {
+                                    Ok(slot_idx) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Added rack layer {}",
+                                            slot_idx + 1
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        if preserve_browser_context {
+                                            preserve_sample_browser_context_for_loaded_sample(
+                                                &mut editor,
+                                                "",
+                                            );
+                                        }
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error adding rack layer: {e}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Rack layer is missing a track or sample path".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    "delete-rack-slot" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let slot_idx = extract_usize_from_payload(&payload, "slot");
+                        match (track, slot_idx) {
+                            (Some(track), Some(slot_idx)) => {
+                                match app.graph_controller().delete_rack_slot(track, slot_idx) {
+                                    Ok(()) => {
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Deleted rack layer {}",
+                                            slot_idx + 1
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error deleting rack layer: {error}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => editor.handle_host_event(HostEvent::Status(
+                                "Rack layer deletion is missing a track or layer".to_string(),
+                            )),
+                        }
+                    }
+                    "add-rack-instrument-slot" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let name = extract_string_from_payload(&payload, "name");
+                        match (track, name) {
+                            (Some(track), Some(name)) => {
+                                match app.add_saved_instrument_slot_to_rack_sync(track, &name) {
+                                    Ok(slot_idx) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Added rack instrument layer {}: {}",
+                                            slot_idx + 1,
+                                            name
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error adding rack instrument layer: {error}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Rack instrument layer is missing a track or instrument name"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
                     "add-track-modulator" => match app.graph_controller().add_modulator_track() {
                         Ok(idx) => {
                             sync_after_instrument_track_apply(
@@ -5966,6 +6362,468 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "select-rack-slot" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(slot_idx)) =
+                                (map_usize(map, "track"), map_usize(map, "slot"))
+                            {
+                                app.set_rack_selected_slot(track, slot_idx);
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-slot-gain" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(slot_idx), Some(value)) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "slot"),
+                                map_number(map, "value").map(|value| value as f32),
+                            ) {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetRackSlotGain {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-slot-pan" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(slot_idx), Some(value)) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "slot"),
+                                map_number(map, "value").map(|value| value as f32),
+                            ) {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetRackSlotPan {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-slot-mute" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(slot_idx)) =
+                                (map_usize(map, "track"), map_usize(map, "slot"))
+                            {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetRackSlotMute {
+                                        track,
+                                        slot_idx,
+                                        value: map_bool(map, "value"),
+                                    },
+                                );
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-slot-solo" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(slot_idx)) =
+                                (map_usize(map, "track"), map_usize(map, "slot"))
+                            {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetRackSlotSolo {
+                                        track,
+                                        slot_idx,
+                                        value: map_bool(map, "value"),
+                                    },
+                                );
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-slot-max-polyphony" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(slot_idx), Some(value)) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "slot"),
+                                map_usize(map, "value"),
+                            ) {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetRackSlotMaxPolyphony {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-slot-base-note" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(slot_idx), Some(value)) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "slot"),
+                                map_number(map, "value").map(|value| value as f32),
+                            ) {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetRackSlotBaseNoteOffset {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-slot-instrument-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let param_idx = map_usize(map, "param-idx");
+                            let value = map_number(map, "value").map(|value| value as f32);
+                            if let (Some(track), Some(slot_idx), Some(param_idx), Some(user_val)) =
+                                (track, slot_idx, param_idx, value)
+                            {
+                                if let Some(slot) =
+                                    rack_slot_snapshot_for_host(&state, track, slot_idx)
+                                {
+                                    if let Some(desc) = app
+                                        .rack_slot_instrument_descriptor(&slot)
+                                        .and_then(|desc| desc.params.get(param_idx).cloned())
+                                    {
+                                        let stored =
+                                            desc.clamp(desc.user_input_to_stored(user_val));
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetRackSlotInstrumentParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: stored,
+                                            },
+                                        );
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-rack-slot-instrument-plock" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let param_idx = map_usize(map, "param-idx");
+                            let value = map_number(map, "value").map(|value| value as f32);
+                            if let (Some(track), Some(slot_idx), Some(param_idx), Some(user_val)) =
+                                (track, slot_idx, param_idx, value)
+                            {
+                                if let Some(slot) =
+                                    rack_slot_snapshot_for_host(&state, track, slot_idx)
+                                {
+                                    if let Some(desc) = app
+                                        .rack_slot_instrument_descriptor(&slot)
+                                        .and_then(|desc| desc.params.get(param_idx).cloned())
+                                    {
+                                        let stored =
+                                            desc.clamp(desc.user_input_to_stored(user_val));
+                                        let steps: Vec<usize> = selected_steps
+                                            .lock()
+                                            .unwrap()
+                                            .iter()
+                                            .copied()
+                                            .collect();
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                track,
+                                                slot_idx,
+                                                steps,
+                                                param_idx,
+                                                value: stored,
+                                            },
+                                        );
+                                        sync_rack_slot_instrument_authoring_display(
+                                            &mut editor,
+                                            &app,
+                                            &state,
+                                            track,
+                                            &selected_steps,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "toggle-rack-slot-instrument-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let param_idx = map_usize(map, "param-idx");
+                            if let (Some(track), Some(slot_idx), Some(param_idx)) =
+                                (track, slot_idx, param_idx)
+                            {
+                                if let Some(slot) =
+                                    rack_slot_snapshot_for_host(&state, track, slot_idx)
+                                {
+                                    if let Some(desc) = app
+                                        .rack_slot_instrument_descriptor(&slot)
+                                        .and_then(|desc| desc.params.get(param_idx).cloned())
+                                    {
+                                        let current = slot
+                                            .instrument_slot
+                                            .defaults
+                                            .get(param_idx)
+                                            .copied()
+                                            .unwrap_or(desc.default);
+                                        let next =
+                                            desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetRackSlotInstrumentParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: next,
+                                            },
+                                        );
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "toggle-rack-slot-instrument-plock" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let param_idx = map_usize(map, "param-idx");
+                            if let (Some(track), Some(slot_idx), Some(param_idx)) =
+                                (track, slot_idx, param_idx)
+                            {
+                                if let Some(slot) =
+                                    rack_slot_snapshot_for_host(&state, track, slot_idx)
+                                {
+                                    if let Some(desc) = app
+                                        .rack_slot_instrument_descriptor(&slot)
+                                        .and_then(|desc| desc.params.get(param_idx).cloned())
+                                    {
+                                        let selected: Vec<usize> = selected_steps
+                                            .lock()
+                                            .unwrap()
+                                            .iter()
+                                            .copied()
+                                            .collect();
+                                        let default = slot
+                                            .instrument_slot
+                                            .defaults
+                                            .get(param_idx)
+                                            .copied()
+                                            .unwrap_or(desc.default);
+                                        let current = selected
+                                            .iter()
+                                            .copied()
+                                            .min()
+                                            .and_then(|step| {
+                                                slot.instrument_slot
+                                                    .plocks
+                                                    .get(step)
+                                                    .and_then(|step_plocks| {
+                                                        step_plocks.get(param_idx)
+                                                    })
+                                                    .copied()
+                                                    .flatten()
+                                            })
+                                            .unwrap_or(default);
+                                        let next =
+                                            desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                track,
+                                                slot_idx,
+                                                steps: selected,
+                                                param_idx,
+                                                value: next,
+                                            },
+                                        );
+                                        sync_rack_slot_instrument_authoring_display(
+                                            &mut editor,
+                                            &app,
+                                            &state,
+                                            track,
+                                            &selected_steps,
+                                        );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-rack-slot-instrument-param-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let param_idx = map_usize(map, "param-idx");
+                            let label = map_string(map, "label");
+                            if let (Some(track), Some(slot_idx), Some(param_idx), Some(label)) =
+                                (track, slot_idx, param_idx, label)
+                            {
+                                if let Some(slot) =
+                                    rack_slot_snapshot_for_host(&state, track, slot_idx)
+                                {
+                                    if let Some(sequencer::effects::ParamKind::Enum { labels }) =
+                                        app.rack_slot_instrument_descriptor(&slot).and_then(
+                                            |desc| {
+                                                desc.params
+                                                    .get(param_idx)
+                                                    .map(|param| param.kind.clone())
+                                            },
+                                        )
+                                    {
+                                        if let Some(selected_idx) =
+                                            labels.iter().position(|item| item == &label)
+                                        {
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::SetRackSlotInstrumentParam {
+                                                    track,
+                                                    slot_idx,
+                                                    param_idx,
+                                                    value: selected_idx as f32,
+                                                },
+                                            );
+                                            refresh_instrument_panel_reactive(
+                                                &mut editor,
+                                                &app,
+                                                track,
+                                                &selected_steps,
+                                                &ui_epoch,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-rack-slot-instrument-plock-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let param_idx = map_usize(map, "param-idx");
+                            let label = map_string(map, "label");
+                            if let (Some(track), Some(slot_idx), Some(param_idx), Some(label)) =
+                                (track, slot_idx, param_idx, label)
+                            {
+                                if let Some(slot) =
+                                    rack_slot_snapshot_for_host(&state, track, slot_idx)
+                                {
+                                    if let Some(sequencer::effects::ParamKind::Enum { labels }) =
+                                        app.rack_slot_instrument_descriptor(&slot).and_then(
+                                            |desc| {
+                                                desc.params
+                                                    .get(param_idx)
+                                                    .map(|param| param.kind.clone())
+                                            },
+                                        )
+                                    {
+                                        if let Some(selected_idx) =
+                                            labels.iter().position(|item| item == &label)
+                                        {
+                                            let steps: Vec<usize> = selected_steps
+                                                .lock()
+                                                .unwrap()
+                                                .iter()
+                                                .copied()
+                                                .collect();
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                    track,
+                                                    slot_idx,
+                                                    steps,
+                                                    param_idx,
+                                                    value: selected_idx as f32,
+                                                },
+                                            );
+                                            sync_rack_slot_instrument_authoring_display(
+                                                &mut editor,
+                                                &app,
+                                                &state,
+                                                track,
+                                                &selected_steps,
+                                            );
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "set-instrument-param" => {
                         if let Value::Map(ref map) = payload {
                             let param_idx =
@@ -6017,6 +6875,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                             display_step: None,
                                             sync_plock_list: wrote_neural_plock,
+                                            sync_plock_presence: false,
                                             sync_sampler_times: true,
                                         },
                                     );
@@ -6091,6 +6950,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 param_idx,
                                                 display_step: None,
                                                 sync_plock_list: true,
+                                                sync_plock_presence: false,
                                                 sync_sampler_times: false,
                                             },
                                         );
@@ -6120,6 +6980,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 steps: selected,
                                                 param_idx,
                                                 value: next,
+                                            },
+                                        );
+                                        let display_step = displayed_plock_step(
+                                            &state,
+                                            track,
+                                            selected_plock_step(&selected_steps),
+                                        );
+                                        sync_instrument_param_authoring_display(
+                                            &mut editor,
+                                            InstrumentParamDisplaySync {
+                                                app: &app,
+                                                state: &state,
+                                                selected_steps: &selected_steps,
+                                                selection: &neural_selection,
+                                                track,
+                                                param_idx,
+                                                display_step,
+                                                sync_plock_list: false,
+                                                sync_plock_presence: true,
+                                                sync_sampler_times: false,
                                             },
                                         );
                                     }
@@ -6513,6 +7393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 param_idx,
                                                 display_step: None,
                                                 sync_plock_list: wrote_neural_plock,
+                                                sync_plock_presence: false,
                                                 sync_sampler_times: false,
                                             },
                                         );
@@ -6586,6 +7467,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                             display_step,
                                             sync_plock_list: wrote_neural_plock,
+                                            sync_plock_presence: !wrote_neural_plock,
                                             sync_sampler_times: true,
                                         },
                                     );
@@ -6645,6 +7527,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 },
                                             );
                                         }
+                                        let display_step = displayed_plock_step(
+                                            &state,
+                                            track,
+                                            selected_plock_step(&selected_steps),
+                                        );
                                         sync_instrument_param_authoring_display(
                                             &mut editor,
                                             InstrumentParamDisplaySync {
@@ -6654,8 +7541,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 selection: &neural_selection,
                                                 track,
                                                 param_idx,
-                                                display_step: None,
+                                                display_step,
                                                 sync_plock_list: wrote_neural_plock,
+                                                sync_plock_presence: !wrote_neural_plock,
                                                 sync_sampler_times: false,
                                             },
                                         );

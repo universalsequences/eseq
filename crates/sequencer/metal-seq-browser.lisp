@@ -169,6 +169,11 @@
   (set! sbrowser-tab "instruments")
   (status "Add modulator track"))
 
+(def sbrowser-add-rack-track ()
+  (host-command "add-track-rack" (dict))
+  (set! sbrowser-tab "samples")
+  (status "Add rack track"))
+
 ;; ── SDF widgets ──
 
 (defwidget browser-panel-bg
@@ -249,6 +254,31 @@
         (sbrowser-leave-create-mode)
         (status (str "Add track: " (get item :label))))
       (status "Select a sample file, not a folder"))))
+
+(def sbrowser-add-rack-layer (item)
+  (let ((path (get item :path)))
+    (if path
+      (do
+        (set! sbrowser-auditioned-sample path)
+        (host-command "add-rack-sample-slot"
+          (dict :track SEQ.current-track :path path :preserve-browser-context true))
+        (status (str "Add layer: " (get item :label))))
+      (status "Select a sample file, not a folder"))))
+
+(def sbrowser-add-selected-rack-layer ()
+  (let ((path (sbrowser-sample-selected-path)))
+    (if (= path "")
+      (status "Select a sample first")
+      (do
+        (set! sbrowser-auditioned-sample path)
+        (host-command "add-rack-sample-slot"
+          (dict :track SEQ.current-track :path path :preserve-browser-context true))
+        (status "Add layer")))))
+
+(def sbrowser-modified-activate-sample (item)
+  (if (= SEQ.sidebar-kind "rack")
+    (sbrowser-add-rack-layer item)
+    (sbrowser-add-track item)))
 
 (def sbrowser-select-item (item)
   (if (or (sbrowser-create-sampler-mode?) (= SEQ.num-tracks 0) (= SEQ.sidebar-kind "instrument"))
@@ -527,6 +557,14 @@
         :height 1.3
         :font-size 10.5
         :on-click |x y r| (sbrowser-add-modulator-track)
+        :color :white)
+      (button "Rack"
+        :variant :secondary
+        :icon :sampler
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-add-rack-track)
         :color :white))))
 
 (def sbrowser-library-label ()
@@ -591,6 +629,24 @@
     (let ((tags (get browser :tags))
           (items (get browser :items)))
       (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
+        (box :key "sample-rack-actions" :width :fill :padding 0.15
+          (h-stack :width :fill :gap 0.35 :align :center
+            (button "Rack"
+              :variant :secondary
+              :icon :sampler
+              :height 1.15
+              :flex 1
+              :font-size 9.5
+              :on-click |x y r| (sbrowser-add-rack-track)
+              :color :white)
+            (button "Layer"
+              :variant :secondary
+              :icon :sampler
+              :height 1.15
+              :flex 1
+              :font-size 9.5
+              :on-click |x y r| (sbrowser-add-selected-rack-layer)
+              :color :white)))
         (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
           (v-stack :width :fill :gap 0.35
             (if (> (len sbrowser-selected-tags) 0)
@@ -623,7 +679,7 @@
                 :on-select (lambda (item) (sbrowser-select-sample item))
                 :on-cursor-change (lambda (item) (sbrowser-select-sample item))
                 :on-activate (lambda (item) (sbrowser-activate-sample item))
-                :on-modified-activate (lambda (item) (sbrowser-add-track item))))))))))
+                :on-modified-activate (lambda (item) (sbrowser-modified-activate-sample item))))))))))
 
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1

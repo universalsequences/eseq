@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use super::command::{apply_command, AppCommand};
 
 use crate::effects::EffectDescriptor;
+use crate::sequencer::{InstrumentType, RackSlotSnapshot};
 
 use super::{App, InputMode};
 
@@ -1047,12 +1048,493 @@ impl App {
         }
     }
 
+    pub fn rack_slot_instrument_descriptor(
+        &self,
+        slot: &RackSlotSnapshot,
+    ) -> Option<EffectDescriptor> {
+        match slot.instrument_type {
+            InstrumentType::Sampler => Some(EffectDescriptor::builtin_sampler()),
+            InstrumentType::Custom | InstrumentType::Modulator => {
+                let engine_id = slot.track_sound_state.engine_id?;
+                let engine = self.editor.engine_registry.get(engine_id)?;
+                Some(crate::lisp_host::instrument_descriptor_from_manifest(
+                    &engine.name,
+                    &engine.manifest,
+                ))
+            }
+            InstrumentType::Rack => None,
+        }
+    }
+
+    fn rack_slot_snapshot(&self, track: usize, slot_idx: usize) -> Option<RackSlotSnapshot> {
+        self.state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(|rack| rack.as_ref())
+            .and_then(|rack| rack.slots.get(slot_idx))
+            .cloned()
+    }
+
+    fn push_rack_slot_panner_param(&self, track: usize, slot_idx: usize, idx: u64, value: f32) {
+        let Some(nodes) = self
+            .graph
+            .track_node_ids
+            .get(track)
+            .and_then(|track_nodes| track_nodes.rack_slots.get(slot_idx))
+        else {
+            return;
+        };
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                self.graph.lg.0,
+                crate::audiograph::ParamMsg {
+                    idx,
+                    logical_id: nodes.slot_pan_id as u64,
+                    fvalue: value,
+                },
+            );
+        }
+    }
+
+    pub fn push_rack_slot_solo_mutes(&self, track: usize) {
+        let Some(rack) = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(|rack| rack.as_ref())
+            .cloned()
+        else {
+            return;
+        };
+        let has_solo = rack.slots.iter().any(|slot| slot.solo);
+        let Some(track_nodes) = self.graph.track_node_ids.get(track) else {
+            return;
+        };
+        for (slot_idx, nodes) in track_nodes.rack_slots.iter().enumerate() {
+            let muted_by_solo = has_solo && !rack.slots.get(slot_idx).is_some_and(|slot| slot.solo);
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+                        logical_id: nodes.slot_pan_id as u64,
+                        fvalue: if muted_by_solo { 1.0 } else { 0.0 },
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn set_rack_slot_gain(&mut self, track: usize, slot_idx: usize, value: f32) -> bool {
+        let value = value.clamp(0.0, 2.0);
+        let updated = self
+            .state
+            .update_live_rack_slot(track, slot_idx, |slot| slot.gain = value);
+        if updated {
+            self.push_rack_slot_panner_param(
+                track,
+                slot_idx,
+                crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                value,
+            );
+        }
+        updated
+    }
+
+    pub fn set_rack_slot_pan(&mut self, track: usize, slot_idx: usize, value: f32) -> bool {
+        let value = value.clamp(-1.0, 1.0);
+        let updated = self
+            .state
+            .update_live_rack_slot(track, slot_idx, |slot| slot.pan = value);
+        if updated {
+            self.push_rack_slot_panner_param(
+                track,
+                slot_idx,
+                crate::stereo_panner::STEREO_PANNER_PARAM_PAN,
+                value,
+            );
+        }
+        updated
+    }
+
+    pub fn set_rack_slot_mute(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {
+        let updated = self
+            .state
+            .update_live_rack_slot(track, slot_idx, |slot| slot.mute = value);
+        if updated {
+            self.push_rack_slot_panner_param(
+                track,
+                slot_idx,
+                crate::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                if value { 1.0 } else { 0.0 },
+            );
+        }
+        updated
+    }
+
+    pub fn set_rack_slot_solo(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {
+        let updated = self
+            .state
+            .update_live_rack_slot(track, slot_idx, |slot| slot.solo = value);
+        if updated {
+            self.push_rack_slot_solo_mutes(track);
+        }
+        updated
+    }
+
+    pub fn set_rack_slot_max_polyphony(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        value: usize,
+    ) -> bool {
+        self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            slot.max_polyphony = value.clamp(1, crate::voice::MAX_VOICES);
+        })
+    }
+
+    pub fn set_rack_slot_base_note_offset(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        value: f32,
+    ) -> bool {
+        let value = value.clamp(-48.0, 48.0);
+        self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            slot.instrument_base_note_offset = value;
+            slot.track_sound_state.dirty = true;
+        })
+    }
+
+    pub fn send_rack_slot_instrument_param(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) {
+        let Some(slot) = self.rack_slot_snapshot(track, slot_idx) else {
+            return;
+        };
+        let Some(nodes) = self
+            .graph
+            .track_node_ids
+            .get(track)
+            .and_then(|track_nodes| track_nodes.rack_slots.get(slot_idx))
+        else {
+            return;
+        };
+        let idx = slot
+            .instrument_slot
+            .param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(0) as u64;
+        let span = slot
+            .instrument_slot
+            .param_node_spans
+            .get(param_idx)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        if crate::voice_modulator::is_bar_resync_param(idx as u32) {
+            self.state.schedule_mod_resync();
+        }
+        if slot.instrument_type == InstrumentType::Sampler {
+            let sample_rate = slot
+                .sample_id
+                .as_ref()
+                .map(|(_, _, rate)| (*rate).max(1) as f32)
+                .unwrap_or(self.graph.sample_rate.max(1) as f32);
+            let (idx, fvalue) = match param_idx {
+                0 => (
+                    crate::sampler::PARAM_ATTACK_SAMPLES,
+                    value * sample_rate / 1000.0,
+                ),
+                1 => (
+                    crate::sampler::PARAM_RELEASE_SAMPLES,
+                    value * sample_rate / 1000.0,
+                ),
+                2 => (crate::sampler::PARAM_START_POINT, value),
+                3 => (crate::sampler::PARAM_END_POINT, value),
+                4 => (crate::sampler::PARAM_ENABLED, value),
+                5 => (crate::sampler::PARAM_REVERSE, value),
+                6 => (crate::sampler::PARAM_LOOP_MODE, value),
+                7 => (
+                    crate::sampler::PARAM_LOOP_XFADE_SAMPLES,
+                    value * sample_rate / 1000.0,
+                ),
+                8 => (crate::sampler::PARAM_SR_HZ, value),
+                9 => (crate::sampler::PARAM_WARP_ENABLED, value),
+                10 => (crate::sampler::PARAM_WARP_MODE, value),
+                11 => (crate::sampler::PARAM_WARP_SAMPLE_BPM, value),
+                _ => (idx, value),
+            };
+            let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+            let resolved_idx = if is_mod_param {
+                idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+            } else {
+                idx
+            };
+            let target_ids: &[i32] = if is_mod_param {
+                &nodes.sampler_modulator_ids
+            } else {
+                &nodes.sampler_ids
+            };
+            for &node_id in target_ids {
+                unsafe {
+                    for lane in 0..span as u64 {
+                        crate::audiograph::params_push_wrapper(
+                            self.graph.lg.0,
+                            crate::audiograph::ParamMsg {
+                                idx: resolved_idx + lane,
+                                logical_id: node_id as u64,
+                                fvalue,
+                            },
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
+        let Some(engine_id) = nodes.engine_id else {
+            return;
+        };
+        let Some(engine) = self
+            .graph
+            .engine_node_ids
+            .get(engine_id)
+            .and_then(|engine| engine.as_ref())
+        else {
+            return;
+        };
+        let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+        let resolved_idx = if is_mod_param {
+            idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+        } else {
+            idx
+        };
+        let target_ids = if is_mod_param {
+            &engine.modulator_ids
+        } else {
+            &engine.synth_ids
+        };
+        for &node_id in target_ids {
+            unsafe {
+                for lane in 0..span as u64 {
+                    crate::audiograph::params_push_wrapper(
+                        self.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            idx: resolved_idx + lane,
+                            logical_id: node_id as u64,
+                            fvalue: value,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn set_rack_slot_instrument_default_only(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let mut wrote = false;
+        let slot_exists = self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            let param_count = slot.instrument_slot.num_params as usize;
+            if param_idx < param_count {
+                if slot.instrument_slot.defaults.len() < param_count {
+                    slot.instrument_slot.defaults.resize(param_count, 0.0);
+                }
+                slot.instrument_slot.defaults[param_idx] = value;
+                slot.track_sound_state.dirty = true;
+                wrote = true;
+            }
+        });
+        slot_exists && wrote
+    }
+
+    pub fn set_rack_slot_instrument_param(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let updated = self.set_rack_slot_instrument_default_only(track, slot_idx, param_idx, value);
+        if updated {
+            self.send_rack_slot_instrument_param(track, slot_idx, param_idx, value);
+            self.sync_rack_slot_mod_active_default(track, slot_idx, param_idx);
+        }
+        updated
+    }
+
+    pub fn set_rack_slot_instrument_plock(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        step: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> bool {
+        let mut wrote = false;
+        let slot_exists = self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            if slot.instrument_slot.set_plock(step, param_idx, value) {
+                slot.track_sound_state.dirty = true;
+                wrote = true;
+            }
+        });
+        if slot_exists && wrote {
+            self.sync_rack_slot_mod_active_plock(track, slot_idx, step, param_idx);
+        }
+        slot_exists && wrote
+    }
+
+    fn sync_rack_slot_mod_active_default(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        changed_param_idx: usize,
+    ) {
+        let Some(slot) = self.rack_slot_snapshot(track, slot_idx) else {
+            return;
+        };
+        let Some(desc) = self.rack_slot_instrument_descriptor(&slot) else {
+            return;
+        };
+        let Some(active_param_idx) = desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.depth_param_idx == changed_param_idx)
+            .and_then(|target| target.active_param_idx)
+        else {
+            return;
+        };
+        let active = desc
+            .instrument_modulation_targets
+            .iter()
+            .filter(|target| target.active_param_idx == Some(active_param_idx))
+            .any(|target| {
+                slot.instrument_slot
+                    .defaults
+                    .get(target.depth_param_idx)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        desc.params
+                            .get(target.depth_param_idx)
+                            .map(|param| param.default)
+                            .unwrap_or_default()
+                    })
+                    .abs()
+                    > f32::EPSILON
+            });
+        let value = if active { 1.0 } else { 0.0 };
+        if self.set_rack_slot_instrument_default_only(track, slot_idx, active_param_idx, value) {
+            self.send_rack_slot_instrument_param(track, slot_idx, active_param_idx, value);
+        }
+    }
+
+    fn sync_rack_slot_mod_active_plock(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        step: usize,
+        changed_param_idx: usize,
+    ) {
+        let Some(slot) = self.rack_slot_snapshot(track, slot_idx) else {
+            return;
+        };
+        let Some(desc) = self.rack_slot_instrument_descriptor(&slot) else {
+            return;
+        };
+        let Some(active_param_idx) = desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| target.depth_param_idx == changed_param_idx)
+            .and_then(|target| target.active_param_idx)
+        else {
+            return;
+        };
+        let active = desc
+            .instrument_modulation_targets
+            .iter()
+            .filter(|target| target.active_param_idx == Some(active_param_idx))
+            .any(|target| {
+                slot.instrument_slot
+                    .plocks
+                    .get(step)
+                    .and_then(|step_plocks| step_plocks.get(target.depth_param_idx))
+                    .copied()
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        slot.instrument_slot
+                            .defaults
+                            .get(target.depth_param_idx)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                desc.params
+                                    .get(target.depth_param_idx)
+                                    .map(|param| param.default)
+                                    .unwrap_or_default()
+                            })
+                    })
+                    .abs()
+                    > f32::EPSILON
+            });
+        let value = if active { 1.0 } else { 0.0 };
+        self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            if slot
+                .instrument_slot
+                .set_plock(step, active_param_idx, value)
+            {
+                slot.track_sound_state.dirty = true;
+            }
+        });
+    }
+
     pub(super) fn push_instrument_defaults_for_track(&self, track: usize) {
         let slot = &self.state.pattern.instrument_slots[track];
         let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
         for param_idx in 0..num_params {
             self.send_instrument_param(track, param_idx, slot.defaults.get(param_idx));
         }
+    }
+
+    pub(super) fn push_rack_slot_instrument_defaults_for_track(&self, track: usize) {
+        let Some(rack) = self
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(|rack| rack.as_ref())
+            .cloned()
+        else {
+            return;
+        };
+        for (slot_idx, slot) in rack.slots.iter().enumerate() {
+            for param_idx in 0..slot.instrument_slot.num_params as usize {
+                let value = slot
+                    .instrument_slot
+                    .defaults
+                    .get(param_idx)
+                    .copied()
+                    .unwrap_or_default();
+                self.send_rack_slot_instrument_param(track, slot_idx, param_idx, value);
+            }
+        }
+        self.push_rack_slot_solo_mutes(track);
     }
 
     pub fn force_instrument_enabled(&self, track: usize) -> bool {
@@ -1072,6 +1554,10 @@ impl App {
 
     pub(super) fn push_all_restored_instrument_defaults(&self) {
         for track in 0..self.tracks.len() {
+            if self.graph.track_instrument_types.get(track) == Some(&InstrumentType::Rack) {
+                self.push_rack_slot_instrument_defaults_for_track(track);
+                continue;
+            }
             if self.is_sampler_track(track) {
                 continue;
             }

@@ -396,6 +396,26 @@ impl App {
         })
     }
 
+    pub fn add_saved_instrument_slot_to_rack_sync(
+        &mut self,
+        track: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
+        let lib_ptr: *const lisp_host::LoadedDGenLib =
+            &self.editor.instrument_libs[prepared.lib_index];
+        unsafe {
+            self.graph_controller().add_custom_slot_to_rack(
+                track,
+                &prepared.name,
+                prepared.engine_id,
+                &prepared.manifest,
+                &*lib_ptr,
+                prepared.run_mode,
+            )
+        }
+    }
+
     pub fn try_add_cached_saved_instrument_track_sync(
         &mut self,
         name: &str,

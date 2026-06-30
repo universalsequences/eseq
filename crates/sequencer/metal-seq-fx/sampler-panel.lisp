@@ -10,11 +10,15 @@
   (set! sampler-cursor-time 0.0)
   (set! sampler-active-marker "none"))
 
-(def sampler-set-start-end (start-seconds end-seconds duration)
+(def sampler-set-start-end (inst start-seconds end-seconds duration)
   (if (> duration 0)
     (do
-      (fx-set-instrument-value (dict :idx 2 :control "param") (* 100 (/ start-seconds duration)))
-      (fx-set-instrument-value (dict :idx 3 :control "param") (* 100 (/ end-seconds duration))))))
+      (fx-set-instrument-value
+        (instrument-target-param-dict inst 2)
+        (* 100 (/ start-seconds duration)))
+      (fx-set-instrument-value
+        (instrument-target-param-dict inst 3)
+        (* 100 (/ end-seconds duration))))))
 
 (def sampler-clamp-start (next-start duration)
   (max 0 (min next-start (max 0 (- duration sampler-view-duration)))))
@@ -22,18 +26,18 @@
 (def sampler-clamp-duration (next-duration duration)
   (max 0.001 (min next-duration (max 0.001 duration))))
 
-(def handle-sampler-waveform-action (event duration)
+(def handle-sampler-waveform-action (inst event duration)
   (match event.type
     :set-cursor
     (set! sampler-cursor-time event.time)
     :set-selection
-    (sampler-set-start-end event.start event.end duration)
+    (sampler-set-start-end inst event.start event.end duration)
     :begin-marker-drag
     (set! sampler-active-marker (if (= event.marker :start) "start" "end"))
     :end-marker-drag
     (set! sampler-active-marker "none")
     :clear-selection
-    (sampler-set-start-end 0 duration duration)
+    (sampler-set-start-end inst 0 duration duration)
     :scroll-view
     (set! sampler-view-start (sampler-clamp-start (+ sampler-view-start event.delta-time) duration))
     :zoom-view
@@ -53,6 +57,18 @@
       (if path
         (host-command "load-sample-into-track" (dict :track track :path path :preserve-browser-context true))
         (status "Drop a sample file, not a folder")))))
+
+(def sampler-panel-drop-types (inst)
+  (if (instrument-rack-target? inst)
+    '()
+    (list "sample")))
+
+(def sampler-panel-drop-meta (inst)
+  (if (instrument-rack-target? inst)
+    (dict :kind "rack-selected-sampler"
+          :track (get inst :rack-track)
+          :slot (get inst :rack-slot))
+    (dict :kind "sampler-panel" :track (get inst :track))))
 
 (def sampler-param-knob (p key)
   (instrument-param-mod-wrapper p (str key "-mod-wrapper")
@@ -174,62 +190,74 @@
     (sampler-param-control (sampler-param-by-name params "warp"))
     (sampler-bpm-control (sampler-param-by-name params "bpm"))))
 
+(def sampler-selection-start-prop (inst)
+  (if (get inst :start-time-field)
+    (bind-seq (get inst :start-time-field))
+    (get inst :start-time)))
+
+(def sampler-selection-end-prop (inst)
+  (if (get inst :end-time-field)
+    (bind-seq (get inst :end-time-field))
+    (get inst :end-time)))
+
+(def sampler-panel-content (inst)
+  (let ((body
+        (v-stack
+          (box :background-color :instrument-control-bg :corner-radius 10
+            (v-stack :gap 0.0
+              (box :height 0.3)
+              (if (get inst :buffer)
+                (subtree :key (str "sampler-waveform-" (get inst :buffer))
+                  (box :width 78 :height 5.85
+                    (waveform
+                      :height 4.85
+                      :header-height 0.3
+                      :ruler-font-size 8
+                      :ruler-color :dim
+                      :ruler-bg :black
+                      :grid-major-color :black
+                      :grid-minor-color :black
+                      :bg :instrument-control-bg
+                      :focusable true
+                      :marker-selection true
+                      :active-marker sampler-active-marker
+                      :marker-color :dim
+                      :active-marker-color :widget-knob-filled
+                      :waveform-color :yellow
+                      :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
+                      :buffer (get inst :buffer)
+                      :view-start sampler-view-start
+                      :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
+                      :cursor-time sampler-cursor-time
+                      :playhead-time (bind-seq "sampler-playhead")
+                      :selection-start (sampler-selection-start-prop inst)
+                      :selection-end (sampler-selection-end-prop inst)
+                      :time-ruler (dict :mode :seconds)
+                      :on-action |event| (handle-sampler-waveform-action inst event (get inst :duration)))))
+                (box :width 70 :height 4.85 :h-align :center :v-align :center
+                  (label "No sample" :font-size 12 :color :dim :bg :transparent)))
+              (sampler-param-knobs (get inst :synth) inst))))))
+    (if instrument-mods-open
+      (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
+        (instrument-mod-control-panel inst)
+        body)
+      body)))
+
 (def sampler-panel (inst)
   (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     :height fx-fixed-panel-height
     :debug-name "sampler-panel"
-    :drop-types (list "sample")
-    :drop-meta (dict :kind "sampler-panel" :track (get inst :track))
+    :drop-types (sampler-panel-drop-types inst)
+    :drop-meta (sampler-panel-drop-meta inst)
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (sampler-panel-drop-sample event))
-    (v-stack :gap 0 :height :fill 
+    (v-stack :gap 0 :height :fill
       (box :debug-name "sampler-header-box" :height 1 :padding 0 :v-align :center :h-align :start
-        (h-stack :gap 0.5  :width :fill 
+        (h-stack :gap 0.5  :width :fill
           (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param (get inst :synth)) false "sampler-enabled")
           (label "Sampler" :font-size 11 :color :white :bg :transparent)
           (instrument-synth-button)
-          (instrument-mods-toggle-button)
-          	  ))
+          (instrument-mods-toggle-button)))
       (fx-panel-body "sampler-panel-content"
-        (let ((body
-              (v-stack
-                (box :background-color :instrument-control-bg :corner-radius 10
-                  (v-stack :gap 0.0 
-                    (box :height 0.3)
-                    (if (get inst :buffer)
-                      (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                        (box :width 78 :height 5.85 
-                          (waveform
-                            :height 4.85
-                            :header-height 0.3
-                            :ruler-font-size 8
-                            :ruler-color :dim
-                            :ruler-bg :black
-                            :grid-major-color :black
-                            :grid-minor-color :black
-                            :bg :instrument-control-bg
-                            :focusable true
-                            :marker-selection true
-                            :active-marker sampler-active-marker
-                            :marker-color :dim
-                            :active-marker-color :widget-knob-filled
-                            :waveform-color :yellow
-                            :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
-                            :buffer (get inst :buffer)
-                            :view-start sampler-view-start
-                            :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
-                            :cursor-time sampler-cursor-time
-                            :playhead-time (bind-seq "sampler-playhead")
-                            :selection-start (bind-seq (get inst :start-time-field))
-                            :selection-end (bind-seq (get inst :end-time-field))
-                            :time-ruler (dict :mode :seconds)
-                            :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
-                      (box :width 70 :height 4.85 :h-align :center :v-align :center
-                        (label "No sample" :font-size 12 :color :dim :bg :transparent)))
-                    (sampler-param-knobs (get inst :synth) inst))))))
-          (if instrument-mods-open
-            (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
-              (instrument-mod-control-panel inst)
-              body)
-            body))))))
+        (sampler-panel-content inst)))))

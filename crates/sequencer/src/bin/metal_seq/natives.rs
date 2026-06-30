@@ -150,6 +150,13 @@ fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarg
             }
             Ok(ActiveDeleteTarget::FxEffect { chain, bus, slot })
         }
+        Some("rack-slot") | Some("rack-layer") => {
+            let track = value_number_field(payload, "track")
+                .ok_or_else(|| "rack-slot delete target expects :track".to_string())?;
+            let slot = value_number_field(payload, "slot")
+                .ok_or_else(|| "rack-slot delete target expects :slot".to_string())?;
+            Ok(ActiveDeleteTarget::RackSlot { track, slot })
+        }
         Some(other) => Err(format!("unknown delete target kind :{other}")),
         None => Err("delete target kind must be a keyword or string".to_string()),
     }
@@ -181,6 +188,7 @@ fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
         Some(ActiveDeleteTarget::TrackPattern { .. }) => Value::String("track-pattern".to_string()),
         Some(ActiveDeleteTarget::ModRoute { .. }) => Value::String("mod-route".to_string()),
         Some(ActiveDeleteTarget::FxEffect { .. }) => Value::String("fx-effect".to_string()),
+        Some(ActiveDeleteTarget::RackSlot { .. }) => Value::String("rack-slot".to_string()),
         None => Value::Bool(false),
     }
 }
@@ -264,6 +272,15 @@ mod delete_target_tests {
                 bus: Some(1),
                 slot: 4,
             }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("rack-slot".to_string()),
+                &map_value([("track", Value::Number(2.0)), ("slot", Value::Number(3.0))]),
+            )
+            .expect("rack slot target"),
+            ActiveDeleteTarget::RackSlot { track: 2, slot: 3 }
         );
     }
 
@@ -1201,6 +1218,41 @@ pub(crate) fn init_runtime(
                     }
                 };
                 ctx.enqueue_command(HostCommand::Custom { name, payload });
+            }
+            ActiveDeleteTarget::RackSlot { track, slot } => {
+                if current_buffer != "*fx*" {
+                    return Ok(Value::Bool(false));
+                }
+                let valid = track < st.active_track_count()
+                    && st
+                        .pattern
+                        .rack_tracks
+                        .lock()
+                        .unwrap()
+                        .get(track)
+                        .and_then(|rack| rack.as_ref())
+                        .is_some_and(|rack| slot < rack.slots.len());
+                if !valid {
+                    ctx.set_status("Cannot delete missing rack layer");
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(track as f64))),
+                );
+                map.insert(
+                    "slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(slot as f64))),
+                );
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-rack-slot".to_string(),
+                    payload: Value::Map(map),
+                });
             }
         }
 
