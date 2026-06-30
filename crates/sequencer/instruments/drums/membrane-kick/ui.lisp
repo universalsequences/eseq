@@ -25,8 +25,8 @@
         (h-stack :gap 0.18 :align :start
           (ui-lego-badge-s 0 "PRIMARY" 4.4 (ui-accent-green))))
       (h-stack :gap 0.10 :align :start
-        (ui-lego-knob-s 0 "pitch" "PTCH" 3.9 (ui-accent-green) 3)
-        (ui-lego-knob-s 0 "release" "REL" 3.9 (ui-accent-green) 2)
+        (ui-lego-knob-s 0 "tune" "TUNE" 3.9 (ui-accent-green) 1)
+        (ui-lego-knob-s 0 "release" "REL" 3.9 (ui-accent-green) 0)
         (ui-lego-knob-s 0 "coupling" "CPL" 3.9 (ui-accent-orange) 2)))))
 
 (def mk-mix ()
@@ -58,8 +58,8 @@
         (h-stack :gap 0.18 :align :start
           (ui-lego-badge-s 0 "SECONDARY" 4.4 (ui-accent-violet))))
       (h-stack :gap 0.10 :align :start
-        (ui-lego-knob-s 0 "pitch2" "PTCH" 3.9 (ui-accent-violet) 3)
-        (ui-lego-knob-s 0 "release2" "REL" 3.9 (ui-accent-violet) 2)))))
+        (ui-lego-knob-s 0 "pitch2_ratio" "RAT" 3.9 (ui-accent-violet) 2)
+        (ui-lego-knob-s 0 "release2" "REL" 3.9 (ui-accent-violet) 0)))))
 
 (defsynth-ui
   (h-stack :width :fill :gap 0.35 :align :stretch
