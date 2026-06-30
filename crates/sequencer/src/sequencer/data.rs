@@ -4,6 +4,9 @@ use std::sync::Mutex;
 use crate::voice::MAX_VOICES;
 
 pub const MAX_TRACKS: usize = 64;
+pub const MAX_RACK_SLOTS: usize = 16;
+pub const MAX_INSTRUMENT_ENGINES: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
+pub const MAX_SAMPLER_POOLS: usize = MAX_TRACKS * (MAX_RACK_SLOTS + 1);
 pub const MAX_STEPS: usize = 256;
 pub const STEPS_PER_PAGE: usize = 16;
 pub const NUM_PARAMS: usize = 10;
@@ -12,6 +15,13 @@ pub const TRACK_PATTERN_WORDS: usize = MAX_STEPS / 64;
 pub const MIX_BUS_ID: u64 = 0;
 pub const DEFAULT_BUS_A_ID: u64 = 1;
 pub const DEFAULT_BUS_B_ID: u64 = 2;
+
+pub fn rack_slot_pool_index(track_idx: usize, slot_idx: usize) -> Option<usize> {
+    if track_idx >= MAX_TRACKS || slot_idx >= MAX_RACK_SLOTS {
+        return None;
+    }
+    Some(MAX_TRACKS + track_idx * MAX_RACK_SLOTS + slot_idx)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BusId(pub u64);
@@ -46,17 +56,20 @@ pub enum InstrumentType {
     Sampler,
     Custom,
     Modulator,
+    Rack,
 }
 
 impl InstrumentType {
-    pub const COUNT: usize = 3;
-    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom, Self::Modulator];
+    pub const COUNT: usize = 4;
+    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom, Self::Modulator, Self::Rack];
+    pub const ADD_TRACK_TYPES: [Self; 3] = [Self::Sampler, Self::Custom, Self::Modulator];
 
     pub fn label(&self) -> &'static str {
         match self {
             InstrumentType::Sampler => "Sampler",
             InstrumentType::Custom => "Custom",
             InstrumentType::Modulator => "Modulator",
+            InstrumentType::Rack => "Rack",
         }
     }
 
@@ -65,6 +78,7 @@ impl InstrumentType {
             InstrumentType::Sampler => 0,
             InstrumentType::Custom => 1,
             InstrumentType::Modulator => 2,
+            InstrumentType::Rack => 3,
         }
     }
 
@@ -72,9 +86,16 @@ impl InstrumentType {
         match flag {
             1 => InstrumentType::Custom,
             2 => InstrumentType::Modulator,
+            3 => InstrumentType::Rack,
             _ => InstrumentType::Sampler,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RackRouting {
+    #[default]
+    Broadcast,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -984,7 +1005,7 @@ impl Default for TrackParamsSnapshot {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TrackSoundState {
     pub engine_id: Option<usize>,
     pub loaded_preset: Option<String>,

@@ -28,8 +28,10 @@ use crate::scheduled_event::{
     ScheduledInstrumentParams, ScheduledSamplerParams,
 };
 use crate::sequencer::{
-    sync_beats, BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, SequencerState,
-    StepParam, SwingResolution, MAX_TRACKS,
+    rack_slot_pool_index, sync_beats, BusId, CustomInstrumentRunMode, InstrumentType,
+    KeyboardTrigger, RackSlotSnapshot, RackTrackSnapshot, SequencerSnapshot, SequencerState,
+    StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
+    MAX_TRACKS,
 };
 use crate::ui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
@@ -299,10 +301,71 @@ fn cancel_chops_for_track(
     });
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveKeyboardVoiceTarget {
+    Sampler { pool_id: usize },
+    Custom { engine_id: usize, free_patch: bool },
+}
+
+impl Default for ActiveKeyboardVoiceTarget {
+    fn default() -> Self {
+        Self::Sampler { pool_id: 0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ActiveKeyboardVoice {
+    logical_id: u64,
+    gatepitch_id: i32,
+    target: ActiveKeyboardVoiceTarget,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct ActiveKeyboardNote {
     source_transpose: f32,
-    logical_id: u64,
+    voice_count: u8,
+    voices: [ActiveKeyboardVoice; MAX_RACK_SLOTS],
+}
+
+impl ActiveKeyboardNote {
+    fn new(source_transpose: f32, voices: &[ActiveKeyboardVoice]) -> Option<Self> {
+        if voices.is_empty() {
+            return None;
+        }
+        let mut note = Self {
+            source_transpose,
+            voice_count: 0,
+            voices: [ActiveKeyboardVoice::default(); MAX_RACK_SLOTS],
+        };
+        for voice in voices.iter().take(MAX_RACK_SLOTS) {
+            note.voices[note.voice_count as usize] = *voice;
+            note.voice_count += 1;
+        }
+        Some(note)
+    }
+
+    fn voices(&self) -> &[ActiveKeyboardVoice] {
+        &self.voices[..self.voice_count as usize]
+    }
+
+    fn remove_voice_by_lid(&mut self, logical_id: u64) -> bool {
+        if logical_id == 0 {
+            return false;
+        }
+        let Some(pos) = self
+            .voices()
+            .iter()
+            .position(|voice| voice.logical_id == logical_id)
+        else {
+            return false;
+        };
+        let voice_count = self.voice_count as usize;
+        for idx in pos..voice_count.saturating_sub(1) {
+            self.voices[idx] = self.voices[idx + 1];
+        }
+        self.voice_count -= 1;
+        true
+    }
 }
 
 struct AudioCallbackData {
@@ -314,6 +377,8 @@ struct AudioCallbackData {
     last_mod_reset_counter: u32,
     voice_pools: Vec<VoicePool>,
     custom_engine_pools: Vec<CustomEnginePool>,
+    scheduler_snapshot: Arc<SequencerSnapshot>,
+    scheduler_snapshot_version: u64,
     active_keyboard_notes: [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
     keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
     master_recorder: Arc<MasterRecorder>,
@@ -747,6 +812,55 @@ fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut 
     }
 }
 
+fn sync_rack_voice_pools(data: &mut AudioCallbackData, num_tracks: usize) {
+    let rack_tracks: Vec<(usize, RackTrackSnapshot)> = data
+        .scheduler_snapshot
+        .tracks
+        .iter()
+        .take(num_tracks)
+        .enumerate()
+        .filter_map(|(track_idx, track)| {
+            track
+                .rack_track
+                .as_ref()
+                .cloned()
+                .map(|rack| (track_idx, rack))
+        })
+        .collect();
+
+    for (track_idx, rack) in rack_tracks {
+        for (slot_idx, slot) in rack.slots.iter().enumerate() {
+            match slot.instrument_type {
+                InstrumentType::Sampler => {
+                    let Some(pool_id) = rack_slot_pool_index(track_idx, slot_idx) else {
+                        continue;
+                    };
+                    if pool_id < data.voice_pools.len() {
+                        sync_sampler_voice_pool(
+                            &data.state,
+                            pool_id,
+                            &mut data.voice_pools[pool_id],
+                        );
+                    }
+                }
+                InstrumentType::Custom => {
+                    let Some(engine_id) = slot.track_sound_state.engine_id else {
+                        continue;
+                    };
+                    if engine_id < data.custom_engine_pools.len() {
+                        sync_custom_engine_pool(
+                            &data.state,
+                            engine_id,
+                            &mut data.custom_engine_pools[engine_id],
+                        );
+                    }
+                }
+                InstrumentType::Modulator | InstrumentType::Rack => {}
+            }
+        }
+    }
+}
+
 fn free_patch_route_lids_hash(
     state: &SequencerState,
     engine_id: usize,
@@ -913,7 +1027,7 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     // already-ringing custom voices. Explicitly send gate-off to every live
     // custom engine voice before resetting callback-local state so notes do
     // not hang after tracks are compacted.
-    for engine_id in 0..MAX_TRACKS {
+    for engine_id in 0..data.state.runtime.engine_voice_counts.len() {
         let voice_count =
             data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
         for voice_idx in 0..voice_count.min(MAX_VOICES) {
@@ -958,16 +1072,16 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
             );
         }
     }
+    sync_rack_voice_pools(data, num_tracks);
 }
 
 fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
     for track in 0..MAX_TRACKS {
         let active = if track < num_tracks {
-            let is_custom = InstrumentType::from_runtime_flag(
+            match InstrumentType::from_runtime_flag(
                 data.state.runtime.instrument_type_flags[track].load(Ordering::Relaxed),
-            ) == InstrumentType::Custom;
-            if is_custom {
-                track_engine_id(&data.state, track)
+            ) {
+                InstrumentType::Custom => track_engine_id(&data.state, track)
                     .map(|engine_id| {
                         let pool = &data.custom_engine_pools[engine_id];
                         pool.voices[..pool.num_voices]
@@ -975,18 +1089,145 @@ fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
                             .filter(|voice| voice.active && voice.assigned_track == Some(track))
                             .count()
                     })
-                    .unwrap_or(0)
-            } else {
-                let pool = &data.voice_pools[track];
-                pool.voices[..pool.num_voices]
-                    .iter()
-                    .filter(|voice| voice.active)
-                    .count()
+                    .unwrap_or(0),
+                InstrumentType::Rack => data
+                    .scheduler_snapshot
+                    .tracks
+                    .get(track)
+                    .and_then(|track| track.rack_track.as_ref())
+                    .map(|rack| {
+                        rack.slots
+                            .iter()
+                            .enumerate()
+                            .map(|(slot_idx, slot)| match slot.instrument_type {
+                                InstrumentType::Sampler => rack_slot_pool_index(track, slot_idx)
+                                    .and_then(|pool_id| data.voice_pools.get(pool_id))
+                                    .map(|pool| {
+                                        pool.voices[..pool.num_voices]
+                                            .iter()
+                                            .filter(|voice| voice.active)
+                                            .count()
+                                    })
+                                    .unwrap_or(0),
+                                InstrumentType::Custom => slot
+                                    .track_sound_state
+                                    .engine_id
+                                    .and_then(|engine_id| data.custom_engine_pools.get(engine_id))
+                                    .map(|pool| {
+                                        pool.voices[..pool.num_voices]
+                                            .iter()
+                                            .filter(|voice| {
+                                                voice.active && voice.assigned_track == Some(track)
+                                            })
+                                            .count()
+                                    })
+                                    .unwrap_or(0),
+                                InstrumentType::Modulator | InstrumentType::Rack => 0,
+                            })
+                            .sum()
+                    })
+                    .unwrap_or(0),
+                InstrumentType::Sampler | InstrumentType::Modulator => {
+                    let pool = &data.voice_pools[track];
+                    pool.voices[..pool.num_voices]
+                        .iter()
+                        .filter(|voice| voice.active)
+                        .count()
+                }
             }
         } else {
             0
         };
         data.state.transport.active_voice_counts[track].store(active as u32, Ordering::Relaxed);
+    }
+}
+
+fn release_rack_active_voices(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    release_sample: u64,
+    frame_offset: u32,
+) {
+    let Some(rack) = data
+        .scheduler_snapshot
+        .tracks
+        .get(track_idx)
+        .and_then(|track| track.rack_track.clone())
+    else {
+        return;
+    };
+    for (slot_idx, slot) in rack.slots.iter().enumerate() {
+        match slot.instrument_type {
+            InstrumentType::Sampler => {
+                let Some(pool_id) = rack_slot_pool_index(track_idx, slot_idx) else {
+                    continue;
+                };
+                if pool_id >= data.voice_pools.len() {
+                    continue;
+                }
+                let active: Vec<(u64, i32)> = data.voice_pools[pool_id].voices
+                    [..data.voice_pools[pool_id].num_voices]
+                    .iter()
+                    .filter(|voice| voice.active && voice.logical_id != 0)
+                    .map(|voice| (voice.logical_id, voice.gatepitch_id))
+                    .collect();
+                for (lid, gatepitch_id) in active {
+                    data.voice_pools[pool_id].release_voice_by_logical_id(lid);
+                    cancel_gate_off_for_lid(
+                        &mut data.countdown_events,
+                        &mut data.block_events,
+                        lid,
+                    );
+                    let gatepitch_seq = next_block_event_sequence(data);
+                    let sampler_seq = next_block_event_sequence(data);
+                    unsafe {
+                        if gatepitch_id > 0 {
+                            send_custom_note_off(
+                                data.lg.0,
+                                gatepitch_id as u64,
+                                frame_offset,
+                                gatepitch_seq,
+                            );
+                        }
+                        send_sampler_note_off(data.lg.0, lid, frame_offset, sampler_seq);
+                    }
+                }
+            }
+            InstrumentType::Custom => {
+                let Some(engine_id) = slot.track_sound_state.engine_id else {
+                    continue;
+                };
+                if engine_id >= data.custom_engine_pools.len() {
+                    continue;
+                }
+                let free_patch = slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch;
+                let lids: Vec<u64> = data.custom_engine_pools[engine_id].voices
+                    [..data.custom_engine_pools[engine_id].num_voices]
+                    .iter()
+                    .filter(|voice| voice.active && voice.assigned_track == Some(track_idx))
+                    .map(|voice| voice.logical_id)
+                    .collect();
+                for lid in lids {
+                    if free_patch {
+                        data.custom_engine_pools[engine_id]
+                            .release_free_patch_voice_by_logical_id(lid);
+                    } else {
+                        data.custom_engine_pools[engine_id]
+                            .release_voice_by_logical_id(lid, release_sample);
+                    }
+                    cancel_gate_off_for_lid(
+                        &mut data.countdown_events,
+                        &mut data.block_events,
+                        lid,
+                    );
+                    let seq = next_block_event_sequence(data);
+                    unsafe {
+                        send_custom_note_off(data.lg.0, lid, frame_offset, seq);
+                    }
+                }
+            }
+            InstrumentType::Modulator | InstrumentType::Rack => {}
+        }
     }
 }
 
@@ -1016,6 +1257,10 @@ fn release_track_active_voices(
                 set_modulator_gate(data.lg.0, lid, 0.0);
             }
         }
+        return;
+    }
+    if instrument_type == InstrumentType::Rack {
+        release_rack_active_voices(data, track_idx, release_sample, frame_offset);
         return;
     }
 
@@ -1339,6 +1584,9 @@ fn dispatch_gate_off_event(
             engine_id,
             free_patch,
         } => {
+            if engine_id >= data.custom_engine_pools.len() {
+                return;
+            }
             if free_patch {
                 data.custom_engine_pools[engine_id]
                     .release_free_patch_voice_by_logical_id(event.logical_id);
@@ -1359,6 +1607,9 @@ fn dispatch_gate_off_event(
                 unsafe {
                     send_custom_note_off(data.lg.0, gatepitch_id as u64, frame_offset, seq);
                 }
+            }
+            if event.track_idx >= data.voice_pools.len() {
+                return;
             }
             data.voice_pools[event.track_idx].release_voice_by_logical_id(event.logical_id);
             let seq = next_block_event_sequence(data);
@@ -1426,10 +1677,16 @@ fn clear_active_keyboard_note_by_lid(
     active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
     logical_id: u64,
 ) {
+    if logical_id == 0 {
+        return;
+    }
     for track_notes in active_notes.iter_mut() {
         for slot in track_notes.iter_mut() {
-            if slot.is_some_and(|note| note.logical_id == logical_id) {
-                *slot = None;
+            if let Some(note) = slot.as_mut() {
+                note.remove_voice_by_lid(logical_id);
+                if note.voice_count == 0 {
+                    *slot = None;
+                }
             }
         }
     }
@@ -1439,30 +1696,26 @@ fn store_active_keyboard_note(
     active_notes: &mut [[Option<ActiveKeyboardNote>; MAX_VOICES]; MAX_TRACKS],
     track_idx: usize,
     source_transpose: f32,
-    logical_id: u64,
+    voices: &[ActiveKeyboardVoice],
 ) {
-    clear_active_keyboard_note_by_lid(active_notes, logical_id);
+    let Some(note) = ActiveKeyboardNote::new(source_transpose, voices) else {
+        return;
+    };
+    for voice in voices {
+        clear_active_keyboard_note_by_lid(active_notes, voice.logical_id);
+    }
     let track_notes = &mut active_notes[track_idx];
     if let Some(slot) = track_notes.iter_mut().find(|slot| {
         slot.is_some_and(|note| (note.source_transpose - source_transpose).abs() < 0.01)
     }) {
-        *slot = Some(ActiveKeyboardNote {
-            source_transpose,
-            logical_id,
-        });
+        *slot = Some(note);
         return;
     }
     if let Some(slot) = track_notes.iter_mut().find(|slot| slot.is_none()) {
-        *slot = Some(ActiveKeyboardNote {
-            source_transpose,
-            logical_id,
-        });
+        *slot = Some(note);
         return;
     }
-    track_notes[0] = Some(ActiveKeyboardNote {
-        source_transpose,
-        logical_id,
-    });
+    track_notes[0] = Some(note);
 }
 
 fn take_active_keyboard_note(
@@ -1477,6 +1730,64 @@ fn take_active_keyboard_note(
         }
     }
     None
+}
+
+fn release_active_keyboard_voice(
+    data: &mut AudioCallbackData,
+    voice: ActiveKeyboardVoice,
+    frame_offset: u32,
+    block_end_sample: u64,
+) {
+    if voice.logical_id == 0 {
+        return;
+    }
+    match voice.target {
+        ActiveKeyboardVoiceTarget::Sampler { pool_id } => {
+            if let Some(pool) = data.voice_pools.get_mut(pool_id) {
+                pool.release_voice_by_logical_id(voice.logical_id);
+            }
+            let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
+            let sampler_seq = next_event_sequence_from(&mut data.event_seq);
+            unsafe {
+                if voice.gatepitch_id > 0 {
+                    send_custom_note_off(
+                        data.lg.0,
+                        voice.gatepitch_id as u64,
+                        frame_offset,
+                        gatepitch_seq,
+                    );
+                }
+                send_sampler_note_off(data.lg.0, voice.logical_id, frame_offset, sampler_seq);
+            }
+        }
+        ActiveKeyboardVoiceTarget::Custom {
+            engine_id,
+            free_patch,
+        } => {
+            if let Some(pool) = data.custom_engine_pools.get_mut(engine_id) {
+                if free_patch {
+                    pool.release_free_patch_voice_by_logical_id(voice.logical_id);
+                } else {
+                    pool.release_voice_by_logical_id(voice.logical_id, block_end_sample);
+                }
+            }
+            let seq = next_block_event_sequence(data);
+            unsafe {
+                send_custom_note_off(data.lg.0, voice.logical_id, frame_offset, seq);
+            }
+        }
+    }
+}
+
+fn release_active_keyboard_note(
+    data: &mut AudioCallbackData,
+    note: ActiveKeyboardNote,
+    frame_offset: u32,
+    block_end_sample: u64,
+) {
+    for voice in note.voices() {
+        release_active_keyboard_voice(data, *voice, frame_offset, block_end_sample);
+    }
 }
 
 fn track_engine_id(state: &SequencerState, track_idx: usize) -> Option<usize> {
@@ -1552,6 +1863,231 @@ fn instrument_sound_fingerprint(
         value_bits.hash(&mut hasher);
     }
 
+    hasher.finish()
+}
+
+fn slot_param_identity(
+    node_id: u32,
+    modulator_node_id: u32,
+    raw_idx: u32,
+) -> Option<crate::neural::ParamNodeId> {
+    if raw_idx == u32::MAX {
+        return None;
+    }
+    if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        if modulator_node_id == 0 {
+            return None;
+        }
+        Some(crate::neural::ParamNodeId {
+            logical_id: modulator_node_id as u64,
+            node_param_idx: raw_idx - crate::voice_modulator::MOD_PARAM_BASE,
+        })
+    } else {
+        if node_id == 0 {
+            return None;
+        }
+        Some(crate::neural::ParamNodeId {
+            logical_id: node_id as u64,
+            node_param_idx: raw_idx,
+        })
+    }
+}
+
+fn plock_identity_matches(
+    plock_ids: &[Vec<Option<crate::neural::ParamNodeId>>],
+    step_idx: usize,
+    param_idx: usize,
+    expected: Option<crate::neural::ParamNodeId>,
+) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    plock_ids
+        .get(step_idx)
+        .and_then(|step| step.get(param_idx))
+        .copied()
+        .flatten()
+        == Some(expected)
+}
+
+fn resolved_slot_param_value(
+    slot: &EffectSlotSnapshot,
+    step_idx: usize,
+    param_idx: usize,
+    default: f32,
+) -> f32 {
+    let default_value = slot.defaults.get(param_idx).copied().unwrap_or(default);
+    let Some(plock) = slot
+        .plocks
+        .get(step_idx)
+        .and_then(|step| step.get(param_idx))
+        .copied()
+        .flatten()
+    else {
+        return default_value;
+    };
+    let raw_idx = slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()
+        .unwrap_or(param_idx as u32);
+    let expected_id = slot_param_identity(slot.node_id, slot.modulator_node_id, raw_idx);
+    if plock_identity_matches(&slot.plock_param_ids, step_idx, param_idx, expected_id) {
+        plock
+    } else {
+        default_value
+    }
+}
+
+fn resolve_rack_slot_instrument_params(
+    slot: &EffectSlotSnapshot,
+    step_idx: usize,
+) -> ScheduledInstrumentParams {
+    let num_params = slot.num_params as usize;
+    let mut params = ScheduledInstrumentParams::new();
+    for param_idx in 0..num_params {
+        let raw_idx = slot
+            .param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32);
+        if raw_idx == u32::MAX {
+            continue;
+        }
+        let span = slot
+            .param_node_spans
+            .get(param_idx)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+            (
+                ScheduledInstrumentParamTarget::Modulator,
+                (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+            )
+        } else {
+            (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
+        };
+        let value = resolved_slot_param_value(slot, step_idx, param_idx, 0.0);
+        if !value.is_finite() {
+            continue;
+        }
+        params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
+    }
+    params.sort_by_key(|param| match param.target {
+        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+    });
+    params
+}
+
+fn resolve_rack_slot_instrument_defaults(slot: &EffectSlotSnapshot) -> ScheduledInstrumentParams {
+    let num_params = slot.num_params as usize;
+    let mut params = ScheduledInstrumentParams::new();
+    for param_idx in 0..num_params {
+        let raw_idx = slot
+            .param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32);
+        if raw_idx == u32::MAX {
+            continue;
+        }
+        let span = slot
+            .param_node_spans
+            .get(param_idx)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+            (
+                ScheduledInstrumentParamTarget::Modulator,
+                (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+            )
+        } else {
+            (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
+        };
+        let value = slot.defaults.get(param_idx).copied().unwrap_or(0.0);
+        if !value.is_finite() {
+            continue;
+        }
+        params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
+    }
+    params.sort_by_key(|param| match param.target {
+        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+    });
+    params
+}
+
+fn resolve_rack_slot_sampler_params(
+    slot: &EffectSlotSnapshot,
+    step_idx: usize,
+) -> ScheduledSamplerParams {
+    let value = |param_idx: usize, default: f32| {
+        resolved_slot_param_value(slot, step_idx, param_idx, default)
+    };
+    ScheduledSamplerParams {
+        attack_ms: value(0, 0.0),
+        release_ms: value(1, 0.0),
+        start_point: value(2, 0.0),
+        end_point: value(3, 1.0),
+        instrument_enabled: value(4, 1.0),
+        reverse: value(5, 0.0),
+        loop_mode: value(6, 0.0),
+        loop_xfade_ms: value(7, 0.0),
+        sr_hz: value(8, 0.0),
+        warp_enabled: value(9, 0.0),
+        warp_mode: value(10, 0.0),
+        sample_bpm: value(11, 120.0),
+        playback_speed: value(12, 1.0),
+        scrub: value(13, 0.0),
+    }
+}
+
+fn resolve_rack_slot_sampler_defaults(slot: &EffectSlotSnapshot) -> ScheduledSamplerParams {
+    let value =
+        |param_idx: usize, default: f32| slot.defaults.get(param_idx).copied().unwrap_or(default);
+    ScheduledSamplerParams {
+        attack_ms: value(0, 0.0),
+        release_ms: value(1, 0.0),
+        start_point: value(2, 0.0),
+        end_point: value(3, 1.0),
+        instrument_enabled: value(4, 1.0),
+        reverse: value(5, 0.0),
+        loop_mode: value(6, 0.0),
+        loop_xfade_ms: value(7, 0.0),
+        sr_hz: value(8, 0.0),
+        warp_enabled: value(9, 0.0),
+        warp_mode: value(10, 0.0),
+        sample_bpm: value(11, 120.0),
+        playback_speed: value(12, 1.0),
+        scrub: value(13, 0.0),
+    }
+}
+
+fn rack_slot_sound_fingerprint(
+    slot: &RackSlotSnapshot,
+    instrument_params: &[ScheduledInstrumentParam],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    slot.track_sound_state.engine_id.hash(&mut hasher);
+    slot.instrument_base_note_offset.to_bits().hash(&mut hasher);
+    for param in instrument_params {
+        param.target.hash(&mut hasher);
+        param.idx.hash(&mut hasher);
+        param.value.to_bits().hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -2741,6 +3277,595 @@ fn zero_output_frames(output: &mut [f32], start_frame: usize, num_channels: usiz
     }
 }
 
+fn rack_slot_accepts_trigger(slot: &RackSlotSnapshot, has_solo: bool) -> bool {
+    if has_solo {
+        slot.solo && !slot.mute
+    } else {
+        !slot.mute
+    }
+}
+
+fn rack_sampler_warp_runtime(
+    state: &SequencerState,
+    warp_enabled: f32,
+    warp_mode: f32,
+    sample_bpm: f32,
+) -> (f32, f32, f32, f32, f32, f32, f32) {
+    let project_bpm = state.transport.bpm.load(Ordering::Relaxed).max(1) as f32;
+    let sample_bpm = sample_bpm.clamp(20.0, 400.0);
+    if warp_enabled <= 0.5 || warp_mode.round() != 0.0 {
+        return (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0);
+    }
+    (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0)
+}
+
+fn push_active_keyboard_voice(
+    voices: &mut [ActiveKeyboardVoice; MAX_RACK_SLOTS],
+    voice_count: &mut usize,
+    voice: ActiveKeyboardVoice,
+) {
+    if *voice_count >= MAX_RACK_SLOTS || voice.logical_id == 0 {
+        return;
+    }
+    voices[*voice_count] = voice;
+    *voice_count += 1;
+}
+
+fn fire_live_keyboard_rack_note(
+    data: &mut AudioCallbackData,
+    parent_track_idx: usize,
+    trigger: &KeyboardTrigger,
+    transpose: f32,
+    rack: RackTrackSnapshot,
+) -> bool {
+    let gate_mode = if data.state.pattern.track_params[parent_track_idx].is_gate_on() {
+        1.0
+    } else {
+        0.0
+    };
+    let has_solo = rack.slots.iter().any(|slot| slot.solo);
+    let mut active_voices = [ActiveKeyboardVoice::default(); MAX_RACK_SLOTS];
+    let mut active_voice_count = 0;
+
+    for (slot_idx, slot) in rack.slots.iter().enumerate() {
+        if !rack_slot_accepts_trigger(slot, has_solo) {
+            continue;
+        }
+        let instrument_params = resolve_rack_slot_instrument_defaults(&slot.instrument_slot);
+        match slot.instrument_type {
+            InstrumentType::Sampler => {
+                let Some(pool_id) = rack_slot_pool_index(parent_track_idx, slot_idx) else {
+                    continue;
+                };
+                if pool_id >= data.voice_pools.len() {
+                    continue;
+                }
+                let sampler_lid = data.state.runtime.sampler_lids[pool_id].load(Ordering::Acquire);
+                if sampler_lid == 0 {
+                    continue;
+                }
+                let sampler_params = resolve_rack_slot_sampler_defaults(&slot.instrument_slot);
+                let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
+                let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
+                let loop_xfade_samples =
+                    sampler_params.loop_xfade_ms * data.sample_rate as f32 / 1000.0;
+                let (
+                    warp_enabled,
+                    warp_mode,
+                    warp_ratio,
+                    warp_sample_bpm,
+                    warp_project_bpm,
+                    warp_ptr_lo,
+                    warp_ptr_hi,
+                ) = rack_sampler_warp_runtime(
+                    &data.state,
+                    sampler_params.warp_enabled,
+                    sampler_params.warp_mode,
+                    sampler_params.sample_bpm,
+                );
+                data.voice_pools[pool_id].polyphonic = slot.max_polyphony > 1;
+                let (voice_lid, gatepitch_id, modulator_id) = {
+                    let voice = data.voice_pools[pool_id]
+                        .allocate_voice_retriggering_same_note_with_limit(
+                            transpose,
+                            slot.max_polyphony,
+                        );
+                    (voice.logical_id, voice.gatepitch_id, voice.modulator_id)
+                };
+                if voice_lid == 0 {
+                    continue;
+                }
+                if modulator_id > 0 {
+                    let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
+                    unsafe {
+                        dispatch_sampler_modulator_params_to_voice(
+                            data.lg.0,
+                            modulator_id as u64,
+                            &instrument_params,
+                        );
+                        send_custom_trigger(
+                            data.lg.0,
+                            gatepitch_id as u64,
+                            0,
+                            gatepitch_seq,
+                            custom_pitch_hz(transpose + slot.instrument_base_note_offset, 0.0),
+                            trigger.velocity,
+                        );
+                    }
+                }
+                let sampler_seq = next_event_sequence_from(&mut data.event_seq);
+                unsafe {
+                    send_keyboard_trigger(
+                        data.lg.0,
+                        voice_lid,
+                        0,
+                        sampler_seq,
+                        transpose + slot.instrument_base_note_offset,
+                        trigger.velocity,
+                        sampler_params.playback_speed,
+                        attack_samples,
+                        release_samples,
+                        gate_mode,
+                        sampler_params.start_point,
+                        sampler_params.end_point,
+                        sampler_params.instrument_enabled,
+                        sampler_params.reverse,
+                        sampler_params.loop_mode,
+                        loop_xfade_samples,
+                        sampler_params.sr_hz,
+                        warp_enabled,
+                        warp_mode,
+                        warp_ratio,
+                        warp_sample_bpm,
+                        warp_project_bpm,
+                        warp_ptr_lo,
+                        warp_ptr_hi,
+                        sampler_params.scrub,
+                    );
+                    dispatch_sampler_extra_params_to_voice(
+                        data.lg.0,
+                        voice_lid,
+                        &instrument_params,
+                    );
+                }
+                push_active_keyboard_voice(
+                    &mut active_voices,
+                    &mut active_voice_count,
+                    ActiveKeyboardVoice {
+                        logical_id: voice_lid,
+                        gatepitch_id,
+                        target: ActiveKeyboardVoiceTarget::Sampler { pool_id },
+                    },
+                );
+            }
+            InstrumentType::Custom => {
+                let Some(engine_id) = slot.track_sound_state.engine_id else {
+                    continue;
+                };
+                if engine_id >= data.custom_engine_pools.len() {
+                    continue;
+                }
+                let free_patch = slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch;
+                let allocation = if free_patch {
+                    let Some(allocation) = data.custom_engine_pools[engine_id]
+                        .allocate_free_patch_voice(parent_track_idx, transpose)
+                    else {
+                        continue;
+                    };
+                    allocation
+                } else {
+                    data.custom_engine_pools[engine_id].allocate_voice(
+                        parent_track_idx,
+                        transpose,
+                        slot.max_polyphony > 1,
+                        slot.max_polyphony,
+                    )
+                };
+                let voice_idx = allocation.voice_idx;
+                data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
+                let voice_lid = allocation.logical_id;
+                let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
+                    .load(Ordering::Relaxed);
+                let modulator_id = data.state.runtime.engine_modulator_node_ids[engine_id]
+                    [voice_idx]
+                    .load(Ordering::Relaxed);
+                if voice_lid == 0 || synth_id == 0 || modulator_id == 0 {
+                    continue;
+                }
+                let instrument_fingerprint = rack_slot_sound_fingerprint(slot, &instrument_params);
+                let pitch_hz = custom_pitch_hz(transpose, slot.instrument_base_note_offset);
+                cancel_gate_off_for_lid(
+                    &mut data.countdown_events,
+                    &mut data.block_events,
+                    voice_lid,
+                );
+                unsafe {
+                    route_custom_voice_to_track(
+                        data.lg.0,
+                        &data.state,
+                        engine_id,
+                        voice_idx,
+                        parent_track_idx,
+                    );
+                    if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
+                        != instrument_fingerprint
+                    {
+                        dispatch_instrument_params_to_voice(
+                            data.lg.0,
+                            synth_id as u64,
+                            modulator_id as u64,
+                            &instrument_params,
+                        );
+                    }
+                    if allocation.stole_active_voice || slot.max_polyphony <= 1 || free_patch {
+                        let off_seq = next_event_sequence_from(&mut data.event_seq);
+                        send_custom_note_off(data.lg.0, voice_lid, 0, off_seq);
+                    }
+                    let on_seq = next_event_sequence_from(&mut data.event_seq);
+                    send_custom_trigger(
+                        data.lg.0,
+                        voice_lid,
+                        0,
+                        on_seq,
+                        pitch_hz,
+                        trigger.velocity,
+                    );
+                }
+                data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint =
+                    instrument_fingerprint;
+                push_active_keyboard_voice(
+                    &mut active_voices,
+                    &mut active_voice_count,
+                    ActiveKeyboardVoice {
+                        logical_id: voice_lid,
+                        gatepitch_id: 0,
+                        target: ActiveKeyboardVoiceTarget::Custom {
+                            engine_id,
+                            free_patch,
+                        },
+                    },
+                );
+            }
+            InstrumentType::Modulator | InstrumentType::Rack => {}
+        }
+    }
+
+    if active_voice_count == 0 {
+        return false;
+    }
+    store_active_keyboard_note(
+        &mut data.active_keyboard_notes,
+        parent_track_idx,
+        trigger.transpose,
+        &active_voices[..active_voice_count],
+    );
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fire_rack_slot_note(
+    data: &mut AudioCallbackData,
+    frame_offset: u32,
+    parent_track_idx: usize,
+    slot_idx: usize,
+    slot: &RackSlotSnapshot,
+    transpose: f32,
+    velocity: f32,
+    speed: f32,
+    gate_samples: f32,
+    gate_mode: f32,
+    instrument_params: &ScheduledInstrumentParams,
+    sampler_params: Option<ScheduledSamplerParams>,
+    instrument_fingerprint: u64,
+) {
+    match slot.instrument_type {
+        InstrumentType::Sampler => {
+            let Some(pool_id) = rack_slot_pool_index(parent_track_idx, slot_idx) else {
+                return;
+            };
+            if pool_id >= data.voice_pools.len() {
+                return;
+            }
+            let sampler_lid = data.state.runtime.sampler_lids[pool_id].load(Ordering::Acquire);
+            if sampler_lid == 0 {
+                return;
+            }
+            let sampler_params = sampler_params.unwrap_or_default();
+            let attack_samples = sampler_params.attack_ms * data.sample_rate as f32 / 1000.0;
+            let release_samples = sampler_params.release_ms * data.sample_rate as f32 / 1000.0;
+            let loop_xfade_samples =
+                sampler_params.loop_xfade_ms * data.sample_rate as f32 / 1000.0;
+            let (
+                warp_enabled,
+                warp_mode,
+                warp_ratio,
+                warp_sample_bpm,
+                warp_project_bpm,
+                warp_ptr_lo,
+                warp_ptr_hi,
+            ) = rack_sampler_warp_runtime(
+                &data.state,
+                sampler_params.warp_enabled,
+                sampler_params.warp_mode,
+                sampler_params.sample_bpm,
+            );
+            data.voice_pools[pool_id].polyphonic = slot.max_polyphony > 1;
+            let voice = data.voice_pools[pool_id]
+                .allocate_voice_retriggering_same_note_with_limit(transpose, slot.max_polyphony);
+            let voice_lid = voice.logical_id;
+            let lid = if voice_lid != 0 {
+                voice_lid
+            } else {
+                sampler_lid
+            };
+            let gatepitch_id = voice.gatepitch_id;
+            if voice.modulator_id > 0 {
+                let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
+                unsafe {
+                    dispatch_sampler_modulator_params_to_voice(
+                        data.lg.0,
+                        voice.modulator_id as u64,
+                        instrument_params,
+                    );
+                    send_custom_trigger(
+                        data.lg.0,
+                        voice.gatepitch_id as u64,
+                        frame_offset,
+                        gatepitch_seq,
+                        custom_pitch_hz(transpose + slot.instrument_base_note_offset, 0.0),
+                        velocity,
+                    );
+                }
+            }
+            let sampler_seq = next_event_sequence_from(&mut data.event_seq);
+            unsafe {
+                dispatch_sampler_extra_params_to_voice(data.lg.0, lid, instrument_params);
+                send_trigger(
+                    data.lg.0,
+                    lid,
+                    frame_offset,
+                    sampler_seq,
+                    velocity,
+                    speed * sampler_params.playback_speed,
+                    gate_samples,
+                    attack_samples,
+                    release_samples,
+                    gate_mode,
+                    transpose + slot.instrument_base_note_offset,
+                    sampler_params.start_point,
+                    sampler_params.end_point,
+                    sampler_params.instrument_enabled,
+                    sampler_params.reverse,
+                    sampler_params.loop_mode,
+                    loop_xfade_samples,
+                    sampler_params.sr_hz,
+                    warp_enabled,
+                    warp_mode,
+                    warp_ratio,
+                    warp_sample_bpm,
+                    warp_project_bpm,
+                    warp_ptr_lo,
+                    warp_ptr_hi,
+                    sampler_params.scrub,
+                );
+            }
+            if gate_mode > 0.5 {
+                schedule_gate_off_event(
+                    data,
+                    pool_id,
+                    lid,
+                    frame_offset,
+                    gate_samples as f64,
+                    GateOffTarget::Sampler { gatepitch_id },
+                );
+            }
+        }
+        InstrumentType::Custom => {
+            let Some(engine_id) = slot.track_sound_state.engine_id else {
+                return;
+            };
+            if engine_id >= data.custom_engine_pools.len() {
+                return;
+            }
+            let free_patch = slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch;
+            let allocation = if free_patch {
+                let Some(allocation) = data.custom_engine_pools[engine_id]
+                    .allocate_free_patch_voice(parent_track_idx, transpose)
+                else {
+                    return;
+                };
+                allocation
+            } else {
+                data.custom_engine_pools[engine_id].allocate_voice(
+                    parent_track_idx,
+                    transpose,
+                    slot.max_polyphony > 1,
+                    slot.max_polyphony,
+                )
+            };
+            let voice_idx = allocation.voice_idx;
+            data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
+            let lid = allocation.logical_id;
+            let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
+                .load(Ordering::Relaxed);
+            let modulator_id = data.state.runtime.engine_modulator_node_ids[engine_id][voice_idx]
+                .load(Ordering::Relaxed);
+            if lid == 0 || synth_id == 0 || modulator_id == 0 {
+                return;
+            }
+            let pitch_hz = custom_pitch_hz(transpose, slot.instrument_base_note_offset);
+            cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
+            unsafe {
+                if allocation.stole_active_voice || slot.max_polyphony <= 1 || free_patch {
+                    let off_seq = next_event_sequence_from(&mut data.event_seq);
+                    send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
+                }
+                route_custom_voice_to_track(
+                    data.lg.0,
+                    &data.state,
+                    engine_id,
+                    voice_idx,
+                    parent_track_idx,
+                );
+                if data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint
+                    != instrument_fingerprint
+                {
+                    dispatch_instrument_params_to_voice(
+                        data.lg.0,
+                        synth_id as u64,
+                        modulator_id as u64,
+                        instrument_params,
+                    );
+                }
+            }
+            data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint =
+                instrument_fingerprint;
+            let on_seq = next_event_sequence_from(&mut data.event_seq);
+            unsafe {
+                send_custom_trigger(data.lg.0, lid, frame_offset, on_seq, pitch_hz, velocity);
+            }
+            if gate_mode > 0.5 {
+                schedule_gate_off_event(
+                    data,
+                    parent_track_idx,
+                    lid,
+                    frame_offset,
+                    gate_samples as f64,
+                    GateOffTarget::Custom {
+                        engine_id,
+                        free_patch,
+                    },
+                );
+            }
+        }
+        InstrumentType::Modulator | InstrumentType::Rack => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fire_rack_resolved(
+    data: &mut AudioCallbackData,
+    frame_offset: u32,
+    track_idx: usize,
+    step: usize,
+    samples_per_step: f64,
+    resolved: crate::accumulator::ResolvedStep,
+    chord: crate::scheduled_event::ScheduledChordData,
+    rack: RackTrackSnapshot,
+) {
+    let (track_pan, track_send, gate_mode) = {
+        let tp = &data.state.pattern.track_params[track_idx];
+        (
+            tp.get_pan(),
+            tp.get_send(),
+            if tp.is_gate_on() { 1.0 } else { 0.0 },
+        )
+    };
+    let chop = (resolved.chop.round() as u32).max(1);
+    let total_gate = (resolved.duration as f64 * samples_per_step) as f32;
+    let rack_gate = total_gate / chop as f32;
+
+    let pan_lid = data.state.runtime.pan_lids[track_idx].load(Ordering::Acquire);
+    if pan_lid != 0 {
+        let effective_pan = (track_pan + resolved.pan).clamp(-1.0, 1.0);
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                data.lg.0,
+                crate::audiograph::ParamMsg {
+                    idx: crate::stereo_panner::STEREO_PANNER_PARAM_PAN,
+                    logical_id: pan_lid,
+                    fvalue: effective_pan,
+                },
+            );
+        }
+    }
+
+    let has_solo = rack.slots.iter().any(|slot| slot.solo);
+    for (slot_idx, slot) in rack.slots.iter().enumerate() {
+        if !rack_slot_accepts_trigger(slot, has_solo) {
+            continue;
+        }
+        let instrument_params = resolve_rack_slot_instrument_params(&slot.instrument_slot, step);
+        let sampler_params = if slot.instrument_type == InstrumentType::Sampler {
+            Some(resolve_rack_slot_sampler_params(
+                &slot.instrument_slot,
+                step,
+            ))
+        } else {
+            None
+        };
+        let instrument_fingerprint = rack_slot_sound_fingerprint(slot, &instrument_params);
+
+        if chord.count > 0 {
+            for n in 0..chord.count {
+                let note_duration = chord.durations[n].max(0.0);
+                let note_total_gate = if note_duration > 0.0 {
+                    (note_duration as f64 * samples_per_step) as f32
+                } else {
+                    total_gate
+                };
+                let note_gate = note_total_gate / chop as f32;
+                let transpose = resolved_chord_transpose(
+                    chord.notes[n],
+                    chord.step_transpose,
+                    resolved.transpose,
+                );
+                fire_rack_slot_note(
+                    data,
+                    frame_offset,
+                    track_idx,
+                    slot_idx,
+                    slot,
+                    transpose,
+                    resolved.velocity,
+                    resolved.speed,
+                    note_gate,
+                    gate_mode,
+                    &instrument_params,
+                    sampler_params,
+                    instrument_fingerprint,
+                );
+            }
+        } else {
+            fire_rack_slot_note(
+                data,
+                frame_offset,
+                track_idx,
+                slot_idx,
+                slot,
+                resolved.transpose,
+                resolved.velocity,
+                resolved.speed,
+                rack_gate,
+                gate_mode,
+                &instrument_params,
+                sampler_params,
+                instrument_fingerprint,
+            );
+        }
+    }
+
+    let send_lid = data.state.runtime.send_lids[track_idx].load(Ordering::Acquire);
+    if send_lid != 0 {
+        unsafe {
+            params_push_wrapper(
+                data.lg.0,
+                ParamMsg {
+                    idx: 0,
+                    logical_id: send_lid,
+                    fvalue: track_send,
+                },
+            );
+        }
+    }
+    cancel_chops_for_track(
+        &mut data.countdown_events,
+        &mut data.block_events,
+        track_idx,
+    );
+    data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
+}
+
 /// Fire a resolved step trigger for a track (handles gate, chop setup, envelope params).
 /// Uses voice pool allocation for polyphonic playback.
 fn fire_resolved(
@@ -2762,6 +3887,26 @@ fn fire_resolved(
     let instrument_type = InstrumentType::from_runtime_flag(
         data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
     );
+    if instrument_type == InstrumentType::Rack {
+        let rack = data
+            .scheduler_snapshot
+            .tracks
+            .get(track_idx)
+            .and_then(|track| track.rack_track.clone());
+        if let Some(rack) = rack {
+            fire_rack_resolved(
+                data,
+                frame_offset,
+                track_idx,
+                step,
+                samples_per_step,
+                resolved,
+                chord,
+                rack,
+            );
+        }
+        return;
+    }
     let is_custom = instrument_type == InstrumentType::Custom;
     let is_modulator = instrument_type == InstrumentType::Modulator;
     let sampler_lid = data.state.runtime.sampler_lids[track_idx].load(Ordering::Acquire);
@@ -3559,6 +4704,11 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         clear_countdown_events(data);
         data.event_seq = 0;
     }
+    let scheduler_snapshot_version = data.state.scheduler_snapshot_version();
+    if scheduler_snapshot_version != data.scheduler_snapshot_version {
+        data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
+        data.scheduler_snapshot_version = scheduler_snapshot_version;
+    }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
     sync_bus_gate_params(data, block_start_sample);
@@ -3578,6 +4728,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             );
         }
     }
+    sync_rack_voice_pools(data, num_tracks);
     sync_free_patch_transport_routes(data, num_tracks);
 
     // Process keyboard triggers
@@ -3587,8 +4738,10 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         if kt.track >= num_tracks {
             continue;
         }
-        let is_custom =
-            data.state.runtime.instrument_type_flags[kt.track].load(Ordering::Relaxed) == 1;
+        let instrument_type = InstrumentType::from_runtime_flag(
+            data.state.runtime.instrument_type_flags[kt.track].load(Ordering::Relaxed),
+        );
+        let is_custom = instrument_type == InstrumentType::Custom;
         let track_polyphonic = data.state.pattern.track_params[kt.track].is_polyphonic();
         let track_max_polyphony = data.state.pattern.track_params[kt.track].get_max_polyphony();
         data.voice_pools[kt.track].polyphonic = track_polyphonic;
@@ -3597,67 +4750,10 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         );
 
         if kt.note_off {
-            // Note-off: find the voice playing this note and stop it
-            if is_custom {
-                let Some(active_note) = take_active_keyboard_note(
-                    &mut data.active_keyboard_notes,
-                    kt.track,
-                    kt.transpose,
-                ) else {
-                    continue;
-                };
-                let Some(engine_id) = track_engine_id(&data.state, kt.track) else {
-                    continue;
-                };
-                let pool = &mut data.custom_engine_pools[engine_id];
-                if track_custom_run_mode(&data.state, kt.track)
-                    == CustomInstrumentRunMode::FreePatch
-                {
-                    pool.release_free_patch_voice_by_logical_id(active_note.logical_id);
-                } else {
-                    pool.release_voice_by_logical_id(active_note.logical_id, block_end_sample);
-                }
-                if active_note.logical_id != 0 {
-                    let seq = next_block_event_sequence(data);
-                    unsafe {
-                        send_custom_note_off(data.lg.0, active_note.logical_id, 0, seq);
-                    }
-                }
-            } else {
-                if let Some(active_note) = take_active_keyboard_note(
-                    &mut data.active_keyboard_notes,
-                    kt.track,
-                    kt.transpose,
-                ) {
-                    let pool = &mut data.voice_pools[kt.track];
-                    pool.release_voice_by_logical_id(active_note.logical_id);
-                    if active_note.logical_id != 0 {
-                        let gatepitch_id = pool
-                            .voices
-                            .iter()
-                            .find(|voice| voice.logical_id == active_note.logical_id)
-                            .map(|voice| voice.gatepitch_id)
-                            .unwrap_or(0);
-                        let gatepitch_seq = next_event_sequence_from(&mut data.event_seq);
-                        let sampler_seq = next_event_sequence_from(&mut data.event_seq);
-                        unsafe {
-                            if gatepitch_id > 0 {
-                                send_custom_note_off(
-                                    data.lg.0,
-                                    gatepitch_id as u64,
-                                    0,
-                                    gatepitch_seq,
-                                );
-                            }
-                            send_sampler_note_off(
-                                data.lg.0,
-                                active_note.logical_id,
-                                0,
-                                sampler_seq,
-                            );
-                        }
-                    }
-                }
+            if let Some(active_note) =
+                take_active_keyboard_note(&mut data.active_keyboard_notes, kt.track, kt.transpose)
+            {
+                release_active_keyboard_note(data, active_note, 0, block_end_sample);
             }
         } else {
             // Note-on: allocate voice and trigger
@@ -3668,7 +4764,21 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 kt.track,
                 kt.transpose,
             );
-            if is_custom {
+            if instrument_type == InstrumentType::Rack {
+                let rack = data
+                    .scheduler_snapshot
+                    .tracks
+                    .get(kt.track)
+                    .and_then(|track| track.rack_track.clone());
+                if let Some(rack) = rack {
+                    if !fire_live_keyboard_rack_note(data, kt.track, &kt, resolved_transpose, rack)
+                    {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else if is_custom {
                 let Some(engine_id) = track_engine_id(&data.state, kt.track) else {
                     continue;
                 };
@@ -3752,7 +4862,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     &mut data.active_keyboard_notes,
                     kt.track,
                     kt.transpose,
-                    voice_lid,
+                    &[ActiveKeyboardVoice {
+                        logical_id: voice_lid,
+                        gatepitch_id: 0,
+                        target: ActiveKeyboardVoiceTarget::Custom {
+                            engine_id,
+                            free_patch,
+                        },
+                    }],
                 );
             } else {
                 let voice = data.voice_pools[kt.track]
@@ -3851,7 +4968,11 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     &mut data.active_keyboard_notes,
                     kt.track,
                     kt.transpose,
-                    voice_lid,
+                    &[ActiveKeyboardVoice {
+                        logical_id: voice_lid,
+                        gatepitch_id: voice.gatepitch_id,
+                        target: ActiveKeyboardVoiceTarget::Sampler { pool_id: kt.track },
+                    }],
                 );
             }
             data.state.transport.trigger_flash[kt.track].store(255, Ordering::Relaxed);
@@ -3957,7 +5078,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
 
     let custom_release_tail_samples =
         (CUSTOM_ENGINE_RELEASE_TAIL_SECONDS * data.sample_rate).round() as u64;
-    for engine_id in 0..MAX_TRACKS {
+    for engine_id in 0..data.state.runtime.engine_voice_counts.len() {
         if data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) == 0 {
             continue;
         }
@@ -4146,9 +5267,11 @@ pub fn build_output_stream(
     bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
 ) -> Result<Stream, String> {
     // Initialize voice pools from state
-    let mut voice_pools: Vec<VoicePool> = (0..MAX_TRACKS).map(|_| VoicePool::new()).collect();
-    let mut custom_engine_pools: Vec<CustomEnginePool> =
-        (0..MAX_TRACKS).map(|_| CustomEnginePool::new()).collect();
+    let mut voice_pools: Vec<VoicePool> =
+        (0..MAX_SAMPLER_POOLS).map(|_| VoicePool::new()).collect();
+    let mut custom_engine_pools: Vec<CustomEnginePool> = (0..MAX_INSTRUMENT_ENGINES)
+        .map(|_| CustomEnginePool::new())
+        .collect();
 
     // Pre-populate voice pools for any existing tracks
     let num_tracks = state.active_track_count();
@@ -4189,6 +5312,8 @@ pub fn build_output_stream(
             });
     }
     let initial_topology_epoch = state.transport.topology_epoch.load(Ordering::Relaxed);
+    let initial_scheduler_snapshot_version = state.scheduler_snapshot_version();
+    let initial_scheduler_snapshot = state.latest_scheduler_snapshot();
     let trace_audio = env_flag("TINYSEQ_AUDIO_TRACE", false);
     crate::voice_modulator::set_process_stats_enabled(trace_audio);
     if trace_audio {
@@ -4204,6 +5329,8 @@ pub fn build_output_stream(
         last_mod_reset_counter: 0,
         voice_pools,
         custom_engine_pools,
+        scheduler_snapshot: initial_scheduler_snapshot,
+        scheduler_snapshot_version: initial_scheduler_snapshot_version,
         active_keyboard_notes: [[None; MAX_VOICES]; MAX_TRACKS],
         keyboard_rx: audio_keyboard_rx,
         master_recorder,
@@ -4317,11 +5444,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        bus_gate_target_at, free_patch_transport_route_cache_is_fresh,
-        free_patch_transport_route_target, instrument_sound_fingerprint,
-        mute_group_winner_for_block_events, resolve_live_keyboard_transpose,
-        resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
-        select_output_config, swing_delay_samples, track_accepts_scheduled_trigger, BlockEvent,
+        bus_gate_target_at, clear_active_keyboard_note_by_lid,
+        free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
+        instrument_sound_fingerprint, mute_group_winner_for_block_events,
+        resolve_live_keyboard_transpose, resolved_chord_transpose, sampler_warp_runtime,
+        select_output_channels, select_output_config, store_active_keyboard_note,
+        swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
+        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
         BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
         FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
         OutputDeviceConfig, OutputFormatRange, FALLBACK_SAMPLE_RATE,
@@ -4336,6 +5465,12 @@ mod tests {
     use crate::sequencer::{
         CustomInstrumentRunMode, InstrumentType, SequencerState, SwingResolution,
     };
+
+    fn active_keyboard_notes_fixture(
+    ) -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
+    {
+        [[None; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
+    }
 
     #[test]
     fn dj_mixer_slots_carry_explicit_transport_phase_param() {
@@ -4356,6 +5491,63 @@ mod tests {
             str8_slot.transport_phase_param_idx.load(Ordering::Relaxed),
             crate::effects::NO_TRANSPORT_PHASE_PARAM
         );
+    }
+
+    #[test]
+    fn active_keyboard_note_stores_all_rack_slot_voices_for_one_key() {
+        let mut notes = active_keyboard_notes_fixture();
+        let voices = [
+            ActiveKeyboardVoice {
+                logical_id: 11,
+                gatepitch_id: 21,
+                target: ActiveKeyboardVoiceTarget::Sampler { pool_id: 64 },
+            },
+            ActiveKeyboardVoice {
+                logical_id: 12,
+                gatepitch_id: 0,
+                target: ActiveKeyboardVoiceTarget::Custom {
+                    engine_id: 7,
+                    free_patch: false,
+                },
+            },
+        ];
+
+        store_active_keyboard_note(&mut notes, 0, 3.0, &voices);
+        let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
+
+        assert_eq!(note.source_transpose, 3.0);
+        assert_eq!(note.voices(), &voices);
+    }
+
+    #[test]
+    fn active_keyboard_note_clear_by_lid_preserves_other_slot_voices() {
+        let mut notes = active_keyboard_notes_fixture();
+        let voices = [
+            ActiveKeyboardVoice {
+                logical_id: 11,
+                gatepitch_id: 21,
+                target: ActiveKeyboardVoiceTarget::Sampler { pool_id: 64 },
+            },
+            ActiveKeyboardVoice {
+                logical_id: 12,
+                gatepitch_id: 0,
+                target: ActiveKeyboardVoiceTarget::Custom {
+                    engine_id: 7,
+                    free_patch: false,
+                },
+            },
+            ActiveKeyboardVoice {
+                logical_id: 13,
+                gatepitch_id: 23,
+                target: ActiveKeyboardVoiceTarget::Sampler { pool_id: 65 },
+            },
+        ];
+
+        store_active_keyboard_note(&mut notes, 0, 3.0, &voices);
+        clear_active_keyboard_note_by_lid(&mut notes, 12);
+        let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
+
+        assert_eq!(note.voices(), &[voices[0], voices[2]]);
     }
 
     #[test]

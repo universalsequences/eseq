@@ -11,11 +11,12 @@ mod state;
 pub use clock::{SequencerClock, TrackClockState};
 #[allow(unused_imports)]
 pub use data::{
-    sync_beats, BusId, ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType,
-    KeyboardTrigger, MidiFxPosition, ModConnection, ModDestination, StepData, StepParam,
-    SwingResolution, Timebase, TimebasePLockData, TrackOutput, TrackParams, TrackParamsSnapshot,
-    TrackPattern, TrackSendSnapshot, TrackSoundState, Trigger, DEFAULT_BPM, DEFAULT_BUS_A_ID,
-    DEFAULT_BUS_B_ID, EXT_MOD_INPUT_COUNT, MAX_STEPS, MAX_TRACKS, MIX_BUS_ID, NUM_PARAMS,
+    rack_slot_pool_index, sync_beats, BusId, ChordData, ChordSnapshot, CustomInstrumentRunMode,
+    InstrumentType, KeyboardTrigger, MidiFxPosition, ModConnection, ModDestination, RackRouting,
+    StepData, StepParam, SwingResolution, Timebase, TimebasePLockData, TrackOutput, TrackParams,
+    TrackParamsSnapshot, TrackPattern, TrackSendSnapshot, TrackSoundState, Trigger, DEFAULT_BPM,
+    DEFAULT_BUS_A_ID, DEFAULT_BUS_B_ID, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES,
+    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_STEPS, MAX_TRACKS, MIX_BUS_ID, NUM_PARAMS,
     STEPS_PER_PAGE, SYNC_COUNT, SYNC_RESOLUTIONS, TRACK_PATTERN_WORDS,
 };
 #[allow(unused_imports)]
@@ -25,6 +26,6 @@ pub use snapshot::{
 #[allow(unused_imports)]
 pub use state::{
     default_empty_effect_chain, BusGateSequence, BusPatternSnapshot, PatternId, PatternSnapshot,
-    PublishedSequencer, SequencerState, StepSlotPlocks, StepSnapshot, TrackOutputEvent,
-    TrackPatternCellView,
+    PublishedSequencer, RackSlotSnapshot, RackTrackSnapshot, SequencerState, StepSlotPlocks,
+    StepSnapshot, TrackOutputEvent, TrackPatternCellView,
 };

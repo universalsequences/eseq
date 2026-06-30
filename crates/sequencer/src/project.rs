@@ -8,8 +8,9 @@ use crate::graph::ProjectGraphOverrides;
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    ModDestination, PatternSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
-    TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    ModDestination, PatternSnapshot, RackRouting, RackSlotSnapshot, RackTrackSnapshot,
+    SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot, TrackSendSnapshot,
+    TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 
@@ -205,6 +206,16 @@ pub enum ProjectTrack {
         #[serde(default)]
         collapsed: bool,
     },
+    Rack {
+        #[serde(default)]
+        routing: ProjectRackRouting,
+        #[serde(default)]
+        slots: Vec<ProjectRackTrackSlot>,
+        #[serde(default)]
+        color: Option<TrackColor>,
+        #[serde(default)]
+        collapsed: bool,
+    },
 }
 
 impl ProjectTrack {
@@ -212,7 +223,8 @@ impl ProjectTrack {
         match self {
             Self::Sampler { color, .. }
             | Self::Custom { color, .. }
-            | Self::Modulator { color, .. } => color.map(TrackColor::clamped),
+            | Self::Modulator { color, .. }
+            | Self::Rack { color, .. } => color.map(TrackColor::clamped),
         }
     }
 
@@ -220,9 +232,21 @@ impl ProjectTrack {
         match self {
             Self::Sampler { collapsed, .. }
             | Self::Custom { collapsed, .. }
-            | Self::Modulator { collapsed, .. } => *collapsed,
+            | Self::Modulator { collapsed, .. }
+            | Self::Rack { collapsed, .. } => *collapsed,
         }
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackTrackSlot {
+    pub instrument_type: ProjectInstrumentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument_name: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -289,6 +313,8 @@ pub struct ProjectPattern {
     pub instrument_run_modes: Vec<ProjectCustomInstrumentRunMode>,
     pub sample_paths: Vec<Option<String>>,
     pub sample_names: Vec<String>,
+    #[serde(default)]
+    pub rack_tracks: Vec<Option<ProjectRackTrackPattern>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,7 +399,7 @@ pub struct ProjectTrackSend {
     pub amount: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ProjectEffectSlot {
     pub num_params: u32,
     pub defaults: Vec<f32>,
@@ -386,7 +412,7 @@ pub struct ProjectEffectSlot {
     pub ir: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ProjectTrackSoundState {
     pub loaded_preset: Option<String>,
     pub dirty: bool,
@@ -398,11 +424,59 @@ pub enum ProjectInstrumentType {
     Sampler,
     Custom,
     Modulator,
+    Rack,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRackRouting {
+    #[default]
+    Broadcast,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackTrackPattern {
+    #[serde(default)]
+    pub routing: ProjectRackRouting,
+    #[serde(default)]
+    pub slots: Vec<ProjectRackSlotPattern>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackSlotPattern {
+    pub instrument_type: ProjectInstrumentType,
+    #[serde(default)]
+    pub instrument_run_mode: ProjectCustomInstrumentRunMode,
+    #[serde(default)]
+    pub instrument_base_note_offset: f32,
+    #[serde(default = "default_rack_slot_gain")]
+    pub gain: f32,
+    #[serde(default)]
+    pub pan: f32,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
+    pub solo: bool,
+    #[serde(default = "default_max_polyphony")]
+    pub max_polyphony: usize,
+    #[serde(default)]
+    pub instrument_slot: ProjectEffectSlot,
+    #[serde(default)]
+    pub track_sound_state: ProjectTrackSoundState,
+    #[serde(default)]
+    pub sample_path: Option<String>,
+    #[serde(default)]
+    pub sample_name: Option<String>,
+}
+
+fn default_rack_slot_gain() -> f32 {
+    1.0
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectCustomInstrumentRunMode {
+    #[default]
     Instrument,
     FreePatch,
 }
@@ -519,6 +593,12 @@ impl ProjectPattern {
                 .collect(),
             sample_paths,
             sample_names,
+            rack_tracks: snapshot
+                .rack_tracks
+                .iter()
+                .cloned()
+                .map(|rack| rack.map(ProjectRackTrackPattern::from))
+                .collect(),
         }
     }
 }
@@ -713,6 +793,7 @@ impl From<InstrumentType> for ProjectInstrumentType {
             InstrumentType::Sampler => Self::Sampler,
             InstrumentType::Custom => Self::Custom,
             InstrumentType::Modulator => Self::Modulator,
+            InstrumentType::Rack => Self::Rack,
         }
     }
 }
@@ -723,6 +804,7 @@ impl From<ProjectInstrumentType> for InstrumentType {
             ProjectInstrumentType::Sampler => InstrumentType::Sampler,
             ProjectInstrumentType::Custom => InstrumentType::Custom,
             ProjectInstrumentType::Modulator => InstrumentType::Modulator,
+            ProjectInstrumentType::Rack => InstrumentType::Rack,
         }
     }
 }
@@ -741,6 +823,93 @@ impl From<ProjectCustomInstrumentRunMode> for CustomInstrumentRunMode {
         match value {
             ProjectCustomInstrumentRunMode::Instrument => CustomInstrumentRunMode::Instrument,
             ProjectCustomInstrumentRunMode::FreePatch => CustomInstrumentRunMode::FreePatch,
+        }
+    }
+}
+
+impl From<RackRouting> for ProjectRackRouting {
+    fn from(value: RackRouting) -> Self {
+        match value {
+            RackRouting::Broadcast => Self::Broadcast,
+        }
+    }
+}
+
+impl From<ProjectRackRouting> for RackRouting {
+    fn from(value: ProjectRackRouting) -> Self {
+        match value {
+            ProjectRackRouting::Broadcast => RackRouting::Broadcast,
+        }
+    }
+}
+
+impl From<RackTrackSnapshot> for ProjectRackTrackPattern {
+    fn from(value: RackTrackSnapshot) -> Self {
+        Self {
+            routing: ProjectRackRouting::from(value.routing),
+            slots: value
+                .slots
+                .into_iter()
+                .map(ProjectRackSlotPattern::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<ProjectRackTrackPattern> for RackTrackSnapshot {
+    fn from(value: ProjectRackTrackPattern) -> Self {
+        Self {
+            routing: RackRouting::from(value.routing),
+            slots: value
+                .slots
+                .into_iter()
+                .map(RackSlotSnapshot::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
+    fn from(value: RackSlotSnapshot) -> Self {
+        let (sample_path, sample_name) = value
+            .sample_id
+            .map(|(_, name, _)| (None, Some(name)))
+            .unwrap_or((None, None));
+        Self {
+            instrument_type: ProjectInstrumentType::from(value.instrument_type),
+            instrument_run_mode: ProjectCustomInstrumentRunMode::from(value.instrument_run_mode),
+            instrument_base_note_offset: value.instrument_base_note_offset,
+            gain: value.gain,
+            pan: value.pan,
+            mute: value.mute,
+            solo: value.solo,
+            max_polyphony: value.max_polyphony,
+            instrument_slot: ProjectEffectSlot::from(&value.instrument_slot),
+            track_sound_state: ProjectTrackSoundState::from(value.track_sound_state),
+            sample_path,
+            sample_name,
+        }
+    }
+}
+
+impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
+    fn from(value: ProjectRackSlotPattern) -> Self {
+        let sample_id = value
+            .sample_name
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| (-1, name, 44_100));
+        Self {
+            instrument_type: InstrumentType::from(value.instrument_type),
+            instrument_run_mode: CustomInstrumentRunMode::from(value.instrument_run_mode),
+            instrument_base_note_offset: value.instrument_base_note_offset,
+            gain: value.gain,
+            pan: value.pan.clamp(-1.0, 1.0),
+            mute: value.mute,
+            solo: value.solo,
+            max_polyphony: value.max_polyphony.clamp(1, crate::voice::MAX_VOICES),
+            instrument_slot: value.instrument_slot.into_snapshot_with_node_ids(0, 0),
+            track_sound_state: value.track_sound_state.into_track_sound_state(None),
+            sample_id,
         }
     }
 }
@@ -1553,6 +1722,7 @@ mod tests {
                 }],
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
+                rack_tracks: vec![None, None],
             }],
         }
     }
@@ -1861,6 +2031,91 @@ mod tests {
         assert_eq!(slot.plocks[0][1], None);
         // Slots saved before the IR field deserialize with ir = None.
         assert_eq!(slot.ir, None);
+    }
+
+    #[test]
+    fn rack_track_serializes_and_deserializes_broadcast_slots() {
+        let json = r#"
+        {
+            "version": 1,
+            "name": "rack",
+            "bpm": 120,
+            "current_pattern": 0,
+            "reverb": {"size":0.5,"brightness":0.5,"replace":0.0},
+            "tracks": [{
+                "kind": "rack",
+                "routing": "broadcast",
+                "slots": [
+                    {"instrument_type":"custom","instrument_name":"emulations/prophet-5"},
+                    {"instrument_type":"sampler","sample_path":"samples/kick.wav","sample_name":"kick"}
+                ]
+            }],
+            "custom_effects": [[]],
+            "patterns": [{
+                "track_bits": [[0,0,0,0]],
+                "step_data": [[[0,0,0,0,0,0,0,0,0,0]]],
+                "track_params": [{
+                    "gate": true,
+                    "attack_ms": 0.0,
+                    "release_ms": 0.0,
+                    "swing": 50.0,
+                    "num_steps": 16,
+                    "volume": 1.0,
+                    "send": 0.0,
+                    "polyphonic": true,
+                    "max_polyphony": 4,
+                    "timebase": 2
+                }],
+                "effect_slots": [[]],
+                "instrument_slots": [{"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]}],
+                "instrument_base_note_offsets": [0.0],
+                "track_sound_states": [{"loaded_preset":null,"dirty":false}],
+                "chord_snapshots": [[]],
+                "timebase_plock_snapshots": [[]],
+                "instrument_types": ["custom"],
+                "sample_paths": [null],
+                "sample_names": [""],
+                "rack_tracks": [{
+                    "routing": "broadcast",
+                    "slots": [{
+                        "instrument_type": "custom",
+                        "instrument_run_mode": "instrument",
+                        "instrument_base_note_offset": 12.0,
+                        "gain": 0.75,
+                        "pan": -0.25,
+                        "max_polyphony": 3,
+                        "instrument_slot": {"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]},
+                        "track_sound_state": {"loaded_preset":"wide","dirty":true}
+                    }]
+                }]
+            }]
+        }
+        "#;
+
+        let project: ProjectFile = serde_json::from_str(json).unwrap();
+        match &project.tracks[0] {
+            ProjectTrack::Rack { routing, slots, .. } => {
+                assert_eq!(*routing, ProjectRackRouting::Broadcast);
+                assert_eq!(slots.len(), 2);
+                assert_eq!(
+                    slots[0].instrument_name.as_deref(),
+                    Some("emulations/prophet-5")
+                );
+                assert_eq!(slots[1].sample_name.as_deref(), Some("kick"));
+            }
+            _ => panic!("expected rack track"),
+        }
+        let rack = project.patterns[0].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(rack.routing, ProjectRackRouting::Broadcast);
+        assert_eq!(rack.slots[0].instrument_base_note_offset, 12.0);
+        assert_eq!(rack.slots[0].gain, 0.75);
+        assert_eq!(rack.slots[0].pan, -0.25);
+        assert_eq!(rack.slots[0].max_polyphony, 3);
+        assert_eq!(
+            rack.slots[0].track_sound_state.loaded_preset.as_deref(),
+            Some("wide")
+        );
+        assert!(rack.slots[0].track_sound_state.dirty);
     }
 
     #[test]

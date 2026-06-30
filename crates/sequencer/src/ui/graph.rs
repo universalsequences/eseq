@@ -3,15 +3,16 @@ use std::os::raw::c_void;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use crate::effects::EffectDescriptor;
+use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
-    BusId, CustomInstrumentRunMode, InstrumentType, ModDestination, TrackOutput,
-    EXT_MOD_INPUT_COUNT, MAX_TRACKS,
+    rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentType, ModDestination,
+    RackRouting, RackSlotSnapshot, RackTrackSnapshot, TrackOutput, TrackSoundState,
+    EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
-use super::{App, EngineDescriptor, EngineNodeIds, TrackNodeIds};
+use super::{App, EngineDescriptor, EngineNodeIds, RackSlotNodeIds, TrackNodeIds};
 
 const DELETE_WITHOUT_SHIFT_ENV: &str = "TINYSEQ_DELETE_TRACK_WITHOUT_SHIFT";
 
@@ -58,6 +59,12 @@ struct TrackShell {
     mod_env_id: i32,
 }
 
+struct RackSlotMixer {
+    slot_sum_l_id: i32,
+    slot_sum_r_id: i32,
+    slot_pan_id: i32,
+}
+
 struct SamplerVoiceSetup {
     sampler_ids: Vec<i32>,
     gatepitch_ids: Vec<i32>,
@@ -87,6 +94,38 @@ struct TrackRegistration<'a> {
     shell: TrackShell,
     voice_lids: Vec<u64>,
     instrument: InstrumentRegistration<'a>,
+}
+
+#[derive(Clone)]
+pub struct RackSamplerBuildSpec {
+    pub buffer_id: i32,
+    pub sample_rate: u32,
+    pub sample_name: String,
+}
+
+pub struct RackCustomBuildSpec<'a> {
+    pub instrument_name: &'a str,
+    pub engine_id: usize,
+    pub manifest: &'a DGenManifest,
+    pub lib: &'a LoadedDGenLib,
+    pub run_mode: CustomInstrumentRunMode,
+}
+
+pub enum RackSlotInstrumentBuildSpec<'a> {
+    Sampler(RackSamplerBuildSpec),
+    Custom(RackCustomBuildSpec<'a>),
+}
+
+pub struct RackSlotBuildSpec<'a> {
+    pub instrument: RackSlotInstrumentBuildSpec<'a>,
+    pub instrument_base_note_offset: f32,
+    pub gain: f32,
+    pub pan: f32,
+    pub mute: bool,
+    pub solo: bool,
+    pub max_polyphony: usize,
+    pub instrument_slot: Option<EffectSlotSnapshot>,
+    pub track_sound_state: Option<TrackSoundState>,
 }
 
 pub struct GraphController<'a> {
@@ -1009,6 +1048,197 @@ impl GraphController<'_> {
         Ok(idx)
     }
 
+    pub fn add_rack_track(
+        &mut self,
+        name: &str,
+        routing: RackRouting,
+        slots: Vec<RackSlotBuildSpec<'_>>,
+    ) -> Result<usize, String> {
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let idx = self.app.state.active_track_count();
+        if idx >= MAX_TRACKS {
+            return Err("Maximum number of tracks reached".to_string());
+        }
+        if slots.is_empty() {
+            return Err("Rack tracks require at least one slot".to_string());
+        }
+        if slots.len() > MAX_RACK_SLOTS {
+            return Err(format!(
+                "Rack tracks support at most {MAX_RACK_SLOTS} slots"
+            ));
+        }
+
+        let track_name = instrument_display_name(name);
+        let shell = self.create_track_shell(idx, &track_name)?;
+        let has_solo = slots.iter().any(|slot| slot.solo);
+        let mut rack_slot_nodes = Vec::with_capacity(slots.len());
+        let mut rack_slot_snapshots = Vec::with_capacity(slots.len());
+
+        for (slot_idx, slot) in slots.into_iter().enumerate() {
+            let slot_name = format!("{}_rack{}", track_name, slot_idx + 1);
+            let mixer = self.create_rack_slot_mixer(
+                &slot_name,
+                shell.voice_sum_id,
+                shell.voice_sum_r_id,
+                slot.gain,
+                slot.pan,
+                slot.mute,
+                has_solo && !slot.solo,
+            )?;
+            let max_polyphony = slot.max_polyphony.clamp(1, MAX_VOICES);
+            match slot.instrument {
+                RackSlotInstrumentBuildSpec::Sampler(sampler) => {
+                    let Some(pool_id) = rack_slot_pool_index(idx, slot_idx) else {
+                        return Err(format!(
+                            "Rack sampler pool unavailable for track {idx} slot {slot_idx}"
+                        ));
+                    };
+                    let voices = self.build_sampler_voices(
+                        pool_id,
+                        &slot_name,
+                        sampler.buffer_id,
+                        sampler.sample_rate,
+                        mixer.slot_sum_l_id,
+                        mixer.slot_sum_r_id,
+                        shell.mod_in_clip_ids,
+                    )?;
+                    self.publish_sampler_voice_runtime(
+                        pool_id,
+                        &voices.voice_lids,
+                        &voices.sampler_ids,
+                        &voices.gatepitch_ids,
+                        &voices.modulator_ids,
+                    );
+                    let mut instrument_slot = slot.instrument_slot.unwrap_or_else(|| {
+                        EffectSlotSnapshot::new_default_with_modulator(
+                            &EffectDescriptor::builtin_sampler(),
+                            first_graph_node_identity(&voices.sampler_ids),
+                            first_graph_node_identity(&voices.modulator_ids),
+                        )
+                    });
+                    instrument_slot.sync_to_descriptor_with_modulator(
+                        &EffectDescriptor::builtin_sampler(),
+                        first_graph_node_identity(&voices.sampler_ids),
+                        first_graph_node_identity(&voices.modulator_ids),
+                    );
+                    let sample_id = Some((
+                        sampler.buffer_id,
+                        sampler.sample_name.clone(),
+                        sampler.sample_rate,
+                    ));
+                    rack_slot_snapshots.push(RackSlotSnapshot {
+                        instrument_type: InstrumentType::Sampler,
+                        instrument_run_mode: CustomInstrumentRunMode::Instrument,
+                        instrument_base_note_offset: slot.instrument_base_note_offset,
+                        gain: slot.gain,
+                        pan: slot.pan.clamp(-1.0, 1.0),
+                        mute: slot.mute,
+                        solo: slot.solo,
+                        max_polyphony,
+                        instrument_slot,
+                        track_sound_state: slot.track_sound_state.unwrap_or_default(),
+                        sample_id,
+                    });
+                    rack_slot_nodes.push(RackSlotNodeIds {
+                        sampler_pool_id: Some(pool_id),
+                        engine_id: None,
+                        sampler_voice_lids: voices.voice_lids,
+                        sampler_ids: voices.sampler_ids,
+                        sampler_gatepitch_ids: voices.gatepitch_ids,
+                        sampler_modulator_ids: voices.modulator_ids,
+                        slot_sum_l_id: mixer.slot_sum_l_id,
+                        slot_sum_r_id: mixer.slot_sum_r_id,
+                        slot_pan_id: mixer.slot_pan_id,
+                    });
+                }
+                RackSlotInstrumentBuildSpec::Custom(custom) => {
+                    if self.engine_has_track_route(custom.engine_id, idx) {
+                        return Err(format!(
+                            "Rack custom slot '{}' requires a dedicated engine runtime; engine {} is already routed to track {}",
+                            custom.instrument_name, custom.engine_id, idx
+                        ));
+                    }
+                    self.ensure_custom_engine_runtime(
+                        custom.engine_id,
+                        custom.instrument_name,
+                        custom.manifest,
+                        custom.lib,
+                    )?;
+                    self.connect_engine_to_track(
+                        custom.engine_id,
+                        idx,
+                        &slot_name,
+                        mixer.slot_sum_l_id,
+                        mixer.slot_sum_r_id,
+                        shell.mod_out_id,
+                        shell.mod_in_clip_ids,
+                    )?;
+                    let engine = self.app.graph.engine_node_ids[custom.engine_id]
+                        .as_ref()
+                        .ok_or_else(|| {
+                            format!(
+                                "Rack custom slot '{}' failed to initialize engine {}",
+                                custom.instrument_name, custom.engine_id
+                            )
+                        })?;
+                    let desc = lisp_host::instrument_descriptor_from_manifest(
+                        custom.instrument_name,
+                        custom.manifest,
+                    );
+                    let node_id = first_graph_node_identity(&engine.synth_ids);
+                    let modulator_node_id = first_graph_node_identity(&engine.modulator_ids);
+                    let mut instrument_slot = slot.instrument_slot.unwrap_or_else(|| {
+                        EffectSlotSnapshot::new_default_with_modulator(
+                            &desc,
+                            node_id,
+                            modulator_node_id,
+                        )
+                    });
+                    instrument_slot.sync_to_descriptor_with_modulator(
+                        &desc,
+                        node_id,
+                        modulator_node_id,
+                    );
+                    let mut sound_state = slot.track_sound_state.unwrap_or_default();
+                    sound_state.engine_id = Some(custom.engine_id);
+                    rack_slot_snapshots.push(RackSlotSnapshot {
+                        instrument_type: InstrumentType::Custom,
+                        instrument_run_mode: custom.run_mode,
+                        instrument_base_note_offset: slot.instrument_base_note_offset,
+                        gain: slot.gain,
+                        pan: slot.pan.clamp(-1.0, 1.0),
+                        mute: slot.mute,
+                        solo: slot.solo,
+                        max_polyphony,
+                        instrument_slot,
+                        track_sound_state: sound_state,
+                        sample_id: None,
+                    });
+                    rack_slot_nodes.push(RackSlotNodeIds {
+                        sampler_pool_id: None,
+                        engine_id: Some(custom.engine_id),
+                        sampler_voice_lids: Vec::new(),
+                        sampler_ids: Vec::new(),
+                        sampler_gatepitch_ids: Vec::new(),
+                        sampler_modulator_ids: Vec::new(),
+                        slot_sum_l_id: mixer.slot_sum_l_id,
+                        slot_sum_r_id: mixer.slot_sum_r_id,
+                        slot_pan_id: mixer.slot_pan_id,
+                    });
+                }
+            }
+        }
+
+        let rack_track = RackTrackSnapshot {
+            routing,
+            slots: rack_slot_snapshots,
+        };
+        self.finish_rack_track_registration(idx, track_name, shell, rack_slot_nodes, rack_track);
+        self.app.sampler_paths.push(None);
+        self.debug_assert_track_vectors_aligned();
+        Ok(idx)
+    }
+
     pub fn hot_reload_instrument(
         &mut self,
         track: usize,
@@ -1168,6 +1398,9 @@ impl GraphController<'_> {
         }
 
         for track in self.app.graph.track_node_ids.iter().rev() {
+            for rack_slot in &track.rack_slots {
+                self.delete_rack_slot_nodes(rack_slot);
+            }
             for &sampler_id in &track.sampler_ids {
                 unsafe {
                     crate::audiograph::delete_node(self.app.graph.lg.0, sampler_id);
@@ -1219,6 +1452,7 @@ impl GraphController<'_> {
         self.app.graph.effect_descriptors.clear();
         self.app.graph.instrument_descriptors.clear();
         self.app.graph.record_armed.clear();
+        self.clear_all_rack_sampler_runtime_pools();
         self.app.editor.track_effect_leases.clear();
         self.app.editor.bus_effect_leases.clear();
 
@@ -1323,6 +1557,7 @@ impl GraphController<'_> {
         let sample_rates = self.app.graph.track_sample_rates.clone();
         let instrument_types = self.app.graph.track_instrument_types.clone();
         let deleted_engine_id = self.app.graph.track_engine_ids[track_idx];
+        let deleted_rack_engine_ids = self.rack_engine_ids_for_track(track_idx);
 
         {
             let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
@@ -1333,6 +1568,11 @@ impl GraphController<'_> {
             self.delete_track_shell(&track_nodes);
 
             if let Some(engine_id) = deleted_engine_id {
+                if !self.engine_is_still_referenced_excluding(engine_id, track_idx) {
+                    self.delete_engine_runtime(engine_id);
+                }
+            }
+            for engine_id in deleted_rack_engine_ids {
                 if !self.engine_is_still_referenced_excluding(engine_id, track_idx) {
                     self.delete_engine_runtime(engine_id);
                 }
@@ -1373,12 +1613,13 @@ impl GraphController<'_> {
             return Err("Invalid track index".to_string());
         }
         let deleted_engine_id = self.app.graph.track_engine_ids[track_idx];
+        let deleted_rack_engine_ids = self.rack_engine_ids_for_track(track_idx);
 
         if self.app.is_sampler_track(track_idx) {
             self.send_sample_to_all_voices(track_idx, -1, self.app.graph.sample_rate);
         }
 
-        for engine_id in 0..MAX_TRACKS {
+        for engine_id in 0..self.app.state.runtime.engine_route_lids.len() {
             for voice in 0..MAX_VOICES {
                 let lid_l = self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
                     .load(Ordering::Relaxed);
@@ -1413,7 +1654,17 @@ impl GraphController<'_> {
             let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
             self.delete_custom_effect_chain(track_idx);
             self.delete_track_engine_routes(track_idx);
+            if let Some(track_nodes) = self.app.graph.track_node_ids.get(track_idx).cloned() {
+                for rack_slot in &track_nodes.rack_slots {
+                    self.delete_rack_slot_nodes(rack_slot);
+                }
+            }
             if let Some(engine_id) = deleted_engine_id {
+                if !self.engine_is_still_referenced_excluding(engine_id, track_idx) {
+                    self.delete_engine_runtime(engine_id);
+                }
+            }
+            for engine_id in deleted_rack_engine_ids {
                 if !self.engine_is_still_referenced_excluding(engine_id, track_idx) {
                     self.delete_engine_runtime(engine_id);
                 }
@@ -1435,6 +1686,9 @@ impl GraphController<'_> {
         self.app.graph.track_instrument_types[track_idx] = InstrumentType::Sampler;
         self.set_track_instrument_run_mode(track_idx, CustomInstrumentRunMode::Instrument)?;
         self.app.graph.track_engine_ids[track_idx] = None;
+        if let Some(nodes) = self.app.graph.track_node_ids.get_mut(track_idx) {
+            nodes.rack_slots.clear();
+        }
         self.app.graph.track_synth_node_ids[track_idx].clear();
         self.app.graph.track_gatepitch_node_ids[track_idx].clear();
         self.app.graph.effect_descriptors[track_idx] = EffectDescriptor::default_full_chain();
@@ -1759,6 +2013,9 @@ impl GraphController<'_> {
     }
 
     fn delete_track_shell(&mut self, track: &TrackNodeIds) {
+        for rack_slot in &track.rack_slots {
+            self.delete_rack_slot_nodes(rack_slot);
+        }
         for &sampler_id in &track.sampler_ids {
             unsafe {
                 crate::audiograph::delete_node(self.app.graph.lg.0, sampler_id);
@@ -1792,6 +2049,43 @@ impl GraphController<'_> {
         }
     }
 
+    fn delete_rack_slot_nodes(&self, slot: &RackSlotNodeIds) {
+        for &sampler_id in &slot.sampler_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, sampler_id);
+            }
+        }
+        for &modulator_id in &slot.sampler_modulator_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, modulator_id);
+            }
+        }
+        for &gatepitch_id in &slot.sampler_gatepitch_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, gatepitch_id);
+            }
+        }
+        unsafe {
+            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, slot.slot_pan_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, slot.slot_pan_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, slot.slot_sum_r_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, slot.slot_sum_l_id);
+        }
+    }
+
+    fn rack_engine_ids_for_track(&self, track_idx: usize) -> Vec<usize> {
+        let Some(nodes) = self.app.graph.track_node_ids.get(track_idx) else {
+            return Vec::new();
+        };
+        let mut engine_ids = Vec::new();
+        for engine_id in nodes.rack_slots.iter().filter_map(|slot| slot.engine_id) {
+            if !engine_ids.contains(&engine_id) {
+                engine_ids.push(engine_id);
+            }
+        }
+        engine_ids
+    }
+
     fn engine_is_still_referenced_excluding(&self, engine_id: usize, removed_track: usize) -> bool {
         self.app
             .graph
@@ -1799,6 +2093,19 @@ impl GraphController<'_> {
             .iter()
             .enumerate()
             .any(|(track_idx, binding)| track_idx != removed_track && *binding == Some(engine_id))
+            || self
+                .app
+                .graph
+                .track_node_ids
+                .iter()
+                .enumerate()
+                .any(|(track_idx, nodes)| {
+                    track_idx != removed_track
+                        && nodes
+                            .rack_slots
+                            .iter()
+                            .any(|slot| slot.engine_id == Some(engine_id))
+                })
     }
 
     fn delete_engine_runtime(&mut self, engine_id: usize) {
@@ -2335,6 +2642,42 @@ impl GraphController<'_> {
                 }
             }
         }
+        drop(track_sound_state);
+        self.rebind_rack_sampler_runtime_pools();
+    }
+
+    fn rebind_rack_sampler_runtime_pools(&mut self) {
+        self.clear_all_rack_sampler_runtime_pools();
+        for track_idx in 0..self.app.graph.track_node_ids.len() {
+            let slot_count = self.app.graph.track_node_ids[track_idx].rack_slots.len();
+            for slot_idx in 0..slot_count {
+                let Some(pool_id) = rack_slot_pool_index(track_idx, slot_idx) else {
+                    continue;
+                };
+                let (sampler_ids, gatepitch_ids, modulator_ids, voice_lids, has_sampler_slot) = {
+                    let slot = &self.app.graph.track_node_ids[track_idx].rack_slots[slot_idx];
+                    (
+                        slot.sampler_ids.clone(),
+                        slot.sampler_gatepitch_ids.clone(),
+                        slot.sampler_modulator_ids.clone(),
+                        slot.sampler_voice_lids.clone(),
+                        slot.sampler_pool_id.is_some(),
+                    )
+                };
+                if !has_sampler_slot {
+                    continue;
+                }
+                self.publish_sampler_voice_runtime(
+                    pool_id,
+                    &voice_lids,
+                    &sampler_ids,
+                    &gatepitch_ids,
+                    &modulator_ids,
+                );
+                self.app.graph.track_node_ids[track_idx].rack_slots[slot_idx].sampler_pool_id =
+                    Some(pool_id);
+            }
+        }
     }
 
     fn create_track_shell(&mut self, idx: usize, name: &str) -> Result<TrackShell, String> {
@@ -2445,9 +2788,232 @@ impl GraphController<'_> {
         })
     }
 
+    fn create_rack_slot_mixer(
+        &mut self,
+        slot_name: &str,
+        track_voice_sum_id: i32,
+        track_voice_sum_r_id: i32,
+        gain: f32,
+        pan: f32,
+        mute: bool,
+        muted_by_solo: bool,
+    ) -> Result<RackSlotMixer, String> {
+        let slot_sum_l_id = add_gain_node_checked(
+            self.app.graph.lg.0,
+            1.0,
+            &format!("{slot_name}_sum_l"),
+            "create_rack_slot_mixer left sum",
+        )?;
+        let slot_sum_r_id = add_gain_node_checked(
+            self.app.graph.lg.0,
+            1.0,
+            &format!("{slot_name}_sum_r"),
+            "create_rack_slot_mixer right sum",
+        )?;
+        let pan_name = CString::new(format!("{slot_name}_pan")).unwrap();
+        let slot_pan_id = unsafe {
+            crate::audiograph::add_node(
+                self.app.graph.lg.0,
+                crate::stereo_panner::stereo_panner_vtable(),
+                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                pan_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if slot_pan_id < 0 {
+            return Err(format!(
+                "create_rack_slot_mixer: failed to add panner for {slot_name}"
+            ));
+        }
+        unsafe {
+            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, slot_pan_id);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, slot_sum_l_id, 0, slot_pan_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, slot_sum_r_id, 0, slot_pan_id, 1);
+            crate::audiograph::graph_connect(
+                self.app.graph.lg.0,
+                slot_pan_id,
+                0,
+                track_voice_sum_id,
+                0,
+            );
+            crate::audiograph::graph_connect(
+                self.app.graph.lg.0,
+                slot_pan_id,
+                1,
+                track_voice_sum_r_id,
+                0,
+            );
+        }
+        push_graph_param(
+            self.app.graph.lg.0,
+            slot_pan_id as u64,
+            crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+            gain.max(0.0),
+        );
+        push_graph_param(
+            self.app.graph.lg.0,
+            slot_pan_id as u64,
+            crate::stereo_panner::STEREO_PANNER_PARAM_PAN,
+            pan.clamp(-1.0, 1.0),
+        );
+        push_graph_param(
+            self.app.graph.lg.0,
+            slot_pan_id as u64,
+            crate::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+            if mute { 1.0 } else { 0.0 },
+        );
+        push_graph_param(
+            self.app.graph.lg.0,
+            slot_pan_id as u64,
+            crate::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+            if muted_by_solo { 1.0 } else { 0.0 },
+        );
+        Ok(RackSlotMixer {
+            slot_sum_l_id,
+            slot_sum_r_id,
+            slot_pan_id,
+        })
+    }
+
+    fn engine_has_track_route(&self, engine_id: usize, track_idx: usize) -> bool {
+        self.app
+            .graph
+            .engine_node_ids
+            .get(engine_id)
+            .and_then(|engine| engine.as_ref())
+            .and_then(|engine| engine.route_gain_ids.get(track_idx))
+            .map(|routes| !routes.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn finish_rack_track_registration(
+        &mut self,
+        idx: usize,
+        track_name: String,
+        shell: TrackShell,
+        rack_slots: Vec<RackSlotNodeIds>,
+        rack_track: RackTrackSnapshot,
+    ) {
+        self.app.state.runtime.voice_counts[idx].store(0, Ordering::Release);
+        self.app.state.runtime.sampler_lids[idx].store(0, Ordering::Release);
+        self.app.state.runtime.modulator_lids[idx].store(0, Ordering::Release);
+        self.app.state.runtime.pan_lids[idx].store(shell.pan_id as u64, Ordering::Release);
+        self.app.state.runtime.delay_lids[idx].store(shell.delay_id as u64, Ordering::Release);
+        self.app.state.runtime.send_lids[idx].store(shell.send_id as u64, Ordering::Release);
+        self.app.state.runtime.instrument_type_flags[idx]
+            .store(InstrumentType::Rack.runtime_flag(), Ordering::Release);
+        self.app.state.pattern.instrument_run_modes[idx].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.app.state.runtime.instrument_run_mode_flags[idx].store(
+            CustomInstrumentRunMode::Instrument.runtime_flag(),
+            Ordering::Release,
+        );
+        self.app.state.runtime.track_engine_ids[idx].store(u32::MAX, Ordering::Release);
+        if let Some(sound) = self
+            .app
+            .state
+            .pattern
+            .track_sound_state
+            .lock()
+            .unwrap()
+            .get_mut(idx)
+        {
+            sound.engine_id = None;
+        }
+
+        self.app.tracks.push(track_name.clone());
+        self.app.push_next_track_color();
+        self.app.push_default_track_collapsed();
+        self.app
+            .graph
+            .effect_descriptors
+            .push(EffectDescriptor::default_full_chain());
+        self.app.graph.record_armed.push(false);
+        self.app.graph.track_voice_lids.push(Vec::new());
+        self.app
+            .graph
+            .track_instrument_types
+            .push(InstrumentType::Rack);
+        self.app
+            .graph
+            .track_instrument_run_modes
+            .push(CustomInstrumentRunMode::Instrument);
+        self.app.graph.track_buffer_ids.push(-1);
+        self.app
+            .graph
+            .track_sample_rates
+            .push(self.app.graph.sample_rate);
+        self.app.graph.track_node_ids.push(TrackNodeIds {
+            sampler_ids: Vec::new(),
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: shell.voice_sum_id,
+            voice_sum_r_id: shell.voice_sum_r_id,
+            pan_id: shell.pan_id,
+            filter_id: shell.filter_id,
+            delay_id: shell.delay_id,
+            send_id: shell.send_id,
+            mod_out_id: shell.mod_out_id,
+            mod_in_clip_ids: shell.mod_in_clip_ids,
+            mod_env_id: shell.mod_env_id,
+            bus_send_ids: Vec::new(),
+            rack_slots,
+        });
+        self.app.graph.track_synth_node_ids.push(Vec::new());
+        self.app.graph.track_gatepitch_node_ids.push(Vec::new());
+        self.app.graph.track_engine_ids.push(None);
+        self.app.state.pattern.instrument_slots[idx].clear();
+        self.app
+            .graph
+            .instrument_descriptors
+            .push(EffectDescriptor::empty_custom_slot());
+
+        self.app.state.extend_all_pattern_snapshots_to_track(
+            idx + 1,
+            &self.app.graph.effect_descriptors,
+            idx,
+            CustomInstrumentRunMode::Instrument,
+            None,
+        );
+        self.app
+            .state
+            .set_rack_track_for_all_pattern_snapshots(idx, rack_track);
+        self.app.refresh_effect_sidechain_labels();
+
+        self.app
+            .state
+            .transport
+            .num_tracks
+            .store((idx + 1) as u32, Ordering::Release);
+        self.app.ui.cursor_track = idx;
+        self.app.ui.cursor_step = 0;
+        self.app.ui.focused_region = super::Region::Cirklon;
+        self.app.ui.sidebar_tab = super::SidebarTab::Tools;
+        self.app.ui.sidebar_mode = super::SidebarMode::Audition;
+        self.app.ui.sidebar_search_focused = false;
+        self.app
+            .state
+            .transport
+            .topology_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app
+            .state
+            .transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app.state.schedule_mod_resync();
+        self.app.state.request_all_accumulator_resets();
+        self.app.state.publish_scheduler_snapshot();
+    }
+
     fn build_sampler_voices(
         &mut self,
-        track_idx: usize,
+        sampler_pool_id: usize,
         track_name: &str,
         buffer_id: i32,
         sample_rate: u32,
@@ -2455,6 +3021,11 @@ impl GraphController<'_> {
         voice_sum_r_id: i32,
         track_mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
     ) -> Result<SamplerVoiceSetup, String> {
+        if sampler_pool_id >= MAX_SAMPLER_POOLS {
+            return Err(format!(
+                "Sampler pool {sampler_pool_id} is unavailable; maximum sampler pools is {MAX_SAMPLER_POOLS}"
+            ));
+        }
         let mut sampler_ids = Vec::with_capacity(MAX_VOICES);
         let mut gatepitch_ids = Vec::with_capacity(MAX_VOICES);
         let mut modulator_ids = Vec::with_capacity(MAX_VOICES);
@@ -2482,7 +3053,7 @@ impl GraphController<'_> {
 
             let mod_name = CString::new(format!("{}_mod_{}", track_name, v)).unwrap();
             let mod_initial_state =
-                crate::voice_modulator::sampler_voice_initial_state(track_idx, v);
+                crate::voice_modulator::sampler_voice_initial_state(sampler_pool_id, v);
             let mod_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
@@ -2574,6 +3145,60 @@ impl GraphController<'_> {
             modulator_ids,
             voice_lids,
         })
+    }
+
+    fn publish_sampler_voice_runtime(
+        &self,
+        pool_id: usize,
+        voice_lids: &[u64],
+        sampler_ids: &[i32],
+        gatepitch_ids: &[i32],
+        modulator_ids: &[i32],
+    ) {
+        if pool_id >= self.app.state.runtime.voice_lids.len() {
+            return;
+        }
+        self.clear_sampler_runtime_pool(pool_id);
+        let voice_count = voice_lids
+            .len()
+            .min(sampler_ids.len())
+            .min(gatepitch_ids.len())
+            .min(modulator_ids.len())
+            .min(MAX_VOICES);
+        for v in 0..voice_count {
+            self.app.state.runtime.voice_lids[pool_id][v].store(voice_lids[v], Ordering::Release);
+            self.app.state.runtime.synth_node_ids[pool_id][v]
+                .store(sampler_ids[v] as u32, Ordering::Release);
+            self.app.state.runtime.sampler_gatepitch_node_ids[pool_id][v]
+                .store(gatepitch_ids[v] as u32, Ordering::Release);
+            self.app.state.runtime.sampler_modulator_node_ids[pool_id][v]
+                .store(modulator_ids[v] as u32, Ordering::Release);
+        }
+        self.app.state.runtime.voice_counts[pool_id].store(voice_count as u32, Ordering::Release);
+        self.app.state.runtime.sampler_lids[pool_id]
+            .store(voice_lids.first().copied().unwrap_or(0), Ordering::Release);
+    }
+
+    fn clear_sampler_runtime_pool(&self, pool_id: usize) {
+        if pool_id >= self.app.state.runtime.voice_lids.len() {
+            return;
+        }
+        self.app.state.runtime.voice_counts[pool_id].store(0, Ordering::Release);
+        self.app.state.runtime.sampler_lids[pool_id].store(0, Ordering::Release);
+        for v in 0..MAX_VOICES {
+            self.app.state.runtime.voice_lids[pool_id][v].store(0, Ordering::Release);
+            self.app.state.runtime.synth_node_ids[pool_id][v].store(0, Ordering::Release);
+            self.app.state.runtime.sampler_gatepitch_node_ids[pool_id][v]
+                .store(0, Ordering::Release);
+            self.app.state.runtime.sampler_modulator_node_ids[pool_id][v]
+                .store(0, Ordering::Release);
+        }
+    }
+
+    fn clear_all_rack_sampler_runtime_pools(&self) {
+        for pool_id in MAX_TRACKS..self.app.state.runtime.voice_lids.len() {
+            self.clear_sampler_runtime_pool(pool_id);
+        }
     }
 
     fn ensure_engine_slot(&mut self, engine_id: usize) {
@@ -3421,6 +4046,7 @@ impl GraphController<'_> {
                     mod_in_clip_ids: shell.mod_in_clip_ids,
                     mod_env_id: shell.mod_env_id,
                     bus_send_ids: Vec::new(),
+                    rack_slots: Vec::new(),
                 });
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
@@ -3470,6 +4096,7 @@ impl GraphController<'_> {
                     mod_in_clip_ids: shell.mod_in_clip_ids,
                     mod_env_id: shell.mod_env_id,
                     bus_send_ids: Vec::new(),
+                    rack_slots: Vec::new(),
                 });
                 let engine = self.app.graph.engine_node_ids[engine_id]
                     .as_ref()
@@ -3527,6 +4154,7 @@ impl GraphController<'_> {
                     mod_in_clip_ids: shell.mod_in_clip_ids,
                     mod_env_id: shell.mod_env_id,
                     bus_send_ids: Vec::new(),
+                    rack_slots: Vec::new(),
                 });
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
@@ -3571,7 +4199,9 @@ impl GraphController<'_> {
         self.app.ui.sidebar_tab = super::SidebarTab::Tools;
         self.app.ui.sidebar_mode = match instrument_type {
             InstrumentType::Custom => super::SidebarMode::Presets,
-            InstrumentType::Sampler | InstrumentType::Modulator => super::SidebarMode::Audition,
+            InstrumentType::Sampler | InstrumentType::Modulator | InstrumentType::Rack => {
+                super::SidebarMode::Audition
+            }
         };
         self.app.ui.sidebar_search_focused = false;
         self.app

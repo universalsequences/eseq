@@ -497,35 +497,41 @@ impl BrowserState {
                 }
             }
             KeyCode::Down => {
-                if app.ui.instrument_picker_cursor + 1 < InstrumentType::COUNT {
+                if app.ui.instrument_picker_cursor + 1 < InstrumentType::ADD_TRACK_TYPES.len() {
                     app.ui.instrument_picker_cursor += 1;
                 }
             }
-            KeyCode::Enter => match InstrumentType::ALL[app.ui.instrument_picker_cursor] {
-                InstrumentType::Sampler => {
-                    app.browser.cursor = 0;
-                    app.browser.filter.clear();
-                    app.browser.scroll_offset = 0;
-                    app.ui.sidebar_mode = SidebarMode::AddTrack;
-                    app.ui.sidebar_search_focused = true;
-                }
-                InstrumentType::Custom => {
-                    app.editor.picker_cursor = 0;
-                    app.editor.picker_filter.clear();
-                    app.editor.picker_items = crate::lisp_host::list_saved_instruments();
-                    app.ui.input_mode = super::InputMode::InstrumentPicker;
-                }
-                InstrumentType::Modulator => match app.graph_controller().add_modulator_track() {
-                    Ok(_) => {
-                        app.ui.sidebar_tab = SidebarTab::Tools;
-                        app.ui.sidebar_mode = SidebarMode::Audition;
-                        app.ui.sidebar_search_focused = false;
+            KeyCode::Enter => {
+                match InstrumentType::ADD_TRACK_TYPES[app.ui.instrument_picker_cursor] {
+                    InstrumentType::Sampler => {
+                        app.browser.cursor = 0;
+                        app.browser.filter.clear();
+                        app.browser.scroll_offset = 0;
+                        app.ui.sidebar_mode = SidebarMode::AddTrack;
+                        app.ui.sidebar_search_focused = true;
                     }
-                    Err(error) => {
-                        app.editor.status_message = Some((error, std::time::Instant::now()));
+                    InstrumentType::Custom => {
+                        app.editor.picker_cursor = 0;
+                        app.editor.picker_filter.clear();
+                        app.editor.picker_items = crate::lisp_host::list_saved_instruments();
+                        app.ui.input_mode = super::InputMode::InstrumentPicker;
                     }
-                },
-            },
+                    InstrumentType::Modulator => match app.graph_controller().add_modulator_track()
+                    {
+                        Ok(_) => {
+                            app.ui.sidebar_tab = SidebarTab::Tools;
+                            app.ui.sidebar_mode = SidebarMode::Audition;
+                            app.ui.sidebar_search_focused = false;
+                        }
+                        Err(error) => {
+                            app.editor.status_message = Some((error, std::time::Instant::now()));
+                        }
+                    },
+                    InstrumentType::Rack => {
+                        unreachable!("rack is not exposed in the add-track picker")
+                    }
+                }
+            }
             KeyCode::Esc => {
                 if !app.tracks.is_empty() {
                     app.ui.sidebar_tab = SidebarTab::Tools;

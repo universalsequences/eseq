@@ -25,6 +25,14 @@ pub(super) enum OverlayPickerKind {
     Instrument,
 }
 
+pub(crate) struct PreparedRackInstrument {
+    pub name: String,
+    pub engine_id: usize,
+    pub manifest: lisp_host::DGenManifest,
+    pub lib_index: usize,
+    pub run_mode: CustomInstrumentRunMode,
+}
+
 #[derive(Clone)]
 struct CustomEffectEntry {
     desc: EffectDescriptor,
@@ -350,6 +358,42 @@ impl App {
             self.graph_controller()
                 .add_custom_track(name, engine_id, &manifest, &*lib_ptr, run_mode)
         }
+    }
+
+    pub(crate) fn prepare_saved_instrument_for_rack_slot_sync(
+        &mut self,
+        name: &str,
+    ) -> Result<PreparedRackInstrument, String> {
+        let source = lisp_host::load_instrument_source(name).map_err(|e| e.to_string())?;
+        let run_mode = lisp_host::load_instrument_run_mode(name).map_err(|e| e.to_string())?;
+        let asset_base = lisp_host::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+
+        let cache_idx = if let Some(cache_idx) = self.cached_instrument_engine_idx(name, &source) {
+            cache_idx
+        } else {
+            let result = lisp_host::compile_and_load_instrument_with_asset_base(
+                &source,
+                self.graph.sample_rate,
+                asset_base.as_deref(),
+            )?;
+            self.cache_instrument_engine(name, &source, &result.manifest, result.lib, result.lease)
+        };
+
+        let manifest = self.editor.engine_registry.engines[cache_idx]
+            .manifest
+            .clone();
+        let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+        let engine_id =
+            self.register_dedicated_instrument_engine(name, &source, &manifest, lib_index)?;
+        Ok(PreparedRackInstrument {
+            name: name.to_string(),
+            engine_id,
+            manifest,
+            lib_index,
+            run_mode,
+        })
     }
 
     pub fn try_add_cached_saved_instrument_track_sync(

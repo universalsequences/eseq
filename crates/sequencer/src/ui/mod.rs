@@ -499,7 +499,7 @@ impl GraphState {
                 .and_then(|engine| engine.as_ref())
                 .map(|engine| !engine.mod_output_channels.is_empty())
                 .unwrap_or(false),
-            Some(InstrumentType::Sampler) | None => false,
+            Some(InstrumentType::Sampler) | Some(InstrumentType::Rack) | None => false,
         }
     }
 }
@@ -597,6 +597,21 @@ pub struct TrackNodeIds {
     pub mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT],
     pub mod_env_id: i32,
     pub bus_send_ids: Vec<BusSendNodeIds>,
+    pub rack_slots: Vec<RackSlotNodeIds>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct RackSlotNodeIds {
+    pub sampler_pool_id: Option<usize>,
+    pub engine_id: Option<usize>,
+    pub sampler_voice_lids: Vec<u64>,
+    pub sampler_ids: Vec<i32>,
+    pub sampler_gatepitch_ids: Vec<i32>,
+    pub sampler_modulator_ids: Vec<i32>,
+    pub slot_sum_l_id: i32,
+    pub slot_sum_r_id: i32,
+    pub slot_pan_id: i32,
 }
 
 #[derive(Clone)]

@@ -82,7 +82,7 @@ type DGenProcessFn = unsafe extern "C" fn(
 // Each track can have up to MAX_CUSTOM_FX custom effects.
 // The process fn pointer is stored here, indexed by slot_id = track * MAX_CUSTOM_FX + offset.
 
-use crate::sequencer::MAX_TRACKS;
+use crate::sequencer::{MAX_INSTRUMENT_ENGINES, MAX_TRACKS};
 pub const MAX_CUSTOM_FX: usize = 8;
 pub const MAX_MIDI_FX_SLOTS: usize = 4;
 pub const MAX_BUS_FX_CHAINS: usize = 64;
@@ -2027,7 +2027,7 @@ pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::
     std::fs::write(path, json)
 }
 
-const INSTRUMENT_REGISTRY_SIZE: usize = MAX_TRACKS * MAX_VOICES;
+const INSTRUMENT_REGISTRY_SIZE: usize = MAX_INSTRUMENT_ENGINES * MAX_VOICES;
 static DGEN_INSTRUMENT_FNS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
     const INIT: AtomicUsize = AtomicUsize::new(0);
     [INIT; INSTRUMENT_REGISTRY_SIZE]
@@ -2036,17 +2036,17 @@ static DGEN_INSTRUMENT_OUTPUT_COUNTS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = 
     const INIT: AtomicUsize = AtomicUsize::new(1);
     [INIT; INSTRUMENT_REGISTRY_SIZE]
 };
-static DGEN_ENGINE_ENABLED_VOICES: [AtomicUsize; MAX_TRACKS] = {
+static DGEN_ENGINE_ENABLED_VOICES: [AtomicUsize; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicUsize = AtomicUsize::new(1);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static DGEN_ENGINE_PROCESS_CALLS: [AtomicU64; MAX_TRACKS] = {
+static DGEN_ENGINE_PROCESS_CALLS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static DGEN_ENGINE_PROCESS_BLOCKS: [AtomicU64; MAX_TRACKS] = {
+static DGEN_ENGINE_PROCESS_BLOCKS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -2067,13 +2067,13 @@ pub fn set_dgen_instrument_output_count(slot_id: usize, count: usize) {
 }
 
 pub fn set_dgen_engine_enabled_voices(engine_id: usize, count: usize) {
-    if engine_id < MAX_TRACKS {
+    if engine_id < MAX_INSTRUMENT_ENGINES {
         DGEN_ENGINE_ENABLED_VOICES[engine_id].store(count.clamp(1, MAX_VOICES), Ordering::Release);
     }
 }
 
 pub fn get_dgen_engine_enabled_voices(engine_id: usize) -> usize {
-    if engine_id < MAX_TRACKS {
+    if engine_id < MAX_INSTRUMENT_ENGINES {
         DGEN_ENGINE_ENABLED_VOICES[engine_id]
             .load(Ordering::Acquire)
             .clamp(1, MAX_VOICES)
@@ -2087,7 +2087,7 @@ pub fn reset_dgen_engine_enabled_voices(engine_id: usize) {
 }
 
 pub fn take_dgen_engine_process_stats() -> Vec<DGenEngineProcessStats> {
-    (0..MAX_TRACKS)
+    (0..MAX_INSTRUMENT_ENGINES)
         .map(|engine_id| DGenEngineProcessStats {
             engine_id,
             enabled_voices: get_dgen_engine_enabled_voices(engine_id),
@@ -2135,7 +2135,7 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
     }
     let engine_id = slot_id / MAX_VOICES;
     let voice_idx = slot_id % MAX_VOICES;
-    if engine_id < MAX_TRACKS {
+    if engine_id < MAX_INSTRUMENT_ENGINES {
         let enabled = DGEN_ENGINE_ENABLED_VOICES[engine_id]
             .load(Ordering::Acquire)
             .clamp(1, MAX_VOICES);
@@ -2169,7 +2169,7 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
         if (*out.add(0)).is_null() {
             return;
         }
-        if engine_id < MAX_TRACKS {
+        if engine_id < MAX_INSTRUMENT_ENGINES {
             DGEN_ENGINE_PROCESS_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
             if voice_idx == 0 {
                 DGEN_ENGINE_PROCESS_BLOCKS[engine_id].fetch_add(1, Ordering::Relaxed);

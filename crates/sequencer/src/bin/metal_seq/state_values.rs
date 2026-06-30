@@ -2175,6 +2175,7 @@ pub(crate) fn build_track_instrument_types(app: &ui::App) -> Value {
                 sequencer::sequencer::InstrumentType::Sampler => "sampler",
                 sequencer::sequencer::InstrumentType::Custom => "custom",
                 sequencer::sequencer::InstrumentType::Modulator => "modulator",
+                sequencer::sequencer::InstrumentType::Rack => "rack",
             };
             Rc::new(RefCell::new(Value::String(label.to_string())))
         })
@@ -6180,6 +6181,7 @@ pub(crate) fn build_instrument_panel_value(
         sequencer::sequencer::InstrumentType::Sampler => "sampler",
         sequencer::sequencer::InstrumentType::Custom => "custom",
         sequencer::sequencer::InstrumentType::Modulator => "modulator",
+        sequencer::sequencer::InstrumentType::Rack => "rack",
     };
     panel_map.insert(
         "type".to_string(),

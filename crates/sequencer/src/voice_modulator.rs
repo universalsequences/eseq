@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::audiograph::NodeVTable;
 use crate::effects::{ParamDescriptor, ParamKind, ParamScaling, SyncDivision};
-use crate::sequencer::MAX_TRACKS;
+use crate::sequencer::{MAX_INSTRUMENT_ENGINES, MAX_SAMPLER_POOLS};
 
 pub const SLOT_COUNT: usize = 4;
 pub const NUM_OUTPUTS: usize = SLOT_COUNT;
@@ -104,9 +104,9 @@ pub fn sampler_voice_initial_state(
 }
 
 static PROCESS_STATS_ENABLED: AtomicBool = AtomicBool::new(false);
-static SAMPLER_ACTIVE_MASKS: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_ACTIVE_MASKS: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
 static PROCESS_CALLS: AtomicU64 = AtomicU64::new(0);
 static RENDERED_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -117,45 +117,45 @@ static UNBOUND_RENDERED_CALLS: AtomicU64 = AtomicU64::new(0);
 static RENDERED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static DISABLED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static ALL_SLOTS_OFF_FRAMES: AtomicU64 = AtomicU64::new(0);
-static CUSTOM_ENGINE_CALLS: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_CALLS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static CUSTOM_ENGINE_RENDERED_CALLS: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_RENDERED_CALLS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static CUSTOM_ENGINE_DISABLED_SKIPS: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_DISABLED_SKIPS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static CUSTOM_ENGINE_RENDERED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_RENDERED_FRAMES: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static CUSTOM_ENGINE_DISABLED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+static CUSTOM_ENGINE_DISABLED_FRAMES: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_INSTRUMENT_ENGINES]
 };
-static SAMPLER_TRACK_CALLS: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_CALLS: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
-static SAMPLER_TRACK_RENDERED_CALLS: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_RENDERED_CALLS: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
-static SAMPLER_TRACK_DISABLED_SKIPS: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_DISABLED_SKIPS: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
-static SAMPLER_TRACK_RENDERED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_RENDERED_FRAMES: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
-static SAMPLER_TRACK_DISABLED_FRAMES: [AtomicU64; MAX_TRACKS] = {
+static SAMPLER_TRACK_DISABLED_FRAMES: [AtomicU64; MAX_SAMPLER_POOLS] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_TRACKS]
+    [INIT; MAX_SAMPLER_POOLS]
 };
 
 #[derive(Clone, Debug, Default)]
@@ -200,13 +200,13 @@ pub fn set_process_stats_enabled(enabled: bool) {
 }
 
 pub fn set_sampler_active_mask(track_idx: usize, active_mask: u64) {
-    if track_idx < MAX_TRACKS {
+    if track_idx < MAX_SAMPLER_POOLS {
         SAMPLER_ACTIVE_MASKS[track_idx].store(active_mask, Ordering::Release);
     }
 }
 
 pub fn take_process_stats() -> VoiceModulatorProcessStats {
-    let engines = (0..MAX_TRACKS)
+    let engines = (0..MAX_INSTRUMENT_ENGINES)
         .filter_map(|engine_id| {
             let calls = CUSTOM_ENGINE_CALLS[engine_id].swap(0, Ordering::AcqRel);
             let rendered_calls = CUSTOM_ENGINE_RENDERED_CALLS[engine_id].swap(0, Ordering::AcqRel);
@@ -228,7 +228,7 @@ pub fn take_process_stats() -> VoiceModulatorProcessStats {
             })
         })
         .collect();
-    let sampler_tracks = (0..MAX_TRACKS)
+    let sampler_tracks = (0..MAX_SAMPLER_POOLS)
         .filter_map(|track_idx| {
             let calls = SAMPLER_TRACK_CALLS[track_idx].swap(0, Ordering::AcqRel);
             let rendered_calls = SAMPLER_TRACK_RENDERED_CALLS[track_idx].swap(0, Ordering::AcqRel);
@@ -1000,7 +1000,7 @@ unsafe fn sampler_identity(s: *const f32) -> Option<(usize, usize)> {
 }
 
 fn sampler_voice_is_active(track_idx: usize, voice_idx: usize) -> bool {
-    if track_idx >= MAX_TRACKS || voice_idx >= 64 {
+    if track_idx >= MAX_SAMPLER_POOLS || voice_idx >= 64 {
         return false;
     }
     let mask = SAMPLER_ACTIVE_MASKS[track_idx].load(Ordering::Acquire);
@@ -1014,7 +1014,7 @@ fn record_disabled_custom_skip(engine_id: usize, nf: usize) {
     PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
     DISABLED_CUSTOM_SKIPS.fetch_add(1, Ordering::Relaxed);
     DISABLED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
-    if engine_id < MAX_TRACKS {
+    if engine_id < MAX_INSTRUMENT_ENGINES {
         CUSTOM_ENGINE_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
         CUSTOM_ENGINE_DISABLED_SKIPS[engine_id].fetch_add(1, Ordering::Relaxed);
         CUSTOM_ENGINE_DISABLED_FRAMES[engine_id].fetch_add(nf as u64, Ordering::Relaxed);
@@ -1028,7 +1028,7 @@ fn record_disabled_sampler_skip(track_idx: usize, nf: usize) {
     PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
     DISABLED_SAMPLER_SKIPS.fetch_add(1, Ordering::Relaxed);
     DISABLED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
-    if track_idx < MAX_TRACKS {
+    if track_idx < MAX_SAMPLER_POOLS {
         SAMPLER_TRACK_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
         SAMPLER_TRACK_DISABLED_SKIPS[track_idx].fetch_add(1, Ordering::Relaxed);
         SAMPLER_TRACK_DISABLED_FRAMES[track_idx].fetch_add(nf as u64, Ordering::Relaxed);
@@ -1057,13 +1057,13 @@ fn record_rendered_call(
     RENDERED_FRAMES.fetch_add(nf as u64, Ordering::Relaxed);
 
     if let Some((engine_id, _)) = custom_identity {
-        if engine_id < MAX_TRACKS {
+        if engine_id < MAX_INSTRUMENT_ENGINES {
             CUSTOM_ENGINE_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
             CUSTOM_ENGINE_RENDERED_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
             CUSTOM_ENGINE_RENDERED_FRAMES[engine_id].fetch_add(nf as u64, Ordering::Relaxed);
         }
     } else if let Some((track_idx, _)) = sampler_identity {
-        if track_idx < MAX_TRACKS {
+        if track_idx < MAX_SAMPLER_POOLS {
             SAMPLER_TRACK_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
             SAMPLER_TRACK_RENDERED_CALLS[track_idx].fetch_add(1, Ordering::Relaxed);
             SAMPLER_TRACK_RENDERED_FRAMES[track_idx].fetch_add(nf as u64, Ordering::Relaxed);
