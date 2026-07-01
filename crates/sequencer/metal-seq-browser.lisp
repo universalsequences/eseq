@@ -336,9 +336,9 @@
       :background-color (if selected 
         (rgba 1 0.6 0.3 1)
         '(rgba 1 1 1 0.1))
-      :color (if selected :black :white)
+      :color (if selected (rgba 0.1 0.1 0.2 1) :white)
       :border-color (if selected 
-        (rgba 0.95 0.98 0.05 1.0) 
+        (rgba 0.05 0.08 0.95 1.0) 
         (rgba 1 1 1 0.3)
         )
       :height 0.9

@@ -65,12 +65,12 @@
         (selected (get slot :selected)))
     (box :key (str "rack-slot-row-" (get slot :idx))
          :width :fill
-         :height 2.25
+         :height 1.65
          :padding 0.18
          :selected delete-target
          :background-color (if selected
                              '(rgba 0.30 0.32 0.34 1.0)
-                             '(rgba 0.06 0.065 0.074 1.0))
+                             '(rgba 0.06 0.065 0.074 0.0))
          :selected-background-color :fx-panel-header-selected-bg
          :border-width 1
          :border-color (if selected
@@ -86,7 +86,7 @@
           :width 1.0
           :bg :transparent)
         (box :key (str "rack-slot-label-" (get slot :idx))
-             :width 12 :height :fill :v-align :center :padding 0
+             :width 19 :height :fill :v-align :center :padding 0
              :selected delete-target
              :background-color :transparent
              :selected-background-color :fx-panel-header-selected-bg
@@ -98,11 +98,7 @@
             :active delete-target
             :active-color :white
             :bg :transparent))
-        (label (get slot :type)
-          :font-size 9
-          :color :gray
-          :width 4.5
-          :bg :transparent)
+
         (v-stack :width 3.75 :height 1.9 :gap 0.05 :align :center
           (label "T" :font-size 8.2 :color :dim :bg :transparent)
           (number-picker :value (get slot :base-note)
@@ -180,7 +176,7 @@
             :font-size 9 :color :gray :bg :transparent)
           (box :flex 1 :height 0.15)))
       (fx-panel-body "rack-content-box"
-        (v-stack :debug-name "rack-chain-list" :gap 0.25 :height fx-panel-body-content-height :width :fill
+        (v-stack :debug-name "rack-chain-list" :gap 0.025 :height fx-panel-body-content-height :width :fill
           (if (> (len (get inst :slots)) 0)
             (each (get inst :slots) |slot idx|
               (rack-slot-row slot))

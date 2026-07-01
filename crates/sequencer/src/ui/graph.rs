@@ -27,13 +27,29 @@ fn first_graph_node_identity(ids: &[i32]) -> u32 {
         .unwrap_or(0)
 }
 
+/// A slot with too few voices for how often it's actually triggered doesn't
+/// just sound worse (cut-off tails) — it costs *more* CPU than a generously
+/// sized one: with no spare voice to round-robin onto, every retrigger steals
+/// the same lone voice before it ever reaches a natural idle/silent state, so
+/// its modulator+sampler nodes spend most of their time in the expensive
+/// "real work" branch instead of the cheap idle-skip branch. Measured on a
+/// dense drum pattern: a 1-voice slot rendered ~73% of its blocks vs ~3% for
+/// a 12-voice singleton track. So the per-slot floor below is deliberately
+/// higher than "1", even though it means racks with many slots will exceed
+/// MAX_VOICES in total — voice starvation is worse for CPU than a few extra
+/// idle voice-nodes.
+const MIN_RACK_SLOT_MAX_POLYPHONY: usize = 4;
+
 /// Default polyphony for a slot being appended to a rack, sized so the
 /// rack's total voice budget stays in line with a singleton track's
-/// (MAX_VOICES). Splits the remaining budget evenly across the slot count
-/// that will exist after the append; clamped to at least 1 voice.
+/// (MAX_VOICES) for the common case, even when slots are appended one at a
+/// time (e.g. dragging samples into a rack in sequence) with no upfront
+/// knowledge of the final slot count. Assumes a typical rack ends up with a
+/// handful of layers; never drops below MIN_RACK_SLOT_MAX_POLYPHONY.
 fn appended_rack_slot_max_polyphony(existing_slots: &[RackSlotSnapshot]) -> usize {
-    let total_slots_after_append = existing_slots.len() + 1;
-    (MAX_VOICES / total_slots_after_append).max(1)
+    const TYPICAL_RACK_SLOT_COUNT: usize = 3;
+    let total_slots_guess = (existing_slots.len() + 1).max(TYPICAL_RACK_SLOT_COUNT);
+    (MAX_VOICES / total_slots_guess).max(MIN_RACK_SLOT_MAX_POLYPHONY)
 }
 
 fn instrument_display_name(name: &str) -> String {
@@ -1288,8 +1304,11 @@ impl GraphController<'_> {
             "Instrument Rack".to_string()
         };
         // Match a singleton track's total voice budget: split MAX_VOICES across
-        // the slots instead of giving each slot its own full 12-voice fan.
-        let per_slot_max_polyphony = (MAX_VOICES / loaded_slots.len().max(1)).max(1);
+        // the slots instead of giving each slot its own full 12-voice fan. Never
+        // drop below MIN_RACK_SLOT_MAX_POLYPHONY — see its doc comment for why
+        // starving a densely-triggered slot to 1 voice costs more CPU, not less.
+        let per_slot_max_polyphony =
+            (MAX_VOICES / loaded_slots.len().max(1)).max(MIN_RACK_SLOT_MAX_POLYPHONY);
         let specs: Vec<RackSlotBuildSpec<'_>> = loaded_slots
             .iter()
             .map(

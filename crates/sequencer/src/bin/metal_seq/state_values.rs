@@ -6326,6 +6326,63 @@ fn insert_rack_param_target(
     );
 }
 
+struct RackUiModMetadata {
+    source_param_idx: Option<usize>,
+    depth_param_idx: usize,
+    source_slot: f32,
+    depth_value: f32,
+    depth_min: f32,
+    depth_max: f32,
+    depth_unit: Option<String>,
+}
+
+fn insert_rack_mod_metadata(
+    pmap: &mut HashMap<String, Rc<RefCell<Value>>>,
+    targets: &[RackUiModMetadata],
+) {
+    pmap.insert("modulatable".to_string(), value_cell(Value::Bool(true)));
+    let target_values = targets
+        .iter()
+        .map(|meta| {
+            let mut target = HashMap::new();
+            if let Some(source_param_idx) = meta.source_param_idx {
+                target.insert(
+                    "source-idx".to_string(),
+                    value_cell(Value::Number(source_param_idx as f64)),
+                );
+            }
+            target.insert(
+                "depth-idx".to_string(),
+                value_cell(Value::Number(meta.depth_param_idx as f64)),
+            );
+            target.insert(
+                "source-slot".to_string(),
+                value_cell(Value::Number(meta.source_slot as f64)),
+            );
+            target.insert(
+                "depth".to_string(),
+                value_cell(Value::Number(meta.depth_value as f64)),
+            );
+            target.insert(
+                "depth-min".to_string(),
+                value_cell(Value::Number(meta.depth_min as f64)),
+            );
+            target.insert(
+                "depth-max".to_string(),
+                value_cell(Value::Number(meta.depth_max as f64)),
+            );
+            if let Some(unit) = &meta.depth_unit {
+                insert_string_prop(&mut target, "depth-unit", unit);
+            }
+            value_cell(Value::Map(target))
+        })
+        .collect();
+    pmap.insert(
+        "mod-targets".to_string(),
+        value_cell(Value::List(target_values)),
+    );
+}
+
 fn rack_slot_param_map(
     track: usize,
     slot_idx: usize,
@@ -6336,6 +6393,7 @@ fn rack_slot_param_map(
     min: f32,
     max: f32,
     options: Option<&Vec<String>>,
+    mod_targets: Option<&Vec<RackUiModMetadata>>,
     ui_metadata: Option<&sequencer::effects::ParamUiMetadata>,
 ) -> Rc<RefCell<Value>> {
     let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -6365,6 +6423,9 @@ fn rack_slot_param_map(
         );
     } else if name == "enabled" || name == "sync" {
         pmap.insert("boolean".to_string(), value_cell(Value::Bool(true)));
+    }
+    if let Some(targets) = mod_targets {
+        insert_rack_mod_metadata(&mut pmap, targets);
     }
     insert_param_ui_metadata(&mut pmap, ui_metadata);
     insert_rack_param_target(&mut pmap, track, slot_idx);
@@ -6401,6 +6462,16 @@ fn rack_slot_param_value(
         })
 }
 
+fn selected_rack_slot_voice_mod_source_indices(
+    desc: &sequencer::effects::EffectDescriptor,
+    slot: &sequencer::sequencer::RackSlotSnapshot,
+    selected_step: Option<usize>,
+) -> Vec<usize> {
+    sequencer::voice_modulator::selected_source_param_indices(&desc.params, |idx, _| {
+        rack_slot_param_value(slot, desc, idx, selected_step)
+    })
+}
+
 fn build_selected_rack_slot_instrument_value(
     app: &ui::App,
     track: usize,
@@ -6412,6 +6483,54 @@ fn build_selected_rack_slot_instrument_value(
     let raw_name = rack_slot_raw_name(app, slot_idx, slot);
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut modulation_targets: HashMap<usize, Vec<RackUiModMetadata>> = HashMap::new();
+    let use_sampler_depth_units =
+        slot.instrument_type == sequencer::sequencer::InstrumentType::Sampler;
+
+    for target in desc
+        .instrument_modulation_targets
+        .iter()
+        .filter_map(|target| {
+            let depth_desc = desc.params.get(target.depth_param_idx)?;
+            let source_current = target
+                .source_param_idx
+                .map(|source_param_idx| {
+                    rack_slot_param_value(slot, &desc, source_param_idx, selected_step)
+                })
+                .unwrap_or(target.modulator_slot as f32);
+            let depth_current =
+                rack_slot_param_value(slot, &desc, target.depth_param_idx, selected_step);
+            let (depth_min, depth_max) = if use_sampler_depth_units {
+                sampler_modulation_depth_display_range(depth_desc, target)
+            } else {
+                instrument_modulation_depth_display_range(target)
+            };
+            Some((
+                target.base_param_idx,
+                RackUiModMetadata {
+                    source_param_idx: target.source_param_idx,
+                    depth_param_idx: target.depth_param_idx,
+                    source_slot: target
+                        .source_param_idx
+                        .and_then(|source_param_idx| {
+                            desc.params
+                                .get(source_param_idx)
+                                .map(|source_desc| source_desc.stored_to_user(source_current))
+                        })
+                        .unwrap_or(source_current),
+                    depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_min,
+                    depth_max,
+                    depth_unit: target.depth_unit.clone(),
+                },
+            ))
+        })
+    {
+        modulation_targets
+            .entry(target.0)
+            .or_default()
+            .push(target.1);
+    }
 
     synth_params.push(rack_slot_param_map(
         track,
@@ -6422,6 +6541,7 @@ fn build_selected_rack_slot_instrument_value(
         slot.instrument_base_note_offset,
         -48.0,
         48.0,
+        None,
         None,
         None,
     ));
@@ -6454,6 +6574,7 @@ fn build_selected_rack_slot_instrument_value(
                 pdesc.stored_to_user(pdesc.max),
                 options,
                 None,
+                None,
             ));
         } else {
             synth_params.push(rack_slot_param_map(
@@ -6466,9 +6587,64 @@ fn build_selected_rack_slot_instrument_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
+                modulation_targets.get(&param_idx),
                 pdesc.ui_metadata.as_ref(),
             ));
         }
+    }
+
+    let source_actual = selected_rack_slot_voice_mod_source_indices(&desc, slot, selected_step);
+    let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
+    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+        let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
+        let mut source_param: Option<Rc<RefCell<Value>>> = None;
+        for &param_idx in &source_actual {
+            let Some(pdesc) = desc.params.get(param_idx) else {
+                continue;
+            };
+            if sequencer::voice_modulator::slot_from_param_name(&pdesc.name) != Some(slot_number) {
+                continue;
+            }
+            let current = rack_slot_param_value(slot, &desc, param_idx, selected_step);
+            let options = match &pdesc.kind {
+                sequencer::effects::ParamKind::Enum { labels } => Some(labels),
+                _ => None,
+            };
+            let param = rack_slot_param_map(
+                track,
+                slot_idx,
+                sequencer::voice_modulator::source_param_display_name(&pdesc.name),
+                "param",
+                Some(param_idx),
+                pdesc.stored_to_user(current),
+                pdesc.stored_to_user(pdesc.min),
+                pdesc.stored_to_user(pdesc.max),
+                options,
+                None,
+                None,
+            );
+            if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+                == Some("source")
+            {
+                source_param = Some(param);
+            } else {
+                params.push(param);
+            }
+        }
+        source_names.push(value_cell(Value::String(section_name.clone())));
+        let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        insert_string_prop(&mut section_map, "name", section_name);
+        section_map.insert(
+            "slot".to_string(),
+            value_cell(Value::Number(slot_number as f64)),
+        );
+        if let Some(source_param) = source_param {
+            section_map.insert("source-param".to_string(), source_param);
+        }
+        section_map.insert("params".to_string(), value_cell(Value::List(params)));
+        source_sections.push(value_cell(Value::Map(section_map)));
     }
 
     let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -6513,9 +6689,12 @@ fn build_selected_rack_slot_instrument_value(
     );
     panel_map.insert(
         "source-names".to_string(),
-        value_cell(Value::List(Vec::new())),
+        value_cell(Value::List(source_names)),
     );
-    panel_map.insert("sources".to_string(), value_cell(Value::List(Vec::new())));
+    panel_map.insert(
+        "sources".to_string(),
+        value_cell(Value::List(source_sections)),
+    );
     panel_map.insert(
         "phase-field".to_string(),
         value_cell(Value::String(modulator_phase_field(track))),
@@ -13525,6 +13704,89 @@ mod tests {
     }
 
     #[test]
+    fn rack_selected_sampler_panel_exposes_mod_sources_and_targets() {
+        let app = test_app_with_rack_panel();
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+
+        let panel = build_instrument_panel_value(&app, 0, &selected);
+        let Value::List(items) = &panel else {
+            panic!("rack panel should be a one-item list");
+        };
+        let Value::Map(rack) = &*items[0].borrow() else {
+            panic!("rack panel item should be a map");
+        };
+        let selected = rack
+            .get("selected-instrument")
+            .unwrap_or_else(|| panic!("rack panel should include selected instrument"));
+        let Value::Map(selected) = &*selected.borrow() else {
+            panic!("selected instrument should be a map");
+        };
+        let Value::List(sources) = &*selected
+            .get("sources")
+            .expect("rack selected sampler should expose mod source sections")
+            .borrow()
+        else {
+            panic!("rack selected sampler sources should be a list");
+        };
+        assert_eq!(
+            sources.len(),
+            sequencer::voice_modulator::SLOT_COUNT,
+            "rack selected sampler should expose one source section per mod slot"
+        );
+        let Value::Map(first_source) = &*sources[0].borrow() else {
+            panic!("rack source section should be a map");
+        };
+        let source_param = first_source
+            .get("source-param")
+            .expect("rack source section should expose the source dropdown param");
+        let Value::Map(source_param) = &*source_param.borrow() else {
+            panic!("rack source dropdown param should be a map");
+        };
+        assert!(
+            matches!(
+                source_param
+                    .get("text-value")
+                    .map(|value| value.borrow().clone()),
+                Some(Value::String(label)) if !label.is_empty()
+            ),
+            "rack source dropdown should expose the selected source type"
+        );
+        assert_eq!(
+            source_param
+                .get("rack-track")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            source_param
+                .get("rack-slot")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+        let Value::List(options) = &*source_param
+            .get("options")
+            .expect("rack source dropdown should expose source type options")
+            .borrow()
+        else {
+            panic!("rack source dropdown options should be a list");
+        };
+        assert!(
+            options
+                .iter()
+                .any(|option| matches!(&*option.borrow(), Value::String(label) if label == "lfo")),
+            "rack source dropdown should include real source choices"
+        );
+        assert!(
+            value_param_has_key(&panel, "speed", "modulatable"),
+            "rack selected sampler speed should be marked modulatable"
+        );
+        assert!(
+            value_param_has_key(&panel, "speed", "mod-targets"),
+            "rack selected sampler speed should expose modulation target metadata"
+        );
+    }
+
+    #[test]
     fn metal_seq_rack_selected_sampler_sample_rate_knob_uses_rack_slot_plock_when_steps_selected() {
         let app = test_app_with_rack_panel();
         let selected = Arc::new(Mutex::new(HashSet::new()));
@@ -13628,6 +13890,197 @@ mod tests {
                 );
             }
             other => panic!("expected set-rack-slot-instrument-plock host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_rack_selected_sampler_mods_route_to_rack_slot_params() {
+        fn assert_rack_param_command(
+            command: &eseqlisp::host::HostCommand,
+            expected_value: f64,
+        ) -> usize {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-rack-slot-instrument-param");
+                    let Value::Map(payload) = payload else {
+                        panic!(
+                            "set-rack-slot-instrument-param payload should be a dict: {payload:?}"
+                        );
+                    };
+                    assert_eq!(
+                        payload.get("track").map(|value| value.borrow().clone()),
+                        Some(Value::Number(0.0))
+                    );
+                    assert_eq!(
+                        payload.get("slot").map(|value| value.borrow().clone()),
+                        Some(Value::Number(0.0))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                    payload
+                        .get("param-idx")
+                        .and_then(|value| match &*value.borrow() {
+                            Value::Number(value) => Some(*value as usize),
+                            _ => None,
+                        })
+                        .expect("rack param command should include param-idx")
+                }
+                other => {
+                    panic!("expected set-rack-slot-instrument-param host command, got {other:?}")
+                }
+            }
+        }
+
+        let app = test_app_with_rack_panel();
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
+        let speed_idx = sequencer::effects::EffectDescriptor::builtin_sampler()
+            .params
+            .iter()
+            .position(|param| param.name == "speed")
+            .expect("sampler descriptor should expose speed");
+        let speed_wrapper_key = format!("sampler-param-{speed_idx}-mod-wrapper");
+        let speed_depth_key = format!("sampler-param-{speed_idx}-mod-depth");
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
+        editor.set_layout_viewport(160, 20);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", rack_panel),
+                ("bus-effects", test_list(vec![])),
+                ("delete-target-version", Value::Number(0.0)),
+                (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (def sbrowser-sample-selected-path () "")
+                (def sbrowser-add-selected-rack-layer () false)
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install rack mods test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open true) (set! instrument-selected-mod-slot 1))")
+            .expect("open rack sampler mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("rack sampler mods fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("rack sampler mods layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        find_layout_node_by_debug_name(&layout, "instrument-mod-selector").unwrap_or_else(|| {
+            panic!("rack sampler mods selector should render; layout={layout_summaries:#?}")
+        });
+        assert!(
+            find_layout_node_by_stable_key(&layout, &speed_wrapper_key).is_some(),
+            "rack sampler speed control should render its modulation wrapper"
+        );
+        let speed_knob = find_layout_node_by_stable_key(&layout, &speed_depth_key)
+            .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+            .unwrap_or_else(|| {
+                panic!("rack sampler speed mod-depth knob; layout={layout_summaries:#?}")
+            });
+        for prop in ["base-value", "mod-range-0-slot", "mod-range-0-depth"] {
+            assert!(
+                speed_knob.props.contains_key(prop),
+                "rack sampler speed knob should expose modulation prop {prop}"
+            );
+        }
+        let callback = speed_knob
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("rack sampler speed mod-depth knob on-change");
+
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.5)])
+            .expect("edit rack sampler speed modulation depth");
+        let commands = editor.drain_host_commands();
+        assert_eq!(
+            commands.len(),
+            2,
+            "assigning an empty rack modulation lane should set source and depth: {commands:?}"
+        );
+        let source_idx = assert_rack_param_command(&commands[0], 1.0);
+        let depth_idx = assert_rack_param_command(&commands[1], 0.5);
+        assert_ne!(
+            source_idx, depth_idx,
+            "rack modulation source and depth should be distinct params"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-set-instrument-option
+                    (get
+                      (nth
+                        (get (get (nth SEQ.instrument-panel 0) :selected-instrument) :sources)
+                        0)
+                      :source-param)
+                    "lfo")"#,
+            )
+            .expect("select rack sampler mod source");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-rack-slot-instrument-param-option");
+                let Value::Map(payload) = payload else {
+                    panic!("set-rack-slot-instrument-param-option payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("label").map(|value| value.borrow().clone()),
+                    Some(Value::String("lfo".to_string()))
+                );
+            }
+            other => {
+                panic!("expected set-rack-slot-instrument-param-option host command, got {other:?}")
+            }
         }
     }
 
