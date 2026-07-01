@@ -8,17 +8,17 @@ use crate::effects::{
 };
 use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
 use crate::neural::{
-    remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
-    ProjectNeuralNetwork,
+    NeuralVisualizationSnapshot, ProjectNeuralNetwork,
+    remap_neural_network_routes_after_track_delete,
 };
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection, RackRouting,
-    StepData, StepParam, SwingPLockData, SwingResolution, SwingResolutionPLockData, Timebase,
-    TimebasePLockData, TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
-    DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
-    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    ChordData, ChordSnapshot, CustomInstrumentRunMode, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
+    InstrumentType, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_STEPS,
+    MAX_TRACKS, ModConnection, NUM_PARAMS, RackRouting, StepData, StepParam, SwingPLockData,
+    SwingResolution, SwingResolutionPLockData, TRACK_PATTERN_WORDS, Timebase, TimebasePLockData,
+    TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
 };
 use super::snapshot::SequencerSnapshot;
 use super::{BusId, TrackOutput};
@@ -356,6 +356,8 @@ pub struct RackSlotSnapshot {
     pub instrument_type: InstrumentType,
     pub instrument_run_mode: CustomInstrumentRunMode,
     pub instrument_base_note_offset: f32,
+    pub pad_note: Option<i32>,
+    pub choke_group: Option<u8>,
     pub gain: f32,
     pub pan: f32,
     pub mute: bool,
@@ -400,6 +402,40 @@ impl RackSlotSnapshot {
     pub fn set_param_plock(&mut self, step: usize, param: RackSlotParam, value: f32) -> bool {
         self.param_plocks.set(step, param, value)
     }
+}
+
+fn prepare_track_pattern_data_for_rack(data: &mut TrackPatternData) {
+    data.instrument_type = InstrumentType::Rack;
+    data.instrument_run_mode = CustomInstrumentRunMode::Instrument;
+    data.instrument_slot = EffectSlotSnapshot::new_empty();
+    data.instrument_base_note_offset = 0.0;
+    data.track_sound_state.engine_id = None;
+}
+
+fn replace_rack_slot_source_preserving_controls(
+    slot: &mut RackSlotSnapshot,
+    replacement: &RackSlotSnapshot,
+) {
+    let pad_note = slot.pad_note;
+    let choke_group = slot.choke_group;
+    let instrument_base_note_offset = slot.instrument_base_note_offset;
+    let gain = slot.gain;
+    let pan = slot.pan;
+    let mute = slot.mute;
+    let solo = slot.solo;
+    let max_polyphony = slot.max_polyphony;
+    let param_plocks = slot.param_plocks.clone();
+
+    *slot = replacement.clone();
+    slot.pad_note = pad_note;
+    slot.choke_group = choke_group;
+    slot.instrument_base_note_offset = instrument_base_note_offset;
+    slot.gain = gain;
+    slot.pan = pan;
+    slot.mute = mute;
+    slot.solo = solo;
+    slot.max_polyphony = max_polyphony;
+    slot.param_plocks = param_plocks;
 }
 
 #[derive(Clone)]
@@ -2881,13 +2917,76 @@ impl SequencerState {
             return;
         };
         for data in pool.patterns.values_mut() {
-            data.instrument_type = InstrumentType::Rack;
-            data.instrument_run_mode = CustomInstrumentRunMode::Instrument;
-            data.instrument_slot = EffectSlotSnapshot::new_empty();
-            data.instrument_base_note_offset = 0.0;
-            data.track_sound_state.engine_id = None;
+            prepare_track_pattern_data_for_rack(data);
             data.rack_track = Some(rack_track.clone());
         }
+    }
+
+    pub fn append_rack_slot_to_current_pattern(
+        &self,
+        track: usize,
+        routing: RackRouting,
+        slot: RackSlotSnapshot,
+    ) -> bool {
+        if self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .is_none()
+        {
+            return false;
+        }
+        {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(id) = scenes.effective_pattern_id(track) else {
+                return false;
+            };
+            if scenes
+                .track_pools
+                .get(track)
+                .and_then(|pool| pool.get(id))
+                .is_none()
+            {
+                return false;
+            }
+        }
+
+        if let Some(live_rack_track) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            match live_rack_track {
+                Some(rack_track) => rack_track.slots.push(slot.clone()),
+                None => {
+                    *live_rack_track = Some(RackTrackSnapshot {
+                        routing,
+                        slots: vec![slot.clone()],
+                    });
+                }
+            }
+        } else {
+            return false;
+        }
+
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let id = scenes
+            .effective_pattern_id(track)
+            .expect("validated current pattern id before rack slot append");
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(id))
+            .expect("validated current pattern data before rack slot append");
+        prepare_track_pattern_data_for_rack(data);
+        match data.rack_track.as_mut() {
+            Some(rack_track) => rack_track.slots.push(slot),
+            None => {
+                data.rack_track = Some(RackTrackSnapshot {
+                    routing,
+                    slots: vec![slot],
+                });
+            }
+        }
+        true
     }
 
     pub fn append_rack_slot_for_all_pattern_snapshots(
@@ -2912,11 +3011,7 @@ impl SequencerState {
             return;
         };
         for data in pool.patterns.values_mut() {
-            data.instrument_type = InstrumentType::Rack;
-            data.instrument_run_mode = CustomInstrumentRunMode::Instrument;
-            data.instrument_slot = EffectSlotSnapshot::new_empty();
-            data.instrument_base_note_offset = 0.0;
-            data.track_sound_state.engine_id = None;
+            prepare_track_pattern_data_for_rack(data);
             match data.rack_track.as_mut() {
                 Some(rack_track) => rack_track.slots.push(slot.clone()),
                 None => {
@@ -2959,11 +3054,152 @@ impl SequencerState {
         true
     }
 
-    pub fn sync_rack_slot_instrument_bindings_for_all_pattern_snapshots(
+    pub fn remove_rack_slot_from_current_pattern(&self, track: usize, slot_idx: usize) -> bool {
+        {
+            let rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+            let Some(Some(live_rack_track)) = rack_tracks.get(track) else {
+                return false;
+            };
+            if live_rack_track.slots.get(slot_idx).is_none() {
+                return false;
+            }
+        }
+        {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(id) = scenes.effective_pattern_id(track) else {
+                return false;
+            };
+            let Some(data) = scenes.track_pools.get(track).and_then(|pool| pool.get(id)) else {
+                return false;
+            };
+            let Some(rack_track) = data.rack_track.as_ref() else {
+                return false;
+            };
+            if rack_track.slots.get(slot_idx).is_none() {
+                return false;
+            }
+        }
+
+        if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
+        {
+            live_rack_track.slots.remove(slot_idx);
+        }
+
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let id = scenes
+            .effective_pattern_id(track)
+            .expect("validated current pattern id before rack slot removal");
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(id))
+            .expect("validated current pattern data before rack slot removal");
+        let rack_track = data
+            .rack_track
+            .as_mut()
+            .expect("validated current rack track before rack slot removal");
+        rack_track.slots.remove(slot_idx);
+        true
+    }
+
+    pub fn replace_rack_slot_source_in_current_pattern(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        replacement: RackSlotSnapshot,
+    ) -> bool {
+        {
+            let rack_tracks = self.pattern.rack_tracks.lock().unwrap();
+            let Some(Some(live_rack_track)) = rack_tracks.get(track) else {
+                return false;
+            };
+            if live_rack_track.slots.get(slot_idx).is_none() {
+                return false;
+            }
+        }
+        {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(id) = scenes.effective_pattern_id(track) else {
+                return false;
+            };
+            let Some(data) = scenes.track_pools.get(track).and_then(|pool| pool.get(id)) else {
+                return false;
+            };
+            let Some(rack_track) = data.rack_track.as_ref() else {
+                return false;
+            };
+            if rack_track.slots.get(slot_idx).is_none() {
+                return false;
+            }
+        }
+
+        if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
+        {
+            let slot = live_rack_track
+                .slots
+                .get_mut(slot_idx)
+                .expect("validated live rack slot before source replacement");
+            replace_rack_slot_source_preserving_controls(slot, &replacement);
+        }
+
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let id = scenes
+            .effective_pattern_id(track)
+            .expect("validated current pattern id before source replacement");
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(id))
+            .expect("validated current pattern data before source replacement");
+        prepare_track_pattern_data_for_rack(data);
+        let rack_track = data
+            .rack_track
+            .as_mut()
+            .expect("validated current rack track before source replacement");
+        let slot = rack_track
+            .slots
+            .get_mut(slot_idx)
+            .expect("validated current rack slot before source replacement");
+        replace_rack_slot_source_preserving_controls(slot, &replacement);
+        true
+    }
+
+    pub fn replace_rack_slot_source_for_all_pattern_snapshots(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        replacement: RackSlotSnapshot,
+    ) -> bool {
+        let mut replaced = false;
+        if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
+        {
+            if let Some(slot) = live_rack_track.slots.get_mut(slot_idx) {
+                replace_rack_slot_source_preserving_controls(slot, &replacement);
+                replaced = true;
+            }
+        }
+        if !replaced {
+            return false;
+        }
+
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        if let Some(pool) = scenes.track_pools.get_mut(track) {
+            for data in pool.patterns.values_mut() {
+                if let Some(rack_track) = data.rack_track.as_mut() {
+                    if let Some(slot) = rack_track.slots.get_mut(slot_idx) {
+                        replace_rack_slot_source_preserving_controls(slot, &replacement);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    pub fn sync_rack_slot_instrument_bindings_for_current_pattern(
         &self,
         track: usize,
         bindings: &[(EffectDescriptor, u32, u32)],
-    ) {
+    ) -> bool {
         let sync_slots = |slots: &mut [RackSlotSnapshot]| {
             for (slot, (descriptor, node_id, modulator_node_id)) in
                 slots.iter_mut().zip(bindings.iter())
@@ -2976,19 +3212,28 @@ impl SequencerState {
             }
         };
 
+        let mut synced_live = false;
         if let Some(Some(live_rack_track)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track)
         {
             sync_slots(&mut live_rack_track.slots);
+            synced_live = true;
         }
 
+        let mut synced_current = false;
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        if let Some(pool) = scenes.track_pools.get_mut(track) {
-            for data in pool.patterns.values_mut() {
+        if let Some(id) = scenes.effective_pattern_id(track) {
+            if let Some(data) = scenes
+                .track_pools
+                .get_mut(track)
+                .and_then(|pool| pool.get_mut(id))
+            {
                 if let Some(rack_track) = data.rack_track.as_mut() {
                     sync_slots(&mut rack_track.slots);
+                    synced_current = true;
                 }
             }
         }
+        synced_live && synced_current
     }
 
     pub fn update_live_rack_slot<F>(&self, track: usize, slot_idx: usize, update: F) -> bool
@@ -4978,11 +5223,7 @@ impl SequencerState {
         for (i, &step) in steps.iter().enumerate() {
             let src = if direction > 0 {
                 // Rotate right: slot i gets content from slot i-1 (last wraps to first)
-                if i == 0 {
-                    n - 1
-                } else {
-                    i - 1
-                }
+                if i == 0 { n - 1 } else { i - 1 }
             } else {
                 // Rotate left: slot i gets content from slot i+1 (first wraps to last)
                 (i + 1) % n
@@ -5099,8 +5340,8 @@ impl SequencerState {
 mod tests {
     use super::*;
     use crate::effects::{
-        EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
-        BUILTIN_SLOT_COUNT,
+        BUILTIN_SLOT_COUNT, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
+        ParamScaling,
     };
     use crate::sequencer::ModDestination;
 
@@ -5272,6 +5513,8 @@ mod tests {
                 instrument_type: InstrumentType::Custom,
                 instrument_run_mode: CustomInstrumentRunMode::Instrument,
                 instrument_base_note_offset: 7.0,
+                pad_note: None,
+                choke_group: None,
                 gain: 0.8,
                 pan: -0.2,
                 mute: false,
@@ -5286,6 +5529,31 @@ mod tests {
                 },
                 sample_id: None,
             }],
+        }
+    }
+
+    fn sample_sampler_rack_slot(
+        buffer_id: i32,
+        sample_name: &str,
+        sample_rate: u32,
+        instrument_slot_id: usize,
+        pad_note: Option<i32>,
+    ) -> RackSlotSnapshot {
+        RackSlotSnapshot {
+            instrument_type: InstrumentType::Sampler,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: -12.0,
+            pad_note,
+            choke_group: None,
+            gain: 0.5,
+            pan: 0.25,
+            mute: false,
+            solo: false,
+            max_polyphony: 2,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: sample_effect_slot_snapshot(instrument_slot_id),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: Some((buffer_id, sample_name.to_string(), sample_rate)),
         }
     }
 
@@ -5607,20 +5875,7 @@ mod tests {
         let state = SequencerState::new(1, Vec::new());
         let initial = sample_rack_track_snapshot();
         state.set_rack_track_for_all_pattern_snapshots(0, initial.clone());
-        let appended = RackSlotSnapshot {
-            instrument_type: InstrumentType::Sampler,
-            instrument_run_mode: CustomInstrumentRunMode::Instrument,
-            instrument_base_note_offset: -12.0,
-            gain: 0.5,
-            pan: 0.25,
-            mute: false,
-            solo: false,
-            max_polyphony: 2,
-            param_plocks: RackSlotParamPlocks::new(),
-            instrument_slot: sample_effect_slot_snapshot(88),
-            track_sound_state: TrackSoundState::default(),
-            sample_id: Some((123, "layer".to_string(), 48_000)),
-        };
+        let appended = sample_sampler_rack_slot(123, "layer", 48_000, 88, None);
 
         state.append_rack_slot_for_all_pattern_snapshots(0, RackRouting::Broadcast, appended);
 
@@ -5647,24 +5902,347 @@ mod tests {
     }
 
     #[test]
+    fn append_rack_slot_to_current_pattern_does_not_mutate_other_patterns() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
+
+        let appended = sample_sampler_rack_slot(123, "current-layer", 48_000, 88, None);
+
+        assert!(state.append_rack_slot_to_current_pattern(0, RackRouting::Broadcast, appended));
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots.len(), 2);
+        assert_eq!(live.slots[1].sample_id.as_ref().unwrap().1, "current-layer");
+
+        let repository = state.export_pattern_repository();
+        let current = repository[0].rack_tracks[0].as_ref().unwrap();
+        let other = repository[1].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(current.slots.len(), 2);
+        assert_eq!(
+            current.slots[1].sample_id.as_ref().unwrap().1,
+            "current-layer"
+        );
+        assert_eq!(other.slots.len(), 1);
+        assert_eq!(
+            other.slots[0].track_sound_state.loaded_preset.as_deref(),
+            Some("rack-lead")
+        );
+        assert!(other.slots[0].sample_id.is_none());
+    }
+
+    #[test]
+    fn replace_rack_slot_source_preserves_pad_controls_and_slot_plocks() {
+        let state = SequencerState::new(1, Vec::new());
+        let mut initial = sample_rack_track_snapshot();
+        initial.routing = RackRouting::ByPitch;
+        initial.slots[0].pad_note = Some(2);
+        initial.slots[0].choke_group = Some(3);
+        initial.slots[0].instrument_base_note_offset = 5.0;
+        initial.slots[0].gain = 0.7;
+        initial.slots[0].pan = -0.4;
+        initial.slots[0].mute = true;
+        initial.slots[0].solo = false;
+        initial.slots[0].max_polyphony = 6;
+        assert!(
+            initial.slots[0]
+                .param_plocks
+                .set(4, RackSlotParam::Gain, 0.25)
+        );
+        state.set_rack_track_for_all_pattern_snapshots(0, initial);
+
+        let replacement = RackSlotSnapshot {
+            instrument_type: InstrumentType::Sampler,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: -12.0,
+            pad_note: Some(9),
+            choke_group: Some(8),
+            gain: 0.2,
+            pan: 0.5,
+            mute: false,
+            solo: true,
+            max_polyphony: 1,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: sample_effect_slot_snapshot(88),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: Some((123, "replacement".to_string(), 48_000)),
+        };
+
+        assert!(state.replace_rack_slot_source_for_all_pattern_snapshots(0, 0, replacement));
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        let live_slot = &live.slots[0];
+        assert_eq!(live_slot.instrument_type, InstrumentType::Sampler);
+        assert_eq!(live_slot.sample_id.as_ref().unwrap().1, "replacement");
+        assert_eq!(live_slot.instrument_slot.node_id, 188);
+        assert_eq!(live_slot.pad_note, Some(2));
+        assert_eq!(live_slot.choke_group, Some(3));
+        assert_eq!(live_slot.instrument_base_note_offset, 5.0);
+        assert_eq!(live_slot.gain, 0.7);
+        assert_eq!(live_slot.pan, -0.4);
+        assert!(live_slot.mute);
+        assert!(!live_slot.solo);
+        assert_eq!(live_slot.max_polyphony, 6);
+        assert_eq!(
+            live_slot.param_plocks.get(4, RackSlotParam::Gain),
+            Some(0.25)
+        );
+
+        let repository = state.export_pattern_repository();
+        let restored = &repository[0].rack_tracks[0].as_ref().unwrap().slots[0];
+        assert_eq!(restored.sample_id.as_ref().unwrap().1, "replacement");
+        assert_eq!(restored.pad_note, Some(2));
+        assert_eq!(restored.choke_group, Some(3));
+        assert_eq!(restored.instrument_base_note_offset, 5.0);
+        assert_eq!(
+            restored.param_plocks.get(4, RackSlotParam::Gain),
+            Some(0.25)
+        );
+    }
+
+    #[test]
+    fn replace_rack_slot_source_in_current_pattern_keeps_other_patterns_unchanged() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+
+        let mut initial = sample_rack_track_snapshot();
+        initial.routing = RackRouting::ByPitch;
+        initial.slots[0].pad_note = Some(0);
+        initial.slots[0].choke_group = Some(4);
+        initial.slots[0].instrument_base_note_offset = 5.0;
+        initial.slots[0].gain = 0.7;
+        initial.slots[0].pan = -0.4;
+        initial.slots[0].mute = true;
+        initial.slots[0].solo = false;
+        initial.slots[0].max_polyphony = 6;
+        assert!(
+            initial.slots[0]
+                .param_plocks
+                .set(4, RackSlotParam::Gain, 0.25)
+        );
+        state.set_rack_track_for_all_pattern_snapshots(0, initial);
+
+        let mut replacement = sample_sampler_rack_slot(321, "replacement", 48_000, 88, Some(9));
+        replacement.choke_group = Some(8);
+        replacement.instrument_base_note_offset = -24.0;
+        replacement.gain = 0.2;
+        replacement.pan = 0.5;
+        replacement.mute = false;
+        replacement.solo = true;
+        replacement.max_polyphony = 1;
+
+        assert!(state.replace_rack_slot_source_in_current_pattern(0, 0, replacement));
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots[0].sample_id.as_ref().unwrap().1, "replacement");
+        assert_eq!(live.slots[0].pad_note, Some(0));
+        assert_eq!(live.slots[0].choke_group, Some(4));
+        assert_eq!(live.slots[0].instrument_base_note_offset, 5.0);
+        assert_eq!(live.slots[0].gain, 0.7);
+        assert_eq!(live.slots[0].pan, -0.4);
+        assert!(live.slots[0].mute);
+        assert!(!live.slots[0].solo);
+        assert_eq!(live.slots[0].max_polyphony, 6);
+        assert_eq!(
+            live.slots[0].param_plocks.get(4, RackSlotParam::Gain),
+            Some(0.25)
+        );
+
+        let repository = state.export_pattern_repository();
+        let current = &repository[0].rack_tracks[0].as_ref().unwrap().slots[0];
+        let other = &repository[1].rack_tracks[0].as_ref().unwrap().slots[0];
+        assert_eq!(current.sample_id.as_ref().unwrap().1, "replacement");
+        assert_eq!(current.pad_note, Some(0));
+        assert_eq!(current.choke_group, Some(4));
+        assert_eq!(current.param_plocks.get(4, RackSlotParam::Gain), Some(0.25));
+        assert!(other.sample_id.is_none());
+        assert_eq!(
+            other.track_sound_state.loaded_preset.as_deref(),
+            Some("rack-lead")
+        );
+        assert_eq!(other.pad_note, Some(0));
+        assert_eq!(other.choke_group, Some(4));
+        assert_eq!(other.param_plocks.get(4, RackSlotParam::Gain), Some(0.25));
+    }
+
+    #[test]
+    fn sync_rack_slot_bindings_for_current_pattern_does_not_rebind_other_patterns() {
+        let state = make_state_with_tracks(1);
+        let mut current = PatternSnapshot::new_default(1, &[]);
+        let mut other = PatternSnapshot::new_default(1, &[]);
+        let mut current_rack = sample_rack_track_snapshot();
+        let mut other_rack = sample_rack_track_snapshot();
+        current_rack.slots[0].instrument_slot = sample_effect_slot_snapshot(11);
+        other_rack.slots[0].instrument_slot = sample_effect_slot_snapshot(22);
+        current.instrument_types[0] = InstrumentType::Rack;
+        other.instrument_types[0] = InstrumentType::Rack;
+        current.rack_tracks[0] = Some(current_rack);
+        other.rack_tracks[0] = Some(other_rack);
+        state.replace_pattern_repository(vec![current, other], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+
+        let descriptor = EffectDescriptor::builtin_sampler();
+        assert!(
+            state.sync_rack_slot_instrument_bindings_for_current_pattern(
+                0,
+                &[(descriptor, 999, 1000)]
+            )
+        );
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots[0].instrument_slot.node_id, 999);
+        assert_eq!(live.slots[0].instrument_slot.modulator_node_id, 1000);
+
+        let repository = state.export_pattern_repository();
+        let current_slot = &repository[0].rack_tracks[0].as_ref().unwrap().slots[0];
+        let other_slot = &repository[1].rack_tracks[0].as_ref().unwrap().slots[0];
+        assert_eq!(current_slot.instrument_slot.node_id, 999);
+        assert_eq!(current_slot.instrument_slot.modulator_node_id, 1000);
+        assert_eq!(other_slot.instrument_slot.node_id, 122);
+        assert_eq!(other_slot.instrument_slot.modulator_node_id, 0);
+    }
+
+    #[test]
+    fn launch_scene_restores_pattern_locked_rack_sources() {
+        let state = make_state_with_tracks(1);
+        let mut first = PatternSnapshot::new_default(1, &[]);
+        let mut second = PatternSnapshot::new_default(1, &[]);
+        first.instrument_types[0] = InstrumentType::Rack;
+        second.instrument_types[0] = InstrumentType::Rack;
+        first.rack_tracks[0] = Some(RackTrackSnapshot {
+            routing: RackRouting::Broadcast,
+            slots: vec![sample_sampler_rack_slot(
+                101,
+                "pattern-one",
+                44_100,
+                11,
+                None,
+            )],
+        });
+        second.rack_tracks[0] = Some(RackTrackSnapshot {
+            routing: RackRouting::Broadcast,
+            slots: vec![sample_sampler_rack_slot(
+                202,
+                "pattern-two",
+                44_100,
+                22,
+                None,
+            )],
+        });
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots[0].sample_id.as_ref().unwrap().1, "pattern-one");
+
+        state
+            .launch_scene(
+                1,
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("rack")],
+                &[InstrumentType::Rack],
+            )
+            .unwrap();
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots[0].sample_id.as_ref().unwrap().1, "pattern-two");
+
+        state
+            .launch_scene(
+                0,
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("rack")],
+                &[InstrumentType::Rack],
+            )
+            .unwrap();
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots[0].sample_id.as_ref().unwrap().1, "pattern-one");
+    }
+
+    #[test]
+    fn remove_rack_slot_from_current_pattern_does_not_mutate_other_patterns() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
+        state.append_rack_slot_for_all_pattern_snapshots(
+            0,
+            RackRouting::Broadcast,
+            sample_sampler_rack_slot(123, "layer", 48_000, 88, None),
+        );
+
+        assert!(state.remove_rack_slot_from_current_pattern(0, 0));
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(live.slots.len(), 1);
+        assert_eq!(live.slots[0].sample_id.as_ref().unwrap().1, "layer");
+
+        let repository = state.export_pattern_repository();
+        let current = repository[0].rack_tracks[0].as_ref().unwrap();
+        let other = repository[1].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(current.slots.len(), 1);
+        assert_eq!(current.slots[0].sample_id.as_ref().unwrap().1, "layer");
+        assert_eq!(other.slots.len(), 2);
+        assert_eq!(
+            other.slots[0].track_sound_state.loaded_preset.as_deref(),
+            Some("rack-lead")
+        );
+        assert_eq!(other.slots[1].sample_id.as_ref().unwrap().1, "layer");
+    }
+
+    #[test]
     fn remove_rack_slot_updates_live_and_pattern_pool_slots() {
         let state = SequencerState::new(1, Vec::new());
         let initial = sample_rack_track_snapshot();
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
-        let appended = RackSlotSnapshot {
-            instrument_type: InstrumentType::Sampler,
-            instrument_run_mode: CustomInstrumentRunMode::Instrument,
-            instrument_base_note_offset: -12.0,
-            gain: 0.5,
-            pan: 0.25,
-            mute: false,
-            solo: false,
-            max_polyphony: 2,
-            param_plocks: RackSlotParamPlocks::new(),
-            instrument_slot: sample_effect_slot_snapshot(88),
-            track_sound_state: TrackSoundState::default(),
-            sample_id: Some((123, "layer".to_string(), 48_000)),
-        };
+        let appended = sample_sampler_rack_slot(123, "layer", 48_000, 88, None);
         state.append_rack_slot_for_all_pattern_snapshots(0, RackRouting::Broadcast, appended);
 
         assert!(state.remove_rack_slot_from_all_pattern_snapshots(0, 0));
@@ -6714,10 +7292,12 @@ mod tests {
             &names,
             &instrument_types,
         ));
-        assert!(state
-            .track_pattern_cells(0)
-            .into_iter()
-            .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden));
+        assert!(
+            state
+                .track_pattern_cells(0)
+                .into_iter()
+                .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden)
+        );
 
         assert!(state.set_scene_cell(
             0,
@@ -6844,10 +7424,12 @@ mod tests {
         ));
         assert_eq!(state.scene_track_pattern_id(1, 0), None);
         assert!(!state.is_scene_silenced(0));
-        assert!(state
-            .track_pattern_cells(0)
-            .iter()
-            .all(|cell| cell.pattern_id != second_id));
+        assert!(
+            state
+                .track_pattern_cells(0)
+                .iter()
+                .all(|cell| cell.pattern_id != second_id)
+        );
 
         assert!(state.delete_track_pattern(
             0,

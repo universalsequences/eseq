@@ -5354,42 +5354,98 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                         }
                     },
-                    "add-track-rack" => match app.graph_controller().add_empty_rack_track() {
-                        Ok(idx) => {
-                            sync_after_instrument_track_apply(
-                                &mut app,
-                                &mut editor,
-                                &state,
-                                idx,
-                                &current_track,
-                                &mut track_names,
-                                &track_pan_ids,
-                                &record_armed,
-                                &selected_steps,
-                                &accumulator_names,
-                                &cached_track_peak_levels,
-                                &cached_bus_peak_levels,
-                                &ui_epoch,
-                                lg_raw,
-                            );
-                            let new_name = app.tracks[idx].clone();
-                            editor.handle_host_event(HostEvent::Status(format!(
-                                "Added rack track {}: {new_name}",
-                                idx + 1
-                            )));
+                    "add-track-rack" => {
+                        let path_str = extract_path_from_payload(&payload)
+                            .filter(|path| !path.trim().is_empty());
+                        let result = if let Some(path_str) = path_str {
+                            let path = Path::new(&path_str);
+                            app.graph_controller().add_sampler_drum_rack_track(
+                                path,
+                                sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE,
+                            )
+                        } else {
+                            app.graph_controller().add_empty_rack_track()
+                        };
+                        match result {
+                            Ok(idx) => {
+                                sync_after_instrument_track_apply(
+                                    &mut app,
+                                    &mut editor,
+                                    &state,
+                                    idx,
+                                    &current_track,
+                                    &mut track_names,
+                                    &track_pan_ids,
+                                    &record_armed,
+                                    &selected_steps,
+                                    &accumulator_names,
+                                    &cached_track_peak_levels,
+                                    &cached_bus_peak_levels,
+                                    &ui_epoch,
+                                    lg_raw,
+                                );
+                                let new_name = app.tracks[idx].clone();
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Added drum rack track {}: {new_name}",
+                                    idx + 1
+                                )));
+                            }
+                            Err(e) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error adding drum rack track: {e}"
+                                )));
+                            }
                         }
-                        Err(e) => {
-                            editor.handle_host_event(HostEvent::Status(format!(
-                                "Error adding rack track: {e}"
-                            )));
+                    }
+                    "add-track-layer-rack" => {
+                        let path_str = extract_path_from_payload(&payload)
+                            .filter(|path| !path.trim().is_empty());
+                        let result = if let Some(path_str) = path_str {
+                            let path = PathBuf::from(path_str);
+                            app.graph_controller().add_sampler_rack_track(&[path])
+                        } else {
+                            app.graph_controller().add_empty_layer_rack_track()
+                        };
+                        match result {
+                            Ok(idx) => {
+                                sync_after_instrument_track_apply(
+                                    &mut app,
+                                    &mut editor,
+                                    &state,
+                                    idx,
+                                    &current_track,
+                                    &mut track_names,
+                                    &track_pan_ids,
+                                    &record_armed,
+                                    &selected_steps,
+                                    &accumulator_names,
+                                    &cached_track_peak_levels,
+                                    &cached_bus_peak_levels,
+                                    &ui_epoch,
+                                    lg_raw,
+                                );
+                                let new_name = app.tracks[idx].clone();
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Added layer rack track {}: {new_name}",
+                                    idx + 1
+                                )));
+                            }
+                            Err(e) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error adding layer rack track: {e}"
+                                )));
+                            }
                         }
-                    },
+                    }
                     "add-track-rack-sample" => {
                         let path_str = extract_path_from_payload(&payload);
                         match path_str {
                             Some(path_str) => {
                                 let path = PathBuf::from(path_str);
-                                match app.graph_controller().add_sampler_rack_track(&[path]) {
+                                match app.graph_controller().add_sampler_drum_rack_track(
+                                    &path,
+                                    sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE,
+                                ) {
                                     Ok(idx) => {
                                         sync_after_instrument_track_apply(
                                             &mut app,
@@ -5409,20 +5465,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                         let new_name = app.tracks[idx].clone();
                                         editor.handle_host_event(HostEvent::Status(format!(
-                                            "Added rack track {}: {new_name}",
+                                            "Added drum rack track {}: {new_name}",
                                             idx + 1
                                         )));
                                     }
                                     Err(e) => {
                                         editor.handle_host_event(HostEvent::Status(format!(
-                                            "Error adding rack track: {e}"
+                                            "Error adding drum rack track: {e}"
                                         )));
                                     }
                                 }
                             }
                             None => {
                                 editor.handle_host_event(HostEvent::Status(
-                                    "Rack track creation is missing a sample path".to_string(),
+                                    "Drum rack track creation is missing a sample path".to_string(),
                                 ));
                             }
                         }
@@ -5481,6 +5537,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => {
                                 editor.handle_host_event(HostEvent::Status(
                                     "Rack layer is missing a track or sample path".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    "add-rack-sample-pad" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let pad_note = extract_i32_from_payload(&payload, "pad-note");
+                        let preserve_browser_context =
+                            extract_bool_from_payload(&payload, "preserve-browser-context");
+                        match (track, pad_note, path_str) {
+                            (Some(track), Some(pad_note), Some(path_str)) => {
+                                if preserve_browser_context {
+                                    preserve_sample_browser_context_for_loaded_sample(
+                                        &mut editor,
+                                        &path_str,
+                                    );
+                                }
+                                let path = Path::new(&path_str);
+                                match app
+                                    .graph_controller()
+                                    .add_sampler_slot_to_drum_rack_pad(track, path, pad_note)
+                                {
+                                    Ok(slot_idx) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Set drum rack pad {pad_note} to slot {}",
+                                            slot_idx + 1
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        if preserve_browser_context {
+                                            preserve_sample_browser_context_for_loaded_sample(
+                                                &mut editor,
+                                                "",
+                                            );
+                                        }
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error setting drum rack pad: {e}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Drum rack pad is missing a track, pad, or sample path"
+                                        .to_string(),
                                 ));
                             }
                         }
@@ -5558,6 +5677,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => {
                                 editor.handle_host_event(HostEvent::Status(
                                     "Rack instrument layer is missing a track or instrument name"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    "add-rack-instrument-pad" => {
+                        let track = extract_usize_from_payload(&payload, "track")
+                            .or_else(|| current_track_for_app(&mut app, &current_track));
+                        let pad_note = extract_i32_from_payload(&payload, "pad-note");
+                        let name = extract_string_from_payload(&payload, "name");
+                        match (track, pad_note, name) {
+                            (Some(track), Some(pad_note), Some(name)) => {
+                                match app.add_saved_instrument_slot_to_drum_rack_pad_sync(
+                                    track, pad_note, &name,
+                                ) {
+                                    Ok(slot_idx) => {
+                                        sync_after_instrument_track_apply(
+                                            &mut app,
+                                            &mut editor,
+                                            &state,
+                                            track,
+                                            &current_track,
+                                            &mut track_names,
+                                            &track_pan_ids,
+                                            &record_armed,
+                                            &selected_steps,
+                                            &accumulator_names,
+                                            &cached_track_peak_levels,
+                                            &cached_bus_peak_levels,
+                                            &ui_epoch,
+                                            lg_raw,
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Set drum rack pad {pad_note} to slot {}: {}",
+                                            slot_idx + 1,
+                                            name
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error setting drum rack instrument pad: {error}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Drum rack instrument pad is missing a track, pad, or instrument name"
                                         .to_string(),
                                 ));
                             }
@@ -6390,6 +6557,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "select-rack-pad" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(pad_note)) =
+                                (map_usize(map, "track"), map_number(map, "pad-note"))
+                            {
+                                app.set_rack_selected_pad_note(track, pad_note as i32);
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "select-rack-pad-bank" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(bank_start)) =
+                                (map_usize(map, "track"), map_number(map, "bank-start"))
+                            {
+                                app.set_rack_pad_bank_start(track, bank_start as i32);
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
                     "set-rack-slot-gain" => {
                         if let Value::Map(ref map) = payload {
                             if let (Some(track), Some(slot_idx), Some(value)) = (
@@ -6496,6 +6695,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ui::apply_command(
                                     &mut app,
                                     ui::AppCommand::SetRackSlotMaxPolyphony {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
+                                refresh_instrument_panel_reactive(
+                                    &mut editor,
+                                    &app,
+                                    track,
+                                    &selected_steps,
+                                    &ui_epoch,
+                                );
+                            }
+                        }
+                    }
+                    "set-rack-slot-choke-group" => {
+                        if let Value::Map(ref map) = payload {
+                            if let (Some(track), Some(slot_idx), Some(value)) = (
+                                map_usize(map, "track"),
+                                map_usize(map, "slot"),
+                                map_number(map, "value")
+                                    .map(|value| value.round().clamp(0.0, u8::MAX as f64) as u8),
+                            ) {
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetRackSlotChokeGroup {
                                         track,
                                         slot_idx,
                                         value,

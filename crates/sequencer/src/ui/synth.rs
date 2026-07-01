@@ -1206,6 +1206,12 @@ impl App {
         })
     }
 
+    pub fn set_rack_slot_choke_group(&mut self, track: usize, slot_idx: usize, value: u8) -> bool {
+        self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            slot.choke_group = if value == 0 { None } else { Some(value) };
+        })
+    }
+
     pub fn set_rack_slot_base_note_offset(
         &mut self,
         track: usize,

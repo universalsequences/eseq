@@ -555,6 +555,13 @@ pub enum AppCommand {
         value: usize,
     },
 
+    /// Set a rack layer's choke group. Group 0 means no choke group.
+    SetRackSlotChokeGroup {
+        track: usize,
+        slot_idx: usize,
+        value: u8,
+    },
+
     /// Set a rack layer's instrument base-note offset.
     SetRackSlotBaseNoteOffset {
         track: usize,
@@ -785,6 +792,8 @@ mod tests {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0,
+                    pad_note: None,
+                    choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
                     mute: false,
@@ -877,6 +886,13 @@ mod tests {
                 step: 0,
                 param: RackSlotParam::Gain,
                 value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetRackSlotChokeGroup {
+                track: 0,
+                slot_idx: 0,
+                value: 1,
             }
         ));
         assert!(command_mutates_sequencer_state(
@@ -1667,6 +1683,14 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             value,
         } => {
             app.set_rack_slot_max_polyphony(track, slot_idx, value);
+        }
+
+        AppCommand::SetRackSlotChokeGroup {
+            track,
+            slot_idx,
+            value,
+        } => {
+            app.set_rack_slot_choke_group(track, slot_idx, value);
         }
 
         AppCommand::SetRackSlotBaseNoteOffset {

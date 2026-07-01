@@ -6,9 +6,10 @@ use std::sync::atomic::Ordering;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
-    rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentType, ModDestination,
-    RackRouting, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, TrackOutput,
-    TrackSoundState, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
+    BusId, CustomInstrumentRunMode, DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE,
+    DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, InstrumentType, MAX_RACK_SLOTS,
+    MAX_SAMPLER_POOLS, MAX_TRACKS, ModDestination, RackRouting, RackSlotParamPlocks,
+    RackSlotSnapshot, RackTrackSnapshot, TrackOutput, TrackSoundState, rack_slot_pool_index,
 };
 use crate::voice::MAX_VOICES;
 
@@ -27,15 +28,95 @@ fn first_graph_node_identity(ids: &[i32]) -> u32 {
         .unwrap_or(0)
 }
 
-/// Default polyphony for a slot being appended to a rack, sized so the
-/// rack's total voice budget stays in line with a singleton track's
-/// (MAX_VOICES), even when slots are appended one at a time (e.g. dragging
-/// samples into a rack in sequence). Uses whatever budget existing slots
-/// haven't already claimed; clamped to at least 1 voice so an explicit
-/// monophonic slot (max_polyphony = 1) is honored rather than padded up.
-fn appended_rack_slot_max_polyphony(existing_slots: &[RackSlotSnapshot]) -> usize {
-    let claimed: usize = existing_slots.iter().map(|slot| slot.max_polyphony).sum();
-    MAX_VOICES.saturating_sub(claimed).max(1)
+const DEFAULT_LAYER_SLOT_MAX_POLYPHONY: usize = 4;
+const DEFAULT_DRUM_SLOT_MAX_POLYPHONY: usize = 1;
+
+fn appended_rack_slot_max_polyphony(_existing_slots: &[RackSlotSnapshot]) -> usize {
+    DEFAULT_LAYER_SLOT_MAX_POLYPHONY.min(MAX_VOICES).max(1)
+}
+
+fn validate_drum_rack_pad_note(pad_note: i32) -> bool {
+    (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).contains(&pad_note)
+}
+
+fn validate_rack_slot_pad_map(
+    routing: RackRouting,
+    slots: &[RackSlotSnapshot],
+) -> Result<(), String> {
+    if routing != RackRouting::ByPitch {
+        return Ok(());
+    }
+
+    let mut occupied = [false; DRUM_RACK_TOTAL_PAD_NOTES];
+    for (slot_idx, slot) in slots.iter().enumerate() {
+        let Some(pad_note) = slot.pad_note else {
+            return Err(format!(
+                "Drum rack slot {} is missing a pad note",
+                slot_idx + 1
+            ));
+        };
+        if !validate_drum_rack_pad_note(pad_note) {
+            return Err(format!(
+                "Drum rack slot {} has unsupported pad note {}",
+                slot_idx + 1,
+                pad_note
+            ));
+        }
+        let pad_idx = (pad_note - DRUM_RACK_FIRST_PAD_NOTE) as usize;
+        if occupied[pad_idx] {
+            return Err(format!("Drum rack pad {pad_note} is already occupied"));
+        }
+        occupied[pad_idx] = true;
+    }
+    Ok(())
+}
+
+fn validate_rack_build_slot_pad_map(
+    routing: RackRouting,
+    slots: &[RackSlotBuildSpec<'_>],
+) -> Result<(), String> {
+    if routing != RackRouting::ByPitch {
+        return Ok(());
+    }
+
+    let mut occupied = [false; DRUM_RACK_TOTAL_PAD_NOTES];
+    for (slot_idx, slot) in slots.iter().enumerate() {
+        let Some(pad_note) = slot.pad_note else {
+            return Err(format!(
+                "Drum rack slot {} is missing a pad note",
+                slot_idx + 1
+            ));
+        };
+        if !validate_drum_rack_pad_note(pad_note) {
+            return Err(format!(
+                "Drum rack slot {} has unsupported pad note {}",
+                slot_idx + 1,
+                pad_note
+            ));
+        }
+        let pad_idx = (pad_note - DRUM_RACK_FIRST_PAD_NOTE) as usize;
+        if occupied[pad_idx] {
+            return Err(format!("Drum rack pad {pad_note} is already occupied"));
+        }
+        occupied[pad_idx] = true;
+    }
+    Ok(())
+}
+
+fn preserve_rack_slot_controls(
+    mut replacement: RackSlotSnapshot,
+    existing: &RackSlotSnapshot,
+) -> RackSlotSnapshot {
+    replacement.pad_note = existing.pad_note;
+    replacement.choke_group = existing.choke_group;
+    replacement.instrument_base_note_offset = existing.instrument_base_note_offset;
+    replacement.gain = existing.gain;
+    replacement.pan = existing.pan;
+    replacement.mute = existing.mute;
+    replacement.solo = existing.solo;
+    replacement.max_polyphony = existing.max_polyphony;
+    replacement.param_plocks = existing.param_plocks.clone();
+    replacement
 }
 
 fn instrument_display_name(name: &str) -> String {
@@ -130,6 +211,8 @@ pub enum RackSlotInstrumentBuildSpec<'a> {
 pub struct RackSlotBuildSpec<'a> {
     pub instrument: RackSlotInstrumentBuildSpec<'a>,
     pub instrument_base_note_offset: f32,
+    pub pad_note: Option<i32>,
+    pub choke_group: Option<u8>,
     pub gain: f32,
     pub pan: f32,
     pub mute: bool,
@@ -1078,6 +1161,7 @@ impl GraphController<'_> {
                 "Rack tracks support at most {MAX_RACK_SLOTS} slots"
             ));
         }
+        validate_rack_build_slot_pad_map(routing, &slots)?;
 
         let track_name = instrument_display_name(name);
         let shell = self.create_track_shell(idx, &track_name)?;
@@ -1142,6 +1226,8 @@ impl GraphController<'_> {
                         instrument_type: InstrumentType::Sampler,
                         instrument_run_mode: CustomInstrumentRunMode::Instrument,
                         instrument_base_note_offset: slot.instrument_base_note_offset,
+                        pad_note: slot.pad_note,
+                        choke_group: slot.choke_group,
                         gain: slot.gain,
                         pan: slot.pan.clamp(-1.0, 1.0),
                         mute: slot.mute,
@@ -1218,6 +1304,8 @@ impl GraphController<'_> {
                         instrument_type: InstrumentType::Custom,
                         instrument_run_mode: custom.run_mode,
                         instrument_base_note_offset: slot.instrument_base_note_offset,
+                        pad_note: slot.pad_note,
+                        choke_group: slot.choke_group,
                         gain: slot.gain,
                         pan: slot.pan.clamp(-1.0, 1.0),
                         mute: slot.mute,
@@ -1255,7 +1343,15 @@ impl GraphController<'_> {
 
     pub fn add_empty_rack_track(&mut self) -> Result<usize, String> {
         self.add_rack_track(
-            "Instrument Rack",
+            "Drum Rack",
+            RackRouting::ByPitch,
+            Vec::<RackSlotBuildSpec<'_>>::new(),
+        )
+    }
+
+    pub fn add_empty_layer_rack_track(&mut self) -> Result<usize, String> {
+        self.add_rack_track(
+            "Layer Rack",
             RackRouting::Broadcast,
             Vec::<RackSlotBuildSpec<'_>>::new(),
         )
@@ -1290,11 +1386,9 @@ impl GraphController<'_> {
         let track_name = if loaded_slots.len() == 1 {
             format!("Rack {}", loaded_slots[0].3)
         } else {
-            "Instrument Rack".to_string()
+            "Layer Rack".to_string()
         };
-        // Match a singleton track's total voice budget: split MAX_VOICES across
-        // the slots instead of giving each slot its own full 12-voice fan.
-        let per_slot_max_polyphony = (MAX_VOICES / loaded_slots.len().max(1)).max(1);
+        let per_slot_max_polyphony = appended_rack_slot_max_polyphony(&[]);
         let specs: Vec<RackSlotBuildSpec<'_>> = loaded_slots
             .iter()
             .map(
@@ -1305,6 +1399,8 @@ impl GraphController<'_> {
                         sample_name: sample_name.clone(),
                     }),
                     instrument_base_note_offset: 0.0,
+                    pad_note: None,
+                    choke_group: None,
                     gain: 1.0,
                     pan: 0.0,
                     mute: false,
@@ -1325,12 +1421,54 @@ impl GraphController<'_> {
         Ok(idx)
     }
 
+    pub fn add_sampler_drum_rack_track(
+        &mut self,
+        wav_path: &Path,
+        pad_note: i32,
+    ) -> Result<usize, String> {
+        if !validate_drum_rack_pad_note(pad_note) {
+            return Err(format!("Unsupported drum rack pad note {pad_note}"));
+        }
+        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        self.app.submit_sample_analysis(&loaded);
+        let sample_name =
+            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
+        let specs = vec![RackSlotBuildSpec {
+            instrument: RackSlotInstrumentBuildSpec::Sampler(RackSamplerBuildSpec {
+                buffer_id: loaded.buffer_id,
+                sample_rate: loaded.sample_rate,
+                sample_name: sample_name.clone(),
+            }),
+            instrument_base_note_offset: 0.0,
+            pad_note: Some(pad_note),
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            max_polyphony: DEFAULT_DRUM_SLOT_MAX_POLYPHONY,
+            param_plocks: None,
+            instrument_slot: None,
+            track_sound_state: None,
+        }];
+        let idx = self.add_rack_track("Drum Rack", RackRouting::ByPitch, specs)?;
+        self.app.register_loaded_sample_path(
+            &sample_name,
+            loaded.buffer_id,
+            wav_path.to_path_buf(),
+        );
+        Ok(idx)
+    }
+
     pub fn add_sampler_slot_to_rack(
         &mut self,
         track_idx: usize,
         wav_path: &Path,
     ) -> Result<usize, String> {
         let (rack, slot_idx) = self.rack_slot_append_target(track_idx)?;
+        if rack.routing == RackRouting::ByPitch {
+            return Err("Add samples to a drum rack pad, not the rack chain".to_string());
+        }
         let Some(pool_id) = rack_slot_pool_index(track_idx, slot_idx) else {
             return Err(format!(
                 "Rack sampler pool unavailable for track {track_idx} slot {slot_idx}"
@@ -1392,6 +1530,8 @@ impl GraphController<'_> {
             instrument_type: InstrumentType::Sampler,
             instrument_run_mode: CustomInstrumentRunMode::Instrument,
             instrument_base_note_offset: 0.0,
+            pad_note: None,
+            choke_group: None,
             gain: 1.0,
             pan: 0.0,
             mute: false,
@@ -1423,11 +1563,13 @@ impl GraphController<'_> {
             loaded.buffer_id,
             wav_path.to_path_buf(),
         );
-        self.app.state.append_rack_slot_for_all_pattern_snapshots(
-            track_idx,
-            rack.routing,
-            rack_slot,
-        );
+        if !self
+            .app
+            .state
+            .append_rack_slot_to_current_pattern(track_idx, rack.routing, rack_slot)
+        {
+            return Err("Failed to append rack layer to current pattern".to_string());
+        }
         self.app
             .state
             .transport
@@ -1467,19 +1609,32 @@ impl GraphController<'_> {
         if !self
             .app
             .state
-            .remove_rack_slot_from_all_pattern_snapshots(track_idx, slot_idx)
+            .remove_rack_slot_from_current_pattern(track_idx, slot_idx)
         {
-            return Err("Failed to remove rack layer from pattern snapshots".to_string());
+            return Err("Failed to remove rack layer from current pattern".to_string());
         }
-        self.app
+        if !self
+            .app
             .state
-            .sync_rack_slot_instrument_bindings_for_all_pattern_snapshots(track_idx, &bindings);
-        let next_selection = if rack.slots.is_empty() {
-            0
+            .sync_rack_slot_instrument_bindings_for_current_pattern(track_idx, &bindings)
+        {
+            return Err("Failed to sync rack layer bindings to current pattern".to_string());
+        }
+        if rack.routing == RackRouting::ByPitch {
+            let next_pad = rack
+                .slots
+                .get(slot_idx.min(rack.slots.len().saturating_sub(1)))
+                .and_then(|slot| slot.pad_note)
+                .unwrap_or(DRUM_RACK_FIRST_PAD_NOTE);
+            self.app.set_rack_selected_pad_note(track_idx, next_pad);
         } else {
-            slot_idx.min(rack.slots.len() - 1)
-        };
-        self.app.set_rack_selected_slot(track_idx, next_selection);
+            let next_selection = if rack.slots.is_empty() {
+                0
+            } else {
+                slot_idx.min(rack.slots.len() - 1)
+            };
+            self.app.set_rack_selected_slot(track_idx, next_selection);
+        }
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.state.publish_scheduler_snapshot();
@@ -1507,6 +1662,9 @@ impl GraphController<'_> {
         run_mode: CustomInstrumentRunMode,
     ) -> Result<usize, String> {
         let (rack, slot_idx) = self.rack_slot_append_target(track_idx)?;
+        if rack.routing == RackRouting::ByPitch {
+            return Err("Add instruments to a drum rack pad, not the rack chain".to_string());
+        }
         if self.engine_has_track_route(engine_id, track_idx) {
             return Err(format!(
                 "Rack custom slot '{}' requires a dedicated engine runtime; engine {} is already routed to track {}",
@@ -1562,6 +1720,8 @@ impl GraphController<'_> {
             instrument_type: InstrumentType::Custom,
             instrument_run_mode: run_mode,
             instrument_base_note_offset: 0.0,
+            pad_note: None,
+            choke_group: None,
             gain: 1.0,
             pan: 0.0,
             mute: false,
@@ -1592,11 +1752,13 @@ impl GraphController<'_> {
             .push(rack_slot_nodes);
         self.publish_rack_slot_panner_runtime(track_idx);
         self.app.set_rack_selected_slot(track_idx, slot_idx);
-        self.app.state.append_rack_slot_for_all_pattern_snapshots(
-            track_idx,
-            rack.routing,
-            rack_slot,
-        );
+        if !self
+            .app
+            .state
+            .append_rack_slot_to_current_pattern(track_idx, rack.routing, rack_slot)
+        {
+            return Err("Failed to append rack instrument to current pattern".to_string());
+        }
         self.app
             .state
             .transport
@@ -1611,6 +1773,163 @@ impl GraphController<'_> {
         self.app.state.request_all_accumulator_resets();
         self.app.state.publish_scheduler_snapshot();
         Ok(slot_idx)
+    }
+
+    fn add_or_replace_drum_rack_slot_source(
+        &mut self,
+        track_idx: usize,
+        pad_note: i32,
+        mut replacement: RackSlotSnapshot,
+    ) -> Result<usize, String> {
+        if self.app.graph.track_instrument_types.get(track_idx) != Some(&InstrumentType::Rack) {
+            return Err("Current track is not a rack".to_string());
+        }
+        if !validate_drum_rack_pad_note(pad_note) {
+            return Err(format!("Unsupported drum rack pad note {pad_note}"));
+        }
+        let mut rack = self
+            .app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track_idx)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| "Rack track has no rack metadata".to_string())?;
+        if rack.routing != RackRouting::ByPitch {
+            return Err("Current rack is not a drum rack".to_string());
+        }
+        replacement.pad_note = Some(pad_note);
+        let replacing_slot_idx = rack
+            .slots
+            .iter()
+            .position(|slot| slot.pad_note == Some(pad_note));
+        let slot_idx = if let Some(slot_idx) = replacing_slot_idx {
+            let existing = rack.slots[slot_idx].clone();
+            rack.slots[slot_idx] = preserve_rack_slot_controls(replacement, &existing);
+            slot_idx
+        } else {
+            if rack.slots.len() >= MAX_RACK_SLOTS {
+                return Err(format!(
+                    "Rack tracks support at most {MAX_RACK_SLOTS} slots"
+                ));
+            }
+            rack.slots.push(replacement);
+            rack.slots.len() - 1
+        };
+
+        let bindings = self.rebuild_rack_slot_graph(track_idx, &mut rack)?;
+        if replacing_slot_idx.is_some() {
+            if !self.app.state.replace_rack_slot_source_in_current_pattern(
+                track_idx,
+                slot_idx,
+                rack.slots[slot_idx].clone(),
+            ) {
+                return Err("Failed to replace drum rack pad source".to_string());
+            }
+        } else {
+            if !self.app.state.append_rack_slot_to_current_pattern(
+                track_idx,
+                rack.routing,
+                rack.slots[slot_idx].clone(),
+            ) {
+                return Err("Failed to add drum rack pad to current pattern".to_string());
+            }
+        }
+        if !self
+            .app
+            .state
+            .sync_rack_slot_instrument_bindings_for_current_pattern(track_idx, &bindings)
+        {
+            return Err("Failed to sync drum rack pad bindings to current pattern".to_string());
+        }
+        self.app.set_rack_selected_pad_note(track_idx, pad_note);
+        self.app.state.schedule_mod_resync();
+        self.app.state.request_all_accumulator_resets();
+        self.app.state.publish_scheduler_snapshot();
+        self.app.push_all_restored_defaults();
+        self.app
+            .state
+            .transport
+            .topology_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app
+            .state
+            .transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(slot_idx)
+    }
+
+    pub fn add_sampler_slot_to_drum_rack_pad(
+        &mut self,
+        track_idx: usize,
+        wav_path: &Path,
+        pad_note: i32,
+    ) -> Result<usize, String> {
+        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        self.app.submit_sample_analysis(&loaded);
+        let sample_name =
+            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
+        let rack_slot = RackSlotSnapshot {
+            instrument_type: InstrumentType::Sampler,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: 0.0,
+            pad_note: Some(pad_note),
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            max_polyphony: DEFAULT_DRUM_SLOT_MAX_POLYPHONY,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: EffectSlotSnapshot::new_empty(),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: Some((loaded.buffer_id, sample_name.clone(), loaded.sample_rate)),
+        };
+        let slot_idx = self.add_or_replace_drum_rack_slot_source(track_idx, pad_note, rack_slot)?;
+        self.app.register_loaded_sample_path(
+            &sample_name,
+            loaded.buffer_id,
+            wav_path.to_path_buf(),
+        );
+        Ok(slot_idx)
+    }
+
+    pub fn add_custom_slot_to_drum_rack_pad(
+        &mut self,
+        track_idx: usize,
+        pad_note: i32,
+        instrument_name: &str,
+        engine_id: usize,
+        manifest: &DGenManifest,
+        _lib: &LoadedDGenLib,
+        run_mode: CustomInstrumentRunMode,
+    ) -> Result<usize, String> {
+        let desc = lisp_host::instrument_descriptor_from_manifest(instrument_name, manifest);
+        let rack_slot = RackSlotSnapshot {
+            instrument_type: InstrumentType::Custom,
+            instrument_run_mode: run_mode,
+            instrument_base_note_offset: 0.0,
+            pad_note: Some(pad_note),
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            max_polyphony: DEFAULT_DRUM_SLOT_MAX_POLYPHONY,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: EffectSlotSnapshot::new_default_with_modulator(&desc, 0, 0),
+            track_sound_state: TrackSoundState {
+                engine_id: Some(engine_id),
+                loaded_preset: Some(instrument_name.to_string()),
+                dirty: false,
+            },
+            sample_id: None,
+        };
+        self.add_or_replace_drum_rack_slot_source(track_idx, pad_note, rack_slot)
     }
 
     pub fn hot_reload_instrument(
@@ -1678,6 +1997,62 @@ impl GraphController<'_> {
                 .sync_sampler_path_from_sample(track, *buffer_id, name);
             self.app.publish_sampler_analysis_runtime(track);
         }
+        if let Err(error) = self.sync_live_rack_tracks_from_pattern_state() {
+            self.app.editor.status_message = Some((
+                format!("Pattern rack sync failed: {error}"),
+                std::time::Instant::now(),
+            ));
+        }
+    }
+
+    pub fn sync_live_rack_tracks_from_pattern_state(&mut self) -> Result<(), String> {
+        let rack_tracks = self.app.state.pattern.rack_tracks.lock().unwrap().clone();
+        let mut rebuilt_any = false;
+        for (track_idx, rack) in rack_tracks.into_iter().enumerate() {
+            if track_idx >= self.app.tracks.len() {
+                break;
+            }
+            if self.app.graph.track_instrument_types.get(track_idx) != Some(&InstrumentType::Rack) {
+                continue;
+            }
+            let Some(mut rack) = rack else {
+                continue;
+            };
+            let bindings = self.rebuild_rack_slot_graph(track_idx, &mut rack)?;
+            if let Some(live_rack_track) = self
+                .app
+                .state
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get_mut(track_idx)
+            {
+                *live_rack_track = Some(rack);
+            }
+            if !self
+                .app
+                .state
+                .sync_rack_slot_instrument_bindings_for_current_pattern(track_idx, &bindings)
+            {
+                return Err(format!(
+                    "Failed to sync rack bindings for track {}",
+                    track_idx + 1
+                ));
+            }
+            rebuilt_any = true;
+        }
+        if rebuilt_any {
+            self.app.state.schedule_mod_resync();
+            self.app.state.request_all_accumulator_resets();
+            self.app.state.publish_scheduler_snapshot();
+            self.app
+                .state
+                .transport
+                .topology_epoch
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     pub fn clear_all_tracks(&mut self) {
@@ -2633,6 +3008,9 @@ impl GraphController<'_> {
         if track_idx < self.app.rack_selected_slots.len() {
             self.app.rack_selected_slots.remove(track_idx);
         }
+        if track_idx < self.app.rack_pad_bank_starts.len() {
+            self.app.rack_pad_bank_starts.remove(track_idx);
+        }
         self.app.sampler_paths.remove(track_idx);
         self.app.graph.track_node_ids.remove(track_idx);
         self.app.graph.track_buffer_ids.remove(track_idx);
@@ -3146,6 +3524,7 @@ impl GraphController<'_> {
                 "Rack tracks support at most {MAX_RACK_SLOTS} slots"
             ));
         }
+        validate_rack_slot_pad_map(rack.routing, &rack.slots)?;
         for (slot_idx, slot) in rack.slots.iter().enumerate() {
             match slot.instrument_type {
                 InstrumentType::Sampler => {
@@ -3659,6 +4038,7 @@ impl GraphController<'_> {
         self.app.push_next_track_color();
         self.app.push_default_track_collapsed();
         self.app.rack_selected_slots.push(0);
+        self.app.rack_pad_bank_starts.push(DRUM_RACK_FIRST_PAD_NOTE);
         self.app
             .graph
             .effect_descriptors
@@ -4721,6 +5101,7 @@ impl GraphController<'_> {
         self.app.push_next_track_color();
         self.app.push_default_track_collapsed();
         self.app.rack_selected_slots.push(0);
+        self.app.rack_pad_bank_starts.push(DRUM_RACK_FIRST_PAD_NOTE);
         self.app
             .graph
             .effect_descriptors
@@ -4989,6 +5370,7 @@ impl GraphController<'_> {
         debug_assert_eq!(self.app.graph.record_armed.len(), self.app.tracks.len());
         debug_assert_eq!(self.app.sampler_paths.len(), self.app.tracks.len());
         debug_assert_eq!(self.app.rack_selected_slots.len(), self.app.tracks.len());
+        debug_assert_eq!(self.app.rack_pad_bank_starts.len(), self.app.tracks.len());
     }
 
     fn initialize_instrument_slot(&mut self, track: usize, name: &str, manifest: &DGenManifest) {

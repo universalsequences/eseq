@@ -6311,6 +6311,109 @@ fn rack_slot_raw_name(
     }
 }
 
+fn drum_rack_pad_label(pad_note: i32) -> String {
+    let name = match pad_note.rem_euclid(12) {
+        0 => "C",
+        1 => "C#",
+        2 => "D",
+        3 => "D#",
+        4 => "E",
+        5 => "F",
+        6 => "F#",
+        7 => "G",
+        8 => "G#",
+        9 => "A",
+        10 => "A#",
+        _ => "B",
+    };
+    format!("{name}{}", 4 + pad_note.div_euclid(12))
+}
+
+fn drum_rack_pad_bank_label(bank_start: i32) -> String {
+    let bank_end = (bank_start + sequencer::sequencer::DRUM_RACK_PAD_COUNT as i32 - 1)
+        .min(sequencer::sequencer::DRUM_RACK_LAST_PAD_NOTE);
+    format!(
+        "{} - {}",
+        drum_rack_pad_label(bank_start),
+        drum_rack_pad_label(bank_end)
+    )
+}
+
+fn drum_rack_pad_bank_value(bank_start: i32, selected_bank_start: i32) -> Rc<RefCell<Value>> {
+    let mut bank_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    bank_map.insert(
+        "bank-start".to_string(),
+        value_cell(Value::Number(bank_start as f64)),
+    );
+    bank_map.insert(
+        "selected".to_string(),
+        value_cell(Value::Bool(bank_start == selected_bank_start)),
+    );
+    insert_string_prop(&mut bank_map, "label", drum_rack_pad_bank_label(bank_start));
+    Rc::new(RefCell::new(Value::Map(bank_map)))
+}
+
+fn rack_pad_value(
+    app: &ui::App,
+    track: usize,
+    rack: &sequencer::sequencer::RackTrackSnapshot,
+    pad_note: i32,
+    selected_pad_note: i32,
+) -> Rc<RefCell<Value>> {
+    let slot_idx = rack
+        .slots
+        .iter()
+        .position(|slot| slot.pad_note == Some(pad_note));
+    let mut pad_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    pad_map.insert("track".to_string(), value_cell(Value::Number(track as f64)));
+    pad_map.insert(
+        "pad-note".to_string(),
+        value_cell(Value::Number(pad_note as f64)),
+    );
+    pad_map.insert(
+        "selected".to_string(),
+        value_cell(Value::Bool(pad_note == selected_pad_note)),
+    );
+    insert_string_prop(&mut pad_map, "label", drum_rack_pad_label(pad_note));
+    if let Some(slot_idx) = slot_idx {
+        let slot = &rack.slots[slot_idx];
+        pad_map.insert(
+            "slot".to_string(),
+            value_cell(Value::Number(slot_idx as f64)),
+        );
+        pad_map.insert(
+            "idx".to_string(),
+            value_cell(Value::Number(slot_idx as f64)),
+        );
+        pad_map.insert("occupied".to_string(), value_cell(Value::Bool(true)));
+        insert_string_prop(&mut pad_map, "type", rack_slot_type_name(slot));
+        let raw_name = rack_slot_raw_name(app, slot_idx, slot);
+        insert_string_prop(&mut pad_map, "name", raw_name.clone());
+        insert_string_prop(
+            &mut pad_map,
+            "display-name",
+            instrument_display_name(&raw_name),
+        );
+        pad_map.insert("mute".to_string(), value_cell(Value::Bool(slot.mute)));
+        pad_map.insert("solo".to_string(), value_cell(Value::Bool(slot.solo)));
+        pad_map.insert(
+            "choke-group".to_string(),
+            value_cell(Value::Number(slot.choke_group.unwrap_or(0) as f64)),
+        );
+    } else {
+        pad_map.insert("occupied".to_string(), value_cell(Value::Bool(false)));
+        pad_map.insert("slot".to_string(), value_cell(Value::Number(-1.0)));
+        pad_map.insert("idx".to_string(), value_cell(Value::Number(-1.0)));
+        insert_string_prop(&mut pad_map, "type", "empty");
+        insert_string_prop(&mut pad_map, "name", "");
+        insert_string_prop(&mut pad_map, "display-name", "");
+        pad_map.insert("mute".to_string(), value_cell(Value::Bool(false)));
+        pad_map.insert("solo".to_string(), value_cell(Value::Bool(false)));
+        pad_map.insert("choke-group".to_string(), value_cell(Value::Number(0.0)));
+    }
+    Rc::new(RefCell::new(Value::Map(pad_map)))
+}
+
 fn insert_rack_param_target(
     pmap: &mut HashMap<String, Rc<RefCell<Value>>>,
     track: usize,
@@ -6781,8 +6884,11 @@ fn build_rack_panel_value(
 
     let routing_name = match rack.routing {
         sequencer::sequencer::RackRouting::Broadcast => "broadcast",
+        sequencer::sequencer::RackRouting::ByPitch => "by-pitch",
     };
-    let selected_slot = app.rack_selected_slot(track, rack.slots.len());
+    let selected_pad_note = app.rack_selected_pad_note(track);
+    let pad_bank_start = app.rack_pad_bank_start(track);
+    let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack);
     let selected_step = selected_plock_step(selected);
     let slots: Vec<Rc<RefCell<Value>>> = rack
         .slots
@@ -6803,6 +6909,17 @@ fn build_rack_panel_value(
                 &mut slot_map,
                 "display-name",
                 instrument_display_name(&raw_name),
+            );
+            if let Some(pad_note) = slot.pad_note {
+                slot_map.insert(
+                    "pad-note".to_string(),
+                    value_cell(Value::Number(pad_note as f64)),
+                );
+                insert_string_prop(&mut slot_map, "pad-label", drum_rack_pad_label(pad_note));
+            }
+            slot_map.insert(
+                "choke-group".to_string(),
+                value_cell(Value::Number(slot.choke_group.unwrap_or(0) as f64)),
             );
             slot_map.insert(
                 "base-note".to_string(),
@@ -6869,13 +6986,44 @@ fn build_rack_panel_value(
             );
             slot_map.insert(
                 "selected".to_string(),
-                value_cell(Value::Bool(slot_idx == selected_slot)),
+                value_cell(Value::Bool(Some(slot_idx) == selected_slot)),
             );
             Rc::new(RefCell::new(Value::Map(slot_map)))
         })
         .collect();
-    let selected_instrument = rack.slots.get(selected_slot).and_then(|slot| {
-        build_selected_rack_slot_instrument_value(app, track, selected_slot, slot, selected_step)
+    let mut pads: Vec<Rc<RefCell<Value>>> =
+        Vec::with_capacity(sequencer::sequencer::DRUM_RACK_PAD_COUNT);
+    for row in (0..4).rev() {
+        for col in 0..4 {
+            let pad_note = pad_bank_start + row * 4 + col;
+            pads.push(rack_pad_value(
+                app,
+                track,
+                &rack,
+                pad_note,
+                selected_pad_note,
+            ));
+        }
+    }
+    let mut bank_starts = Vec::new();
+    let mut bank_start = sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
+    loop {
+        bank_starts.push(bank_start);
+        if bank_start >= sequencer::sequencer::DRUM_RACK_LAST_PAD_BANK_START {
+            break;
+        }
+        let next = bank_start + sequencer::sequencer::DRUM_RACK_PAD_BANK_STRIDE;
+        bank_start = next.min(sequencer::sequencer::DRUM_RACK_LAST_PAD_BANK_START);
+    }
+    let pad_banks: Vec<Rc<RefCell<Value>>> = bank_starts
+        .into_iter()
+        .rev()
+        .map(|bank_start| drum_rack_pad_bank_value(bank_start, pad_bank_start))
+        .collect();
+    let selected_instrument = selected_slot.and_then(|slot_idx| {
+        rack.slots.get(slot_idx).and_then(|slot| {
+            build_selected_rack_slot_instrument_value(app, track, slot_idx, slot, selected_step)
+        })
     });
 
     let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -6883,7 +7031,24 @@ fn build_rack_panel_value(
     panel_map.insert("track".to_string(), value_cell(Value::Number(track as f64)));
     panel_map.insert(
         "selected-slot".to_string(),
-        value_cell(Value::Number(selected_slot as f64)),
+        value_cell(Value::Number(
+            selected_slot
+                .map(|slot_idx| slot_idx as f64)
+                .unwrap_or(-1.0),
+        )),
+    );
+    panel_map.insert(
+        "selected-pad-note".to_string(),
+        value_cell(Value::Number(selected_pad_note as f64)),
+    );
+    panel_map.insert(
+        "pad-bank-start".to_string(),
+        value_cell(Value::Number(pad_bank_start as f64)),
+    );
+    insert_string_prop(
+        &mut panel_map,
+        "pad-bank-label",
+        drum_rack_pad_bank_label(pad_bank_start),
     );
     insert_string_prop(
         &mut panel_map,
@@ -6902,6 +7067,11 @@ fn build_rack_panel_value(
     panel_map.insert(
         "slots".to_string(),
         Rc::new(RefCell::new(Value::List(slots))),
+    );
+    panel_map.insert("pads".to_string(), Rc::new(RefCell::new(Value::List(pads))));
+    panel_map.insert(
+        "pad-banks".to_string(),
+        Rc::new(RefCell::new(Value::List(pad_banks))),
     );
     if let Some(selected_instrument) = selected_instrument {
         panel_map.insert("selected-instrument".to_string(), selected_instrument);
@@ -7236,6 +7406,17 @@ pub(crate) fn extract_usize_from_payload(payload: &Value, key: &str) -> Option<u
     None
 }
 
+pub(crate) fn extract_i32_from_payload(payload: &Value, key: &str) -> Option<i32> {
+    if let Value::Map(map) = payload {
+        if let Some(cell) = map.get(key) {
+            if let Value::Number(n) = &*cell.borrow() {
+                return Some(*n as i32);
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn extract_bool_from_payload(payload: &Value, key: &str) -> bool {
     if let Value::Map(map) = payload {
         if let Some(cell) = map.get(key) {
@@ -7290,21 +7471,21 @@ pub(crate) fn sync_track_params(
     // instead of silently editing a value playback ignores.
     let rack_slot_poly = (app.graph.track_instrument_types.get(track)
         == Some(&sequencer::sequencer::InstrumentType::Rack))
-        .then(|| {
-            let rack = app
-                .state
-                .pattern
-                .rack_tracks
-                .lock()
-                .unwrap()
-                .get(track)
-                .cloned()
-                .flatten()?;
-            let selected_slot = app.rack_selected_slot(track, rack.slots.len());
-            let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
-            Some((selected_slot, max_polyphony))
-        })
-        .flatten();
+    .then(|| {
+        let rack = app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .flatten()?;
+        let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack)?;
+        let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
+        Some((selected_slot, max_polyphony))
+    })
+    .flatten();
     rt.set_reactive("SEQ", "tp-is-rack", Value::Bool(rack_slot_poly.is_some()));
     rt.set_reactive(
         "SEQ",
@@ -9609,6 +9790,7 @@ mod tests {
                     "sidebar-instrument-display-name",
                     Value::String(String::new()),
                 ),
+                ("instrument-panel", test_list(vec![])),
                 ("current-project-name", Value::String(String::new())),
                 ("editor-mode", Value::String(String::new())),
                 ("editor-buffer-name", Value::String(String::new())),
@@ -11119,6 +11301,114 @@ mod tests {
                 );
             }
             other => panic!("expected add-track-rack host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_rack_button_includes_selected_sample_for_drum_rack() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-selected-sample",
+            Value::String("samples/kick.wav".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-add-rack-track)")
+            .expect("invoke rack add action");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-rack");
+                let Value::Map(payload) = payload else {
+                    panic!("rack sample payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected add-track-rack host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_layer_button_queues_layer_rack_track_without_sample() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-add-layer-rack-track)")
+            .expect("invoke layer rack add action");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-layer-rack");
+                assert!(
+                    matches!(payload, Value::Map(map) if map.is_empty()),
+                    "empty layer rack payload should be an empty dict: {payload:?}"
+                );
+            }
+            other => panic!("expected add-track-layer-rack host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_layer_button_appends_sample_to_current_broadcast_rack() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let mut rack = HashMap::new();
+        rack.insert(
+            "routing".to_string(),
+            Rc::new(RefCell::new(Value::String("broadcast".to_string()))),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sidebar-kind", Value::String("rack".to_string()));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-selected-sample",
+            Value::String("samples/snare.wav".to_string()),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "instrument-panel",
+            test_list(vec![Value::Map(rack)]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-add-layer-rack-track)")
+            .expect("invoke layer rack add action");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-rack-sample-slot");
+                let Value::Map(payload) = payload else {
+                    panic!("rack layer payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/snare.wav".to_string()))
+                );
+                assert_eq!(
+                    payload
+                        .get("preserve-browser-context")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Bool(true))
+                );
+            }
+            other => panic!("expected add-rack-sample-slot host command, got {other:?}"),
         }
     }
 
@@ -13627,6 +13917,8 @@ mod tests {
                     instrument_type: sequencer::sequencer::InstrumentType::Sampler,
                     instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 12.0,
+                    pad_note: None,
+                    choke_group: None,
                     gain: 0.75,
                     pan: -0.2,
                     mute: false,
@@ -13665,6 +13957,61 @@ mod tests {
         app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Rack];
         app.graph.instrument_descriptors =
             vec![sequencer::effects::EffectDescriptor::empty_custom_slot()];
+        app
+    }
+
+    fn test_app_with_drum_rack_panel(selected_pad_note: i32) -> ui::App {
+        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
+        let sampler_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        state.set_rack_track_for_all_pattern_snapshots(
+            0,
+            sequencer::sequencer::RackTrackSnapshot {
+                routing: sequencer::sequencer::RackRouting::ByPitch,
+                slots: vec![sequencer::sequencer::RackSlotSnapshot {
+                    instrument_type: sequencer::sequencer::InstrumentType::Sampler,
+                    instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    pad_note: Some(sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE),
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 1,
+                    param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
+                    instrument_slot:
+                        sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
+                            &sampler_desc,
+                            0,
+                            0,
+                        ),
+                    track_sound_state: sequencer::sequencer::TrackSoundState::default(),
+                    sample_id: Some((42, "DS FM".to_string(), 48_000)),
+                }],
+            },
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = ui::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            ui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Drum Rack".to_string()];
+        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Rack];
+        app.graph.instrument_descriptors =
+            vec![sequencer::effects::EffectDescriptor::empty_custom_slot()];
+        app.set_rack_selected_pad_note(0, selected_pad_note);
         app
     }
 
@@ -14630,6 +14977,320 @@ mod tests {
             }
             other => panic!("expected add-rack-instrument-slot host command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn drum_rack_pad_labels_match_piano_roll_transpose_octaves() {
+        assert_eq!(drum_rack_pad_label(0), "C4");
+        assert_eq!(drum_rack_pad_label(12), "C5");
+        assert_eq!(drum_rack_pad_label(36), "C7");
+        assert_eq!(drum_rack_pad_bank_label(0), "C4 - D#5");
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_drum_rack_pad_grid() {
+        fn drop_meta_number(node: &eseqlisp::layout::LayoutNode, key: &str) -> Option<f64> {
+            let Value::Map(map) = node.props.get("drop-meta")? else {
+                return None;
+            };
+            map.get(key).and_then(|value| match *value.borrow() {
+                Value::Number(number) => Some(number),
+                _ => None,
+            })
+        }
+
+        let app = test_app_with_drum_rack_panel(0);
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 20);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", rack_panel),
+                ("bus-effects", test_list(vec![])),
+                ("delete-target-version", Value::Number(0.0)),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (def sbrowser-sample-selected-path () "")
+                (def sbrowser-add-selected-rack-layer () false)
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install drum rack fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("drum rack fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("drum rack fx layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let grid = find_layout_node_by_debug_name(&layout, "drum-rack-pad-grid")
+            .unwrap_or_else(|| panic!("drum rack pad grid; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(grid, "drum rack pad grid");
+        let grid_cells = find_layout_node_by_debug_name(&layout, "drum-rack-pad-grid-cells")
+            .unwrap_or_else(|| panic!("drum rack pad grid cells; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(grid_cells, "drum rack pad grid cells");
+        let bank_selector = find_layout_node_by_debug_name(&layout, "drum-rack-pad-bank-selector")
+            .unwrap_or_else(|| panic!("drum rack pad bank selector; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(bank_selector, "drum rack pad bank selector");
+        assert!(
+            find_layout_node_by_text(&layout, "C4 - D#5").is_some(),
+            "first drum rack pad bank label should render; layout={layout_summaries:#?}"
+        );
+        assert_eq!(
+            count_stable_key_prefix(&layout, "drum-rack-pad-"),
+            16,
+            "drum rack should render exactly 16 pads"
+        );
+        assert!(
+            count_stable_key_prefix(&layout, "drum-rack-bank-") >= 2,
+            "drum rack should render octave pad bank selector cells"
+        );
+        let c4 = find_layout_node_by_text(&layout, "C4")
+            .unwrap_or_else(|| panic!("C4 pad label; layout={layout_summaries:#?}"));
+        let d_sharp_5 = find_layout_node_by_text(&layout, "D#5")
+            .unwrap_or_else(|| panic!("D#5 pad label; layout={layout_summaries:#?}"));
+        assert_finite_nonzero_rect(c4, "C4 pad label");
+        assert_finite_nonzero_rect(d_sharp_5, "D#5 pad label");
+        let selected_sampler_panel = find_layout_node_by_debug_name(&layout, "sampler-panel")
+            .unwrap_or_else(|| {
+                panic!("selected drum pad sampler panel; layout={layout_summaries:#?}")
+            });
+        assert_finite_nonzero_rect(selected_sampler_panel, "selected drum pad sampler panel");
+        let pad_0 =
+            find_layout_node_by_stable_key(&layout, "drum-rack-pad-0").expect("C4 drum rack pad");
+        let pad_15 =
+            find_layout_node_by_stable_key(&layout, "drum-rack-pad-15").expect("D#5 drum rack pad");
+        assert_finite_nonzero_rect(pad_0, "C4 drum rack pad");
+        assert_finite_nonzero_rect(pad_15, "D#5 drum rack pad");
+        for pad_note in 0..16 {
+            let pad = find_layout_node_by_stable_key(&layout, &format!("drum-rack-pad-{pad_note}"))
+                .unwrap_or_else(|| panic!("missing visible drum rack pad {pad_note}"));
+            assert_finite_nonzero_rect(pad, &format!("drum rack pad {pad_note}"));
+            assert!(
+                pad.rect.row >= grid_cells.rect.row - 0.5
+                    && pad.rect.row + pad.rect.height
+                        <= grid_cells.rect.row + grid_cells.rect.height + 0.5,
+                "drum rack pad {pad_note} should fit inside the visible grid cells; pad={:?} grid={:?}",
+                pad.rect,
+                grid_cells.rect
+            );
+            assert!(
+                pad.rect.height <= 3.0,
+                "drum rack pad {pad_note} should be compact enough for four visible rows; got {:?}",
+                pad.rect
+            );
+        }
+        assert_eq!(drop_meta_number(pad_0, "track"), Some(0.0));
+        assert_eq!(drop_meta_number(pad_0, "pad-note"), Some(0.0));
+        assert_eq!(drop_meta_number(pad_15, "pad-note"), Some(15.0));
+
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(rack-pad-select
+                    (dict :track 0 :pad-note 15))"#,
+            )
+            .expect("select drum rack pad");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "select-rack-pad");
+                let Value::Map(payload) = payload else {
+                    panic!("select-rack-pad payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("pad-note").map(|value| value.borrow().clone()),
+                    Some(Value::Number(15.0))
+                );
+            }
+            other => panic!("expected select-rack-pad host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(rack-pad-bank-select
+                    (dict :track 0)
+                    (dict :bank-start 12))"#,
+            )
+            .expect("select drum rack pad bank");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "select-rack-pad-bank");
+                let Value::Map(payload) = payload else {
+                    panic!("select-rack-pad-bank payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("bank-start")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(12.0))
+                );
+            }
+            other => panic!("expected select-rack-pad-bank host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(rack-slot-set-choke-group-label
+                    (dict :track 0 :idx 0)
+                    "2")"#,
+            )
+            .expect("set drum rack pad choke group");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-rack-slot-choke-group");
+                let Value::Map(payload) = payload else {
+                    panic!("set-rack-slot-choke-group payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("value").map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0))
+                );
+            }
+            other => panic!("expected set-rack-slot-choke-group host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(rack-panel-drop-on-drum-pad
+                    (dict :drag-type "sample"
+                          :payload (dict :path "samples/snare.wav")
+                          :target (dict :track 0 :pad-note 3)))"#,
+            )
+            .expect("drop sample on drum pad");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-rack-sample-pad");
+                let Value::Map(payload) = payload else {
+                    panic!("add-rack-sample-pad payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("pad-note").map(|value| value.borrow().clone()),
+                    Some(Value::Number(3.0))
+                );
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/snare.wav".to_string()))
+                );
+                assert_eq!(
+                    payload
+                        .get("preserve-browser-context")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Bool(true))
+                );
+            }
+            other => panic!("expected add-rack-sample-pad host command, got {other:?}"),
+        }
+
+        let mut banked_app = test_app_with_drum_rack_panel(0);
+        banked_app.set_rack_pad_bank_start(0, 12);
+        let banked_panel = build_instrument_panel_value(&banked_app, 0, &selected);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "instrument-panel", banked_panel);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let banked_layout = editor.widget_layout().expect("banked drum pad fx layout");
+        assert_finite_layout_tree(&banked_layout);
+        let mut banked_summaries = Vec::new();
+        collect_layout_node_summaries(&banked_layout, &mut banked_summaries);
+        assert!(
+            find_layout_node_by_text(&banked_layout, "C5").is_some(),
+            "banked drum rack should render C5 pad label; layout={banked_summaries:#?}"
+        );
+        assert!(
+            find_layout_node_by_text(&banked_layout, "D#6").is_some(),
+            "banked drum rack should render D#6 pad label; layout={banked_summaries:#?}"
+        );
+        let c2_pad = find_layout_node_by_stable_key(&banked_layout, "drum-rack-pad-12")
+            .expect("C5 drum rack pad in second bank");
+        let d_sharp_3_pad = find_layout_node_by_stable_key(&banked_layout, "drum-rack-pad-27")
+            .expect("D#6 drum rack pad in second bank");
+        assert_finite_nonzero_rect(c2_pad, "C5 drum rack pad");
+        assert_finite_nonzero_rect(d_sharp_3_pad, "D#6 drum rack pad");
+        assert_eq!(drop_meta_number(c2_pad, "pad-note"), Some(12.0));
+        assert_eq!(drop_meta_number(d_sharp_3_pad, "pad-note"), Some(27.0));
+
+        let empty_app = test_app_with_drum_rack_panel(3);
+        let empty_panel = build_instrument_panel_value(&empty_app, 0, &selected);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "instrument-panel", empty_panel);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let empty_layout = editor.widget_layout().expect("empty drum pad fx layout");
+        assert_finite_layout_tree(&empty_layout);
+        let empty_drop = find_layout_node_by_debug_name(&empty_layout, "rack-empty-selected-panel")
+            .expect("empty selected drum pad panel");
+        assert_finite_nonzero_rect(empty_drop, "empty selected drum pad panel");
+        assert_eq!(drop_meta_number(empty_drop, "track"), Some(0.0));
+        assert_eq!(drop_meta_number(empty_drop, "pad-note"), Some(3.0));
     }
 
     fn reactive_number(runtime: &Runtime, namespace: &str, field: &str) -> Option<f64> {

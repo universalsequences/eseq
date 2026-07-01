@@ -170,9 +170,39 @@
   (status "Add modulator track"))
 
 (def sbrowser-add-rack-track ()
-  (host-command "add-track-rack" (dict))
+  (let ((path (sbrowser-sample-selected-path)))
+    (if (= path "")
+      (host-command "add-track-rack" (dict))
+      (do
+        (set! sbrowser-auditioned-sample path)
+        (host-command "add-track-rack" (dict :path path)))))
   (set! sbrowser-tab "samples")
-  (status "Add rack track"))
+  (status "Add drum rack"))
+
+(def sbrowser-current-rack-routing ()
+  (if (= SEQ.sidebar-kind "rack")
+    (if (> (len SEQ.instrument-panel) 0)
+      (get (nth SEQ.instrument-panel 0) :routing)
+      "")
+    ""))
+
+(def sbrowser-add-layer-rack-track ()
+  (let ((path (sbrowser-sample-selected-path)))
+    (if (and (= (sbrowser-current-rack-routing) "broadcast")
+             (not (= path "")))
+      (do
+        (set! sbrowser-auditioned-sample path)
+        (host-command "add-rack-sample-slot"
+          (dict :track SEQ.current-track :path path :preserve-browser-context true))
+        (status "Add layer"))
+      (do
+        (if (= path "")
+          (host-command "add-track-layer-rack" (dict))
+          (do
+            (set! sbrowser-auditioned-sample path)
+            (host-command "add-track-layer-rack" (dict :path path))))
+        (set! sbrowser-tab "samples")
+        (status "Add layer rack")))))
 
 ;; ── SDF widgets ──
 
@@ -266,14 +296,7 @@
       (status "Select a sample file, not a folder"))))
 
 (def sbrowser-add-selected-rack-layer ()
-  (let ((path (sbrowser-sample-selected-path)))
-    (if (= path "")
-      (status "Select a sample first")
-      (do
-        (set! sbrowser-auditioned-sample path)
-        (host-command "add-rack-sample-slot"
-          (dict :track SEQ.current-track :path path :preserve-browser-context true))
-        (status "Add layer")))))
+  (sbrowser-add-layer-rack-track))
 
 (def sbrowser-modified-activate-sample (item)
   (if (= SEQ.sidebar-kind "rack")
@@ -645,7 +668,7 @@
               :height 1.15
               :flex 1
               :font-size 9.5
-              :on-click |x y r| (sbrowser-add-selected-rack-layer)
+              :on-click |x y r| (sbrowser-add-layer-rack-track)
               :color :white)))
         (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
           (v-stack :width :fill :gap 0.35

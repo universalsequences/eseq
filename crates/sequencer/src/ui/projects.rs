@@ -1645,6 +1645,10 @@ impl App {
                                         .as_ref()
                                         .map(|slot| slot.instrument_base_note_offset)
                                         .unwrap_or(0.0),
+                                    pad_note: saved_slot.as_ref().and_then(|slot| slot.pad_note),
+                                    choke_group: saved_slot
+                                        .as_ref()
+                                        .and_then(|slot| slot.choke_group),
                                     gain: saved_slot.as_ref().map(|slot| slot.gain).unwrap_or(1.0),
                                     pan: saved_slot.as_ref().map(|slot| slot.pan).unwrap_or(0.0),
                                     mute: saved_slot
@@ -1670,9 +1674,14 @@ impl App {
                                         .map(|slot| slot.track_sound_state.clone()),
                                 });
                             }
+                            let routing = RackRouting::from(*routing);
+                            let rack_name = match routing {
+                                RackRouting::Broadcast => "Layer Rack",
+                                RackRouting::ByPitch => "Drum Rack",
+                            };
                             self.graph_controller().add_rack_track(
-                                "Instrument Rack",
-                                RackRouting::from(*routing),
+                                rack_name,
+                                routing,
                                 build_specs,
                             )?;
                         }

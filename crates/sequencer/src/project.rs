@@ -432,6 +432,7 @@ pub enum ProjectInstrumentType {
 pub enum ProjectRackRouting {
     #[default]
     Broadcast,
+    ByPitch,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -449,6 +450,10 @@ pub struct ProjectRackSlotPattern {
     pub instrument_run_mode: ProjectCustomInstrumentRunMode,
     #[serde(default)]
     pub instrument_base_note_offset: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pad_note: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choke_group: Option<u8>,
     #[serde(default = "default_rack_slot_gain")]
     pub gain: f32,
     #[serde(default)]
@@ -833,6 +838,7 @@ impl From<RackRouting> for ProjectRackRouting {
     fn from(value: RackRouting) -> Self {
         match value {
             RackRouting::Broadcast => Self::Broadcast,
+            RackRouting::ByPitch => Self::ByPitch,
         }
     }
 }
@@ -841,6 +847,7 @@ impl From<ProjectRackRouting> for RackRouting {
     fn from(value: ProjectRackRouting) -> Self {
         match value {
             ProjectRackRouting::Broadcast => RackRouting::Broadcast,
+            ProjectRackRouting::ByPitch => RackRouting::ByPitch,
         }
     }
 }
@@ -881,6 +888,8 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
             instrument_type: ProjectInstrumentType::from(value.instrument_type),
             instrument_run_mode: ProjectCustomInstrumentRunMode::from(value.instrument_run_mode),
             instrument_base_note_offset: value.instrument_base_note_offset,
+            pad_note: value.pad_note,
+            choke_group: value.choke_group,
             gain: value.gain,
             pan: value.pan,
             mute: value.mute,
@@ -905,6 +914,8 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             instrument_type: InstrumentType::from(value.instrument_type),
             instrument_run_mode: CustomInstrumentRunMode::from(value.instrument_run_mode),
             instrument_base_note_offset: value.instrument_base_note_offset,
+            pad_note: value.pad_note,
+            choke_group: value.choke_group,
             gain: value.gain,
             pan: value.pan.clamp(-1.0, 1.0),
             mute: value.mute,
@@ -2120,6 +2131,112 @@ mod tests {
             Some("wide")
         );
         assert!(rack.slots[0].track_sound_state.dirty);
+    }
+
+    #[test]
+    fn rack_track_serializes_and_deserializes_by_pitch_pad_metadata() {
+        let json = r#"
+        {
+            "version": 1,
+            "name": "drum-rack",
+            "bpm": 120,
+            "current_pattern": 0,
+            "reverb": {"size":0.5,"brightness":0.5,"replace":0.0},
+            "tracks": [{
+                "kind": "rack",
+                "routing": "by_pitch",
+                "slots": [
+                    {"instrument_type":"sampler","sample_path":"samples/kick.wav","sample_name":"kick"},
+                    {"instrument_type":"custom","instrument_name":"emulations/digitone"}
+                ]
+            }],
+            "custom_effects": [[]],
+            "patterns": [{
+                "track_bits": [[0,0,0,0]],
+                "step_data": [[[0,0,0,0,0,0,0,0,0,0]]],
+                "track_params": [{
+                    "gate": true,
+                    "attack_ms": 0.0,
+                    "release_ms": 0.0,
+                    "swing": 50.0,
+                    "num_steps": 16,
+                    "volume": 1.0,
+                    "send": 0.0,
+                    "polyphonic": true,
+                    "max_polyphony": 4,
+                    "timebase": 2
+                }],
+                "effect_slots": [[]],
+                "instrument_slots": [{"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]}],
+                "instrument_base_note_offsets": [0.0],
+                "track_sound_states": [{"loaded_preset":null,"dirty":false}],
+                "chord_snapshots": [[]],
+                "timebase_plock_snapshots": [[]],
+                "instrument_types": ["rack"],
+                "sample_paths": [null],
+                "sample_names": [""],
+                "rack_tracks": [{
+                    "routing": "by_pitch",
+                    "slots": [{
+                        "instrument_type": "sampler",
+                        "instrument_run_mode": "instrument",
+                        "instrument_base_note_offset": 0.0,
+                        "pad_note": 0,
+                        "choke_group": 1,
+                        "gain": 0.9,
+                        "pan": 0.1,
+                        "max_polyphony": 1,
+                        "instrument_slot": {"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]},
+                        "sample_name": "kick"
+                    }, {
+                        "instrument_type": "custom",
+                        "instrument_run_mode": "instrument",
+                        "instrument_base_note_offset": 7.0,
+                        "pad_note": 2,
+                        "choke_group": 1,
+                        "gain": 0.75,
+                        "pan": -0.25,
+                        "max_polyphony": 2,
+                        "instrument_slot": {"num_params":0,"defaults":[],"plocks":[],"param_node_indices":[]},
+                        "track_sound_state": {"loaded_preset":"digitone","dirty":true}
+                    }]
+                }]
+            }]
+        }
+        "#;
+
+        let project: ProjectFile = serde_json::from_str(json).unwrap();
+        match &project.tracks[0] {
+            ProjectTrack::Rack { routing, slots, .. } => {
+                assert_eq!(*routing, ProjectRackRouting::ByPitch);
+                assert_eq!(slots.len(), 2);
+                assert_eq!(slots[0].sample_name.as_deref(), Some("kick"));
+                assert_eq!(
+                    slots[1].instrument_name.as_deref(),
+                    Some("emulations/digitone")
+                );
+            }
+            _ => panic!("expected rack track"),
+        }
+        let rack = project.patterns[0].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(rack.routing, ProjectRackRouting::ByPitch);
+        assert_eq!(rack.slots[0].pad_note, Some(0));
+        assert_eq!(rack.slots[0].choke_group, Some(1));
+        assert_eq!(rack.slots[0].max_polyphony, 1);
+        assert_eq!(rack.slots[1].pad_note, Some(2));
+        assert_eq!(rack.slots[1].choke_group, Some(1));
+        assert_eq!(rack.slots[1].instrument_base_note_offset, 7.0);
+
+        let serialized = serde_json::to_string(&project).unwrap();
+        assert!(serialized.contains("\"routing\":\"by_pitch\""));
+        assert!(serialized.contains("\"pad_note\":0"));
+        assert!(serialized.contains("\"choke_group\":1"));
+
+        let restored: ProjectFile = serde_json::from_str(&serialized).unwrap();
+        let restored_rack = restored.patterns[0].rack_tracks[0].as_ref().unwrap();
+        assert_eq!(restored_rack.routing, ProjectRackRouting::ByPitch);
+        assert_eq!(restored_rack.slots[0].pad_note, Some(0));
+        assert_eq!(restored_rack.slots[1].pad_note, Some(2));
     }
 
     #[test]
