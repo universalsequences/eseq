@@ -87,7 +87,7 @@
           :width 1.0
           :bg :transparent)
         (box :key (str "rack-slot-label-" (get slot :idx))
-             :width 19 :height :fill :v-align :center :padding 0
+             :width 13 :height :fill :v-align :center :padding 0
              :selected delete-target
              :background-color :transparent
              :selected-background-color :fx-panel-header-selected-bg
@@ -132,7 +132,6 @@
             :text-align :center :text-color :dim :edit-color :yellow
             :width 3.55 :height 0.84
             :on-change (lambda (v) (rack-slot-set-max-polyphony slot v))))
-        (box :flex 1 :height 0.1)
         (button "M"
           :width 1.35 :height 1.02 :padding 0 :font-size 9
           :background-color (if (get slot :mute) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
@@ -194,7 +193,7 @@
     :header :fx-panel-header-bg
     :selected-header :fx-panel-header-selected-bg
     :padding 0
-    :width 43.5
+    :width 35.5
     :height fx-fixed-panel-height
     :selected 0))
 

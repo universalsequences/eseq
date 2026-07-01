@@ -7281,11 +7281,49 @@ pub(crate) fn sync_track_params(
         Value::Number(tp.get_num_steps() as f64),
     );
     rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
-    rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp.is_polyphonic()));
+    // For a Rack track, playback polyphony is governed per-slot
+    // (RackSlotSnapshot::max_polyphony, read by fire_rack_slot_note /
+    // fire_live_keyboard_rack_note) — the track-level TrackParams poly/voices
+    // fields below are never consulted for Sampler/Custom rack slots. Surface
+    // the *selected slot's* values here (and which slot they'd be writing to)
+    // so this panel's poly/voices controls can be routed to the right place
+    // instead of silently editing a value playback ignores.
+    let rack_slot_poly = (app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Rack))
+        .then(|| {
+            let rack = app
+                .state
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .flatten()?;
+            let selected_slot = app.rack_selected_slot(track, rack.slots.len());
+            let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
+            Some((selected_slot, max_polyphony))
+        })
+        .flatten();
+    rt.set_reactive("SEQ", "tp-is-rack", Value::Bool(rack_slot_poly.is_some()));
+    rt.set_reactive(
+        "SEQ",
+        "tp-rack-slot-idx",
+        Value::Number(rack_slot_poly.map(|(slot_idx, _)| slot_idx).unwrap_or(0) as f64),
+    );
+    let (tp_poly, max_polyphony) = match rack_slot_poly {
+        Some((_, max_polyphony)) => (max_polyphony > 1, max_polyphony),
+        // Non-rack tracks: `is_polyphonic` is its own independently-toggled
+        // flag, distinct from the voice-count value — don't derive it from
+        // max_polyphony or the toggle button's state gets stomped every
+        // render.
+        None => (tp.is_polyphonic(), tp.get_max_polyphony()),
+    };
+    rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp_poly));
     rt.set_reactive(
         "SEQ",
         "tp-max-polyphony",
-        Value::Number(tp.get_max_polyphony() as f64),
+        Value::Number(max_polyphony as f64),
     );
     // Resolve timebase through the same display overlay used by parameter controls.
     let timebase_label = display_step

@@ -249,14 +249,25 @@
               :border-color :white
               :font-size 11
               :color (if SEQ.tp-poly :black :white)
-              :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))
+              ;; Rack tracks: playback polyphony is per-slot (RackSlotSnapshot::max_polyphony),
+              ;; never the track-level param below — route there instead, or this control
+              ;; silently edits a value playback ignores.
+              :on-click |x y r| (do (cool-off-follow)
+                (if SEQ.tp-is-rack
+                  (host-command "set-rack-slot-max-polyphony"
+                    (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
+                  (seq-set-track-param :poly (if SEQ.tp-poly 0 1))))
               )
             )
           (v-stack :gap 0.5 :align :center
             (label "voices" :font-size 8 :color :dim :bg :transparent)
             (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
               :noui false :font-size 8 :text-color :white
-              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :voices v)))
+              :on-change (lambda (v) (do (cool-off-follow)
+                (if SEQ.tp-is-rack
+                  (host-command "set-rack-slot-max-polyphony"
+                    (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
+                  (seq-set-track-param :voices v))))
               :width 3.4 :height 1.15)
             )
           (v-stack :align :center :gap 0.40

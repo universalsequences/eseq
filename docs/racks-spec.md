@@ -156,14 +156,14 @@ sound at `base_note_offset`) — configurable per slot.
 - Each slot owns an independent voice allocation. For samplers that means its
   own gatepitch/modulator/sampler voice fan (today's `build_sampler_voices`,
   parameterized by slot). For custom engines, its own engine runtime instance.
-- To bound cost: keep `MAX_VOICES = 12` as the **per-track** ceiling and divide
-  it across active slots, OR introduce `MAX_RACK_VOICES` as a per-slot ceiling
-  with a per-track cap. Recommended: per-slot `max_poly` (reuse existing
-  `max_poly` machinery) with a documented per-track total ceiling enforced at
-  rack build time so the audio graph node count stays bounded.
-  - Drum racks: most pads want `max_poly = 1` (one-shot, monophonic) — cheap.
-  - Instrument racks: layering N synths × polyphony is the expensive case;
-    surface a clear per-slot poly setting and a total-voice readout in the UI.
+- Each underlying instrument follows its own polyphony rule. A slot's
+  `max_polyphony` bounds how many voices that slot may sound at once; it is not
+  partitioned out of a shared `MAX_VOICES` track budget.
+- To bound cost, keep a hard slot cap (`MAX_RACK_SLOTS`, initially 16) and
+  clamp every slot's `max_polyphony` to a documented limit. Drum racks default
+  most pads to low polyphony (usually 1 for one-shots), while instrument racks
+  expose per-slot polyphony clearly because layered synths are the expensive
+  case.
 - **Choke groups** (drum rack): when a slot in choke group *g* triggers, send a
   fast note-off / gate-cut to all currently-sounding voices of other slots in
   group *g* (classic closed-hat chokes open-hat). Implement as a pre-trigger
@@ -261,17 +261,13 @@ the bigger end-user unlock with mostly additive work.
 
 ### 9.1 Phase 1 task breakdown (Instrument Rack, `Broadcast`)
 
-**Guiding constraint — partition the existing voice budget, don't add a slot
-dimension.** The runtime already keys every voice independently:
-`runtime.synth_node_ids[track][voice]`, `sampler_gatepitch_node_ids[track][voice]`,
-`sampler_modulator_node_ids[track][voice]`, `voice_lids[track][voice]` (all sized
-`MAX_VOICES = 12`), set in `finish_track_registration` (`ui/graph.rs:3318`). A
-voice can therefore point at *any* instrument node. Phase 1 assigns disjoint
-voice ranges of the existing 12 to slots (a rack with `N` slots × per-slot poly
-`p` uses `N·p ≤ 12` voices total). This leaves `VoicePool`, the runtime arrays,
-and the trigger consume path **unchanged** — the only new runtime state is a
-`voice → slot` ownership map. (Lifting the per-track 12 ceiling is deferred; not
-needed for Phase 1.)
+**Guiding constraint — each slot owns its voices.** A rack is a collection of
+independent underlying instruments. Each sampler slot gets its own sampler pool;
+each custom slot gets its own engine runtime. Slot polyphony is enforced per
+slot, so a drum rack can keep most pads monophonic while an instrument rack can
+still layer several polyphonic instruments. Cost is bounded by `MAX_RACK_SLOTS`
+and by clamping each slot's `max_polyphony`, not by partitioning one shared
+track voice pool.
 
 Tasks are ordered so each lands compiling + tested before the next.
 
@@ -302,35 +298,32 @@ Tasks are ordered so each lands compiling + tested before the next.
 
 **T3 — Audio graph: per-slot sub-mixer + multi-instrument build** (`ui/graph.rs`)
 - Extend `TrackNodeIds` (`ui/mod.rs`) with `slots: Vec<RackSlotNodeIds>`;
-  `RackSlotNodeIds { voice_range: Range<usize>, slot_sum_l, slot_sum_r,
-  slot_gain_id, slot_pan_id, engine_id: Option<usize> }`. Keep flat fields for
-  `Single` tracks.
+  `RackSlotNodeIds { sampler_pool_id, engine_id, slot_sum_l, slot_sum_r,
+  slot_pan_id, ... }`. Keep flat fields for `Single` tracks.
 - `build_sampler_voices` (`:2448`) already takes `voice_sum_id`/`voice_sum_r_id`
-  — add a `voice_range` param so a slot builds only its share of the 12 voices
-  and connects them to its `slot_sum_l/r` (which then feed the shared
-  `voice_sum_id`). Same call-site change for `connect_engine_to_track` (`:2867`).
+  — call it once per sampler slot with the slot's sampler pool and
+  `max_polyphony`, connecting that slot's voices to `slot_sum_l/r` (which then
+  feed the shared `voice_sum_id`). Same call-site change for
+  `connect_engine_to_track` (`:2867`).
 - New `add_rack_track(routing) -> usize`: `create_track_shell` (unchanged) →
   for each slot build sub-mixer (`slot_sum → slot_gain → slot_pan → voice_sum`)
-  + its instrument subgraph → `finish_track_registration` extended to write
-  `synth_node_ids[track][v]` etc. for every voice across all slots (the loop at
-  `:3384` already iterates `sampler_ids`; feed it the concatenated per-slot ids).
-- Enforce `Σ slot voices ≤ MAX_VOICES` at build; reject/clamp otherwise.
+  + its instrument subgraph → register each slot's sampler pool or engine
+  runtime independently.
+- Enforce `slots.len() <= MAX_RACK_SLOTS` and clamp/reject out-of-range
+  per-slot `max_polyphony`.
 - *Checkpoint:* headless `HeadlessEngine` test — a 2-slot broadcast rack
-  (sampler + sampler) builds, both slots' voices wire into `voice_sum_id`, total
-  voice count ≤ 12, per-slot gain node present.
+  (sampler + sampler) builds, both slots' voices wire into `voice_sum_id`, each
+  slot enforces its own `max_polyphony`, per-slot gain node present.
 
 **T4 — Trigger routing (`Broadcast`)** (`scheduler.rs`)
-- Add `voice → slot` ownership (derive from `RackSlotNodeIds.voice_range`, expose
-  to the scheduler via runtime state).
 - At trigger resolution for a rack track, after computing incoming note(s), emit
   per-slot sub-triggers: for `Broadcast`, every unmuted slot (respect solo set),
-  each applying the slot's `base_note_offset`, allocating within that slot's
-  voice range. Reuse the `rebind_midi_fx_event_to_track` retarget pattern but
-  target a slot's voice range within the same track. `enqueue_resolved_trigger`
-  (`:1456`) consume path stays the same — it already drives whatever node ids the
-  selected voices hold.
+  each applying the slot's `base_note_offset`, allocating from that slot's
+  sampler pool or engine runtime. Reuse the `rebind_midi_fx_event_to_track`
+  retarget pattern conceptually, but target a slot within the same track.
 - *Checkpoint:* unit test — `Broadcast` on a 3-slot rack produces 3 sub-triggers
-  hitting the 3 slots' voice ranges; muted slot is skipped; solo isolates.
+  hitting the 3 slots' independent voice allocators; muted slot is skipped; solo
+  isolates.
 
 **T5 — UI: instrument-rack chain view** (`ui/…`, `bin/metal_seq` custom widgets)
 - Track header: Single ↔ Rack toggle; "add layer" to append a slot.
@@ -340,7 +333,8 @@ Tasks are ordered so each lands compiling + tested before the next.
   bindings*.
 - Reuse the existing per-track instrument param panel, scoped to the selected
   slot (uses T2's slot-indexed resolution).
-- Show a per-track total-voice readout so users see the `≤ 12` budget.
+- Show per-slot polyphony and a rack cost summary so users can see when a layer
+  stack is getting expensive.
 - *Checkpoint:* `mk_ui` layout test for the chain view; manual audition of a
   2-layer rack (sampler + custom synth) via the dylib harness.
 
@@ -367,14 +361,14 @@ nesting a rack inside a rack slot.
 - Graph build test (headless `HeadlessEngine`): a 2-slot broadcast rack sums
   both instruments into `voice_sum_id`; a drum rack routes note 36→slot0,
   38→slot1; assert node wiring and that voice counts stay within caps.
-- Voice-budget test: per-slot `max_poly` enforced; per-track total ceiling not
-  exceeded.
+- Voice-budget test: per-slot `max_poly` enforced; slot count and per-slot caps
+  keep graph size bounded.
 
 ## 11. Open questions
 
-1. Per-track total voice ceiling vs per-slot caps — pick the bound that keeps
-   the `LiveGraph` node count predictable at 64 tracks. (Recommend per-slot cap
-   + documented per-track total, enforced at build.)
+1. Pick the concrete per-slot `max_polyphony` clamp and default values for
+   broadcast racks vs drum racks. Drum rack pads should default low; instrument
+   rack layers may default higher but must make cost visible.
 2. Should a `Single` track be literally a one-slot rack internally (less code,
    more churn) or stay a separate flat path (more code, zero migration risk)?
    Spec recommends keeping `Single` flat and adding `Rack` as a sibling.

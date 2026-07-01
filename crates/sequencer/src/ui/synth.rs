@@ -1188,29 +1188,21 @@ impl App {
         updated
     }
 
-    fn rack_slot_built_voice_count(&self, track: usize, slot_idx: usize) -> usize {
-        self.graph
-            .track_node_ids
-            .get(track)
-            .and_then(|nodes| nodes.rack_slots.get(slot_idx))
-            .map(|slot| slot.sampler_voice_lids.len())
-            .filter(|&count| count > 0)
-            .unwrap_or(crate::voice::MAX_VOICES)
-    }
-
     pub fn set_rack_slot_max_polyphony(
         &mut self,
         track: usize,
         slot_idx: usize,
         value: usize,
     ) -> bool {
-        // Polyphony can't exceed the voice nodes actually built for this slot
-        // (build_sampler_voices sizes the fan at slot-creation time; raising
-        // this value past that ceiling would silently do nothing useful since
-        // there's no node to allocate from).
-        let built_voice_count = self.rack_slot_built_voice_count(track, slot_idx);
+        // Note: this can exceed the voice nodes actually built for this slot
+        // (build_sampler_voices sizes the fan at slot-creation time). That's
+        // fine — VoicePool::allocate_voice_retriggering_same_note_with_limit
+        // already self-clamps to the pool's real voice count at allocation
+        // time, so a higher value here just means "as polyphonic as the
+        // built voices allow" rather than silently snapping the UI control
+        // back down.
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
-            slot.max_polyphony = value.clamp(1, built_voice_count);
+            slot.max_polyphony = value.clamp(1, crate::voice::MAX_VOICES);
         })
     }
 
@@ -1235,13 +1227,7 @@ impl App {
         param: RackSlotParam,
         value: f32,
     ) -> bool {
-        let mut value = param.clamp(value);
-        if param == RackSlotParam::MaxPolyphony {
-            value = value.clamp(
-                1.0,
-                self.rack_slot_built_voice_count(track, slot_idx) as f32,
-            );
-        }
+        let value = param.clamp(value);
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
             if slot.set_param_plock(step, param, value) && param == RackSlotParam::BaseNote {
                 slot.track_sound_state.dirty = true;
