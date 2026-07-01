@@ -29,9 +29,9 @@ use crate::scheduled_event::{
 };
 use crate::sequencer::{
     rack_slot_pool_index, sync_beats, BusId, CustomInstrumentRunMode, InstrumentType,
-    KeyboardTrigger, RackSlotSnapshot, RackTrackSnapshot, SequencerSnapshot, SequencerState,
-    StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
-    MAX_TRACKS,
+    KeyboardTrigger, RackSlotParam, RackSlotSnapshot, RackTrackSnapshot, SequencerSnapshot,
+    SequencerState, StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS,
+    MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::ui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
@@ -813,22 +813,18 @@ fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut 
 }
 
 fn sync_rack_voice_pools(data: &mut AudioCallbackData, num_tracks: usize) {
-    let rack_tracks: Vec<(usize, RackTrackSnapshot)> = data
-        .scheduler_snapshot
-        .tracks
-        .iter()
-        .take(num_tracks)
-        .enumerate()
-        .filter_map(|(track_idx, track)| {
-            track
-                .rack_track
-                .as_ref()
-                .cloned()
-                .map(|rack| (track_idx, rack))
-        })
-        .collect();
-
-    for (track_idx, rack) in rack_tracks {
+    // Iterate the snapshot by reference instead of cloning each RackTrackSnapshot
+    // (and its nested EffectSlotSnapshot/Vec fields). This runs every audio
+    // callback, so a deep clone here was a real-time-thread heap-allocation
+    // storm unrelated to voice count or polyphony.
+    let num_tracks = num_tracks.min(data.scheduler_snapshot.tracks.len());
+    for track_idx in 0..num_tracks {
+        let Some(rack) = data.scheduler_snapshot.tracks[track_idx]
+            .rack_track
+            .as_ref()
+        else {
+            continue;
+        };
         for (slot_idx, slot) in rack.slots.iter().enumerate() {
             match slot.instrument_type {
                 InstrumentType::Sampler => {
@@ -2079,10 +2075,11 @@ fn resolve_rack_slot_sampler_defaults(slot: &EffectSlotSnapshot) -> ScheduledSam
 fn rack_slot_sound_fingerprint(
     slot: &RackSlotSnapshot,
     instrument_params: &[ScheduledInstrumentParam],
+    base_note_offset: f32,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     slot.track_sound_state.engine_id.hash(&mut hasher);
-    slot.instrument_base_note_offset.to_bits().hash(&mut hasher);
+    base_note_offset.to_bits().hash(&mut hasher);
     for param in instrument_params {
         param.target.hash(&mut hasher);
         param.idx.hash(&mut hasher);
@@ -3293,6 +3290,82 @@ fn rack_slot_accepts_trigger(slot: &RackSlotSnapshot, has_solo: bool) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ResolvedRackSlotParams {
+    base_note_offset: f32,
+    gain: f32,
+    pan: f32,
+    max_polyphony: usize,
+    mute: bool,
+    solo: bool,
+}
+
+fn resolve_rack_slot_params(slot: &RackSlotSnapshot, step: usize) -> ResolvedRackSlotParams {
+    let value = |param: RackSlotParam| param.clamp(slot.param_value_at_step(param, step));
+    let max_polyphony = value(RackSlotParam::MaxPolyphony)
+        .round()
+        .clamp(1.0, MAX_VOICES as f32) as usize;
+    ResolvedRackSlotParams {
+        base_note_offset: value(RackSlotParam::BaseNote),
+        gain: value(RackSlotParam::Gain),
+        pan: value(RackSlotParam::Pan),
+        max_polyphony,
+        mute: value(RackSlotParam::Mute) > 0.5,
+        solo: value(RackSlotParam::Solo) > 0.5,
+    }
+}
+
+fn rack_slot_accepts_resolved(params: ResolvedRackSlotParams, has_solo: bool) -> bool {
+    if has_solo {
+        params.solo && !params.mute
+    } else {
+        !params.mute
+    }
+}
+
+unsafe fn push_rack_slot_panner_params(
+    lg: *mut LiveGraph,
+    slot_pan_lid: u64,
+    params: ResolvedRackSlotParams,
+    muted_by_solo: bool,
+) {
+    if slot_pan_lid == 0 {
+        return;
+    }
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+            logical_id: slot_pan_lid,
+            fvalue: params.gain,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::stereo_panner::STEREO_PANNER_PARAM_PAN,
+            logical_id: slot_pan_lid,
+            fvalue: params.pan,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+            logical_id: slot_pan_lid,
+            fvalue: if params.mute { 1.0 } else { 0.0 },
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+            logical_id: slot_pan_lid,
+            fvalue: if muted_by_solo { 1.0 } else { 0.0 },
+        },
+    );
+}
+
 fn rack_sampler_warp_runtime(
     state: &SequencerState,
     warp_enabled: f32,
@@ -3480,7 +3553,11 @@ fn fire_live_keyboard_rack_note(
                 if voice_lid == 0 || synth_id == 0 || modulator_id == 0 {
                     continue;
                 }
-                let instrument_fingerprint = rack_slot_sound_fingerprint(slot, &instrument_params);
+                let instrument_fingerprint = rack_slot_sound_fingerprint(
+                    slot,
+                    &instrument_params,
+                    slot.instrument_base_note_offset,
+                );
                 let pitch_hz = custom_pitch_hz(transpose, slot.instrument_base_note_offset);
                 cancel_gate_off_for_lid(
                     &mut data.countdown_events,
@@ -3557,6 +3634,7 @@ fn fire_rack_slot_note(
     parent_track_idx: usize,
     slot_idx: usize,
     slot: &RackSlotSnapshot,
+    slot_params: ResolvedRackSlotParams,
     transpose: f32,
     velocity: f32,
     speed: f32,
@@ -3597,9 +3675,11 @@ fn fire_rack_slot_note(
                 sampler_params.warp_mode,
                 sampler_params.sample_bpm,
             );
-            data.voice_pools[pool_id].polyphonic = slot.max_polyphony > 1;
-            let voice = data.voice_pools[pool_id]
-                .allocate_voice_retriggering_same_note_with_limit(transpose, slot.max_polyphony);
+            data.voice_pools[pool_id].polyphonic = slot_params.max_polyphony > 1;
+            let voice = data.voice_pools[pool_id].allocate_voice_retriggering_same_note_with_limit(
+                transpose,
+                slot_params.max_polyphony,
+            );
             let voice_lid = voice.logical_id;
             let lid = if voice_lid != 0 {
                 voice_lid
@@ -3620,7 +3700,7 @@ fn fire_rack_slot_note(
                         voice.gatepitch_id as u64,
                         frame_offset,
                         gatepitch_seq,
-                        custom_pitch_hz(transpose + slot.instrument_base_note_offset, 0.0),
+                        custom_pitch_hz(transpose + slot_params.base_note_offset, 0.0),
                         velocity,
                     );
                 }
@@ -3639,7 +3719,7 @@ fn fire_rack_slot_note(
                     attack_samples,
                     release_samples,
                     gate_mode,
-                    transpose + slot.instrument_base_note_offset,
+                    transpose + slot_params.base_note_offset,
                     sampler_params.start_point,
                     sampler_params.end_point,
                     sampler_params.instrument_enabled,
@@ -3687,8 +3767,8 @@ fn fire_rack_slot_note(
                 data.custom_engine_pools[engine_id].allocate_voice(
                     parent_track_idx,
                     transpose,
-                    slot.max_polyphony > 1,
-                    slot.max_polyphony,
+                    slot_params.max_polyphony > 1,
+                    slot_params.max_polyphony,
                 )
             };
             let voice_idx = allocation.voice_idx;
@@ -3701,10 +3781,10 @@ fn fire_rack_slot_note(
             if lid == 0 || synth_id == 0 || modulator_id == 0 {
                 return;
             }
-            let pitch_hz = custom_pitch_hz(transpose, slot.instrument_base_note_offset);
+            let pitch_hz = custom_pitch_hz(transpose, slot_params.base_note_offset);
             cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
             unsafe {
-                if allocation.stole_active_voice || slot.max_polyphony <= 1 || free_patch {
+                if allocation.stole_active_voice || slot_params.max_polyphony <= 1 || free_patch {
                     let off_seq = next_event_sequence_from(&mut data.event_seq);
                     send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
                 }
@@ -3788,9 +3868,23 @@ fn fire_rack_resolved(
         }
     }
 
-    let has_solo = rack.slots.iter().any(|slot| slot.solo);
+    let resolved_slot_params: Vec<ResolvedRackSlotParams> = rack
+        .slots
+        .iter()
+        .map(|slot| resolve_rack_slot_params(slot, step))
+        .collect();
+    let has_solo = resolved_slot_params.iter().any(|params| params.solo);
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
-        if !rack_slot_accepts_trigger(slot, has_solo) {
+        let Some(slot_params) = resolved_slot_params.get(slot_idx).copied() else {
+            continue;
+        };
+        let muted_by_solo = has_solo && !slot_params.solo;
+        let slot_pan_lid =
+            data.state.runtime.rack_slot_pan_lids[track_idx][slot_idx].load(Ordering::Acquire);
+        unsafe {
+            push_rack_slot_panner_params(data.lg.0, slot_pan_lid, slot_params, muted_by_solo);
+        }
+        if !rack_slot_accepts_resolved(slot_params, has_solo) {
             continue;
         }
         let instrument_params = resolve_rack_slot_instrument_params(&slot.instrument_slot, step);
@@ -3802,7 +3896,8 @@ fn fire_rack_resolved(
         } else {
             None
         };
-        let instrument_fingerprint = rack_slot_sound_fingerprint(slot, &instrument_params);
+        let instrument_fingerprint =
+            rack_slot_sound_fingerprint(slot, &instrument_params, slot_params.base_note_offset);
 
         if chord.count > 0 {
             for n in 0..chord.count {
@@ -3824,6 +3919,7 @@ fn fire_rack_resolved(
                     track_idx,
                     slot_idx,
                     slot,
+                    slot_params,
                     transpose,
                     resolved.velocity,
                     resolved.speed,
@@ -3841,6 +3937,7 @@ fn fire_rack_resolved(
                 track_idx,
                 slot_idx,
                 slot,
+                slot_params,
                 resolved.transpose,
                 resolved.velocity,
                 resolved.speed,

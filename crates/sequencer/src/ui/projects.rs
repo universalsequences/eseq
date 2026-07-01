@@ -1659,6 +1659,9 @@ impl App {
                                         .as_ref()
                                         .map(|slot| slot.max_polyphony)
                                         .unwrap_or(crate::voice::MAX_VOICES),
+                                    param_plocks: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.param_plocks.clone()),
                                     instrument_slot: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.instrument_slot.clone()),

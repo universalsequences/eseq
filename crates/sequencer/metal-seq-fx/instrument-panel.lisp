@@ -36,29 +36,30 @@
 (def rack-slot-delete-target? (slot)
   (rack-slot-delete-target-binding slot))
 
+(def rack-slot-set-param-or-plock (slot param default-command v)
+  (host-command (if (seq-has-selection?) "set-rack-slot-param-plock" default-command)
+    (dict :track (get slot :track)
+          :slot (get slot :idx)
+          :param param
+          :value v)))
+
 (def rack-slot-set-gain (slot v)
-  (host-command "set-rack-slot-gain"
-    (dict :track (get slot :track) :slot (get slot :idx) :value v)))
+  (rack-slot-set-param-or-plock slot "gain" "set-rack-slot-gain" v))
 
 (def rack-slot-set-pan (slot v)
-  (host-command "set-rack-slot-pan"
-    (dict :track (get slot :track) :slot (get slot :idx) :value v)))
+  (rack-slot-set-param-or-plock slot "pan" "set-rack-slot-pan" v))
 
 (def rack-slot-set-base-note (slot v)
-  (host-command "set-rack-slot-base-note"
-    (dict :track (get slot :track) :slot (get slot :idx) :value v)))
+  (rack-slot-set-param-or-plock slot "base-note" "set-rack-slot-base-note" v))
 
 (def rack-slot-set-max-polyphony (slot v)
-  (host-command "set-rack-slot-max-polyphony"
-    (dict :track (get slot :track) :slot (get slot :idx) :value v)))
+  (rack-slot-set-param-or-plock slot "max-polyphony" "set-rack-slot-max-polyphony" v))
 
 (def rack-slot-set-mute (slot v)
-  (host-command "set-rack-slot-mute"
-    (dict :track (get slot :track) :slot (get slot :idx) :value v)))
+  (rack-slot-set-param-or-plock slot "mute" "set-rack-slot-mute" v))
 
 (def rack-slot-set-solo (slot v)
-  (host-command "set-rack-slot-solo"
-    (dict :track (get slot :track) :slot (get slot :idx) :value v)))
+  (rack-slot-set-param-or-plock slot "solo" "set-rack-slot-solo" v))
 
 (def rack-slot-row (slot)
   (let ((delete-target (rack-slot-delete-target? slot))
@@ -180,7 +181,7 @@
           (if (> (len (get inst :slots)) 0)
             (each (get inst :slots) |slot idx|
               (rack-slot-row slot))
-            (box :width :fill :height :fill :h-align :center :v-align :center
+            (box :width :fill :height 9 :h-align :center :v-align :center
               (label "Drop an Instrument or Sample"
                 :font-size 11 :color :dim :bg :transparent))))))
     :debug-name "rack-panel"

@@ -7,8 +7,8 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::{self, DGenManifest, LoadedDGenLib};
 use crate::sequencer::{
     rack_slot_pool_index, BusId, CustomInstrumentRunMode, InstrumentType, ModDestination,
-    RackRouting, RackSlotSnapshot, RackTrackSnapshot, TrackOutput, TrackSoundState,
-    EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
+    RackRouting, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, TrackOutput,
+    TrackSoundState, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
@@ -149,6 +149,7 @@ pub struct RackSlotBuildSpec<'a> {
     pub mute: bool,
     pub solo: bool,
     pub max_polyphony: usize,
+    pub param_plocks: Option<RackSlotParamPlocks>,
     pub instrument_slot: Option<EffectSlotSnapshot>,
     pub track_sound_state: Option<TrackSoundState>,
 }
@@ -1160,6 +1161,7 @@ impl GraphController<'_> {
                         mute: slot.mute,
                         solo: slot.solo,
                         max_polyphony,
+                        param_plocks: slot.param_plocks.unwrap_or_default(),
                         instrument_slot,
                         track_sound_state: slot.track_sound_state.unwrap_or_default(),
                         sample_id,
@@ -1235,6 +1237,7 @@ impl GraphController<'_> {
                         mute: slot.mute,
                         solo: slot.solo,
                         max_polyphony,
+                        param_plocks: slot.param_plocks.unwrap_or_default(),
                         instrument_slot,
                         track_sound_state: sound_state,
                         sample_id: None,
@@ -1324,6 +1327,7 @@ impl GraphController<'_> {
                     mute: false,
                     solo: false,
                     max_polyphony: per_slot_max_polyphony,
+                    param_plocks: None,
                     instrument_slot: None,
                     track_sound_state: None,
                 },
@@ -1410,6 +1414,7 @@ impl GraphController<'_> {
             mute: false,
             solo: false,
             max_polyphony,
+            param_plocks: RackSlotParamPlocks::new(),
             instrument_slot,
             track_sound_state: TrackSoundState::default(),
             sample_id: Some((loaded.buffer_id, sample_name.clone(), loaded.sample_rate)),
@@ -1428,6 +1433,7 @@ impl GraphController<'_> {
         self.app.graph.track_node_ids[track_idx]
             .rack_slots
             .push(rack_slot_nodes);
+        self.publish_rack_slot_panner_runtime(track_idx);
         self.app.set_rack_selected_slot(track_idx, slot_idx);
         self.app.register_loaded_sample_path(
             &sample_name,
@@ -1578,6 +1584,7 @@ impl GraphController<'_> {
             mute: false,
             solo: false,
             max_polyphony: MAX_VOICES,
+            param_plocks: RackSlotParamPlocks::new(),
             instrument_slot,
             track_sound_state: TrackSoundState {
                 engine_id: Some(engine_id),
@@ -1600,6 +1607,7 @@ impl GraphController<'_> {
         self.app.graph.track_node_ids[track_idx]
             .rack_slots
             .push(rack_slot_nodes);
+        self.publish_rack_slot_panner_runtime(track_idx);
         self.app.set_rack_selected_slot(track_idx, slot_idx);
         self.app.state.append_rack_slot_for_all_pattern_snapshots(
             track_idx,
@@ -3086,6 +3094,7 @@ impl GraphController<'_> {
     fn rebind_rack_sampler_runtime_pools(&mut self) {
         self.clear_all_rack_sampler_runtime_pools();
         for track_idx in 0..self.app.graph.track_node_ids.len() {
+            self.publish_rack_slot_panner_runtime(track_idx);
             let slot_count = self.app.graph.track_node_ids[track_idx].rack_slots.len();
             for slot_idx in 0..slot_count {
                 let Some(pool_id) = rack_slot_pool_index(track_idx, slot_idx) else {
@@ -3114,6 +3123,21 @@ impl GraphController<'_> {
                 self.app.graph.track_node_ids[track_idx].rack_slots[slot_idx].sampler_pool_id =
                     Some(pool_id);
             }
+        }
+    }
+
+    fn publish_rack_slot_panner_runtime(&self, track_idx: usize) {
+        let Some(track_nodes) = self.app.graph.track_node_ids.get(track_idx) else {
+            return;
+        };
+        for slot_idx in 0..MAX_RACK_SLOTS {
+            let lid = track_nodes
+                .rack_slots
+                .get(slot_idx)
+                .map(|slot| slot.slot_pan_id as u64)
+                .unwrap_or(0);
+            self.app.state.runtime.rack_slot_pan_lids[track_idx][slot_idx]
+                .store(lid, Ordering::Release);
         }
     }
 
@@ -3363,6 +3387,7 @@ impl GraphController<'_> {
                 }
             }
             self.app.graph.track_node_ids[track_idx].rack_slots = rebuilt_nodes;
+            self.publish_rack_slot_panner_runtime(track_idx);
         }
 
         for engine_id in old_engine_ids {
@@ -3686,6 +3711,7 @@ impl GraphController<'_> {
             bus_send_ids: Vec::new(),
             rack_slots,
         });
+        self.publish_rack_slot_panner_runtime(idx);
         self.app.graph.track_synth_node_ids.push(Vec::new());
         self.app.graph.track_gatepitch_node_ids.push(Vec::new());
         self.app.graph.track_engine_ids.push(None);

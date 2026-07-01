@@ -26,6 +26,7 @@ pub use snapshot::{
 #[allow(unused_imports)]
 pub use state::{
     default_empty_effect_chain, BusGateSequence, BusPatternSnapshot, PatternId, PatternSnapshot,
-    PublishedSequencer, RackSlotSnapshot, RackTrackSnapshot, SequencerState, StepSlotPlocks,
-    StepSnapshot, TrackOutputEvent, TrackPatternCellView,
+    PublishedSequencer, RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot,
+    SequencerState, StepSlotPlocks, StepSnapshot, TrackOutputEvent, TrackPatternCellView,
+    RACK_SLOT_PARAM_COUNT,
 };

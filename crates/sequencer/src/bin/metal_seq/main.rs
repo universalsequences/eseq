@@ -65,8 +65,9 @@ use sequencer::agent::actions::{
 use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
-    CustomInstrumentRunMode, KeyboardTrigger, MidiFxPosition, PatternId, SequencerState, StepParam,
-    SwingResolution, Timebase, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
+    CustomInstrumentRunMode, KeyboardTrigger, MidiFxPosition, PatternId, RackSlotParam,
+    SequencerState, StepParam, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
+    MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
@@ -913,6 +914,17 @@ fn map_number(
 ) -> Option<f64> {
     map.get(key).and_then(|cell| match &*cell.borrow() {
         Value::Number(value) => Some(*value),
+        _ => None,
+    })
+}
+
+fn map_number_or_bool(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Option<f64> {
+    map.get(key).and_then(|cell| match &*cell.borrow() {
+        Value::Number(value) => Some(*value),
+        Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
     })
 }
@@ -6521,6 +6533,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &selected_steps,
                                     &ui_epoch,
                                 );
+                            }
+                        }
+                    }
+                    "set-rack-slot-param-plock" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let param = map_string(map, "param")
+                                .and_then(|name| RackSlotParam::from_name(&name));
+                            let value = map_number_or_bool(map, "value").map(|value| value as f32);
+                            if let (Some(track), Some(slot_idx), Some(param), Some(value)) =
+                                (track, slot_idx, param, value)
+                            {
+                                let steps: Vec<usize> =
+                                    selected_steps.lock().unwrap().iter().copied().collect();
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetRackSlotParamPlockMulti {
+                                        track,
+                                        slot_idx,
+                                        steps,
+                                        param,
+                                        value,
+                                    },
+                                );
+                                sync_rack_slot_instrument_authoring_display(
+                                    &mut editor,
+                                    &app,
+                                    &state,
+                                    track,
+                                    &selected_steps,
+                                );
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }

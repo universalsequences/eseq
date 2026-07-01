@@ -8,9 +8,9 @@ use crate::graph::ProjectGraphOverrides;
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    ModDestination, PatternSnapshot, RackRouting, RackSlotSnapshot, RackTrackSnapshot,
-    SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot, TrackSendSnapshot,
-    TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot,
+    TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 
@@ -460,6 +460,8 @@ pub struct ProjectRackSlotPattern {
     #[serde(default = "default_max_polyphony")]
     pub max_polyphony: usize,
     #[serde(default)]
+    pub param_plocks: Vec<Vec<Option<f32>>>,
+    #[serde(default)]
     pub instrument_slot: ProjectEffectSlot,
     #[serde(default)]
     pub track_sound_state: ProjectTrackSoundState,
@@ -884,6 +886,7 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
             mute: value.mute,
             solo: value.solo,
             max_polyphony: value.max_polyphony,
+            param_plocks: value.param_plocks.rows,
             instrument_slot: ProjectEffectSlot::from(&value.instrument_slot),
             track_sound_state: ProjectTrackSoundState::from(value.track_sound_state),
             sample_path,
@@ -907,6 +910,7 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             mute: value.mute,
             solo: value.solo,
             max_polyphony: value.max_polyphony.clamp(1, crate::voice::MAX_VOICES),
+            param_plocks: RackSlotParamPlocks::from_rows(value.param_plocks),
             instrument_slot: value.instrument_slot.into_snapshot_with_node_ids(0, 0),
             track_sound_state: value.track_sound_state.into_track_sound_state(None),
             sample_id,

@@ -6538,7 +6538,10 @@ fn build_selected_rack_slot_instrument_value(
         "base_note".to_string(),
         "base-note",
         None,
-        slot.instrument_base_note_offset,
+        slot.param_value_at_step(
+            sequencer::sequencer::RackSlotParam::BaseNote,
+            selected_step.unwrap_or(usize::MAX),
+        ),
         -48.0,
         48.0,
         None,
@@ -6803,7 +6806,10 @@ fn build_rack_panel_value(
             );
             slot_map.insert(
                 "base-note".to_string(),
-                value_cell(Value::Number(slot.instrument_base_note_offset as f64)),
+                value_cell(Value::Number(slot.param_value_at_step(
+                    sequencer::sequencer::RackSlotParam::BaseNote,
+                    selected_step.unwrap_or(usize::MAX),
+                ) as f64)),
             );
             slot_map.insert(
                 "base-note-min".to_string(),
@@ -6812,21 +6818,46 @@ fn build_rack_panel_value(
             slot_map.insert("base-note-max".to_string(), value_cell(Value::Number(48.0)));
             slot_map.insert(
                 "gain".to_string(),
-                value_cell(Value::Number(slot.gain as f64)),
+                value_cell(Value::Number(slot.param_value_at_step(
+                    sequencer::sequencer::RackSlotParam::Gain,
+                    selected_step.unwrap_or(usize::MAX),
+                ) as f64)),
             );
             slot_map.insert("gain-min".to_string(), value_cell(Value::Number(0.0)));
             slot_map.insert("gain-max".to_string(), value_cell(Value::Number(2.0)));
             slot_map.insert(
                 "pan".to_string(),
-                value_cell(Value::Number(slot.pan as f64)),
+                value_cell(Value::Number(slot.param_value_at_step(
+                    sequencer::sequencer::RackSlotParam::Pan,
+                    selected_step.unwrap_or(usize::MAX),
+                ) as f64)),
             );
             slot_map.insert("pan-min".to_string(), value_cell(Value::Number(-1.0)));
             slot_map.insert("pan-max".to_string(), value_cell(Value::Number(1.0)));
-            slot_map.insert("mute".to_string(), value_cell(Value::Bool(slot.mute)));
-            slot_map.insert("solo".to_string(), value_cell(Value::Bool(slot.solo)));
+            slot_map.insert(
+                "mute".to_string(),
+                value_cell(Value::Bool(
+                    slot.param_value_at_step(
+                        sequencer::sequencer::RackSlotParam::Mute,
+                        selected_step.unwrap_or(usize::MAX),
+                    ) > 0.5,
+                )),
+            );
+            slot_map.insert(
+                "solo".to_string(),
+                value_cell(Value::Bool(
+                    slot.param_value_at_step(
+                        sequencer::sequencer::RackSlotParam::Solo,
+                        selected_step.unwrap_or(usize::MAX),
+                    ) > 0.5,
+                )),
+            );
             slot_map.insert(
                 "max-polyphony".to_string(),
-                value_cell(Value::Number(slot.max_polyphony as f64)),
+                value_cell(Value::Number(slot.param_value_at_step(
+                    sequencer::sequencer::RackSlotParam::MaxPolyphony,
+                    selected_step.unwrap_or(usize::MAX),
+                ) as f64)),
             );
             slot_map.insert(
                 "max-polyphony-min".to_string(),
@@ -7935,6 +7966,11 @@ pub(crate) fn track_step_plock_mask(
         .or_step_plock_mask(&mut mask, instrument_np);
     if let Some(Some(rack)) = state.pattern.rack_tracks.lock().unwrap().get(track) {
         for slot in &rack.slots {
+            for step in 0..MAX_STEPS {
+                if slot.param_plocks.step_has_plock(step) {
+                    mask[step / 64] |= 1u64 << (step % 64);
+                }
+            }
             let num_params = slot.instrument_slot.num_params as usize;
             for step in 0..MAX_STEPS {
                 let Some(step_plocks) = slot.instrument_slot.plocks.get(step) else {
@@ -8001,6 +8037,9 @@ pub(crate) fn track_step_has_plock(
         .and_then(|rack| rack.as_ref())
         .is_some_and(|rack| {
             rack.slots.iter().any(|slot| {
+                if slot.param_plocks.step_has_plock(step) {
+                    return true;
+                }
                 let num_params = slot.instrument_slot.num_params as usize;
                 slot.instrument_slot
                     .plocks
@@ -13555,6 +13594,7 @@ mod tests {
                     mute: false,
                     solo: true,
                     max_polyphony: 4,
+                    param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
                     instrument_slot:
                         sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
                             &sampler_desc,
@@ -13655,8 +13695,27 @@ mod tests {
 
     #[test]
     fn rack_selected_sampler_panel_uses_selected_slot_plocks_and_marks_steps() {
+        fn rack_slot_value(panel: &Value, slot_idx: usize, key: &str) -> Option<Value> {
+            let Value::List(items) = panel else {
+                return None;
+            };
+            let Value::Map(rack) = &*items.first()?.borrow() else {
+                return None;
+            };
+            let Value::List(slots) = &*rack.get("slots")?.borrow() else {
+                return None;
+            };
+            let Value::Map(slot) = &*slots.get(slot_idx)?.borrow() else {
+                return None;
+            };
+            slot.get(key).map(|value| value.borrow().clone())
+        }
+
         let app = test_app_with_rack_panel();
         app.state.update_live_rack_slot(0, 0, |slot| {
+            assert!(slot
+                .param_plocks
+                .set(3, sequencer::sequencer::RackSlotParam::Gain, 0.25));
             slot.instrument_slot.defaults[8] = 44_100.0;
             assert!(slot.instrument_slot.set_plock(3, 8, 22_050.0));
         });
@@ -13676,9 +13735,14 @@ mod tests {
             Some(22_050.0),
             "selected rack sampler should show the selected step p-lock"
         );
+        assert_eq!(
+            rack_slot_value(&selected_panel, 0, "gain"),
+            Some(Value::Number(0.25)),
+            "selected rack row should show the selected step slot gain p-lock"
+        );
         assert!(
             track_step_has_plock(&app.state, 0, &app.graph.effect_descriptors, 3),
-            "rack slot instrument p-locks should contribute to step p-lock markers"
+            "rack slot p-locks should contribute to step p-lock markers"
         );
         let marker_values = bool_list_values(&build_step_has_plocks(
             &app.state,
@@ -13700,6 +13764,11 @@ mod tests {
             value_param_number_by_idx(&cleared_panel, "sr", 8),
             Some(44_100.0),
             "clearing selection should restore the rack sampler default display"
+        );
+        assert_eq!(
+            rack_slot_value(&cleared_panel, 0, "gain"),
+            Some(Value::Number(0.75)),
+            "clearing selection should restore the rack row default gain display"
         );
     }
 
@@ -13890,6 +13959,91 @@ mod tests {
                 );
             }
             other => panic!("expected set-rack-slot-instrument-plock host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_rack_slot_gain_uses_slot_param_plock_when_steps_selected() {
+        let app = test_app_with_rack_panel();
+        let selected = Arc::new(Mutex::new(HashSet::from([3])));
+        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let rack_slot_delete_target_0 = rack_slot_delete_target_field(0, 0);
+        editor.set_layout_viewport(160, 20);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", rack_panel),
+                ("bus-effects", test_list(vec![])),
+                ("delete-target-version", Value::Number(0.0)),
+                (rack_slot_delete_target_0.as_str(), Value::Bool(false)),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () true)
+                (def sbrowser-editor-name "")
+                (def sbrowser-sample-selected-path () "")
+                (def sbrowser-add-selected-rack-layer () false)
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install selected-step rack gain test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.drain_host_commands();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(rack-slot-set-gain
+                      (nth (get (nth SEQ.instrument-panel 0) :slots) 0)
+                      0.33)"#,
+            )
+            .expect("set rack slot gain");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-rack-slot-param-plock");
+                let Value::Map(payload) = payload else {
+                    panic!("set-rack-slot-param-plock payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("param").map(|value| value.borrow().clone()),
+                    Some(Value::String("gain".to_string()))
+                );
+                assert_eq!(
+                    payload.get("value").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.33))
+                );
+            }
+            other => panic!("expected set-rack-slot-param-plock host command, got {other:?}"),
         }
     }
 

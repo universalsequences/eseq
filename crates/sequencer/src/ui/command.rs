@@ -13,7 +13,8 @@
 use std::sync::atomic::Ordering;
 
 use crate::sequencer::{
-    StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
+    RackSlotParam, StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput,
+    TrackSendSnapshot,
 };
 
 use super::App;
@@ -561,6 +562,24 @@ pub enum AppCommand {
         value: f32,
     },
 
+    /// Set a rack layer's strip parameter p-lock on one step.
+    SetRackSlotParamPlock {
+        track: usize,
+        slot_idx: usize,
+        step: usize,
+        param: RackSlotParam,
+        value: f32,
+    },
+
+    /// Set a rack layer's strip parameter p-lock across several steps.
+    SetRackSlotParamPlockMulti {
+        track: usize,
+        slot_idx: usize,
+        steps: Vec<usize>,
+        param: RackSlotParam,
+        value: f32,
+    },
+
     /// Set a rack layer's underlying instrument default param.
     SetRackSlotInstrumentParam {
         track: usize,
@@ -632,8 +651,9 @@ mod tests {
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, CustomInstrumentRunMode, InstrumentType, RackRouting,
-        RackSlotSnapshot, RackTrackSnapshot, SequencerState, StepSlotPlocks, StepSnapshot,
-        SwingResolution, Timebase, TrackSendSnapshot, TrackSoundState, NUM_PARAMS,
+        RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, SequencerState,
+        StepSlotPlocks, StepSnapshot, SwingResolution, Timebase, TrackSendSnapshot,
+        TrackSoundState, NUM_PARAMS,
     };
     use crate::ui::{App, AudioBuses};
 
@@ -770,6 +790,7 @@ mod tests {
                     mute: false,
                     solo: false,
                     max_polyphony: 8,
+                    param_plocks: RackSlotParamPlocks::new(),
                     instrument_slot: EffectSlotSnapshot::new_default_with_modulator(
                         &sampler_desc,
                         77,
@@ -843,6 +864,22 @@ mod tests {
             }
         ));
         assert!(command_mutates_sequencer_state(
+            &AppCommand::SetRackSlotGain {
+                track: 0,
+                slot_idx: 0,
+                value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetRackSlotParamPlock {
+                track: 0,
+                slot_idx: 0,
+                step: 0,
+                param: RackSlotParam::Gain,
+                value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
             &AppCommand::SetRackSlotInstrumentPlock {
                 track: 0,
                 slot_idx: 0,
@@ -876,6 +913,9 @@ mod tests {
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
             },
+            rack_slot_param_plocks: vec![StepSlotPlocks {
+                params: vec![Some(12.0), Some(0.4), None],
+            }],
             rack_slot_instrument_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.3), None, Some(0.7)],
             }],
@@ -903,6 +943,11 @@ mod tests {
             .iter()
             .all(Option::is_none));
         assert!(sanitized
+            .rack_slot_param_plocks
+            .iter()
+            .flat_map(|plocks| plocks.params.iter())
+            .all(Option::is_none));
+        assert!(sanitized
             .rack_slot_instrument_plocks
             .iter()
             .flat_map(|plocks| plocks.params.iter())
@@ -927,6 +972,9 @@ mod tests {
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
             },
+            rack_slot_param_plocks: vec![StepSlotPlocks {
+                params: vec![Some(12.0), Some(0.4), None],
+            }],
             rack_slot_instrument_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.3), None, Some(0.7)],
             }],
@@ -943,9 +991,41 @@ mod tests {
             vec![Some(0.2), Some(0.8)]
         );
         assert_eq!(
+            sanitized.rack_slot_param_plocks[0].params,
+            vec![Some(12.0), Some(0.4), None]
+        );
+        assert_eq!(
             sanitized.rack_slot_instrument_plocks[0].params,
             vec![Some(0.3), None, Some(0.7)]
         );
+    }
+
+    #[test]
+    fn rack_slot_param_plock_command_writes_slot_plocks_without_changing_default() {
+        let mut app = test_app_with_rack_sampler_slot();
+
+        apply_command(
+            &mut app,
+            AppCommand::SetRackSlotParamPlockMulti {
+                track: 0,
+                slot_idx: 0,
+                steps: vec![2, 3],
+                param: RackSlotParam::Gain,
+                value: 0.42,
+            },
+        );
+
+        let rack_tracks = app.state.pattern.rack_tracks.lock().unwrap();
+        let rack = rack_tracks[0]
+            .as_ref()
+            .expect("test rack track should be present");
+        let slot = &rack.slots[0];
+        assert_eq!(
+            slot.gain, 1.0,
+            "editing selected rack slot steps must not overwrite the default gain"
+        );
+        assert_eq!(slot.param_plocks.get(2, RackSlotParam::Gain), Some(0.42));
+        assert_eq!(slot.param_plocks.get(3, RackSlotParam::Gain), Some(0.42));
     }
 
     #[test]
@@ -1123,10 +1203,6 @@ fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
             | AppCommand::SetTrackSends { .. }
             | AppCommand::SetMasterVolume { .. }
             | AppCommand::AdjustMasterVolume { .. }
-            | AppCommand::SetRackSlotGain { .. }
-            | AppCommand::SetRackSlotPan { .. }
-            | AppCommand::SetRackSlotMute { .. }
-            | AppCommand::SetRackSlotSolo { .. }
     )
 }
 
@@ -1599,6 +1675,28 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             value,
         } => {
             app.set_rack_slot_base_note_offset(track, slot_idx, value);
+        }
+
+        AppCommand::SetRackSlotParamPlock {
+            track,
+            slot_idx,
+            step,
+            param,
+            value,
+        } => {
+            app.set_rack_slot_param_plock(track, slot_idx, step, param, value);
+        }
+
+        AppCommand::SetRackSlotParamPlockMulti {
+            track,
+            slot_idx,
+            steps,
+            param,
+            value,
+        } => {
+            for step in steps {
+                app.set_rack_slot_param_plock(track, slot_idx, step, param, value);
+            }
         }
 
         AppCommand::SetRackSlotInstrumentParam {

@@ -16,8 +16,8 @@
           (rack-slot (get p :rack-slot)))
       (if (instrument-rack-target? p)
         (if (= (get p :control) "base-note")
-          (host-command "set-rack-slot-base-note"
-            (dict :track rack-track :slot rack-slot :value v))
+          (host-command (if (seq-has-selection?) "set-rack-slot-param-plock" "set-rack-slot-base-note")
+            (dict :track rack-track :slot rack-slot :param "base-note" :value v))
           (host-command
             (if (seq-has-selection?) "set-rack-slot-instrument-plock" "set-rack-slot-instrument-param")
             (dict :track rack-track :slot rack-slot :param-idx (get p :idx) :value v)))

@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use super::command::{apply_command, AppCommand};
 
 use crate::effects::EffectDescriptor;
-use crate::sequencer::{InstrumentType, RackSlotSnapshot};
+use crate::sequencer::{InstrumentType, RackSlotParam, RackSlotSnapshot};
 
 use super::{App, InputMode};
 
@@ -1188,6 +1188,16 @@ impl App {
         updated
     }
 
+    fn rack_slot_built_voice_count(&self, track: usize, slot_idx: usize) -> usize {
+        self.graph
+            .track_node_ids
+            .get(track)
+            .and_then(|nodes| nodes.rack_slots.get(slot_idx))
+            .map(|slot| slot.sampler_voice_lids.len())
+            .filter(|&count| count > 0)
+            .unwrap_or(crate::voice::MAX_VOICES)
+    }
+
     pub fn set_rack_slot_max_polyphony(
         &mut self,
         track: usize,
@@ -1198,14 +1208,7 @@ impl App {
         // (build_sampler_voices sizes the fan at slot-creation time; raising
         // this value past that ceiling would silently do nothing useful since
         // there's no node to allocate from).
-        let built_voice_count = self
-            .graph
-            .track_node_ids
-            .get(track)
-            .and_then(|nodes| nodes.rack_slots.get(slot_idx))
-            .map(|slot| slot.sampler_voice_lids.len())
-            .filter(|&count| count > 0)
-            .unwrap_or(crate::voice::MAX_VOICES);
+        let built_voice_count = self.rack_slot_built_voice_count(track, slot_idx);
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
             slot.max_polyphony = value.clamp(1, built_voice_count);
         })
@@ -1221,6 +1224,28 @@ impl App {
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
             slot.instrument_base_note_offset = value;
             slot.track_sound_state.dirty = true;
+        })
+    }
+
+    pub fn set_rack_slot_param_plock(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        step: usize,
+        param: RackSlotParam,
+        value: f32,
+    ) -> bool {
+        let mut value = param.clamp(value);
+        if param == RackSlotParam::MaxPolyphony {
+            value = value.clamp(
+                1.0,
+                self.rack_slot_built_voice_count(track, slot_idx) as f32,
+            );
+        }
+        self.state.update_live_rack_slot(track, slot_idx, |slot| {
+            if slot.set_param_plock(step, param, value) && param == RackSlotParam::BaseNote {
+                slot.track_sound_state.dirty = true;
+            }
         })
     }
 

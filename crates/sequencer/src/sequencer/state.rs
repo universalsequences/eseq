@@ -17,8 +17,8 @@ use super::data::{
     ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection, RackRouting,
     StepData, StepParam, SwingPLockData, SwingResolution, SwingResolutionPLockData, Timebase,
     TimebasePLockData, TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
-    DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_SAMPLER_POOLS, MAX_STEPS,
-    MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
+    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
 use super::{BusId, TrackOutput};
@@ -26,6 +26,174 @@ use super::{BusId, TrackOutput};
 #[derive(Clone)]
 pub struct StepSlotPlocks {
     pub params: Vec<Option<f32>>,
+}
+
+pub const RACK_SLOT_PARAM_COUNT: usize = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RackSlotParam {
+    BaseNote,
+    Gain,
+    Pan,
+    MaxPolyphony,
+    Mute,
+    Solo,
+}
+
+impl RackSlotParam {
+    pub const ALL: [Self; RACK_SLOT_PARAM_COUNT] = [
+        Self::BaseNote,
+        Self::Gain,
+        Self::Pan,
+        Self::MaxPolyphony,
+        Self::Mute,
+        Self::Solo,
+    ];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::BaseNote => 0,
+            Self::Gain => 1,
+            Self::Pan => 2,
+            Self::MaxPolyphony => 3,
+            Self::Mute => 4,
+            Self::Solo => 5,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "base-note" => Some(Self::BaseNote),
+            "gain" => Some(Self::Gain),
+            "pan" => Some(Self::Pan),
+            "max-polyphony" => Some(Self::MaxPolyphony),
+            "mute" => Some(Self::Mute),
+            "solo" => Some(Self::Solo),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::BaseNote => "base-note",
+            Self::Gain => "gain",
+            Self::Pan => "pan",
+            Self::MaxPolyphony => "max-polyphony",
+            Self::Mute => "mute",
+            Self::Solo => "solo",
+        }
+    }
+
+    pub fn clamp(self, value: f32) -> f32 {
+        match self {
+            Self::BaseNote => value.clamp(-48.0, 48.0),
+            Self::Gain => value.clamp(0.0, 2.0),
+            Self::Pan => value.clamp(-1.0, 1.0),
+            Self::MaxPolyphony => value.round().clamp(1.0, crate::voice::MAX_VOICES as f32),
+            Self::Mute | Self::Solo => {
+                if value > 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RackSlotParamPlocks {
+    pub rows: Vec<Vec<Option<f32>>>,
+}
+
+impl RackSlotParamPlocks {
+    pub fn new() -> Self {
+        Self {
+            rows: (0..MAX_STEPS)
+                .map(|_| vec![None; RACK_SLOT_PARAM_COUNT])
+                .collect(),
+        }
+    }
+
+    pub fn from_rows(mut rows: Vec<Vec<Option<f32>>>) -> Self {
+        rows.truncate(MAX_STEPS);
+        while rows.len() < MAX_STEPS {
+            rows.push(Vec::new());
+        }
+        for row in &mut rows {
+            row.truncate(RACK_SLOT_PARAM_COUNT);
+            if row.len() < RACK_SLOT_PARAM_COUNT {
+                row.resize(RACK_SLOT_PARAM_COUNT, None);
+            }
+            for param in RackSlotParam::ALL {
+                if let Some(Some(value)) = row.get_mut(param.index()) {
+                    *value = param.clamp(*value);
+                }
+            }
+        }
+        Self { rows }
+    }
+
+    fn ensure_step(&mut self, step: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        while self.rows.len() <= step {
+            self.rows.push(vec![None; RACK_SLOT_PARAM_COUNT]);
+        }
+        if self.rows[step].len() < RACK_SLOT_PARAM_COUNT {
+            self.rows[step].resize(RACK_SLOT_PARAM_COUNT, None);
+        }
+        true
+    }
+
+    pub fn get(&self, step: usize, param: RackSlotParam) -> Option<f32> {
+        self.rows
+            .get(step)
+            .and_then(|row| row.get(param.index()))
+            .copied()
+            .flatten()
+    }
+
+    pub fn set(&mut self, step: usize, param: RackSlotParam, value: f32) -> bool {
+        if !self.ensure_step(step) {
+            return false;
+        }
+        self.rows[step][param.index()] = Some(param.clamp(value));
+        true
+    }
+
+    pub fn clear(&mut self, step: usize, param: RackSlotParam) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        if let Some(row) = self.rows.get_mut(step) {
+            if let Some(value) = row.get_mut(param.index()) {
+                *value = None;
+            }
+        }
+        true
+    }
+
+    pub fn clear_step(&mut self, step: usize) {
+        if let Some(row) = self.rows.get_mut(step) {
+            for value in row.iter_mut().take(RACK_SLOT_PARAM_COUNT) {
+                *value = None;
+            }
+        }
+    }
+
+    pub fn step_has_plock(&self, step: usize) -> bool {
+        self.rows
+            .get(step)
+            .is_some_and(|row| row.iter().take(RACK_SLOT_PARAM_COUNT).any(Option::is_some))
+    }
+}
+
+impl Default for RackSlotParamPlocks {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone)]
@@ -124,6 +292,7 @@ pub struct StepSnapshot {
     pub swing_resolution: Option<SwingResolution>,
     pub effect_plocks: Vec<StepSlotPlocks>,
     pub instrument_plocks: StepSlotPlocks,
+    pub rack_slot_param_plocks: Vec<StepSlotPlocks>,
     pub rack_slot_instrument_plocks: Vec<StepSlotPlocks>,
 }
 
@@ -137,6 +306,11 @@ impl StepSnapshot {
         }
         for value in &mut snapshot.instrument_plocks.params {
             *value = None;
+        }
+        for plocks in &mut snapshot.rack_slot_param_plocks {
+            for value in &mut plocks.params {
+                *value = None;
+            }
         }
         for plocks in &mut snapshot.rack_slot_instrument_plocks {
             for value in &mut plocks.params {
@@ -187,9 +361,45 @@ pub struct RackSlotSnapshot {
     pub mute: bool,
     pub solo: bool,
     pub max_polyphony: usize,
+    pub param_plocks: RackSlotParamPlocks,
     pub instrument_slot: EffectSlotSnapshot,
     pub track_sound_state: TrackSoundState,
     pub sample_id: Option<(i32, String, u32)>,
+}
+
+impl RackSlotSnapshot {
+    pub fn param_default(&self, param: RackSlotParam) -> f32 {
+        match param {
+            RackSlotParam::BaseNote => self.instrument_base_note_offset,
+            RackSlotParam::Gain => self.gain,
+            RackSlotParam::Pan => self.pan,
+            RackSlotParam::MaxPolyphony => self.max_polyphony as f32,
+            RackSlotParam::Mute => {
+                if self.mute {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            RackSlotParam::Solo => {
+                if self.solo {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    pub fn param_value_at_step(&self, param: RackSlotParam, step: usize) -> f32 {
+        self.param_plocks
+            .get(step, param)
+            .unwrap_or_else(|| self.param_default(param))
+    }
+
+    pub fn set_param_plock(&mut self, step: usize, param: RackSlotParam, value: f32) -> bool {
+        self.param_plocks.set(step, param, value)
+    }
 }
 
 #[derive(Clone)]
@@ -2062,6 +2272,7 @@ pub struct RuntimeBindingState {
     pub pan_lids: Vec<AtomicU64>,
     pub delay_lids: Vec<AtomicU64>,
     pub send_lids: Vec<AtomicU64>,
+    pub rack_slot_pan_lids: Vec<[AtomicU64; MAX_RACK_SLOTS]>,
     pub voice_lids: Vec<[AtomicU64; MAX_VOICES]>,
     pub voice_counts: Vec<AtomicU32>,
     pub instrument_type_flags: Vec<AtomicU32>,
@@ -2308,6 +2519,9 @@ impl SequencerState {
                 pan_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 delay_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 send_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
+                rack_slot_pan_lids: (0..MAX_TRACKS)
+                    .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                    .collect(),
                 voice_lids: (0..MAX_SAMPLER_POOLS)
                     .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                     .collect(),
@@ -3411,6 +3625,9 @@ impl SequencerState {
         self.runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Relaxed);
         self.runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Relaxed);
         self.runtime.sampler_analysis_status[track].store(0, Ordering::Relaxed);
+        for slot in 0..MAX_RACK_SLOTS {
+            self.runtime.rack_slot_pan_lids[track][slot].store(0, Ordering::Relaxed);
+        }
         for voice in 0..MAX_VOICES {
             self.runtime.voice_lids[track][voice].store(0, Ordering::Relaxed);
             self.runtime.synth_node_ids[track][voice].store(0, Ordering::Relaxed);
@@ -3466,6 +3683,12 @@ impl SequencerState {
                 self.runtime.send_lids[next].load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
+            for slot in 0..MAX_RACK_SLOTS {
+                self.runtime.rack_slot_pan_lids[idx][slot].store(
+                    self.runtime.rack_slot_pan_lids[next][slot].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+            }
             self.runtime.voice_counts[idx].store(
                 self.runtime.voice_counts[next].load(Ordering::Relaxed),
                 Ordering::Relaxed,
@@ -3559,6 +3782,9 @@ impl SequencerState {
         self.runtime.pan_lids[last].store(0, Ordering::Relaxed);
         self.runtime.delay_lids[last].store(0, Ordering::Relaxed);
         self.runtime.send_lids[last].store(0, Ordering::Relaxed);
+        for slot in 0..MAX_RACK_SLOTS {
+            self.runtime.rack_slot_pan_lids[last][slot].store(0, Ordering::Relaxed);
+        }
         self.runtime.voice_counts[last].store(0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[last].store(0, Ordering::Relaxed);
         self.runtime.instrument_run_mode_flags[last].store(
@@ -4456,6 +4682,7 @@ impl SequencerState {
             }
             if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
                 for slot in &mut rack.slots {
+                    slot.param_plocks.clear_step(step);
                     slot.instrument_slot.clear_step_plocks(step);
                 }
             }
@@ -4496,7 +4723,7 @@ impl SequencerState {
         for param_idx in 0..instrument_param_count {
             instrument_plocks.push(instrument_slot.plocks.get(step, param_idx));
         }
-        let rack_slot_instrument_plocks = self
+        let (rack_slot_param_plocks, rack_slot_instrument_plocks) = self
             .pattern
             .rack_tracks
             .lock()
@@ -4504,7 +4731,19 @@ impl SequencerState {
             .get(track)
             .and_then(|rack| rack.as_ref())
             .map(|rack| {
-                rack.slots
+                let slot_params = rack
+                    .slots
+                    .iter()
+                    .map(|slot| {
+                        let params = RackSlotParam::ALL
+                            .iter()
+                            .map(|param| slot.param_plocks.get(step, *param))
+                            .collect();
+                        StepSlotPlocks { params }
+                    })
+                    .collect();
+                let instrument_params = rack
+                    .slots
                     .iter()
                     .map(|slot| {
                         let num_params = slot.instrument_slot.num_params as usize;
@@ -4520,7 +4759,8 @@ impl SequencerState {
                             .collect();
                         StepSlotPlocks { params }
                     })
-                    .collect()
+                    .collect();
+                (slot_params, instrument_params)
             })
             .unwrap_or_default();
 
@@ -4538,6 +4778,7 @@ impl SequencerState {
             instrument_plocks: StepSlotPlocks {
                 params: instrument_plocks,
             },
+            rack_slot_param_plocks,
             rack_slot_instrument_plocks,
         }
     }
@@ -4566,6 +4807,7 @@ impl SequencerState {
         }
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             for slot in &mut rack.slots {
+                slot.param_plocks.clear_step(step);
                 slot.instrument_slot.clear_step_plocks(step);
             }
         }
@@ -4682,6 +4924,22 @@ impl SequencerState {
 
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             for (slot_idx, slot) in rack.slots.iter_mut().enumerate() {
+                let saved_params = snapshot.rack_slot_param_plocks.get(slot_idx);
+                for param in RackSlotParam::ALL {
+                    let value = saved_params
+                        .and_then(|plocks| plocks.params.get(param.index()))
+                        .copied()
+                        .flatten();
+                    match value {
+                        Some(value) => {
+                            slot.param_plocks.set(step, param, value);
+                        }
+                        None => {
+                            slot.param_plocks.clear(step, param);
+                        }
+                    }
+                }
+
                 let saved = snapshot.rack_slot_instrument_plocks.get(slot_idx);
                 let num_params = slot.instrument_slot.num_params as usize;
                 for param_idx in 0..num_params {
@@ -5019,6 +5277,7 @@ mod tests {
                 mute: false,
                 solo: true,
                 max_polyphony: 3,
+                param_plocks: RackSlotParamPlocks::new(),
                 instrument_slot: sample_effect_slot_snapshot(77),
                 track_sound_state: TrackSoundState {
                     loaded_preset: Some("rack-lead".to_string()),
@@ -5357,6 +5616,7 @@ mod tests {
             mute: false,
             solo: false,
             max_polyphony: 2,
+            param_plocks: RackSlotParamPlocks::new(),
             instrument_slot: sample_effect_slot_snapshot(88),
             track_sound_state: TrackSoundState::default(),
             sample_id: Some((123, "layer".to_string(), 48_000)),
@@ -5400,6 +5660,7 @@ mod tests {
             mute: false,
             solo: false,
             max_polyphony: 2,
+            param_plocks: RackSlotParamPlocks::new(),
             instrument_slot: sample_effect_slot_snapshot(88),
             track_sound_state: TrackSoundState::default(),
             sample_id: Some((123, "layer".to_string(), 48_000)),
@@ -6799,24 +7060,60 @@ mod tests {
             .flatten()
     }
 
+    fn rack_slot_param_plock_value(
+        state: &SequencerState,
+        track: usize,
+        slot_idx: usize,
+        step: usize,
+        param: RackSlotParam,
+    ) -> Option<f32> {
+        state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(|rack| rack.as_ref())
+            .and_then(|rack| rack.slots.get(slot_idx))
+            .and_then(|slot| slot.param_plocks.get(step, param))
+    }
+
     #[test]
     fn step_snapshot_capture_clear_restore_preserves_rack_slot_instrument_plocks() {
         let state = make_state_with_rack_slot();
         {
             let mut racks = state.pattern.rack_tracks.lock().unwrap();
-            let slot = &mut racks[0].as_mut().unwrap().slots[0].instrument_slot;
-            assert!(slot.set_plock(2, 0, 0.42));
-            assert!(slot.set_plock(4, 0, 0.84));
+            let slot = &mut racks[0].as_mut().unwrap().slots[0];
+            assert!(slot.param_plocks.set(2, RackSlotParam::Gain, 0.42));
+            assert!(slot.param_plocks.set(4, RackSlotParam::Gain, 0.84));
+            assert!(slot.instrument_slot.set_plock(2, 0, 0.42));
+            assert!(slot.instrument_slot.set_plock(4, 0, 0.84));
         }
 
         let snap = state.capture_step_snapshot(0, 2);
+        assert_eq!(
+            snap.rack_slot_param_plocks[0].params[RackSlotParam::Gain.index()],
+            Some(0.42)
+        );
         assert_eq!(snap.rack_slot_instrument_plocks[0].params[0], Some(0.42));
 
         state.clear_step_payload(0, 2);
+        assert_eq!(
+            rack_slot_param_plock_value(&state, 0, 0, 2, RackSlotParam::Gain),
+            None
+        );
+        assert_eq!(
+            rack_slot_param_plock_value(&state, 0, 0, 4, RackSlotParam::Gain),
+            Some(0.84)
+        );
         assert_eq!(rack_slot_plock_value(&state, 0, 0, 2, 0), None);
         assert_eq!(rack_slot_plock_value(&state, 0, 0, 4, 0), Some(0.84));
 
         state.restore_step_snapshot(0, 5, &snap);
+        assert_eq!(
+            rack_slot_param_plock_value(&state, 0, 0, 5, RackSlotParam::Gain),
+            Some(0.42)
+        );
         assert_eq!(rack_slot_plock_value(&state, 0, 0, 5, 0), Some(0.42));
     }
 
