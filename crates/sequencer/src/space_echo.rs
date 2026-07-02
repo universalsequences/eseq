@@ -101,9 +101,31 @@ const STATE_LOOP_DC_Y1: usize = 65;
 const STATE_TENSION: usize = 66;
 const STATE_SMOOTH_TENSION: usize = 67;
 
+// Spring type selector: 0 = RE-201, 1 = King Tubby (Grampian). Each selects
+// a differently-tuned SpringParams fit.
+const STATE_SPRING_TYPE: usize = 68;
+// Stereo width of the panned playback heads (0 = mono, like the hardware).
+const STATE_STEREO_WIDTH: usize = 69;
+const STATE_SMOOTH_WIDTH: usize = 70;
+// Side-channel copy of the playback EQ chain (the width pan runs the head
+// difference signal through the same in-loop EQ so L/R stay tonally matched).
+const STATE_SIDE_LOSS_Z1: usize = 71;
+const STATE_SIDE_LOSS_Z2: usize = 72;
+const STATE_SIDE_BUMP_LP: usize = 73;
+const STATE_SIDE_BUMP_SUB_LP: usize = 74;
+const STATE_SIDE_BASS_LP: usize = 75;
+const STATE_SIDE_TREBLE_LP: usize = 76;
+// Tone shelves on each tank's output, so bass/treble shape the reverb too
+// (on the output rather than the feed — the tank's own band-limit would eat
+// input-side EQ).
+const STATE_SPRING_BASS_LP_A: usize = 77;
+const STATE_SPRING_TREBLE_LP_A: usize = 78;
+const STATE_SPRING_BASS_LP_B: usize = 79;
+const STATE_SPRING_TREBLE_LP_B: usize = 80;
+
 // Spring tank state: flat blocks owned by `crate::spring` (scalars + delay
 // buffers per tank).
-const STATE_SPRING_A: usize = 68;
+const STATE_SPRING_A: usize = 81;
 const STATE_SPRING_B: usize = STATE_SPRING_A + SPRING_TANK_STATE_LEN;
 
 const STATE_TAPE_OFFSET: usize = STATE_SPRING_B + SPRING_TANK_STATE_LEN;
@@ -128,6 +150,8 @@ pub const SPACE_ECHO_PARAM_WOW_FLUTTER: u64 = STATE_WOW_FLUTTER as u64;
 pub const SPACE_ECHO_PARAM_AGE: u64 = STATE_AGE as u64;
 pub const SPACE_ECHO_PARAM_BPM: u64 = STATE_BPM as u64;
 pub const SPACE_ECHO_PARAM_TENSION: u64 = STATE_TENSION as u64;
+pub const SPACE_ECHO_PARAM_SPRING_TYPE: u64 = STATE_SPRING_TYPE as u64;
+pub const SPACE_ECHO_PARAM_STEREO_WIDTH: u64 = STATE_STEREO_WIDTH as u64;
 pub const SPACE_ECHO_PARAM_MOD_RATE_DEPTH_1: u64 = STATE_MOD_RATE_DEPTH_1 as u64;
 pub const SPACE_ECHO_PARAM_MOD_RATE_DEPTH_2: u64 = STATE_MOD_RATE_DEPTH_1 as u64 + 1;
 pub const SPACE_ECHO_PARAM_MOD_RATE_DEPTH_3: u64 = STATE_MOD_RATE_DEPTH_1 as u64 + 2;
@@ -314,6 +338,16 @@ const SPRING_B_DETUNE: f32 = 1.035;
 // Output calibration so the new tanks sit at the same loudness as the old
 // spring did at REVERB_VOL = 0.5 (impulse-response RMS match over 3 s).
 const SPRING_OUT_GAIN: f32 = 0.788;
+const KING_TUBBY_OUT_GAIN: f32 = 0.579;
+
+// Per-type base params + output gain (each gain RMS-matched to the RE-201
+// tank over 3 s so flipping the type doesn't jump the reverb level).
+fn spring_type_params(spring_type: usize) -> (SpringParams, f32) {
+    match spring_type {
+        1 => (SpringParams::king_tubby(), KING_TUBBY_OUT_GAIN),
+        _ => (SpringParams::re201(), SPRING_OUT_GAIN),
+    }
+}
 
 fn spring_tank_b_params(base: &SpringParams) -> SpringParams {
     let mut p = base.clone();
@@ -351,6 +385,9 @@ unsafe extern "C" fn space_echo_init(
     *s.add(STATE_SAMPLE_RATE) = sample_rate as f32;
     *s.add(STATE_TENSION) = 0.5;
     *s.add(STATE_SMOOTH_TENSION) = 0.5;
+    *s.add(STATE_SPRING_TYPE) = 0.0;
+    *s.add(STATE_STEREO_WIDTH) = 0.7;
+    *s.add(STATE_SMOOTH_WIDTH) = 0.7;
     let speed = target_speed(0.0, 0.5, 6.0, 0.0, 120.0);
     *s.add(STATE_SMOOTH_SPEED) = speed;
     *s.add(STATE_SMOOTH_INTENSITY) = intensity_gain(0.45);
@@ -401,6 +438,7 @@ unsafe extern "C" fn space_echo_process(
     let input_gain = db_to_amp((*s.add(STATE_INPUT_DB)).clamp(-12.0, 24.0));
     let wf_amt = (*s.add(STATE_WOW_FLUTTER)).clamp(0.0, 1.0);
     let age = (*s.add(STATE_AGE)).clamp(0.0, 1.0);
+    let width = (*s.add(STATE_STEREO_WIDTH)).clamp(0.0, 1.0);
 
     let mod_rate_depths = [
         *s.add(STATE_MOD_RATE_DEPTH_1),
@@ -475,7 +513,9 @@ unsafe extern "C" fn space_echo_process(
     let mut smooth_tension = *s.add(STATE_SMOOTH_TENSION);
     smooth_tension += 0.1 * (tension_knob - smooth_tension);
     *s.add(STATE_SMOOTH_TENSION) = smooth_tension;
-    let spring_params = SpringParams::re201().with_tension(smooth_tension);
+    let spring_type = (*s.add(STATE_SPRING_TYPE)).round().clamp(0.0, 1.0) as usize;
+    let (spring_base, spring_out_gain) = spring_type_params(spring_type);
+    let spring_params = spring_base.with_tension(smooth_tension);
     let spring_coef_a = SpringCoeffs::new(&spring_params, sr);
     let spring_coef_b = SpringCoeffs::new(&spring_tank_b_params(&spring_params), sr);
 
@@ -485,6 +525,7 @@ unsafe extern "C" fn space_echo_process(
     let mut smooth_bass = *s.add(STATE_SMOOTH_BASS);
     let mut smooth_treble = *s.add(STATE_SMOOTH_TREBLE);
     let mut smooth_dry = *s.add(STATE_SMOOTH_DRY);
+    let mut smooth_width = *s.add(STATE_SMOOTH_WIDTH);
     let mut wpos = (*s.add(STATE_WRITE_POS)) as usize % TAPE_BUF_LEN;
     let mut wow_phase = *s.add(STATE_WOW_PHASE);
     let mut flut_phase1 = *s.add(STATE_FLUT_PHASE1);
@@ -511,6 +552,16 @@ unsafe extern "C" fn space_echo_process(
     let mut fb_prev = *s.add(STATE_FB_PREV);
     let mut loop_dc_x1 = *s.add(STATE_LOOP_DC_X1);
     let mut loop_dc_y1 = *s.add(STATE_LOOP_DC_Y1);
+    let mut side_loss_z1 = *s.add(STATE_SIDE_LOSS_Z1);
+    let mut side_loss_z2 = *s.add(STATE_SIDE_LOSS_Z2);
+    let mut side_bump_lp = *s.add(STATE_SIDE_BUMP_LP);
+    let mut side_bump_sub_lp = *s.add(STATE_SIDE_BUMP_SUB_LP);
+    let mut side_bass_lp = *s.add(STATE_SIDE_BASS_LP);
+    let mut side_treble_lp = *s.add(STATE_SIDE_TREBLE_LP);
+    let mut spring_bass_lp_a = *s.add(STATE_SPRING_BASS_LP_A);
+    let mut spring_treble_lp_a = *s.add(STATE_SPRING_TREBLE_LP_A);
+    let mut spring_bass_lp_b = *s.add(STATE_SPRING_BASS_LP_B);
+    let mut spring_treble_lp_b = *s.add(STATE_SPRING_TREBLE_LP_B);
 
     let tape = s.add(STATE_TAPE_OFFSET);
     let spring_a_state =
@@ -520,6 +571,17 @@ unsafe extern "C" fn space_echo_process(
 
     let target_intensity = intensity_gain(intensity_knob);
     let fb_norm = 1.0 / (head_mask.count_ones().max(1)) as f32;
+
+    // Stereo pan per head, scaled by the width knob: a single active head
+    // stays centered (like the hardware), a pair splits L/R so the repeats
+    // alternate, and all three sweep L → C → R across the echo taps.
+    // Positive pan = left (the side signal is added to L, subtracted from R).
+    let head_pan: [f32; 3] = match head_mask {
+        0b011 => [1.0, -1.0, 0.0],
+        0b110 => [0.0, 1.0, -1.0],
+        0b111 => [1.0, 0.0, -1.0],
+        _ => [0.0, 0.0, 0.0],
+    };
 
     for i in 0..nf {
         // ── Parameter smoothing + host modulation ──
@@ -544,6 +606,7 @@ unsafe extern "C" fn space_echo_process(
         smooth_bass += param_smooth * (bass_gain - smooth_bass);
         smooth_treble += param_smooth * (treble_gain - smooth_treble);
         smooth_dry += param_smooth * (dry_level - smooth_dry);
+        smooth_width += param_smooth * (width - smooth_width);
         let loop_gain = (smooth_intensity + intensity_mod.clamp(-1.0, 1.0) * 1.15).clamp(0.0, 1.15);
 
         // Rate modulation goes through the same motor smoother, so modulating
@@ -676,21 +739,50 @@ unsafe extern "C" fn space_echo_process(
         // regenerate at the same rate as a single head instead of 2× hotter.
         fb_prev = echo * fb_norm;
 
+        // Stereo width: the panned-head difference signal runs through a copy
+        // of the playback EQ so both channels keep the in-loop tone; the
+        // feedback tap above stays mono, so width never changes the
+        // regeneration behavior.
+        let side_in = smooth_width
+            * (head_pan[0] * heads[0] + head_pan[1] * heads[1] + head_pan[2] * heads[2]);
+        let side_loss = biquad_sample(side_in, loss_lp, &mut side_loss_z1, &mut side_loss_z2);
+        side_bump_lp += bump_coef * (side_loss - side_bump_lp);
+        side_bump_sub_lp += bump_sub_coef * (side_bump_lp - side_bump_sub_lp);
+        let side_bump = side_loss + bump_gain * (side_bump_lp - side_bump_sub_lp);
+        side_bass_lp += bass_coef * (side_bump - side_bass_lp);
+        let side_bass = side_bump + smooth_bass * side_bass_lp;
+        side_treble_lp += treble_coef * (side_bass - side_treble_lp);
+        let side = side_bass + smooth_treble * (side_bass - side_treble_lp);
+
         // ── Spring reverb (fed from preamp + echo, per the RE-201 bus) ──
         let (tank_a, tank_b) = if reverb_on {
             let spring_in = (pre + echo) * 0.7;
-            (
-                SPRING_OUT_GAIN * spring_tank_process(spring_in, &spring_coef_a, spring_a_state),
-                SPRING_OUT_GAIN * spring_tank_process(spring_in, &spring_coef_b, spring_b_state),
-            )
+            let raw_a =
+                spring_out_gain * spring_tank_process(spring_in, &spring_coef_a, spring_a_state);
+            let raw_b =
+                spring_out_gain * spring_tank_process(spring_in, &spring_coef_b, spring_b_state);
+            // Bass/treble shelves on the tank outputs, so the tone knobs
+            // shape the reverb too (matters most in reverb-only mode, where
+            // the EQ'd echo path is silent).
+            spring_bass_lp_a += bass_coef * (raw_a - spring_bass_lp_a);
+            let a_bass = raw_a + smooth_bass * spring_bass_lp_a;
+            spring_treble_lp_a += treble_coef * (a_bass - spring_treble_lp_a);
+            let a = a_bass + smooth_treble * (a_bass - spring_treble_lp_a);
+            spring_bass_lp_b += bass_coef * (raw_b - spring_bass_lp_b);
+            let b_bass = raw_b + smooth_bass * spring_bass_lp_b;
+            spring_treble_lp_b += treble_coef * (b_bass - spring_treble_lp_b);
+            let b = b_bass + smooth_treble * (b_bass - spring_treble_lp_b);
+            (a, b)
         } else {
             (0.0, 0.0)
         };
 
-        let echo_out = echo * (smooth_echo + echo_mod).clamp(0.0, 1.5);
+        let echo_gain = (smooth_echo + echo_mod).clamp(0.0, 1.5);
+        let echo_out_l = (echo + side) * echo_gain;
+        let echo_out_r = (echo - side) * echo_gain;
         let rev_gain = (smooth_reverb + reverb_mod).clamp(0.0, 1.5);
-        *out0.add(i) = dry_l * smooth_dry + echo_out + (0.85 * tank_a + 0.35 * tank_b) * rev_gain;
-        *out1.add(i) = dry_r * smooth_dry + echo_out + (0.35 * tank_a + 0.85 * tank_b) * rev_gain;
+        *out0.add(i) = dry_l * smooth_dry + echo_out_l + (0.85 * tank_a + 0.35 * tank_b) * rev_gain;
+        *out1.add(i) = dry_r * smooth_dry + echo_out_r + (0.35 * tank_a + 0.85 * tank_b) * rev_gain;
 
         wpos = (wpos + 1) % TAPE_BUF_LEN;
     }
@@ -728,6 +820,17 @@ unsafe extern "C" fn space_echo_process(
     *s.add(STATE_FB_PREV) = fb_prev;
     *s.add(STATE_LOOP_DC_X1) = loop_dc_x1;
     *s.add(STATE_LOOP_DC_Y1) = loop_dc_y1;
+    *s.add(STATE_SMOOTH_WIDTH) = smooth_width;
+    *s.add(STATE_SIDE_LOSS_Z1) = side_loss_z1;
+    *s.add(STATE_SIDE_LOSS_Z2) = side_loss_z2;
+    *s.add(STATE_SIDE_BUMP_LP) = side_bump_lp;
+    *s.add(STATE_SIDE_BUMP_SUB_LP) = side_bump_sub_lp;
+    *s.add(STATE_SIDE_BASS_LP) = side_bass_lp;
+    *s.add(STATE_SIDE_TREBLE_LP) = side_treble_lp;
+    *s.add(STATE_SPRING_BASS_LP_A) = spring_bass_lp_a;
+    *s.add(STATE_SPRING_TREBLE_LP_A) = spring_treble_lp_a;
+    *s.add(STATE_SPRING_BASS_LP_B) = spring_bass_lp_b;
+    *s.add(STATE_SPRING_TREBLE_LP_B) = spring_treble_lp_b;
 }
 
 pub fn space_echo_vtable() -> NodeVTable {
@@ -803,11 +906,14 @@ mod tests {
         (samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32).sqrt()
     }
 
-    // Quiet-test baseline: zero out character noise sources.
+    // Quiet-test baseline: zero out character noise sources and the stereo
+    // width so single-channel assertions see the plain mono echo path.
     fn clean_state() -> Vec<f32> {
         let mut state = init_state();
         state[STATE_AGE] = 0.0;
         state[STATE_WOW_FLUTTER] = 0.0;
+        state[STATE_STEREO_WIDTH] = 0.0;
+        state[STATE_SMOOTH_WIDTH] = 0.0;
         state
     }
 
@@ -839,6 +945,97 @@ mod tests {
             i += 1;
         }
         peaks
+    }
+
+    // Echo-only heads 1+2 with dry muted, speed pinned to nominal.
+    fn width_test_state(width: f32) -> Vec<f32> {
+        let mut state = clean_state();
+        state[STATE_MODE] = 3.0;
+        state[STATE_INTENSITY] = 0.0;
+        state[STATE_SMOOTH_INTENSITY] = 0.0;
+        state[STATE_DRY] = 0.0;
+        state[STATE_SMOOTH_DRY] = 0.0;
+        let knob = (1.0 / MIN_SPEED).ln() / (MAX_SPEED / MIN_SPEED).ln();
+        state[STATE_RATE] = knob;
+        state[STATE_SMOOTH_SPEED] = 1.0;
+        state[STATE_STEREO_WIDTH] = width;
+        state[STATE_SMOOTH_WIDTH] = width;
+        state
+    }
+
+    fn peak_near(samples: &[f32], ms: f32) -> f32 {
+        let center = (ms * 0.001 * SR as f32) as usize;
+        samples[center.saturating_sub(200)..(center + 200).min(samples.len())]
+            .iter()
+            .fold(0.0f32, |m, x| m.max(x.abs()))
+    }
+
+    #[test]
+    fn zero_width_paired_heads_stay_mono() {
+        let mut state = width_test_state(0.0);
+        let frames = SR as usize / 2;
+        let (out_l, out_r) = render(&mut state, &impulse(frames), &impulse(frames));
+        assert_eq!(out_l, out_r);
+    }
+
+    #[test]
+    fn width_pans_head_1_left_and_head_2_right() {
+        let mut state = width_test_state(1.0);
+        let frames = SR as usize / 2;
+        let (out_l, out_r) = render(&mut state, &impulse(frames), &impulse(frames));
+        let (l1, r1) = (peak_near(&out_l, 69.0), peak_near(&out_r, 69.0));
+        let (l2, r2) = (peak_near(&out_l, 138.0), peak_near(&out_r, 138.0));
+        assert!(l1 > 3.0 * r1, "head 1 should lean left: L {l1} vs R {r1}");
+        assert!(r2 > 3.0 * l2, "head 2 should lean right: L {l2} vs R {r2}");
+    }
+
+    #[test]
+    fn width_never_changes_the_mono_sum() {
+        let frames = SR as usize / 2;
+        let mut narrow = width_test_state(0.0);
+        let (nl, nr) = render(&mut narrow, &impulse(frames), &impulse(frames));
+        let mut wide = width_test_state(1.0);
+        let (wl, wr) = render(&mut wide, &impulse(frames), &impulse(frames));
+        for i in 0..frames {
+            let mid_n = 0.5 * (nl[i] + nr[i]);
+            let mid_w = 0.5 * (wl[i] + wr[i]);
+            assert!(
+                (mid_n - mid_w).abs() < 1e-5,
+                "mono sum diverged at {i}: {mid_n} vs {mid_w}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_head_stays_centered_at_full_width() {
+        let mut state = width_test_state(1.0);
+        state[STATE_MODE] = 1.0; // head 2 only
+        let frames = SR as usize / 2;
+        let (out_l, out_r) = render(&mut state, &impulse(frames), &impulse(frames));
+        assert_eq!(out_l, out_r);
+    }
+
+    #[test]
+    fn tone_knobs_shape_reverb_only_mode() {
+        let run = |treble: f32| {
+            let mut state = clean_state();
+            state[STATE_MODE] = 11.0; // reverb only
+            state[STATE_DRY] = 0.0;
+            state[STATE_SMOOTH_DRY] = 0.0;
+            state[STATE_TREBLE] = treble;
+            state[STATE_SMOOTH_TREBLE] = db_to_amp(treble * 8.0) - 1.0;
+            let frames = SR as usize;
+            let (out_l, _) = render(&mut state, &impulse(frames), &impulse(frames));
+            // First-difference RMS emphasizes the treble band the shelf acts on.
+            let hf: Vec<f32> = out_l.windows(2).map(|w| w[1] - w[0]).collect();
+            rms(&hf)
+        };
+        let dark = run(-1.0);
+        let bright = run(1.0);
+        assert!(
+            bright > dark * 1.5,
+            "treble knob should shape the reverb-only tail: dark {dark} vs bright {bright}"
+        );
     }
 
     #[test]

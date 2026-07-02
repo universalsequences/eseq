@@ -25,7 +25,8 @@ use crate::sampler::{
 use crate::scheduled_event::{
     resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
-    ScheduledInstrumentParams, ScheduledSamplerParams,
+    ScheduledInstrumentParams, ScheduledInstrumentTensorParam, ScheduledInstrumentTensorParams,
+    ScheduledSamplerParams,
 };
 use crate::sequencer::{
     rack_slot_pool_index, sync_beats, BusId, CustomInstrumentRunMode, InstrumentType,
@@ -1816,6 +1817,20 @@ fn instrument_sound_fingerprint(
         };
         value_bits.hash(&mut hasher);
     }
+    let num_tensors = slot.tensor_params.num_params();
+    for tensor_idx in 0..num_tensors {
+        if let Some(cell_offset) = slot.tensor_params.tensor_cell_offset(tensor_idx) {
+            cell_offset.hash(&mut hasher);
+        }
+        if let Some(values) = step
+            .and_then(|step_idx| slot.tensor_params.plock_values(step_idx, tensor_idx))
+            .or_else(|| slot.tensor_params.default_values(tensor_idx))
+        {
+            for value in values {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+    }
 
     hasher.finish()
 }
@@ -2133,6 +2148,24 @@ unsafe fn dispatch_instrument_params_to_voice(
     }
 }
 
+unsafe fn dispatch_instrument_tensor_params_to_voice(
+    lg: *mut LiveGraph,
+    synth_id: u64,
+    instrument_tensor_params: &[ScheduledInstrumentTensorParam],
+) {
+    if synth_id == 0 {
+        return;
+    }
+    for tensor in instrument_tensor_params {
+        crate::lisp_host::queue_tensor_write(
+            lg,
+            synth_id as i32,
+            tensor.cell_offset,
+            &tensor.values,
+        );
+    }
+}
+
 unsafe fn dispatch_instrument_defaults_to_voice(
     lg: *mut LiveGraph,
     state: &SequencerState,
@@ -2163,6 +2196,16 @@ unsafe fn dispatch_instrument_defaults_to_voice(
             slot.resolve_node_span(param_idx),
             slot.defaults.get(param_idx),
         );
+    }
+    let num_tensors = slot.tensor_params.num_params();
+    for tensor_idx in 0..num_tensors {
+        let Some(cell_offset) = slot.tensor_params.tensor_cell_offset(tensor_idx) else {
+            continue;
+        };
+        let Some(values) = slot.tensor_params.default_values(tensor_idx) else {
+            continue;
+        };
+        crate::lisp_host::queue_tensor_write(lg, synth_id as i32, cell_offset, &values);
     }
 }
 
@@ -2298,6 +2341,46 @@ fn dispatch_instrument_params_to_active_voices(
     }
 }
 
+fn dispatch_instrument_tensor_params_to_active_voices(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    instrument_tensor_params: &[ScheduledInstrumentTensorParam],
+) {
+    if instrument_tensor_params.is_empty() {
+        return;
+    }
+    let Some(engine_id) = track_engine_id(&data.state, track_idx) else {
+        return;
+    };
+    let pool = &mut data.custom_engine_pools[engine_id];
+    let free_patch =
+        track_custom_run_mode(&data.state, track_idx) == CustomInstrumentRunMode::FreePatch;
+    for voice_idx in 0..pool.num_voices {
+        let targets_voice = if free_patch {
+            voice_idx == 0
+        } else {
+            pool.voices[voice_idx].active
+                && pool.voices[voice_idx].assigned_track == Some(track_idx)
+        };
+        if !targets_voice {
+            continue;
+        }
+        let synth_id =
+            data.state.runtime.engine_synth_node_ids[engine_id][voice_idx].load(Ordering::Relaxed);
+        if synth_id == 0 {
+            continue;
+        }
+        unsafe {
+            dispatch_instrument_tensor_params_to_voice(
+                data.lg.0,
+                synth_id as u64,
+                instrument_tensor_params,
+            );
+        }
+        pool.voices[voice_idx].fingerprint = 0;
+    }
+}
+
 unsafe fn dispatch_sampler_modulator_defaults_to_voice(
     lg: *mut LiveGraph,
     state: &SequencerState,
@@ -2361,6 +2444,7 @@ fn dispatch_scheduled_step(
     chord: crate::scheduled_event::ScheduledChordData,
     mut effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
     instrument_fingerprint: u64,
 ) {
     unsafe {
@@ -2375,6 +2459,7 @@ fn dispatch_scheduled_step(
         resolved,
         chord,
         instrument_params,
+        instrument_tensor_params,
         instrument_fingerprint,
         None,
     );
@@ -2389,6 +2474,7 @@ fn dispatch_scheduled_network_step(
     chord: crate::scheduled_event::ScheduledChordData,
     mut effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
 ) {
@@ -2404,6 +2490,7 @@ fn dispatch_scheduled_network_step(
         resolved,
         chord,
         instrument_params,
+        instrument_tensor_params,
         instrument_fingerprint,
         Some(sampler_params),
     );
@@ -2423,6 +2510,7 @@ fn dispatch_scheduled_event(
             chord,
             effect_params,
             instrument_params,
+            instrument_tensor_params,
             instrument_fingerprint,
         } => {
             dispatch_scheduled_step(
@@ -2435,14 +2523,21 @@ fn dispatch_scheduled_event(
                 chord,
                 effect_params,
                 instrument_params,
+                instrument_tensor_params,
                 instrument_fingerprint,
             );
         }
         ScheduledEventKind::InstrumentParams {
             track,
             instrument_params,
+            instrument_tensor_params,
         } => {
             dispatch_instrument_params_to_active_voices(data, track, &instrument_params);
+            dispatch_instrument_tensor_params_to_active_voices(
+                data,
+                track,
+                &instrument_tensor_params,
+            );
         }
         ScheduledEventKind::EffectParams {
             mut effect_params, ..
@@ -2456,6 +2551,7 @@ fn dispatch_scheduled_event(
             chord,
             effect_params,
             instrument_params,
+            instrument_tensor_params,
             sampler_params,
             instrument_fingerprint,
             ..
@@ -2469,6 +2565,7 @@ fn dispatch_scheduled_event(
                 chord,
                 effect_params,
                 instrument_params,
+                instrument_tensor_params,
                 sampler_params,
                 instrument_fingerprint,
             );
@@ -4148,6 +4245,7 @@ fn fire_resolved(
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
     instrument_fingerprint: u64,
     scheduled_sampler_params: Option<ScheduledSamplerParams>,
 ) {
@@ -4424,6 +4522,11 @@ fn fire_resolved(
                                 modulator_id as u64,
                                 &instrument_params,
                             );
+                            dispatch_instrument_tensor_params_to_voice(
+                                data.lg.0,
+                                synth_id as u64,
+                                &instrument_tensor_params,
+                            );
                         }
                     }
                 } else {
@@ -4443,6 +4546,11 @@ fn fire_resolved(
                                 synth_id as u64,
                                 modulator_id as u64,
                                 &instrument_params,
+                            );
+                            dispatch_instrument_tensor_params_to_voice(
+                                data.lg.0,
+                                synth_id as u64,
+                                &instrument_tensor_params,
                             );
                         }
                     }
@@ -4600,6 +4708,11 @@ fn fire_resolved(
                             modulator_id as u64,
                             &instrument_params,
                         );
+                        dispatch_instrument_tensor_params_to_voice(
+                            data.lg.0,
+                            synth_id as u64,
+                            &instrument_tensor_params,
+                        );
                     }
                 }
             } else {
@@ -4619,6 +4732,11 @@ fn fire_resolved(
                             synth_id as u64,
                             modulator_id as u64,
                             &instrument_params,
+                        );
+                        dispatch_instrument_tensor_params_to_voice(
+                            data.lg.0,
+                            synth_id as u64,
+                            &instrument_tensor_params,
                         );
                     }
                 }
@@ -5730,10 +5848,12 @@ mod tests {
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
     use crate::analysis::{pack_ptr, OnsetTableShared};
-    use crate::effects::{EffectDescriptor, EffectSlotSnapshot, EffectSlotState};
+    use crate::effects::{
+        EffectDescriptor, EffectSlotSnapshot, EffectSlotState, TensorParamDescriptor,
+    };
     use crate::scheduled_event::{
         ScheduledChordData, ScheduledEvent, ScheduledEventKind, ScheduledInstrumentParams,
-        ScheduledSamplerParams,
+        ScheduledInstrumentTensorParams, ScheduledSamplerParams,
     };
     use crate::sequencer::{
         CustomInstrumentRunMode, InstrumentType, RackRouting, RackSlotParamPlocks,
@@ -6265,6 +6385,7 @@ mod tests {
                     },
                     effect_params: Vec::new(),
                     instrument_params: ScheduledInstrumentParams::new(),
+                    instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                     instrument_fingerprint: 0,
                 },
             }),
@@ -6302,6 +6423,7 @@ mod tests {
                     },
                     effect_params: Vec::new(),
                     instrument_params: ScheduledInstrumentParams::new(),
+                    instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                     sampler_params: ScheduledSamplerParams::default(),
                     instrument_fingerprint: 0,
                 },
@@ -6349,6 +6471,43 @@ mod tests {
         });
 
         assert_eq!(winner, 0);
+    }
+
+    #[test]
+    fn instrument_sound_fingerprint_changes_for_tensor_default_and_plock_values() {
+        let state = SequencerState::new(1, Vec::new());
+        let desc = EffectDescriptor {
+            name: "tensor instrument".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: vec![TensorParamDescriptor {
+                name: "strike_mask".to_string(),
+                shape: vec![2, 2],
+                cell_offset: 64,
+                default: vec![0.1, 0.2, 0.3, 0.4],
+                min: 0.0,
+                max: 1.0,
+            }],
+            params: Vec::new(),
+        };
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 42);
+
+        let default_fingerprint = instrument_sound_fingerprint(&state, 0, 5, None);
+        state.pattern.instrument_slots[0]
+            .tensor_params
+            .set_default_cell(0, 0, 0.75)
+            .expect("default tensor edit");
+        let edited_default_fingerprint = instrument_sound_fingerprint(&state, 0, 5, None);
+        state.pattern.instrument_slots[0]
+            .tensor_params
+            .set_plock_cell(3, 0, 1, 0.95)
+            .expect("tensor p-lock edit");
+        let plocked_fingerprint = instrument_sound_fingerprint(&state, 0, 5, Some(3));
+
+        assert_ne!(default_fingerprint, edited_default_fingerprint);
+        assert_ne!(edited_default_fingerprint, plocked_fingerprint);
     }
 
     #[test]

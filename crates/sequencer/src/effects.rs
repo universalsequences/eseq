@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::neural::ParamNodeId;
 use crate::sequencer::MAX_STEPS;
@@ -7,6 +8,9 @@ use crate::sequencer::MAX_STEPS;
 /// Custom instruments include generated host-modulation controls in addition to
 /// their declared DGen params, so dense synths can exceed 128 parameters.
 pub const MAX_SLOT_PARAMS: usize = 512;
+pub const MAX_SLOT_TENSOR_PARAMS: usize = 16;
+pub const MAX_SLOT_TENSOR_PARAM_CELLS: usize = 64;
+pub const MAX_SLOT_TENSOR_CELLS: usize = MAX_SLOT_TENSOR_PARAMS * MAX_SLOT_TENSOR_PARAM_CELLS;
 
 /// Number of fixed built-in effect slots. Built-ins are now ordinary inserts,
 /// so track effect chains start at slot 0.
@@ -254,10 +258,23 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
-        ParamScaling,
+        tensor_param_descriptors_from_manifest, EffectDescriptor, EffectSlotSnapshot,
+        EffectSlotState, ParamDescriptor, ParamKind, ParamScaling, TensorParamDescriptor,
     };
+    use crate::lisp_host::{TensorInit, TensorMeta};
     use crate::neural::ParamNodeId;
+
+    fn tensor_meta(name: &str, cell_offset: usize, shape: Vec<usize>, mutable: bool) -> TensorMeta {
+        TensorMeta {
+            name: name.to_string(),
+            cell_offset,
+            shape,
+            kind: "f32".to_string(),
+            mutable,
+            source_file: None,
+            source_sample_rate: None,
+        }
+    }
 
     #[test]
     fn denormalize_boolean_snaps_to_zero_or_one() {
@@ -321,6 +338,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params,
         };
 
@@ -334,6 +352,96 @@ mod tests {
     }
 
     #[test]
+    fn tensor_param_descriptors_expose_small_named_mutable_tensors() {
+        let tensors = vec![
+            tensor_meta("strike_mask", 64, vec![2, 2], true),
+            tensor_meta("", 80, vec![2, 2], true),
+            tensor_meta("immutable", 96, vec![2, 2], false),
+            tensor_meta("rank3", 112, vec![2, 2, 2], true),
+        ];
+        let init = vec![TensorInit {
+            offset: 64,
+            data: vec![-0.25, 0.25, 1.5, f32::NAN, 0.75],
+        }];
+
+        let descriptors = tensor_param_descriptors_from_manifest(&tensors, &init);
+
+        assert_eq!(descriptors.len(), 1);
+        let tensor = &descriptors[0];
+        assert_eq!(tensor.name, "strike_mask");
+        assert_eq!(tensor.shape, vec![2, 2]);
+        assert_eq!(tensor.cell_offset, 64);
+        assert_eq!(tensor.rows(), 2);
+        assert_eq!(tensor.cols(), 2);
+        assert_eq!(tensor.default, vec![0.0, 0.25, 1.0, 0.0]);
+        assert_eq!((tensor.min, tensor.max), (0.0, 1.0));
+    }
+
+    #[test]
+    fn tensor_param_descriptors_hide_large_mutable_tensors() {
+        let tensors = vec![tensor_meta("ir_buffer", 128, vec![128, 1024], true)];
+
+        let descriptors = tensor_param_descriptors_from_manifest(&tensors, &[]);
+
+        assert!(
+            descriptors.is_empty(),
+            "large mutable IR-style tensors must not become user parameters"
+        );
+    }
+
+    #[test]
+    fn slot_tensor_params_capture_restore_defaults_and_whole_matrix_plocks() {
+        let desc = EffectDescriptor {
+            name: "tensor instrument".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: vec![TensorParamDescriptor {
+                name: "strike_mask".to_string(),
+                shape: vec![2, 2],
+                cell_offset: 64,
+                default: vec![0.1, 0.2, 0.3, 0.4],
+                min: 0.0,
+                max: 1.0,
+            }],
+            params: Vec::new(),
+        };
+        let slot = EffectSlotState::new(&desc, 10);
+
+        let edited = slot
+            .tensor_params
+            .set_plock_cell(7, 0, 2, 0.95)
+            .expect("tensor p-lock edit");
+
+        assert_eq!(edited, vec![0.1, 0.2, 0.95, 0.4]);
+        assert_eq!(
+            slot.tensor_params.default_values(0).unwrap(),
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(slot.tensor_params.plock_values(7, 0).unwrap(), edited);
+
+        let snapshot = EffectSlotSnapshot::capture(&slot);
+        assert_eq!(snapshot.tensor_params.len(), 1);
+        assert_eq!(snapshot.tensor_params[0].default, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(
+            snapshot.tensor_params[0].plocks[7],
+            Some(vec![0.1, 0.2, 0.95, 0.4])
+        );
+
+        let restored = EffectSlotState::empty();
+        snapshot.restore(&restored);
+        assert_eq!(
+            restored.tensor_params.default_values(0).unwrap(),
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(
+            restored.tensor_params.plock_values(7, 0).unwrap(),
+            vec![0.1, 0.2, 0.95, 0.4]
+        );
+    }
+
+    #[test]
     fn sync_to_descriptor_rebinds_loaded_plock_ids_to_live_node_id() {
         let desc = EffectDescriptor {
             name: "test".to_string(),
@@ -341,6 +449,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
                 name: "cutoff".to_string(),
                 min: 0.0,
@@ -368,6 +477,7 @@ mod tests {
             param_node_indices: vec![15],
             param_node_spans: vec![1],
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
+            tensor_params: Vec::new(),
             ir: None,
         };
         snapshot.plocks[3][0] = Some(0.9);
@@ -410,6 +520,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params,
         };
 
@@ -431,6 +542,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "a".to_string(),
@@ -464,6 +576,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "a".to_string(),
@@ -517,6 +630,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -552,6 +666,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "gain".to_string(),
@@ -607,6 +722,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -642,6 +758,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -694,6 +811,7 @@ mod tests {
             output_channels: 1,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -1023,11 +1141,24 @@ mod tests {
         );
         assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
         assert_eq!(desc.instrument_modulators.len(), 4);
-        // Spring tension macro rides at the end (after the modulator params)
-        // so stored plock param indices stay stable.
-        let tension = desc.params.last().expect("space echo params");
+        // Spring tension, spring type, and stereo width ride at the end (after
+        // the modulator params) so stored plock param indices stay stable.
+        let n = desc.params.len();
+        let tension = &desc.params[n - 3];
         assert_eq!(tension.name, "tension");
         assert_eq!(tension.default, 0.5);
+        let spring_type = &desc.params[n - 2];
+        assert_eq!(spring_type.name, "spring type");
+        match &spring_type.kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), 2);
+                assert_eq!(labels[1], "King Tubby");
+            }
+            other => panic!("spring type should be enum, got {other:?}"),
+        }
+        let width = &desc.params[n - 1];
+        assert_eq!(width.name, "stereo width");
+        assert_eq!(width.default, 0.7);
         match &desc.params[1].kind {
             ParamKind::Enum { labels } => {
                 assert_eq!(labels.len(), 12);
@@ -1350,6 +1481,125 @@ mod tests {
 
 // ── EffectDescriptor ──
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorParamDescriptor {
+    pub name: String,
+    pub shape: Vec<usize>,
+    pub cell_offset: usize,
+    pub default: Vec<f32>,
+    pub min: f32,
+    pub max: f32,
+}
+
+impl TensorParamDescriptor {
+    pub fn cell_count(&self) -> usize {
+        self.shape.iter().copied().product()
+    }
+
+    pub fn rows(&self) -> usize {
+        match self.shape.as_slice() {
+            [cols] if *cols > 0 => 1,
+            [rows, _cols] if *rows > 0 => *rows,
+            _ => 0,
+        }
+    }
+
+    pub fn cols(&self) -> usize {
+        match self.shape.as_slice() {
+            [cols] if *cols > 0 => *cols,
+            [_rows, cols] if *cols > 0 => *cols,
+            _ => 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorParamSnapshot {
+    pub name: String,
+    pub shape: Vec<usize>,
+    pub cell_offset: usize,
+    pub default: Vec<f32>,
+    pub plocks: Vec<Option<Vec<f32>>>,
+}
+
+impl TensorParamSnapshot {
+    pub fn cell_count(&self) -> usize {
+        self.shape.iter().copied().product()
+    }
+
+    fn same_identity_as_descriptor(&self, desc: &TensorParamDescriptor) -> bool {
+        self.name == desc.name
+            && self.shape == desc.shape
+            && self.default.len() == desc.default.len()
+    }
+}
+
+fn exposed_tensor_cell_count(shape: &[usize]) -> Option<usize> {
+    if !(1..=2).contains(&shape.len()) {
+        return None;
+    }
+    let mut count = 1usize;
+    for dim in shape {
+        if *dim == 0 {
+            return None;
+        }
+        count = count.checked_mul(*dim)?;
+    }
+    (count <= MAX_SLOT_TENSOR_PARAM_CELLS).then_some(count)
+}
+
+fn clamped_tensor_cell(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+pub fn tensor_param_descriptors_from_manifest(
+    tensors: &[crate::lisp_host::TensorMeta],
+    tensor_init_data: &[crate::lisp_host::TensorInit],
+) -> Vec<TensorParamDescriptor> {
+    let mut descriptors = Vec::new();
+    for tensor in tensors {
+        if descriptors.len() >= MAX_SLOT_TENSOR_PARAMS {
+            break;
+        }
+        let name = tensor.name.trim();
+        if name.is_empty() || !tensor.mutable {
+            continue;
+        }
+        let Some(cell_count) = exposed_tensor_cell_count(&tensor.shape) else {
+            continue;
+        };
+        let init = tensor_init_data
+            .iter()
+            .find(|init| init.offset == tensor.cell_offset);
+        let mut default = init
+            .map(|init| {
+                init.data
+                    .iter()
+                    .copied()
+                    .take(cell_count)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        default.resize(cell_count, 0.0);
+        for value in &mut default {
+            *value = clamped_tensor_cell(*value);
+        }
+        descriptors.push(TensorParamDescriptor {
+            name: name.to_string(),
+            shape: tensor.shape.clone(),
+            cell_offset: tensor.cell_offset,
+            default,
+            min: 0.0,
+            max: 1.0,
+        });
+    }
+    descriptors
+}
+
 fn sampler_mod_depth_range(destination: &str) -> (f32, f32, Option<String>) {
     match destination {
         "speed" => (-8.0, 8.0, None),
@@ -1365,6 +1615,7 @@ fn sampler_mod_depth_range(destination: &str) -> (f32, f32, Option<String>) {
 pub struct EffectDescriptor {
     pub name: String,
     pub params: Vec<ParamDescriptor>,
+    pub tensor_params: Vec<TensorParamDescriptor>,
     pub input_channels: usize,
     pub output_channels: usize,
     pub instrument_modulators: Vec<InstrumentModulatorDescriptor>,
@@ -1477,6 +1728,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::filter::FILTER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1763,6 +2015,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "wet".to_string(),
@@ -1872,6 +2125,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::str8_delay::STR8_DELAY_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -2237,6 +2491,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::space_echo::SPACE_ECHO_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -2558,6 +2813,37 @@ impl EffectDescriptor {
             ui_metadata: None,
         });
 
+        // Spring type + stereo width — also appended last (in this order) so
+        // existing projects' plock / mod param indices stay stable.
+        desc.params.push(ParamDescriptor {
+            name: "spring type".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            kind: ParamKind::Enum {
+                labels: vec!["RE-201".to_string(), "King Tubby".to_string()],
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_SPRING_TYPE as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+        desc.params.push(ParamDescriptor {
+            name: "stereo width".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.7,
+            kind: ParamKind::Continuous {
+                unit: Some("%".to_string()),
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::space_echo::SPACE_ECHO_PARAM_STEREO_WIDTH as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+
         desc
     }
 
@@ -2576,6 +2862,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::dimension::DIMENSION_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -2822,6 +3109,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::dj_mixer::DJ_MIXER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -3023,6 +3311,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mix".to_string(),
@@ -3096,6 +3385,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -3292,6 +3582,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "threshold".to_string(),
@@ -3388,6 +3679,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "depth".to_string(),
@@ -3554,6 +3846,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "input".to_string(),
@@ -3624,6 +3917,7 @@ impl EffectDescriptor {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "drive".to_string(),
@@ -4024,6 +4318,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets,
+            tensor_params: Vec::new(),
             params,
         }
     }
@@ -4046,6 +4341,7 @@ impl EffectDescriptor {
         Self {
             name: String::new(),
             params: Vec::new(),
+            tensor_params: Vec::new(),
             input_channels: 0,
             output_channels: 0,
             instrument_modulators: Vec::new(),
@@ -4089,6 +4385,7 @@ impl EffectDescriptor {
         Self {
             name: name.to_string(),
             params: descriptors,
+            tensor_params: Vec::new(),
             input_channels,
             output_channels,
             instrument_modulators: Vec::new(),
@@ -4437,6 +4734,385 @@ impl SlotParamDefaults {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SlotTensorParamMeta {
+    name: String,
+    shape: Vec<usize>,
+    cell_offset: usize,
+    flat_offset: usize,
+    len: usize,
+}
+
+pub struct SlotTensorParamData {
+    metadata: Mutex<Vec<SlotTensorParamMeta>>,
+    num_params: AtomicU32,
+    cell_offsets: Vec<AtomicU32>,
+    flat_offsets: Vec<AtomicU32>,
+    lengths: Vec<AtomicU32>,
+    defaults: Vec<AtomicU32>,
+    plocks: Vec<AtomicU32>,
+    plock_count: AtomicU32,
+    step_counts: Vec<AtomicU32>,
+}
+
+impl SlotTensorParamData {
+    pub fn new() -> Self {
+        Self {
+            metadata: Mutex::new(Vec::new()),
+            num_params: AtomicU32::new(0),
+            cell_offsets: (0..MAX_SLOT_TENSOR_PARAMS)
+                .map(|_| AtomicU32::new(u32::MAX))
+                .collect(),
+            flat_offsets: (0..MAX_SLOT_TENSOR_PARAMS)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
+            lengths: (0..MAX_SLOT_TENSOR_PARAMS)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
+            defaults: (0..MAX_SLOT_TENSOR_CELLS)
+                .map(|_| AtomicU32::new(0.0_f32.to_bits()))
+                .collect(),
+            plocks: (0..MAX_STEPS * MAX_SLOT_TENSOR_CELLS)
+                .map(|_| AtomicU32::new(NAN_BITS))
+                .collect(),
+            plock_count: AtomicU32::new(0),
+            step_counts: (0..MAX_STEPS).map(|_| AtomicU32::new(0)).collect(),
+        }
+    }
+
+    fn metadata(&self) -> std::sync::MutexGuard<'_, Vec<SlotTensorParamMeta>> {
+        self.metadata
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn meta_at(&self, tensor_idx: usize) -> Option<SlotTensorParamMeta> {
+        self.metadata().get(tensor_idx).cloned()
+    }
+
+    fn plock_index(step: usize, flat_offset: usize, cell_idx: usize) -> usize {
+        step * MAX_SLOT_TENSOR_CELLS + flat_offset + cell_idx
+    }
+
+    fn has_plock_for_meta(&self, step: usize, meta: &SlotTensorParamMeta) -> bool {
+        if step >= MAX_STEPS || meta.len == 0 {
+            return false;
+        }
+        let idx = Self::plock_index(step, meta.flat_offset, 0);
+        idx < self.plocks.len()
+            && !f32::from_bits(self.plocks[idx].load(Ordering::Relaxed)).is_nan()
+    }
+
+    fn note_plock_transition(&self, step: usize, old_set: bool, new_set: bool) {
+        if !old_set && new_set {
+            self.plock_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(count) = self.step_counts.get(step) {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if old_set && !new_set {
+            self.plock_count.fetch_sub(1, Ordering::Relaxed);
+            if let Some(count) = self.step_counts.get(step) {
+                count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn has_any_plock(&self) -> bool {
+        self.plock_count.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn clear_all_plocks(&self) {
+        if !self.has_any_plock() {
+            return;
+        }
+        for value in &self.plocks {
+            value.store(NAN_BITS, Ordering::Relaxed);
+        }
+        self.plock_count.store(0, Ordering::Relaxed);
+        for count in &self.step_counts {
+            count.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub fn clear(&self) {
+        *self.metadata() = Vec::new();
+        self.num_params.store(0, Ordering::Relaxed);
+        for idx in 0..MAX_SLOT_TENSOR_PARAMS {
+            self.cell_offsets[idx].store(u32::MAX, Ordering::Relaxed);
+            self.flat_offsets[idx].store(0, Ordering::Relaxed);
+            self.lengths[idx].store(0, Ordering::Relaxed);
+        }
+        for value in &self.defaults {
+            value.store(0.0_f32.to_bits(), Ordering::Relaxed);
+        }
+        self.clear_all_plocks();
+    }
+
+    pub fn apply_descriptor(&self, descriptors: &[TensorParamDescriptor]) {
+        self.clear();
+        let mut metadata = Vec::new();
+        let mut flat_offset = 0usize;
+        for desc in descriptors.iter().take(MAX_SLOT_TENSOR_PARAMS) {
+            let len = desc.default.len();
+            if len == 0 || len > MAX_SLOT_TENSOR_PARAM_CELLS {
+                continue;
+            }
+            let Some(next_offset) = flat_offset.checked_add(len) else {
+                break;
+            };
+            if next_offset > MAX_SLOT_TENSOR_CELLS {
+                break;
+            }
+            let idx = metadata.len();
+            self.cell_offsets[idx].store(desc.cell_offset as u32, Ordering::Relaxed);
+            self.flat_offsets[idx].store(flat_offset as u32, Ordering::Relaxed);
+            self.lengths[idx].store(len as u32, Ordering::Relaxed);
+            for (cell_idx, value) in desc.default.iter().copied().enumerate() {
+                self.defaults[flat_offset + cell_idx]
+                    .store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
+            }
+            metadata.push(SlotTensorParamMeta {
+                name: desc.name.clone(),
+                shape: desc.shape.clone(),
+                cell_offset: desc.cell_offset,
+                flat_offset,
+                len,
+            });
+            flat_offset = next_offset;
+        }
+        self.num_params
+            .store(metadata.len() as u32, Ordering::Relaxed);
+        *self.metadata() = metadata;
+    }
+
+    pub fn num_params(&self) -> usize {
+        self.num_params.load(Ordering::Relaxed) as usize
+    }
+
+    pub fn tensor_len(&self, tensor_idx: usize) -> usize {
+        self.lengths
+            .get(tensor_idx)
+            .map(|len| len.load(Ordering::Relaxed) as usize)
+            .unwrap_or(0)
+    }
+
+    pub fn tensor_cell_offset(&self, tensor_idx: usize) -> Option<usize> {
+        let raw = self.cell_offsets.get(tensor_idx)?.load(Ordering::Relaxed);
+        (raw != u32::MAX).then_some(raw as usize)
+    }
+
+    pub fn default_values(&self, tensor_idx: usize) -> Option<Vec<f32>> {
+        let meta = self.meta_at(tensor_idx)?;
+        let mut values = Vec::with_capacity(meta.len);
+        for cell_idx in 0..meta.len {
+            values.push(f32::from_bits(
+                self.defaults[meta.flat_offset + cell_idx].load(Ordering::Relaxed),
+            ));
+        }
+        Some(values)
+    }
+
+    pub fn plock_values(&self, step: usize, tensor_idx: usize) -> Option<Vec<f32>> {
+        let meta = self.meta_at(tensor_idx)?;
+        if !self.has_plock_for_meta(step, &meta) {
+            return None;
+        }
+        let mut values = Vec::with_capacity(meta.len);
+        for cell_idx in 0..meta.len {
+            let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
+            values.push(f32::from_bits(self.plocks[idx].load(Ordering::Relaxed)));
+        }
+        Some(values)
+    }
+
+    pub fn resolved_values(&self, step: Option<usize>, tensor_idx: usize) -> Option<Vec<f32>> {
+        step.and_then(|step| self.plock_values(step, tensor_idx))
+            .or_else(|| self.default_values(tensor_idx))
+    }
+
+    pub fn set_default(&self, tensor_idx: usize, values: &[f32]) -> bool {
+        let Some(meta) = self.meta_at(tensor_idx) else {
+            return false;
+        };
+        if values.len() != meta.len {
+            return false;
+        }
+        for (cell_idx, value) in values.iter().copied().enumerate() {
+            self.defaults[meta.flat_offset + cell_idx]
+                .store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
+        }
+        true
+    }
+
+    pub fn set_default_cell(
+        &self,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> Option<Vec<f32>> {
+        let mut values = self.default_values(tensor_idx)?;
+        if cell_idx >= values.len() {
+            return None;
+        }
+        values[cell_idx] = clamped_tensor_cell(value);
+        self.set_default(tensor_idx, &values).then_some(values)
+    }
+
+    pub fn set_plock(&self, step: usize, tensor_idx: usize, values: &[f32]) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        let Some(meta) = self.meta_at(tensor_idx) else {
+            return false;
+        };
+        if values.len() != meta.len {
+            return false;
+        }
+        let had_plock = self.has_plock_for_meta(step, &meta);
+        for (cell_idx, value) in values.iter().copied().enumerate() {
+            let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
+            self.plocks[idx].store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
+        }
+        self.note_plock_transition(step, had_plock, true);
+        true
+    }
+
+    pub fn set_plock_cell(
+        &self,
+        step: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> Option<Vec<f32>> {
+        let mut values = self
+            .plock_values(step, tensor_idx)
+            .or_else(|| self.default_values(tensor_idx))?;
+        if cell_idx >= values.len() {
+            return None;
+        }
+        values[cell_idx] = clamped_tensor_cell(value);
+        self.set_plock(step, tensor_idx, &values).then_some(values)
+    }
+
+    pub fn clear_plock(&self, step: usize, tensor_idx: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        let Some(meta) = self.meta_at(tensor_idx) else {
+            return false;
+        };
+        let had_plock = self.has_plock_for_meta(step, &meta);
+        if !had_plock {
+            return true;
+        }
+        for cell_idx in 0..meta.len {
+            let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
+            self.plocks[idx].store(NAN_BITS, Ordering::Relaxed);
+        }
+        self.note_plock_transition(step, true, false);
+        true
+    }
+
+    pub fn capture(&self) -> Vec<TensorParamSnapshot> {
+        let metadata = self.metadata().clone();
+        let mut snapshots = Vec::with_capacity(metadata.len());
+        for (tensor_idx, meta) in metadata.iter().enumerate() {
+            let default = self.default_values(tensor_idx).unwrap_or_default();
+            let mut plocks = if self.has_any_plock() {
+                vec![None; MAX_STEPS]
+            } else {
+                Vec::new()
+            };
+            if self.has_any_plock() {
+                for step in 0..MAX_STEPS {
+                    plocks[step] = self.plock_values(step, tensor_idx);
+                }
+            }
+            snapshots.push(TensorParamSnapshot {
+                name: meta.name.clone(),
+                shape: meta.shape.clone(),
+                cell_offset: meta.cell_offset,
+                default,
+                plocks,
+            });
+        }
+        snapshots
+    }
+
+    pub fn restore_snapshots(&self, snapshots: &[TensorParamSnapshot]) {
+        let descriptors = snapshots
+            .iter()
+            .filter_map(|snapshot| {
+                let cell_count = exposed_tensor_cell_count(&snapshot.shape)?;
+                if snapshot.default.len() != cell_count {
+                    return None;
+                }
+                Some(TensorParamDescriptor {
+                    name: snapshot.name.clone(),
+                    shape: snapshot.shape.clone(),
+                    cell_offset: snapshot.cell_offset,
+                    default: snapshot.default.clone(),
+                    min: 0.0,
+                    max: 1.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.apply_descriptor(&descriptors);
+        for (tensor_idx, snapshot) in snapshots.iter().enumerate().take(self.num_params()) {
+            self.set_default(tensor_idx, &snapshot.default);
+            for (step, values) in snapshot.plocks.iter().enumerate().take(MAX_STEPS) {
+                if let Some(values) = values {
+                    self.set_plock(step, tensor_idx, values);
+                }
+            }
+        }
+    }
+
+    pub fn migrate_matching_snapshots(
+        &self,
+        descriptors: &[TensorParamDescriptor],
+        old_snapshots: &[TensorParamSnapshot],
+    ) {
+        for (tensor_idx, desc) in descriptors.iter().enumerate().take(self.num_params()) {
+            let Some(old) = old_snapshots
+                .iter()
+                .find(|snapshot| snapshot.same_identity_as_descriptor(desc))
+            else {
+                continue;
+            };
+            self.set_default(tensor_idx, &old.default);
+            for (step, values) in old.plocks.iter().enumerate().take(MAX_STEPS) {
+                if let Some(values) = values {
+                    self.set_plock(step, tensor_idx, values);
+                }
+            }
+        }
+    }
+
+    pub fn or_step_plock_mask(&self, mask: &mut [u64; MAX_STEPS / 64]) {
+        if !self.has_any_plock() {
+            return;
+        }
+        for step in 0..MAX_STEPS {
+            if self
+                .step_counts
+                .get(step)
+                .map(|count| count.load(Ordering::Relaxed) > 0)
+                .unwrap_or(false)
+            {
+                mask[step / 64] |= 1u64 << (step % 64);
+            }
+        }
+    }
+
+    pub fn step_has_any_plock(&self, step: usize) -> bool {
+        self.step_counts
+            .get(step)
+            .map(|count| count.load(Ordering::Relaxed) > 0)
+            .unwrap_or(false)
+    }
+}
+
 // ── EffectSlotState (runtime state for one effect in a track's chain) ──
 
 pub struct EffectSlotState {
@@ -4444,6 +5120,7 @@ pub struct EffectSlotState {
     pub modulator_node_id: AtomicU32, // optional host modulation bank node
     pub plocks: SlotPLockData,
     pub defaults: SlotParamDefaults,
+    pub tensor_params: SlotTensorParamData,
     pub num_params: AtomicU32,
     pub param_node_indices: Vec<AtomicU32>, // per-param: idx field for ParamMsg
     pub param_node_spans: Vec<AtomicU32>,   // per-param: contiguous DGen cells updated by idx
@@ -4466,11 +5143,12 @@ impl EffectSlotState {
             .map(|p| AtomicU32::new(p.node_param_span.max(1)))
             .collect();
         param_node_spans.resize_with(capacity, || AtomicU32::new(1));
-        Self {
+        let state = Self {
             node_id: AtomicU32::new(node_id),
             modulator_node_id: AtomicU32::new(0),
             plocks: SlotPLockData::new(capacity),
             defaults: SlotParamDefaults::new_from_descriptor(desc),
+            tensor_params: SlotTensorParamData::new(),
             num_params: AtomicU32::new(num_params as u32),
             param_node_indices,
             param_node_spans,
@@ -4478,7 +5156,9 @@ impl EffectSlotState {
                 desc.transport_phase_param_idx()
                     .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
             ),
-        }
+        };
+        state.tensor_params.apply_descriptor(&desc.tensor_params);
+        state
     }
 
     /// Resolve the audio graph param index for a given param.
@@ -4544,6 +5224,7 @@ impl EffectSlotState {
             modulator_node_id: AtomicU32::new(0),
             plocks: SlotPLockData::new(MAX_SLOT_PARAMS),
             defaults: SlotParamDefaults::new_zeroed(MAX_SLOT_PARAMS),
+            tensor_params: SlotTensorParamData::new(),
             num_params: AtomicU32::new(0),
             param_node_indices: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(0)).collect(),
             param_node_spans: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(1)).collect(),
@@ -4581,6 +5262,7 @@ impl EffectSlotState {
                 self.param_node_spans[i].store(p.node_param_span.max(1), Ordering::Relaxed);
             }
         }
+        self.tensor_params.apply_descriptor(&desc.tensor_params);
     }
 
     /// Rebind this live slot to the current graph descriptor/node while
@@ -4606,6 +5288,7 @@ impl EffectSlotState {
 
         let mut saved_plocks = Vec::with_capacity(MAX_STEPS);
         let mut saved_plock_ids = Vec::with_capacity(MAX_STEPS);
+        let saved_tensor_params = self.tensor_params.capture();
         for step in 0..MAX_STEPS {
             let mut step_plocks = Vec::with_capacity(preserve);
             let mut step_ids = Vec::with_capacity(preserve);
@@ -4618,6 +5301,8 @@ impl EffectSlotState {
         }
 
         self.apply_descriptor_with_modulator(desc, node_id, modulator_node_id);
+        self.tensor_params
+            .migrate_matching_snapshots(&desc.tensor_params, &saved_tensor_params);
 
         for param_idx in 0..preserve {
             self.defaults.set(param_idx, saved_defaults[param_idx]);
@@ -4669,6 +5354,7 @@ impl EffectSlotState {
     ) {
         let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
         let mut migrated = Vec::new();
+        let old_tensor_params = self.tensor_params.capture();
 
         for (new_idx, new_param) in new_desc.params.iter().enumerate() {
             let Some(old_idx) = unique_param_index_by_name(old_desc, &new_param.name) else {
@@ -4703,6 +5389,8 @@ impl EffectSlotState {
         }
 
         self.apply_descriptor_with_modulator(new_desc, node_id, modulator_node_id);
+        self.tensor_params
+            .migrate_matching_snapshots(&new_desc.tensor_params, &old_tensor_params);
         for step in 0..MAX_STEPS {
             for param_idx in 0..MAX_SLOT_PARAMS {
                 self.plocks.clear_param(step, param_idx);
@@ -4782,6 +5470,7 @@ impl EffectSlotState {
     pub fn clear(&self) {
         self.node_id.store(0, Ordering::Relaxed);
         self.num_params.store(0, Ordering::Relaxed);
+        self.tensor_params.clear();
         for i in 0..MAX_SLOT_PARAMS {
             self.defaults.set(i, 0.0);
             if i < self.param_node_indices.len() {
@@ -4829,6 +5518,7 @@ pub struct EffectSlotSnapshot {
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
     pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    pub tensor_params: Vec<TensorParamSnapshot>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
     pub transport_phase_param_idx: u32,
@@ -4850,6 +5540,7 @@ impl EffectSlotSnapshot {
         }
 
         let (plocks, plock_param_ids) = slot.plocks.capture_rows(np);
+        let tensor_params = slot.tensor_params.capture();
 
         let mut param_node_indices = Vec::with_capacity(np);
         let mut param_node_spans = Vec::with_capacity(np);
@@ -4873,6 +5564,7 @@ impl EffectSlotSnapshot {
             defaults,
             plocks,
             plock_param_ids,
+            tensor_params,
             param_node_indices,
             param_node_spans,
             transport_phase_param_idx: slot.transport_phase_param_idx.load(Ordering::Relaxed),
@@ -4905,6 +5597,7 @@ impl EffectSlotSnapshot {
 
         slot.plocks
             .restore_rows(&self.plocks, &self.plock_param_ids, np);
+        slot.tensor_params.restore_snapshots(&self.tensor_params);
     }
 
     pub fn new_default(desc: &EffectDescriptor, node_id: u32) -> Self {
@@ -4925,6 +5618,17 @@ impl EffectSlotSnapshot {
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect();
+        let tensor_params = desc
+            .tensor_params
+            .iter()
+            .map(|tensor| TensorParamSnapshot {
+                name: tensor.name.clone(),
+                shape: tensor.shape.clone(),
+                cell_offset: tensor.cell_offset,
+                default: tensor.default.clone(),
+                plocks: Vec::new(),
+            })
+            .collect();
 
         Self {
             node_id,
@@ -4933,6 +5637,7 @@ impl EffectSlotSnapshot {
             defaults,
             plocks,
             plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; np]).collect(),
+            tensor_params,
             param_node_indices,
             param_node_spans,
             transport_phase_param_idx: desc
@@ -4950,6 +5655,7 @@ impl EffectSlotSnapshot {
             defaults: Vec::new(),
             plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+            tensor_params: Vec::new(),
             param_node_indices: Vec::new(),
             param_node_spans: Vec::new(),
             transport_phase_param_idx: NO_TRANSPORT_PHASE_PARAM,
@@ -5028,6 +5734,115 @@ impl EffectSlotSnapshot {
         }
     }
 
+    pub fn tensor_default_values(&self, tensor_idx: usize) -> Option<&[f32]> {
+        self.tensor_params
+            .get(tensor_idx)
+            .map(|tensor| tensor.default.as_slice())
+    }
+
+    pub fn tensor_plock_values(&self, step: usize, tensor_idx: usize) -> Option<&[f32]> {
+        self.tensor_params
+            .get(tensor_idx)
+            .and_then(|tensor| tensor.plocks.get(step))
+            .and_then(|values| values.as_deref())
+    }
+
+    pub fn resolved_tensor_values(&self, step: usize, tensor_idx: usize) -> Option<&[f32]> {
+        self.tensor_plock_values(step, tensor_idx)
+            .or_else(|| self.tensor_default_values(tensor_idx))
+    }
+
+    pub fn set_tensor_default(&mut self, tensor_idx: usize, values: Vec<f32>) -> bool {
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if values.len() != tensor.cell_count() {
+            return false;
+        }
+        tensor.default = values.into_iter().map(clamped_tensor_cell).collect();
+        true
+    }
+
+    pub fn set_tensor_default_cell(
+        &mut self,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> bool {
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if cell_idx >= tensor.default.len() {
+            return false;
+        }
+        tensor.default[cell_idx] = clamped_tensor_cell(value);
+        true
+    }
+
+    fn ensure_tensor_plock_rows(&mut self, tensor_idx: usize) -> bool {
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if tensor.plocks.is_empty() {
+            tensor.plocks = vec![None; MAX_STEPS];
+        } else if tensor.plocks.len() < MAX_STEPS {
+            tensor.plocks.resize_with(MAX_STEPS, || None);
+        }
+        true
+    }
+
+    pub fn set_tensor_plock(&mut self, step: usize, tensor_idx: usize, values: Vec<f32>) -> bool {
+        if step >= MAX_STEPS || !self.ensure_tensor_plock_rows(tensor_idx) {
+            return false;
+        }
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if values.len() != tensor.cell_count() {
+            return false;
+        }
+        tensor.plocks[step] = Some(values.into_iter().map(clamped_tensor_cell).collect());
+        true
+    }
+
+    pub fn set_tensor_plock_cell(
+        &mut self,
+        step: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    ) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        let Some(base) = self
+            .tensor_plock_values(step, tensor_idx)
+            .or_else(|| self.tensor_default_values(tensor_idx))
+            .map(|values| values.to_vec())
+        else {
+            return false;
+        };
+        if cell_idx >= base.len() {
+            return false;
+        }
+        let mut values = base;
+        values[cell_idx] = clamped_tensor_cell(value);
+        self.set_tensor_plock(step, tensor_idx, values)
+    }
+
+    pub fn clear_tensor_plock(&mut self, step: usize, tensor_idx: usize) -> bool {
+        if step >= MAX_STEPS {
+            return false;
+        }
+        let Some(tensor) = self.tensor_params.get_mut(tensor_idx) else {
+            return false;
+        };
+        if let Some(plock) = tensor.plocks.get_mut(step) {
+            *plock = None;
+        }
+        true
+    }
+
     pub fn sync_to_descriptor(&mut self, desc: &EffectDescriptor, node_id: u32) {
         self.sync_to_descriptor_with_modulator(desc, node_id, self.modulator_node_id);
     }
@@ -5041,6 +5856,7 @@ impl EffectSlotSnapshot {
         let new_np = desc.params.len();
         let old_defaults = self.defaults.clone();
         let old_plocks = self.plocks.clone();
+        let old_tensor_params = self.tensor_params.clone();
 
         self.node_id = node_id;
         self.modulator_node_id = modulator_node_id;
@@ -5057,6 +5873,29 @@ impl EffectSlotSnapshot {
             .unwrap_or(NO_TRANSPORT_PHASE_PARAM);
         self.plocks = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
         self.plock_param_ids = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
+        self.tensor_params = desc
+            .tensor_params
+            .iter()
+            .map(|tensor| TensorParamSnapshot {
+                name: tensor.name.clone(),
+                shape: tensor.shape.clone(),
+                cell_offset: tensor.cell_offset,
+                default: tensor.default.clone(),
+                plocks: Vec::new(),
+            })
+            .collect();
+        for (tensor_idx, desc_tensor) in desc.tensor_params.iter().enumerate() {
+            let Some(old_tensor) = old_tensor_params
+                .iter()
+                .find(|snapshot| snapshot.same_identity_as_descriptor(desc_tensor))
+            else {
+                continue;
+            };
+            if let Some(new_tensor) = self.tensor_params.get_mut(tensor_idx) {
+                new_tensor.default = old_tensor.default.clone();
+                new_tensor.plocks = old_tensor.plocks.clone();
+            }
+        }
 
         let preserve = old_defaults.len().min(new_np);
         for i in 0..preserve {

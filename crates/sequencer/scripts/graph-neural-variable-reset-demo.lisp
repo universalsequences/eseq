@@ -10,9 +10,10 @@
 ;;
 ;; All nodes route to track 0 by default so every firing is audible on one instrument;
 ;; change a node's route in your own copy if you want it to drive other tracks. The
-;; control panel exposes global transpose/timing batch controls, per-node route /
-;; seed / delay / transpose / transpose-reset / vel-decay / vel-reset / resolution /
-;; quantize plus the active NxN connection-weight matrix.
+;; control panel exposes threshold / max-poly selection / global transpose / timing
+;; batch controls, per-node route / seed / delay / transpose / transpose-reset /
+;; vel-decay / vel-reset / resolution / quantize plus the active NxN
+;; connection-weight matrix.
 ;;
 ;; SCALING: every per-node control binds DIRECTLY to the resolved graph value via
 ;; `bind-graph` (number knobs) / `bind-graph` + an options list (enum dropdowns).
@@ -102,6 +103,8 @@
   (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
         "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
         "Off"))
+(def gvr-max-poly-selection-options
+  (list "deterministic" "propagation" "random" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 (def gvr-route-off-index (- (len gvr-route-options) 1))
 (def gvr-route-off-color (list 0.20 0.21 0.23))
 
@@ -161,6 +164,7 @@
       (range 0 count))))
 
 (defstate gvr-weights (list))
+(defstate gvr-threshold 0.55)
 (defstate gvr-global-transpose 0)
 (defstate gvr-dur-factor 1)
 (defstate gvr-delay-factor-index 2)
@@ -253,6 +257,14 @@
         (graph-param gvr-name n field v)))
     (range 0 (gvr-node-count))))
 
+(def gvr-edit-capacity-param (field v)
+  (for-each
+    (lambda (n)
+      (do
+        (reactive-set "GRAPH" (graph-key gvr-name n field) v)
+        (graph-param gvr-name n field v)))
+    (range 0 gvr-max-node-count)))
+
 (def gvr-edit-enum (n field options label internal)
   (do
     (reactive-set "GRAPH" (graph-key gvr-name n field) (gvr-index-of options label))
@@ -331,12 +343,17 @@
         (range 0 (gvr-node-count)))
       (set! gvr-timebase-factor-index (gvr-index-of gvr-factor-options "1")))))
 
-;; Sequencer-level config (reset-every / max-poly) is per-pattern like the node/edge
-;; overrides; bind via `bind-graph-config`, key via `graph-config-key`.
+;; Sequencer-level config is per-pattern like the node/edge overrides; bind via
+;; `bind-graph-config`, key via `graph-config-key`.
 (def gvr-edit-config (field v)
   (do
     (reactive-set "GRAPH" (graph-config-key gvr-name field) v)
     (graph-config gvr-name field v)))
+
+(def gvr-edit-config-enum (field options label)
+  (do
+    (reactive-set "GRAPH" (graph-config-key gvr-name field) (gvr-index-of options label))
+    (graph-config gvr-name field label)))
 
 ;; ── UI ──
 
@@ -363,12 +380,15 @@
     :width gvr-control-width :height gvr-row-height :font-size 9
     :on-change on-change))
 
-(def gvr-pick (key value-index options on-change)
+(def gvr-pick-sized (key value-index options width on-change)
   (dropdown
     :key key
     :value-index value-index :options options
-    :width gvr-control-width :height gvr-row-height :font-size 6
+    :width width :height gvr-row-height :font-size 6
     :on-change on-change))
+
+(def gvr-pick (key value-index options on-change)
+  (gvr-pick-sized key value-index options gvr-control-width on-change))
 
 (def gvr-reset-value (n field)
   (>= (reactive-value (bind-graph gvr-name n field)) 1))
@@ -488,6 +508,7 @@
     ;; render below.
     current-pattern
     (set! gvr-weights (gvr-read-weights))
+    (set! gvr-threshold (graph-param-value gvr-name 0 :threshold))
     (set! gvr-global-transpose (graph-param-value gvr-name 0 :global-transpose))
     (set! gvr-dur-factor (graph-param-value gvr-name 0 :dur-factor))
     (let ((active-count (gvr-node-count))
@@ -519,6 +540,20 @@
                   (gvr-num "graph-variable-reset-max-poly"
                     (bind-graph-config gvr-name :max-poly) 0 16 1 0
                     (lambda (v) (gvr-edit-config :max-poly v))))
+                (h-stack :gap 0.6 :align :center
+                  (label "poly mode" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
+                  (gvr-pick-sized "graph-variable-reset-max-poly-selection"
+                    (bind-graph-config gvr-name :max-poly-selection gvr-max-poly-selection-options)
+                    gvr-max-poly-selection-options 9.5
+                    (lambda (v) (gvr-edit-config-enum :max-poly-selection gvr-max-poly-selection-options v))))
+                (h-stack :gap 0.6 :align :center
+                  (label "threshold" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
+                  (gvr-num "graph-variable-reset-threshold"
+                    gvr-threshold 0 4 0.01 2
+                    (lambda (v)
+                      (do
+                        (set! gvr-threshold v)
+                        (gvr-edit-capacity-param :threshold v)))))
                 (h-stack :gap 0.6 :align :center
                   (label "global trn" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
                   (gvr-num "graph-variable-reset-global-transpose"

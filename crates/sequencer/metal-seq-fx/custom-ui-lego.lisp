@@ -340,6 +340,20 @@
               :on-change (custom-ui-param-change-callback-s section p)))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
+(def ui-lego-matrix-s (section name title width height accent)
+  (let ((p (custom-ui-current-tensor-param name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-matrix-" (custom-ui-scope-name) "-" name)
+        (v-stack :width width :height height :gap 0.10 :align :start
+          (label title :font-size 8.2 :width width :height 0.50 :color accent :bg :transparent)
+          (matrix :rows (get p :rows) :cols (get p :cols)
+            :value (custom-ui-tensor-bound-values p)
+            :min (get p :min) :max (get p :max)
+            :control :grid
+            :width width :height (- height 0.60)
+            :on-cell-change (custom-ui-tensor-cell-change-callback-s section p))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
 (def ui-lego-option (name title width options accent)
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))

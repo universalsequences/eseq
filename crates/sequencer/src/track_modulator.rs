@@ -253,6 +253,7 @@ pub fn descriptor() -> EffectDescriptor {
         output_channels: 0,
         instrument_modulators: Vec::new(),
         instrument_modulation_targets: Vec::new(),
+        tensor_params: Vec::new(),
         params: vec![
             EffectDescriptor::enabled_param(PARAM_ENABLED as u32, 1.0),
             ParamDescriptor {
@@ -426,5 +427,44 @@ mod tests {
         }
 
         assert_eq!(out, [0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn scheduled_pulse_level_updates_on_retrigger() {
+        let mut state = [0.0f32; MODULATOR_ENVELOPE_STATE_SIZE];
+        unsafe {
+            modulator_envelope_init(state.as_mut_ptr().cast(), 48_000, 16, std::ptr::null());
+        }
+        state[PARAM_RISE_MS as usize] = 0.0;
+        state[PARAM_FALL_MS as usize] = 0.0;
+
+        unsafe {
+            modulator_envelope_begin_event_slice(state.as_mut_ptr().cast(), 1, 0, 8);
+            let first = pulse_event(0, 2.0, 1.0);
+            let second = pulse_event(4, 2.0, 0.25);
+            assert!(modulator_envelope_schedule_event(
+                state.as_mut_ptr().cast(),
+                &first
+            ));
+            assert!(modulator_envelope_schedule_event(
+                state.as_mut_ptr().cast(),
+                &second
+            ));
+        }
+
+        let mut out = [0.0f32; 8];
+        let out_ptrs = [out.as_mut_ptr()];
+        unsafe {
+            modulator_envelope_process(
+                std::ptr::null(),
+                out_ptrs.as_ptr(),
+                out.len() as c_int,
+                state.as_mut_ptr().cast(),
+                std::ptr::null_mut(),
+            );
+        }
+
+        assert_eq!(out, [1.0, 1.0, 0.0, 0.0, 0.25, 0.25, 0.0, 0.0]);
+        assert_eq!(state[PARAM_PULSE_LEVEL as usize], 0.25);
     }
 }

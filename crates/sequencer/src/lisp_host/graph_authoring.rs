@@ -375,7 +375,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config-value",
         "(graph-config-value sequencer :reset-bars)",
-        "Resolved sequencer-level config (:reset-bars, :max-poly, or :node-count), override-or-manifest.",
+        "Resolved sequencer-level config (:reset-bars, :max-poly, :max-poly-selection, or :node-count), override-or-manifest.",
         move |args, _ctx| {
             if args.len() != 2 {
                 return Err("graph-config-value expects graph and field".to_string());
@@ -384,7 +384,6 @@ pub fn register_graph_authoring_natives(
             let field = graph_key_string(&args[1])
                 .ok_or_else(|| "graph-config-value expects a field name".to_string())?;
             resolved_graph_config_value(&state_for_graph_config_value, &manifest, &field)
-                .map(EValue::Number)
         },
     );
 
@@ -392,7 +391,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config",
         "(graph-config sequencer :reset-bars 4)",
-        "Set a sequencer-level config override (:reset-bars in bars, :max-poly, or :node-count).",
+        "Set a sequencer-level config override (:reset-bars in bars, :max-poly, :max-poly-selection, or :node-count).",
         move |args, ctx| {
             if args.len() != 3 {
                 return Err("graph-config expects graph, field, value".to_string());
@@ -400,10 +399,8 @@ pub fn register_graph_authoring_natives(
             let manifest = resolve_graph_manifest(&state_for_graph_config, &args[0])?;
             let field = graph_key_string(&args[1])
                 .ok_or_else(|| "graph-config expects a field name".to_string())?;
-            let value = graph_number(&args[2])
-                .ok_or_else(|| "graph-config value must be numeric".to_string())?;
             let sequencer_name = manifest.name.clone();
-            set_graph_config_value(&state_for_graph_config, &manifest, &field, value)?;
+            set_graph_config_value(&state_for_graph_config, &manifest, &field, &args[2])?;
             ctx.set_status(format!("updated graph '{sequencer_name}' config {field}"));
             Ok(EValue::Bool(true))
         },
@@ -431,17 +428,28 @@ pub fn register_graph_authoring_natives(
     let state_for_bind_graph_config = Arc::clone(&state);
     runtime.register_native_with_docs(
         "bind-graph-config",
-        "(bind-graph-config sequencer :reset-bars)",
-        "Reactive handle to a sequencer-level config field, seeded with the resolved value.",
+        "(bind-graph-config sequencer :reset-bars [options])",
+        "Reactive handle to a sequencer-level config field, seeded with the resolved value. Pass an options list to bind enum fields as dropdown indices.",
         move |args, _ctx| {
-            if args.len() != 2 {
+            if args.len() < 2 {
                 return Err("bind-graph-config expects graph and field".to_string());
             }
             let manifest = resolve_graph_manifest(&state_for_bind_graph_config, &args[0])?;
             let field = graph_key_string(&args[1])
                 .ok_or_else(|| "bind-graph-config expects a field name".to_string())?;
-            let value =
-                resolved_graph_config_value(&state_for_bind_graph_config, &manifest, &field)?;
+            let value = match args.get(2) {
+                Some(options) => {
+                    let display = graph_config_display_value(
+                        &state_for_bind_graph_config,
+                        &manifest,
+                        &field,
+                    )?;
+                    graph_option_index(options, &display)
+                }
+                None => {
+                    graph_config_numeric_value(&state_for_bind_graph_config, &manifest, &field)?
+                }
+            };
             Ok(graph_seeded_reactive_ref(
                 graph_config_reactive_field(manifest.id, &field),
                 value,
@@ -677,14 +685,15 @@ fn graph_config_reactive_field(manifest_id: u64, field: &str) -> String {
     format!("{manifest_id}|cfg|{field}")
 }
 
-/// Resolve a sequencer-level config field (override-or-manifest) to a UI scalar.
+/// Resolve a sequencer-level config field (override-or-manifest) to a UI value.
 /// `:reset-bars` reports bars (engine stores beats); `:max-poly` reports the cap;
-/// `:node-count` reports the resolved active count for variable line shapes.
+/// `:max-poly-selection` reports the engine enum name; `:node-count` reports the
+/// resolved active count for variable line shapes.
 fn resolved_graph_config_value(
     state: &crate::sequencer::SequencerState,
     manifest: &crate::graph::GraphManifest,
     field: &str,
-) -> Result<f64, String> {
+) -> Result<EValue, String> {
     let overrides = resolved_graph_overrides_for_manifest(state, manifest);
     match field {
         "reset-bars" | "reset-every-bars" => {
@@ -692,23 +701,56 @@ fn resolved_graph_config_value(
                 .as_ref()
                 .and_then(|o| o.reset_every_beats)
                 .unwrap_or(manifest.reset_every_beats);
-            Ok(beats / GRAPH_BEATS_PER_BAR)
+            Ok(EValue::Number(beats / GRAPH_BEATS_PER_BAR))
         }
         "max-poly" => {
             let value = overrides
                 .as_ref()
                 .and_then(|o| o.max_poly)
                 .unwrap_or(manifest.max_poly);
-            Ok(value as f64)
+            Ok(EValue::Number(value as f64))
+        }
+        "max-poly-selection" | "max-poly-mode" | "poly-selection" | "poly-mode" => {
+            let value = overrides
+                .as_ref()
+                .and_then(|o| o.max_poly_selection)
+                .unwrap_or(manifest.max_poly_selection);
+            Ok(EValue::String(value.as_str().to_string()))
         }
         "node-count" => {
             if !manifest.shape.is_variable_line() {
                 return Err("graph config :node-count requires a variable line shape".to_string());
             }
-            Ok(manifest.shape.resolved_node_count(overrides.as_ref()) as f64)
+            Ok(EValue::Number(
+                manifest.shape.resolved_node_count(overrides.as_ref()) as f64,
+            ))
         }
         other => Err(format!("graph config unknown field :{other}")),
     }
+}
+
+fn graph_config_numeric_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    field: &str,
+) -> Result<f64, String> {
+    let value = resolved_graph_config_value(state, manifest, field)?;
+    graph_number(&value)
+        .ok_or_else(|| format!("bind-graph-config field :{field} is an enum; pass an options list"))
+}
+
+fn graph_config_display_value(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    field: &str,
+) -> Result<String, String> {
+    let value = resolved_graph_config_value(state, manifest, field)?;
+    Ok(match value {
+        EValue::String(label) => label,
+        EValue::Number(number) => graph_format_number(number),
+        EValue::Nil => "off".to_string(),
+        other => eseqlisp::vm::format_lisp_value(&other),
+    })
 }
 
 fn clamp_graph_node_count(
@@ -728,20 +770,34 @@ fn set_graph_config_value(
     state: &crate::sequencer::SequencerState,
     manifest: &crate::graph::GraphManifest,
     field: &str,
-    value: f64,
+    value: &EValue,
 ) -> Result<(), String> {
     enum ConfigEdit {
         ResetEveryBeats(f64),
         MaxPoly(u32),
+        MaxPolySelection(NeuralMaxPolySelection),
         NodeCount(u32),
     }
 
     let edit = match field {
         "reset-bars" | "reset-every-bars" => {
+            let value = graph_number(value)
+                .ok_or_else(|| "graph config :reset-bars expects a numeric value".to_string())?;
             ConfigEdit::ResetEveryBeats((value * GRAPH_BEATS_PER_BAR).max(0.0))
         }
-        "max-poly" => ConfigEdit::MaxPoly(value.max(0.0).round() as u32),
-        "node-count" => ConfigEdit::NodeCount(clamp_graph_node_count(manifest, value)?),
+        "max-poly" => {
+            let value = graph_number(value)
+                .ok_or_else(|| "graph config :max-poly expects a numeric value".to_string())?;
+            ConfigEdit::MaxPoly(value.max(0.0).round() as u32)
+        }
+        "max-poly-selection" | "max-poly-mode" | "poly-selection" | "poly-mode" => {
+            ConfigEdit::MaxPolySelection(parse_neural_max_poly_selection(value)?)
+        }
+        "node-count" => {
+            let value = graph_number(value)
+                .ok_or_else(|| "graph config :node-count expects a numeric value".to_string())?;
+            ConfigEdit::NodeCount(clamp_graph_node_count(manifest, value)?)
+        }
         other => return Err(format!("graph config unknown field :{other}")),
     };
 
@@ -750,6 +806,7 @@ fn set_graph_config_value(
         match edit {
             ConfigEdit::ResetEveryBeats(value) => graph.reset_every_beats = Some(value),
             ConfigEdit::MaxPoly(value) => graph.max_poly = Some(value),
+            ConfigEdit::MaxPolySelection(value) => graph.max_poly_selection = Some(value),
             ConfigEdit::NodeCount(value) => graph.node_count = Some(value),
         }
         Ok(())
@@ -1320,13 +1377,16 @@ fn graph_manifest_to_value(
         "capacity".to_string(),
         lisp_number(manifest.shape.capacity_num_nodes() as f64),
     );
-    map.insert(
-        "max-poly".to_string(),
-        lisp_number(manifest.max_poly as f64),
-    );
+    let max_poly = overrides
+        .and_then(|o| o.max_poly)
+        .unwrap_or(manifest.max_poly);
+    let max_poly_selection = overrides
+        .and_then(|o| o.max_poly_selection)
+        .unwrap_or(manifest.max_poly_selection);
+    map.insert("max-poly".to_string(), lisp_number(max_poly as f64));
     map.insert(
         "max-poly-selection".to_string(),
-        lisp_string(manifest.max_poly_selection.as_str().to_string()),
+        lisp_string(max_poly_selection.as_str().to_string()),
     );
     map.insert(
         "node-group".to_string(),

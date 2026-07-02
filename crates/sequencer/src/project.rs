@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::effects::EffectSlotSnapshot;
+use crate::effects::{EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::sequencer::{
@@ -407,6 +407,7 @@ pub struct ProjectEffectSlot {
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
     pub plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    pub tensor_params: Vec<TensorParamSnapshot>,
     pub param_node_indices: Vec<u32>,
     pub param_node_spans: Vec<u32>,
     /// Effect-specific instance data that isn't a numeric param. Currently just
@@ -747,6 +748,7 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             defaults: value.defaults.clone(),
             plocks: value.plocks.clone(),
             plock_param_ids: value.plock_param_ids.clone(),
+            tensor_params: value.tensor_params.clone(),
             param_node_indices: value.param_node_indices.clone(),
             param_node_spans: value.param_node_spans.clone(),
             ir: value.ir.clone(),
@@ -771,6 +773,7 @@ impl ProjectEffectSlot {
             defaults: self.defaults,
             plocks: self.plocks,
             plock_param_ids: self.plock_param_ids,
+            tensor_params: self.tensor_params,
             param_node_indices: self.param_node_indices,
             param_node_spans: self.param_node_spans,
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
@@ -1343,11 +1346,29 @@ struct SparseEffectSlotPlock {
 }
 
 #[derive(Serialize, Deserialize)]
+struct SparseTensorParamPlock {
+    step: usize,
+    value: Vec<f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SparseProjectTensorParam {
+    name: String,
+    shape: Vec<usize>,
+    cell_offset: usize,
+    default: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    plocks_sparse: Vec<SparseTensorParamPlock>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct SparseProjectEffectSlot {
     num_params: u32,
     defaults: Vec<f32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     plocks_sparse: Vec<SparseEffectSlotPlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tensor_params: Vec<SparseProjectTensorParam>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     param_node_indices: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1363,6 +1384,8 @@ struct DenseProjectEffectSlot {
     plocks: Vec<Vec<Option<f32>>>,
     #[serde(default)]
     plock_param_ids: Vec<Vec<Option<ParamNodeId>>>,
+    #[serde(default)]
+    tensor_params: Vec<SparseProjectTensorParam>,
     param_node_indices: Vec<u32>,
     #[serde(default)]
     param_node_spans: Vec<u32>,
@@ -1376,6 +1399,43 @@ enum ProjectEffectSlotRepr {
     Sparse(SparseProjectEffectSlot),
     Dense(DenseProjectEffectSlot),
     Empty(()),
+}
+
+fn sparse_tensor_param_from_snapshot(tensor: &TensorParamSnapshot) -> SparseProjectTensorParam {
+    let plocks_sparse = tensor
+        .plocks
+        .iter()
+        .enumerate()
+        .filter_map(|(step, value)| {
+            value.as_ref().map(|value| SparseTensorParamPlock {
+                step,
+                value: value.clone(),
+            })
+        })
+        .collect();
+    SparseProjectTensorParam {
+        name: tensor.name.clone(),
+        shape: tensor.shape.clone(),
+        cell_offset: tensor.cell_offset,
+        default: tensor.default.clone(),
+        plocks_sparse,
+    }
+}
+
+fn tensor_snapshot_from_sparse(tensor: SparseProjectTensorParam) -> TensorParamSnapshot {
+    let mut plocks = vec![None; MAX_STEPS];
+    for entry in tensor.plocks_sparse {
+        if entry.step < MAX_STEPS {
+            plocks[entry.step] = Some(entry.value);
+        }
+    }
+    TensorParamSnapshot {
+        name: tensor.name,
+        shape: tensor.shape,
+        cell_offset: tensor.cell_offset,
+        default: tensor.default,
+        plocks,
+    }
 }
 
 impl Serialize for ProjectEffectSlot {
@@ -1403,11 +1463,17 @@ impl Serialize for ProjectEffectSlot {
                 })
             })
             .collect::<Vec<_>>();
+        let tensor_params = self
+            .tensor_params
+            .iter()
+            .map(sparse_tensor_param_from_snapshot)
+            .collect::<Vec<_>>();
 
         if self.num_params == 0
             && self.defaults.is_empty()
             && self.param_node_indices.is_empty()
             && plocks_sparse.is_empty()
+            && tensor_params.is_empty()
             && self.ir.is_none()
         {
             return Option::<()>::None.serialize(serializer);
@@ -1417,6 +1483,7 @@ impl Serialize for ProjectEffectSlot {
             num_params: self.num_params,
             defaults: self.defaults.clone(),
             plocks_sparse,
+            tensor_params,
             param_node_indices: self.param_node_indices.clone(),
             param_node_spans: self.param_node_spans.clone(),
             ir: self.ir.clone(),
@@ -1446,6 +1513,11 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                     defaults: slot.defaults,
                     plocks,
                     plock_param_ids,
+                    tensor_params: slot
+                        .tensor_params
+                        .into_iter()
+                        .map(tensor_snapshot_from_sparse)
+                        .collect(),
                     param_node_indices: slot.param_node_indices,
                     param_node_spans: slot.param_node_spans,
                     ir: slot.ir,
@@ -1456,6 +1528,11 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 defaults: slot.defaults,
                 plocks: slot.plocks,
                 plock_param_ids: slot.plock_param_ids,
+                tensor_params: slot
+                    .tensor_params
+                    .into_iter()
+                    .map(tensor_snapshot_from_sparse)
+                    .collect(),
                 param_node_indices: slot.param_node_indices,
                 param_node_spans: slot.param_node_spans,
                 ir: slot.ir,
@@ -1465,6 +1542,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 defaults: Vec::new(),
                 plocks: vec![Vec::new(); MAX_STEPS],
                 plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                tensor_params: Vec::new(),
                 param_node_indices: Vec::new(),
                 param_node_spans: Vec::new(),
                 ir: None,
@@ -1627,6 +1705,7 @@ mod tests {
                         plock_param_ids: vec![vec![None, None]; 256],
                         param_node_indices: vec![0, 1],
                         param_node_spans: vec![1, 1],
+                        tensor_params: Vec::new(),
                         ir: None,
                     },
                     ProjectEffectSlot {
@@ -1636,6 +1715,7 @@ mod tests {
                         plock_param_ids: vec![vec![]; 256],
                         param_node_indices: vec![],
                         param_node_spans: vec![],
+                        tensor_params: Vec::new(),
                         ir: None,
                     },
                 ],
@@ -1743,6 +1823,7 @@ mod tests {
                     }],
                     reset_every_beats: None,
                     max_poly: None,
+                    max_poly_selection: None,
                     node_count: Some(12),
                 }],
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
@@ -2258,11 +2339,51 @@ mod tests {
             plock_param_ids: vec![Vec::new(); MAX_STEPS],
             param_node_indices: vec![10, 11],
             param_node_spans: vec![1, 1],
+            tensor_params: Vec::new(),
             ir: Some("lexicon-300-rich-plate".to_string()),
         };
         let json = serde_json::to_string(&slot).expect("serialize slot with ir");
         assert!(json.contains("\"ir\":\"lexicon-300-rich-plate\""), "{json}");
         let back: ProjectEffectSlot = serde_json::from_str(&json).expect("roundtrip slot with ir");
         assert_eq!(back.ir.as_deref(), Some("lexicon-300-rich-plate"));
+    }
+
+    #[test]
+    fn effect_slot_roundtrips_tensor_defaults_and_sparse_whole_matrix_plocks() {
+        let mut tensor_plocks = vec![None; MAX_STEPS];
+        tensor_plocks[11] = Some(vec![0.0, 0.25, 0.75, 1.0]);
+        let slot = ProjectEffectSlot {
+            num_params: 0,
+            defaults: Vec::new(),
+            plocks: vec![Vec::new(); MAX_STEPS],
+            plock_param_ids: vec![Vec::new(); MAX_STEPS],
+            param_node_indices: Vec::new(),
+            param_node_spans: Vec::new(),
+            tensor_params: vec![TensorParamSnapshot {
+                name: "strike_mask".to_string(),
+                shape: vec![2, 2],
+                cell_offset: 64,
+                default: vec![0.1, 0.2, 0.3, 0.4],
+                plocks: tensor_plocks,
+            }],
+            ir: None,
+        };
+
+        let json = serde_json::to_string(&slot).expect("serialize tensor slot");
+
+        assert!(json.contains("\"tensor_params\""), "{json}");
+        assert!(json.contains("\"plocks_sparse\""), "{json}");
+        let back: ProjectEffectSlot =
+            serde_json::from_str(&json).expect("roundtrip slot with tensor params");
+        assert_eq!(back.tensor_params.len(), 1);
+        assert_eq!(back.tensor_params[0].name, "strike_mask");
+        assert_eq!(back.tensor_params[0].shape, vec![2, 2]);
+        assert_eq!(back.tensor_params[0].cell_offset, 64);
+        assert_eq!(back.tensor_params[0].default, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(
+            back.tensor_params[0].plocks[11],
+            Some(vec![0.0, 0.25, 0.75, 1.0])
+        );
+        assert!(back.tensor_params[0].plocks[10].is_none());
     }
 }

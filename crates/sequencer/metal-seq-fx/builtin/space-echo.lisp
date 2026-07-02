@@ -141,8 +141,8 @@
 
 ;; ── Echo section ──
 
-(def builtin-fx-space-echo-echo-box (fx intensity-p echo-p bass-p treble-p)
-  (box :width 10.4 :height 7.45 :padding 0.36
+(def builtin-fx-space-echo-echo-box (fx intensity-p echo-p bass-p treble-p width-p)
+  (box :width 10.4 :height 8.55 :padding 0.36
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.18 :align :center
       (label "ECHO" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
@@ -152,12 +152,29 @@
       (label "TONE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (v-stack :gap 0.30 :align :baseline
         (builtin-fx-filter-mini-number fx "bass" bass-p)
-        (builtin-fx-filter-mini-number fx "treb" treble-p)))))
+        (builtin-fx-filter-mini-number fx "treb" treble-p)
+        (if width-p
+          (builtin-fx-filter-mini-percent fx "wide" width-p)
+          (box :height 0.1))))))
 
 ;; ── Tape + reverb section ──
 
-(def builtin-fx-space-echo-tape-box (fx reverb-p tension-p wf-p age-p drive-p dry-p)
-  (box :width 10.4 :height 7.45 :padding 0.36
+;; Spring type selector (which physical tank the model is tuned to).
+(def builtin-fx-space-echo-spring-button (fx p index short-label)
+  (let ((selected (= (round (get p :value)) index)))
+    (button short-label
+      :width 3.35 :height 0.92 :padding 0 :font-size 8.0
+      :background-color (if selected (space-echo-green) :mixer-control-bg)
+      :color (if selected :black :dim)
+      :on-click |x y r| (fx-set-effect-value fx p index))))
+
+(def builtin-fx-space-echo-spring-row (fx p)
+  (h-stack :gap 0.14
+    (builtin-fx-space-echo-spring-button fx p 0 "RE-201")
+    (builtin-fx-space-echo-spring-button fx p 1 "Tubby")))
+
+(def builtin-fx-space-echo-tape-box (fx reverb-p tension-p spring-p wf-p age-p drive-p dry-p)
+  (box :width 10.4 :height 8.55 :padding 0.36
        :background-color :fx-inner-panel-bg :corner-radius 7
     (v-stack :gap 0.16 :align :center
       (label "REVERB" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
@@ -166,6 +183,9 @@
         (if tension-p
           (builtin-fx-space-echo-percent-knob fx "tension" tension-p)
           (box :width 4.35 :height 2.45)))
+      (if spring-p
+        (builtin-fx-space-echo-spring-row fx spring-p)
+        (box :height 0.1))
       (label "TAPE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (builtin-fx-filter-mini-percent fx "w/f" wf-p)
       (builtin-fx-filter-mini-percent fx "age" age-p)
@@ -185,6 +205,8 @@
           (echo-p (builtin-fx-param params "echo volume"))
           (reverb-p (builtin-fx-param params "reverb volume"))
           (tension-p (builtin-fx-param params "tension"))
+          (spring-p (builtin-fx-param params "spring type"))
+          (width-p (builtin-fx-param params "stereo width"))
           (dry-p (builtin-fx-param params "dry"))
           (drive-p (builtin-fx-param params "input drive"))
           (wf-p (builtin-fx-param params "wow/flutter"))
@@ -193,6 +215,6 @@
         (h-stack :gap 0.35 :align :start
           (builtin-fx-space-echo-rate-box fx sync-p div-p offset-p rate-p)
           (builtin-fx-space-echo-mode-box fx mode-p)
-          (builtin-fx-space-echo-echo-box fx intensity-p echo-p bass-p treble-p)
-          (builtin-fx-space-echo-tape-box fx reverb-p tension-p wf-p age-p drive-p dry-p))
+          (builtin-fx-space-echo-echo-box fx intensity-p echo-p bass-p treble-p width-p)
+          (builtin-fx-space-echo-tape-box fx reverb-p tension-p spring-p wf-p age-p drive-p dry-p))
         (fx-param-grid params fx)))))

@@ -7748,6 +7748,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-instrument-tensor-cell" => {
+                        if let Value::Map(ref map) = payload {
+                            let tensor_idx = map_usize(map, "tensor-idx");
+                            let value = map_number(map, "value").map(|value| value as f32);
+                            if let (Some(tensor_idx), Some(user_val)) = (tensor_idx, value) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(tensor_desc) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|desc| desc.tensor_params.get(tensor_idx))
+                                    .cloned()
+                                {
+                                    let cell_idx = map_usize(map, "cell-idx").or_else(|| {
+                                        let row = map_usize(map, "row")?;
+                                        let col = map_usize(map, "col")?;
+                                        (col < tensor_desc.cols())
+                                            .then_some(row * tensor_desc.cols() + col)
+                                    });
+                                    let Some(cell_idx) = cell_idx else {
+                                        continue;
+                                    };
+                                    if cell_idx >= tensor_desc.default.len() {
+                                        continue;
+                                    }
+                                    let value = user_val.clamp(tensor_desc.min, tensor_desc.max);
+                                    let steps: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    if steps.is_empty() {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentTensorCell {
+                                                track,
+                                                tensor_idx,
+                                                cell_idx,
+                                                value,
+                                            },
+                                        );
+                                    } else {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentTensorPlockCellMulti {
+                                                track,
+                                                steps,
+                                                tensor_idx,
+                                                cell_idx,
+                                                value,
+                                            },
+                                        );
+                                    }
+                                    let display_step = displayed_plock_step(
+                                        &state,
+                                        track,
+                                        selected_plock_step(&selected_steps),
+                                    );
+                                    if sync_instrument_tensor_value_field(
+                                        editor.runtime_mut(),
+                                        &app,
+                                        track,
+                                        tensor_idx,
+                                        display_step,
+                                    ) {
+                                        editor.refresh_runtime_side_effects();
+                                        editor.mark_needs_redraw();
+                                    }
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
                     "set-instrument-plock-option" => {
                         if let Value::Map(ref map) = payload {
                             let param_idx =

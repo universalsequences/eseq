@@ -996,6 +996,10 @@ pub fn instrument_descriptor_from_manifest(
         manifest.n_inputs,
         manifest.n_outputs,
     );
+    desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
+        &manifest.tensors,
+        &manifest.tensor_init_data,
+    );
     desc.params
         .extend(crate::voice_modulator::ui_param_descriptors());
 
@@ -3845,6 +3849,7 @@ impl ScratchControlRuntime {
                     output_channels: 0,
                     instrument_modulators: Vec::new(),
                     instrument_modulation_targets: Vec::new(),
+                    tensor_params: Vec::new(),
                 },
                 0,
             )
@@ -6561,6 +6566,7 @@ fn register_sequencer_natives_with_accumulators(
                         output_channels: 0,
                         instrument_modulators: Vec::new(),
                         instrument_modulation_targets: Vec::new(),
+                        tensor_params: Vec::new(),
                     };
                     state_for_use_midi_fx.pattern.midi_fx_slots[track_idx][slot_idx]
                         .sync_descriptor(&desc, 0);
@@ -14081,6 +14087,8 @@ mod tests {
         fn assert_active_layout(layout: &eseqlisp::layout::LayoutNode, count: usize) {
             for key in [
                 "graph-variable-reset-node-count",
+                "graph-variable-reset-max-poly-selection",
+                "graph-variable-reset-threshold",
                 "graph-variable-reset-route-color-0",
                 "graph-variable-reset-seed-route-0",
                 "graph-variable-reset-reset-seed-0",
@@ -14312,6 +14320,33 @@ mod tests {
                 .expect("node 7 reset seed enabled"),
             Some(Value::Number(1.0))
         );
+        let threshold_change = find_by_stable_key(&layout, "graph-variable-reset-threshold")
+            .and_then(|node| node.props.get("on-change"))
+            .cloned()
+            .expect("threshold callback");
+        runtime
+            .invoke(threshold_change, vec![Value::Number(0.8)])
+            .expect("set graph threshold");
+        assert_eq!(
+            runtime
+                .eval_str("(graph-param-value gvr-name 0 :threshold)")
+                .expect("node 0 threshold"),
+            Some(Value::Number(0.8))
+        );
+        let selection_change =
+            find_by_stable_key(&layout, "graph-variable-reset-max-poly-selection")
+                .and_then(|node| node.props.get("on-change"))
+                .cloned()
+                .expect("max-poly-selection callback");
+        runtime
+            .invoke(selection_change, vec![Value::String("random".to_string())])
+            .expect("set max-poly-selection");
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value gvr-name :max-poly-selection)")
+                .expect("max-poly-selection value"),
+            Some(Value::String("random".to_string()))
+        );
         let node_count_change = find_by_stable_key(&layout, "graph-variable-reset-node-count")
             .and_then(|node| node.props.get("on-change"))
             .cloned()
@@ -14323,6 +14358,12 @@ mod tests {
         runtime.run_reactive_cycle();
         let layout = latest_layout(&mut runtime);
         assert_active_layout(&layout, 16);
+        assert_eq!(
+            runtime
+                .eval_str("(graph-param-value gvr-name 14 :threshold)")
+                .expect("restored capacity threshold"),
+            Some(Value::Number(0.8))
+        );
 
         runtime
             .eval_str("(graph-param gvr-name 14 :transpose 7)")
@@ -14345,6 +14386,14 @@ mod tests {
             .find(|graph| graph.sequencer_name == "neural-variable-reset-demo")
             .expect("variable graph overrides");
         assert_eq!(graph.node_count, Some(12));
+        assert_eq!(
+            graph.max_poly_selection,
+            Some(NeuralMaxPolySelection::Random)
+        );
+        assert!(graph
+            .node_params
+            .iter()
+            .any(|param| param.instance == 14 && param.param == "threshold" && param.value == 0.8));
         assert!(graph
             .node_params
             .iter()
@@ -15078,6 +15127,7 @@ mod tests {
             }],
             reset_every_beats: None,
             max_poly: None,
+            max_poly_selection: None,
             node_count: None,
         };
         state
@@ -15524,17 +15574,30 @@ mod tests {
                 .expect("max-poly default"),
             Some(Value::Number(4.0))
         );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"neural\" :max-poly-selection)")
+                .expect("max-poly-selection default"),
+            Some(Value::String("deterministic".to_string()))
+        );
 
-        // Override both; reset-bars persists as beats (2 bars -> 8 beats).
+        // Override scalar and enum config; reset-bars persists as beats (2 bars -> 8 beats).
         runtime
             .eval_str("(graph-config \"neural\" :reset-bars 2)")
             .expect("set reset-bars");
         runtime
             .eval_str("(graph-config \"neural\" :max-poly 1)")
             .expect("set max-poly");
+        runtime
+            .eval_str("(graph-config \"neural\" :max-poly-selection :random)")
+            .expect("set max-poly-selection");
         let overrides = state.current_graph_overrides();
         assert_eq!(overrides[0].reset_every_beats, Some(8.0));
         assert_eq!(overrides[0].max_poly, Some(1));
+        assert_eq!(
+            overrides[0].max_poly_selection,
+            Some(NeuralMaxPolySelection::Random)
+        );
         assert_eq!(
             runtime
                 .eval_str("(graph-config-value \"neural\" :reset-bars)")
@@ -15547,11 +15610,27 @@ mod tests {
                 .expect("bound max-poly"),
             Some(Value::Number(1.0))
         );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"neural\" :max-poly-selection)")
+                .expect("max-poly-selection override"),
+            Some(Value::String("random".to_string()))
+        );
+        assert_eq!(
+            runtime
+                .eval_str(
+                    "(reactive-value (bind-graph-config \"neural\" :max-poly-selection \
+                     (list \"deterministic\" \"propagation\" \"random\")))"
+                )
+                .expect("bound max-poly-selection"),
+            Some(Value::Number(2.0))
+        );
 
         // The overrides actually reach the materialized runtime config.
         let config = manifest.runtime_config_with_overrides(Some(&overrides[0]));
         assert_eq!(config.reset_interval_beats, 8.0);
         assert_eq!(config.max_poly, 1);
+        assert_eq!(config.max_poly_selection, NeuralMaxPolySelection::Random);
     }
 
     #[test]
@@ -20131,6 +20210,37 @@ mod tests {
         assert_eq!(manifest.tensors[0].name, "waves");
         assert_eq!(manifest.tensors[0].shape, vec![4, 2]);
         assert_eq!(manifest.tensor_init_data[0].data.len(), 8);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compiled_tensor_param_manifest_derives_instrument_tensor_descriptor() {
+        let root = std::env::temp_dir().join(format!(
+            "sequencer-tensor-param-asset-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("strike-mask.json"), "[0.1,0.2,0.3,0.4]").unwrap();
+
+        let source = r#"
+            (def strike-mask
+              (tensor-param @shape [2 2] @name strike_mask @default-file "strike-mask.json"))
+            (param gain @default 1.0 @min 0.0 @max 1.0)
+            (out (* 0.0 gain) 1 @name audio)
+        "#;
+
+        let json = compile_instrument_with_asset_base(source, 44_100, Some(&root)).unwrap();
+        let manifest = parse_manifest(&json).unwrap();
+        let desc = super::instrument_descriptor_from_manifest("tensor-test", &manifest);
+
+        assert_eq!(desc.tensor_params.len(), 1);
+        let tensor = &desc.tensor_params[0];
+        assert_eq!(tensor.name, "strike_mask");
+        assert_eq!(tensor.shape, vec![2, 2]);
+        assert_eq!(tensor.rows(), 2);
+        assert_eq!(tensor.cols(), 2);
+        assert_eq!(tensor.default, vec![0.1, 0.2, 0.3, 0.4]);
 
         let _ = std::fs::remove_dir_all(root);
     }

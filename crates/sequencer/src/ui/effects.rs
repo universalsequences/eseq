@@ -1877,6 +1877,10 @@ impl App {
             manifest.n_inputs,
             manifest.n_outputs,
         );
+        desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
+            &manifest.tensors,
+            &manifest.tensor_init_data,
+        );
 
         lisp_host::append_effect_host_modulation_controls(&mut desc, manifest);
 
@@ -1914,6 +1918,10 @@ impl App {
             &manifest.params,
             manifest.n_inputs,
             manifest.n_outputs,
+        );
+        desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
+            &manifest.tensors,
+            &manifest.tensor_init_data,
         );
         lisp_host::append_effect_host_modulation_controls(&mut desc, manifest);
 

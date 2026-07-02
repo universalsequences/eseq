@@ -151,13 +151,8 @@
 ; off-center, which excites the asymmetric modes that give a snare its bark
 ; 6x6 masks are area-reduced from the 8x8 masks and scaled by 8/6, preserving
 ; the excitation/readout coupling strength without overdriving the smaller grid.
-(def strike-mask (tensor @shape [6 6] @data [
-  0.008 0.042 0.100 0.100 0.042 0.008
-  0.038 0.187 0.480 0.480 0.187 0.038
-  0.058 0.307 0.805 0.805 0.307 0.058
-  0.030 0.153 0.397 0.397 0.153 0.030
-  0.012 0.050 0.128 0.128 0.050 0.012
-  0.001 0.012 0.035 0.035 0.012 0.001]))
+(def strike-mask
+  (tensor-param @shape [6 6] @name strike_mask @default-file "strike-mask.json"))
 ; readout "mic positions": off-center smooth bumps, different spots per head
 (def read-mask-p (tensor @shape [6 6] @data [
   0.000 0.000 0.000 0.009 0.013 0.002

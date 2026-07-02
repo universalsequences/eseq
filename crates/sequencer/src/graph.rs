@@ -518,6 +518,8 @@ pub struct ProjectGraphOverrides {
     #[serde(default)]
     pub max_poly: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_poly_selection: Option<NeuralMaxPolySelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_count: Option<u32>,
 }
 
@@ -2535,6 +2537,9 @@ impl GraphManifest {
             .and_then(|o| o.reset_every_beats)
             .unwrap_or(self.reset_every_beats);
         let max_poly = overrides.and_then(|o| o.max_poly).unwrap_or(self.max_poly);
+        let max_poly_selection = overrides
+            .and_then(|o| o.max_poly_selection)
+            .unwrap_or(self.max_poly_selection);
 
         GraphRuntimeConfig::new(
             self.id,
@@ -2544,7 +2549,7 @@ impl GraphManifest {
             self.energy_decay,
             reset_every_beats,
             max_poly,
-            self.max_poly_selection,
+            max_poly_selection,
             self.duration.clone(),
             self.swing,
             node_params,

@@ -667,6 +667,7 @@ impl App {
             output_channels: 0,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
         })
     }
 
@@ -691,6 +692,7 @@ impl App {
             output_channels: 0,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
         })
     }
 
@@ -1044,6 +1046,43 @@ impl App {
                         },
                     );
                 }
+            }
+        }
+    }
+
+    pub fn send_instrument_tensor_param(&self, track: usize, tensor_idx: usize, values: &[f32]) {
+        if self.is_sampler_track(track) {
+            return;
+        }
+        let Some(cell_offset) = self.state.pattern.instrument_slots[track]
+            .tensor_params
+            .tensor_cell_offset(tensor_idx)
+        else {
+            return;
+        };
+        let Some(engine_id) = self.graph.track_engine_ids.get(track).and_then(|id| *id) else {
+            return;
+        };
+        let engine_track_uses = self
+            .graph
+            .track_engine_ids
+            .iter()
+            .filter(|bound| **bound == Some(engine_id))
+            .count();
+        if engine_track_uses > 1 {
+            return;
+        }
+        let Some(engine) = self
+            .graph
+            .engine_node_ids
+            .get(engine_id)
+            .and_then(|engine| engine.as_ref())
+        else {
+            return;
+        };
+        for &node_id in &engine.synth_ids {
+            unsafe {
+                crate::lisp_host::queue_tensor_write(self.graph.lg.0, node_id, cell_offset, values);
             }
         }
     }

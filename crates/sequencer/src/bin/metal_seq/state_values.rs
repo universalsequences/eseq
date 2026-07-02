@@ -1164,6 +1164,13 @@ pub(crate) fn instrument_param_value_field(track: usize, param_idx: usize, name:
     )
 }
 
+pub(crate) fn instrument_tensor_value_field(track: usize, tensor_idx: usize, name: &str) -> String {
+    format!(
+        "track-{track}-instrument-tensor-{tensor_idx}-{}",
+        field_safe_name(name)
+    )
+}
+
 pub(crate) fn sampler_selection_time_field(track: usize, marker: &str) -> String {
     format!("track-{track}-sampler-selection-{marker}-time")
 }
@@ -1328,6 +1335,41 @@ pub(crate) fn sync_instrument_param_value_field(
             "SEQ",
             &instrument_param_value_field(track, param_idx, &name),
             Value::Number(value as f64),
+        ));
+    }
+    false
+}
+
+pub(crate) fn sync_instrument_tensor_value_field(
+    rt: &mut Runtime,
+    app: &ui::App,
+    track: usize,
+    tensor_idx: usize,
+    display_step: Option<usize>,
+) -> bool {
+    if let Some((name, values)) = app
+        .graph
+        .instrument_descriptors
+        .get(track)
+        .and_then(|desc| desc.tensor_params.get(tensor_idx))
+        .and_then(|tdesc| {
+            app.state.pattern.instrument_slots.get(track).map(|slot| {
+                let values = slot
+                    .tensor_params
+                    .resolved_values(display_step, tensor_idx)
+                    .unwrap_or_else(|| tdesc.default.clone());
+                (tdesc.name.clone(), values)
+            })
+        })
+    {
+        let list = values
+            .into_iter()
+            .map(|value| Rc::new(RefCell::new(Value::Number(value as f64))))
+            .collect();
+        return reactive_set_needs_ui(rt.set_reactive(
+            "SEQ",
+            &instrument_tensor_value_field(track, tensor_idx, &name),
+            Value::List(list),
         ));
     }
     false
@@ -1612,6 +1654,10 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
                         selected_neural_neurons,
                     );
                 }
+            }
+            for tensor_idx in 0..desc.tensor_params.len() {
+                needs_ui |=
+                    sync_instrument_tensor_value_field(rt, app, track, tensor_idx, display_step);
             }
         }
         if let Some(slots) = app.graph.effect_descriptors.get(track) {
@@ -3012,11 +3058,21 @@ fn read_modulator_display_value(
     if !copied || state_size < STATE_BYTES {
         return (0.0, 0.0);
     }
+    decode_modulator_display_state(&state)
+}
+
+fn decode_modulator_display_state(state: &[f32]) -> (f64, f64) {
+    let phase = state
+        .get(sequencer::track_modulator::STATE_DISPLAY_PHASE)
+        .copied()
+        .unwrap_or(0.0);
+    let level = state
+        .get(sequencer::track_modulator::STATE_VALUE)
+        .copied()
+        .unwrap_or(0.0);
     (
-        quantize_modulator_unit_value(state[sequencer::track_modulator::STATE_DISPLAY_PHASE]),
-        quantize_modulator_unit_value(
-            state[sequencer::track_modulator::PARAM_PULSE_LEVEL as usize],
-        ),
+        quantize_modulator_unit_value(phase),
+        quantize_modulator_unit_value(level),
     )
 }
 
@@ -5813,7 +5869,7 @@ pub(crate) fn build_instrument_panel_value(
     let Some(desc) = app.graph.instrument_descriptors.get(track) else {
         return Value::List(vec![]);
     };
-    if desc.params.is_empty() {
+    if desc.params.is_empty() && desc.tensor_params.is_empty() {
         return Value::List(vec![]);
     }
 
@@ -6194,6 +6250,56 @@ pub(crate) fn build_instrument_panel_value(
         source_sections.push(Rc::new(RefCell::new(Value::Map(section_map))));
     }
 
+    let mut tensor_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    for (tensor_idx, tensor_desc) in desc.tensor_params.iter().enumerate() {
+        let values = slot
+            .tensor_params
+            .resolved_values(plock_step, tensor_idx)
+            .unwrap_or_else(|| tensor_desc.default.clone());
+        let value_list = values
+            .into_iter()
+            .map(|value| Rc::new(RefCell::new(Value::Number(value as f64))))
+            .collect();
+        let mut tensor_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        tensor_map.insert(
+            "idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(tensor_idx as f64))),
+        );
+        tensor_map.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(tensor_desc.name.clone()))),
+        );
+        tensor_map.insert(
+            "rows".to_string(),
+            Rc::new(RefCell::new(Value::Number(tensor_desc.rows() as f64))),
+        );
+        tensor_map.insert(
+            "cols".to_string(),
+            Rc::new(RefCell::new(Value::Number(tensor_desc.cols() as f64))),
+        );
+        tensor_map.insert(
+            "min".to_string(),
+            Rc::new(RefCell::new(Value::Number(tensor_desc.min as f64))),
+        );
+        tensor_map.insert(
+            "max".to_string(),
+            Rc::new(RefCell::new(Value::Number(tensor_desc.max as f64))),
+        );
+        tensor_map.insert(
+            "value-field".to_string(),
+            Rc::new(RefCell::new(Value::String(instrument_tensor_value_field(
+                track,
+                tensor_idx,
+                &tensor_desc.name,
+            )))),
+        );
+        tensor_map.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::List(value_list))),
+        );
+        tensor_params.push(Rc::new(RefCell::new(Value::Map(tensor_map))));
+    }
+
     let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
     let instrument_type = app
         .graph
@@ -6245,6 +6351,10 @@ pub(crate) fn build_instrument_panel_value(
     panel_map.insert(
         "mod".to_string(),
         Rc::new(RefCell::new(Value::List(mod_params))),
+    );
+    panel_map.insert(
+        "tensors".to_string(),
+        Rc::new(RefCell::new(Value::List(tensor_params))),
     );
     panel_map.insert(
         "modulators".to_string(),
@@ -8353,6 +8463,19 @@ mod tests {
             "-40 dBFS should remain near one third scale"
         );
         assert_eq!(meter_display_level(0.0005), 0.0);
+    }
+
+    #[test]
+    fn modulator_display_level_uses_current_envelope_value() {
+        let mut state = [0.0_f32; sequencer::track_modulator::MODULATOR_ENVELOPE_STATE_SIZE];
+        state[sequencer::track_modulator::STATE_VALUE] = 0.25;
+        state[sequencer::track_modulator::STATE_DISPLAY_PHASE] = 0.5;
+        state[sequencer::track_modulator::PARAM_PULSE_LEVEL as usize] = 0.875;
+
+        let (phase, level) = decode_modulator_display_state(&state);
+
+        assert_eq!(phase, 0.5);
+        assert_eq!(level, 0.25);
     }
 
     #[test]
@@ -12691,6 +12814,13 @@ mod tests {
             Value::Map(test_param_map("wow/flutter", 13, 0.35, 0.0, 1.0)),
             Value::Map(test_param_map("tape age", 14, 0.3, 0.0, 1.0)),
             Value::Map(test_param_map("tension", 15, 0.5, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "spring type",
+                16,
+                0.0,
+                vec!["RE-201", "King Tubby"],
+            )),
+            Value::Map(test_param_map("stereo width", 17, 0.7, 0.0, 1.0)),
         ]
     }
 
@@ -13820,6 +13950,117 @@ mod tests {
             value_param_has_value_field(&cleared_panel, "cutoff", &value_field),
             "cleared selection should restore default value binding"
         );
+    }
+
+    #[test]
+    fn instrument_panel_exposes_tensor_params_and_selected_step_matrix_value() {
+        fn tensor_map_owned(value: &Value, name: &str) -> Option<HashMap<String, Value>> {
+            match value {
+                Value::Map(map) => {
+                    if value_map_string(map, "name").as_deref() == Some(name)
+                        && map.contains_key("rows")
+                        && map.contains_key("cols")
+                    {
+                        return Some(
+                            map.iter()
+                                .map(|(key, value)| (key.clone(), value.borrow().clone()))
+                                .collect(),
+                        );
+                    }
+                    map.values()
+                        .find_map(|value| tensor_map_owned(&value.borrow(), name))
+                }
+                Value::List(items) => items
+                    .iter()
+                    .find_map(|value| tensor_map_owned(&value.borrow(), name)),
+                _ => None,
+            }
+        }
+
+        fn number_list(value: &Value) -> Vec<f64> {
+            let Value::List(items) = value else {
+                panic!("expected number list, got {value:?}");
+            };
+            items
+                .iter()
+                .map(|value| match &*value.borrow() {
+                    Value::Number(value) => *value,
+                    other => panic!("expected number, got {other:?}"),
+                })
+                .collect()
+        }
+
+        fn assert_numbers_close(actual: Vec<f64>, expected: &[f64]) {
+            assert_eq!(actual.len(), expected.len());
+            for (idx, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (actual - expected).abs() < 0.000001,
+                    "value {idx} expected {expected}, got {actual}"
+                );
+            }
+        }
+
+        let desc = sequencer::effects::EffectDescriptor {
+            name: "tensor instrument".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: vec![sequencer::effects::TensorParamDescriptor {
+                name: "strike_mask".to_string(),
+                shape: vec![2, 2],
+                cell_offset: 64,
+                default: vec![0.1, 0.2, 0.3, 0.4],
+                min: 0.0,
+                max: 1.0,
+            }],
+            params: Vec::new(),
+        };
+        let mut app = test_app_with_instrument_descriptor(desc);
+        app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Custom];
+        app.state.pattern.instrument_slots[0]
+            .tensor_params
+            .set_plock_cell(5, 0, 2, 0.95)
+            .expect("tensor p-lock edit");
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let field = instrument_tensor_value_field(0, 0, "strike_mask");
+
+        let default_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        let tensor = tensor_map_owned(&default_panel, "strike_mask").expect("tensor panel map");
+        assert_eq!(tensor.get("idx"), Some(&Value::Number(0.0)));
+        assert_eq!(tensor.get("rows"), Some(&Value::Number(2.0)));
+        assert_eq!(tensor.get("cols"), Some(&Value::Number(2.0)));
+        assert_eq!(tensor.get("min"), Some(&Value::Number(0.0)));
+        assert_eq!(tensor.get("max"), Some(&Value::Number(1.0)));
+        assert_eq!(
+            tensor.get("value-field"),
+            Some(&Value::String(field.clone()))
+        );
+        assert_numbers_close(
+            number_list(tensor.get("value").expect("tensor value")),
+            &[0.1, 0.2, 0.3, 0.4],
+        );
+
+        selected_steps.lock().unwrap().insert(5);
+        let selected_panel = build_instrument_panel_value(&app, 0, &selected_steps);
+        let selected_tensor =
+            tensor_map_owned(&selected_panel, "strike_mask").expect("selected tensor panel map");
+        assert_numbers_close(
+            number_list(selected_tensor.get("value").expect("selected tensor value")),
+            &[0.1, 0.2, 0.95, 0.4],
+        );
+
+        let mut runtime = Runtime::new();
+        sync_instrument_tensor_value_field(&mut runtime, &app, 0, 0, Some(5));
+        let Value::Map(seq) = runtime.global_value("SEQ").expect("SEQ namespace") else {
+            panic!("SEQ should be a map");
+        };
+        let reactive_value = seq
+            .get(&field)
+            .unwrap_or_else(|| panic!("missing tensor field {field}"))
+            .borrow()
+            .clone();
+        assert_numbers_close(number_list(&reactive_value), &[0.1, 0.2, 0.95, 0.4]);
     }
 
     #[test]
@@ -22266,6 +22507,8 @@ mod tests {
         assert!(value_contains_string(&ui_probe, "intensity"));
         assert!(value_contains_string(&ui_probe, "tension"));
         assert!(value_contains_string(&ui_probe, "8: head 2 + rev"));
+        assert!(value_contains_string(&ui_probe, "Tubby"));
+        assert!(value_contains_string(&ui_probe, "wide"));
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("space echo fx lisp status after refresh: {status}");
@@ -24077,6 +24320,157 @@ mod tests {
                 );
             }
             other => panic!("expected set-instrument-param host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_instrument_matrix_renders_and_emits_tensor_cell_command() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/test-instrument/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-param-matrix "strike_mask" 4.0 3.0))
+            "#
+            .to_string(),
+        )));
+        let tensor_field = "test-strike-mask";
+        let mut tensor = HashMap::new();
+        tensor.insert("idx".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
+        tensor.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("strike_mask".to_string()))),
+        );
+        tensor.insert(
+            "rows".to_string(),
+            Rc::new(RefCell::new(Value::Number(2.0))),
+        );
+        tensor.insert(
+            "cols".to_string(),
+            Rc::new(RefCell::new(Value::Number(2.0))),
+        );
+        tensor.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
+        tensor.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(1.0))));
+        tensor.insert(
+            "value-field".to_string(),
+            Rc::new(RefCell::new(Value::String(tensor_field.to_string()))),
+        );
+        tensor.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Number(0.1),
+                Value::Number(0.2),
+                Value::Number(0.3),
+                Value::Number(0.4),
+            ]))),
+        );
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "tensors".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Map(tensor)]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(120, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                (
+                    tensor_field,
+                    test_list(vec![
+                        Value::Number(0.1),
+                        Value::Number(0.2),
+                        Value::Number(0.3),
+                        Value::Number(0.4),
+                    ]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install matrix test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load initial custom instrument UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load custom instrument UI");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom matrix instrument fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("custom matrix layout");
+        assert_finite_layout_tree(&layout);
+        let matrix_wrapper =
+            find_layout_node_by_stable_key(&layout, "custom-ui-matrix-test-instrument-strike_mask")
+                .expect("matrix wrapper should render");
+        assert_finite_nonzero_rect(matrix_wrapper, "tensor matrix wrapper");
+        let matrix = find_layout_node_by_widget_type(matrix_wrapper, "matrix")
+            .expect("ui-param-matrix should render a matrix widget");
+        assert_finite_nonzero_rect(matrix, "tensor matrix");
+        let callback = matrix
+            .props
+            .get("on-cell-change")
+            .cloned()
+            .expect("matrix should expose on-cell-change");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(1.0), Value::Number(0.0), Value::Number(0.72)],
+            )
+            .expect("invoke matrix on-cell-change");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-instrument-tensor-cell");
+                let Value::Map(payload) = payload else {
+                    panic!("set-instrument-tensor-cell payload should be a dict: {payload:?}");
+                };
+                assert_eq!(value_map_number(payload, "tensor-idx"), Some(0.0));
+                assert_eq!(value_map_number(payload, "row"), Some(1.0));
+                assert_eq!(value_map_number(payload, "col"), Some(0.0));
+                assert_eq!(value_map_number(payload, "cell-idx"), Some(2.0));
+                assert_eq!(value_map_number(payload, "value"), Some(0.72));
+            }
+            other => panic!("expected set-instrument-tensor-cell host command, got {other:?}"),
         }
     }
 
@@ -26009,6 +26403,510 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_lisp_lays_out_mnm_vox_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let vox_ui = std::fs::read_to_string("instruments/monomachine/vox/ui.lisp")
+            .expect("read vox ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/monomachine/vox/ui.lisp".to_string(),
+            vox_ui,
+        )));
+        let mut vox_inst = test_instrument_map();
+        vox_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("glottis", 0, 0.35, 0.02, 0.5)),
+                Value::Map(test_param_map("vowel", 1, 0.0, 0.0, 9.0)),
+                Value::Map(test_param_map("cons_type", 2, 0.0, 0.0, 7.0)),
+                Value::Map(test_param_map("cons_level", 3, 0.5, 0.0, 1.5)),
+                Value::Map(test_param_map("flt_base", 4, 60.0, 20.0, 11000.0)),
+                Value::Map(test_param_map("env_to_base", 5, 0.0, -6.0, 6.0)),
+                Value::Map(test_param_map("srr", 6, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("amp_hold_ms", 7, 120.0, 0.0, 4000.0)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(vox_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load vox custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("vox fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("vox layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        for suffix in [
+            "glottis",
+            "vowel",
+            "cons_type",
+            "cons_level",
+            "flt_base",
+            "env_to_base",
+            "srr",
+            "amp_hold_ms",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_mnm_grit_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let grit_ui = std::fs::read_to_string("instruments/monomachine/grit/ui.lisp")
+            .expect("read grit ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/monomachine/grit/ui.lisp".to_string(),
+            grit_ui,
+        )));
+        let mut grit_inst = test_instrument_map();
+        grit_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("osc_wave", 0, 2.0, 0.0, 4.0)),
+                Value::Map(test_param_map("osc_mode", 1, 0.0, 0.0, 3.0)),
+                Value::Map(test_param_map("tune_semi", 2, 7.0, -36.0, 36.0)),
+                Value::Map(test_param_map("interlace", 3, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("flt_base", 4, 140.0, 20.0, 11000.0)),
+                Value::Map(test_param_map("env_to_width", 5, -1.0, -8.0, 8.0)),
+                Value::Map(test_param_map("srr", 6, 0.12, 0.0, 1.0)),
+                Value::Map(test_param_map("bits", 7, 16.0, 3.0, 16.0)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(grit_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load grit custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("grit fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("grit layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        for suffix in [
+            "osc_wave",
+            "osc_mode",
+            "tune_semi",
+            "interlace",
+            "flt_base",
+            "env_to_width",
+            "srr",
+            "bits",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_mnm_melt_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let melt_ui = std::fs::read_to_string("instruments/monomachine/melt/ui.lisp")
+            .expect("read melt ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/monomachine/melt/ui.lisp".to_string(),
+            melt_ui,
+        )));
+        let mut melt_inst = test_instrument_map();
+        melt_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("ratio1", 0, 1.0, 0.25, 16.0)),
+                Value::Map(test_param_map("sweep2", 1, -2.0, -4.0, 4.0)),
+                Value::Map(test_param_map("stack", 2, 0.5, 0.0, 1.0)),
+                Value::Map(test_param_map("feedback", 3, 0.2, 0.0, 1.2)),
+                Value::Map(test_param_map("ratio_snap", 4, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("flt_base", 5, 50.0, 20.0, 11000.0)),
+                Value::Map(test_param_map("env_to_base", 6, 0.0, -6.0, 6.0)),
+                Value::Map(test_param_map("op2_decay_ms", 7, 140.0, 5.0, 8000.0)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(melt_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load melt custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("melt fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("melt layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        for suffix in [
+            "ratio1",
+            "sweep2",
+            "stack",
+            "feedback",
+            "ratio_snap",
+            "flt_base",
+            "env_to_base",
+            "op2_decay_ms",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_mnm_wave3_columns() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let wave3_ui = std::fs::read_to_string("instruments/monomachine/wave3/ui.lisp")
+            .expect("read wave3 ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/monomachine/wave3/ui.lisp".to_string(),
+            wave3_ui,
+        )));
+        let mut wave3_inst = test_instrument_map();
+        wave3_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("wave", 0, 7.0, 1.0, 32.0)),
+                Value::Map(test_param_map("wp", 1, 0.0, 0.0, 127.0)),
+                Value::Map(test_param_map("phase_morph", 2, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("sync_mode", 3, 0.0, 0.0, 2.0)),
+                Value::Map(test_param_map("stack_semi", 4, 12.0, -24.0, 24.0)),
+                Value::Map(test_param_map("bits", 5, 12.0, 4.0, 16.0)),
+                Value::Map(test_param_map("flt_width", 6, 6.5, 0.1, 9.0)),
+                Value::Map(test_param_map("sfrq", 7, 440.0, 20.0, 8000.0)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(wave3_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load wave3 custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("wave3 fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("wave3 layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        for suffix in [
+            "wave",
+            "wp",
+            "phase_morph",
+            "sync_mode",
+            "stack_semi",
+            "bits",
+            "flt_width",
+            "sfrq",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+        }
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_lays_out_operator_columns() {
         fn find_stable_key_suffix<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
@@ -27678,6 +28576,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 sequencer::effects::ParamDescriptor {
                     name: "threshold".to_string(),

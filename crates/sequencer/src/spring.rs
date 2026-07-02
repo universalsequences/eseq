@@ -48,6 +48,7 @@ const SC_IN_LP_Z4: usize = SC_IN_LP_Z3 + 1;
 const SC_HF_LP: usize = SC_IN_LP_Z4 + 1;
 const SC_WPOS: usize = SC_HF_LP + 1;
 const SC_AP_PHASE: usize = SC_WPOS + 1; // cycles 0..K-1 (K need not divide the wpos wrap)
+const SC_HF_IN_LP: usize = SC_AP_PHASE + 1; // HF-path input highpass state
 const SCALARS: usize = SC_AP_PHASE + 4; // + spares
 
 const BUF_LOOP0: usize = SCALARS;
@@ -154,6 +155,40 @@ impl SpringParams {
             g_hf: 0.216_239_3,
         }
     }
+
+    /// Fitted to `impulses/prepared/king-tubby.wav` (Grampian spring, the
+    /// King Tubby dub tank) with `scripts/spring_tune.py` staged Nelder-Mead
+    /// from the `re201()` start, then a hand "boing" pass: the optimizer's
+    /// centroid-based ridge metric under-rewards distinct chirp arcs, so
+    /// `t_dc`/`ap_per_loop` were pushed up (chirp sweep ~7 ms → ~35 ms) and
+    /// the diffusers backed off (c_df, d_df1) until the spectrogram shows the
+    /// reference's repeating rising arcs — the audible spring boing.
+    /// Brighter and much shorter than the RE-201 tank (flat to ~5 kHz,
+    /// −20 dB by 1.0 s). Residuals: EDC 1.29 dB RMS, 1/6-oct spectrum
+    /// 2.6 dB, echo density 0.14.
+    pub fn king_tubby() -> Self {
+        SpringParams {
+            ap_per_loop: 128,
+            d_loop: [0.049_275_733, 0.072_572_678, 0.099_002_319],
+            w_loop: [1.0, 0.945_277_6, 0.603_259_06],
+            t60: 12.674_776,
+            t_dc: 0.020,
+            f_peak: 5_655.696_7,
+            f_damp: 2_247.093,
+            f_shelf: 336.457_84,
+            g_shelf: 0.950_482_36,
+            f_hp: 360.119,
+            f_lp: 5_045.882,
+            c_df: 0.25,
+            d_df1: 0.0015,
+            d_hf: 0.0023,
+            // Short HF-comb ring: at the fitted 0.84 s it reads as a pitched
+            // note on transients rather than shimmer.
+            t60_hf: 0.3,
+            f_hf_damp: 4_718.846_7,
+            g_hf: 0.265_802_4,
+        }
+    }
 }
 
 impl SpringParams {
@@ -177,7 +212,9 @@ impl SpringParams {
         self.f_shelf *= s;
         self.t_dc /= s;
         self.d_df1 /= s;
-        self.d_hf /= s;
+        // d_hf deliberately NOT scaled: the HF comb's fundamental is faintly
+        // audible on transients, and having the tension knob repitch it reads
+        // as a synthetic tone rather than a spring.
         // Loose springs ring a touch longer.
         self.t60 *= s.powf(-0.4);
         self
@@ -232,6 +269,7 @@ pub struct SpringCoeffs {
     hf_delay: usize,
     hf_fb: f32,
     hf_damp_coef: f32,
+    hf_in_hp_coef: f32,
     g_hf: f32,
 }
 
@@ -286,6 +324,8 @@ impl SpringCoeffs {
             hf_delay: hf_d,
             hf_fb,
             hf_damp_coef: one_pole_coef(p.f_hf_damp, sr),
+            // HP the comb input above its own fundamental (1/d_hf).
+            hf_in_hp_coef: one_pole_coef(1.6 / p.d_hf.max(1e-4), sr),
             g_hf: p.g_hf,
         }
     }
@@ -364,12 +404,18 @@ pub fn spring_tank_process(input: f32, c: &SpringCoeffs, st: &mut [f32]) -> f32 
     st[SC_AP_PHASE] = ((phase + 1) % c.k) as f32;
 
     // HF "shimmer" path: short damped feedback comb on the diffused input.
+    // The comb's fundamental sits at 1/d_hf (~435 Hz), so its input is
+    // highpassed above that — otherwise a kick's thump rings it as a clean
+    // pitched note instead of transient sizzle.
+    let hf_in_lp = st[SC_HF_IN_LP] + c.hf_in_hp_coef * (x - st[SC_HF_IN_LP]);
+    st[SC_HF_IN_LP] = hf_in_lp;
+    let hf_in = x - hf_in_lp;
     let hw = wpos % HF_BUF_LEN;
     let hr = (hw + HF_BUF_LEN - c.hf_delay) % HF_BUF_LEN;
     let hf_out = st[BUF_HF + hr];
     let hf_lp = st[SC_HF_LP] + c.hf_damp_coef * (hf_out - st[SC_HF_LP]);
     st[SC_HF_LP] = hf_lp;
-    st[BUF_HF + hw] = x + hf_lp * c.hf_fb;
+    st[BUF_HF + hw] = hf_in + hf_lp * c.hf_fb;
     acc += c.g_hf * hf_out;
 
     st[SC_WPOS] = ((wpos + 1) % WPOS_WRAP) as f32;
@@ -475,6 +521,25 @@ mod tests {
             peak(&hi),
             peak(&lo)
         );
+    }
+
+    #[test]
+    fn all_spring_type_presets_render_finite_and_distinct() {
+        let presets = [SpringParams::re201(), SpringParams::king_tubby()];
+        let irs: Vec<Vec<f32>> = presets
+            .iter()
+            .map(|p| render_impulse(p, 44_100.0, 2.0, 0.25))
+            .collect();
+        for (i, ir) in irs.iter().enumerate() {
+            assert!(ir.iter().all(|x| x.is_finite()), "preset {i} not finite");
+            assert!(ir.iter().any(|x| x.abs() > 1e-4), "preset {i} is silent");
+        }
+        for i in 0..irs.len() {
+            for j in (i + 1)..irs.len() {
+                let diff: f32 = irs[i].iter().zip(&irs[j]).map(|(a, b)| (a - b).abs()).sum();
+                assert!(diff > 1e-2, "presets {i} and {j} render identically");
+            }
+        }
     }
 
     #[test]

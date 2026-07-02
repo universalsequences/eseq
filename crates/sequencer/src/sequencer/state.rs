@@ -5425,6 +5425,7 @@ mod tests {
             param_node_indices: vec![id as u32, id as u32 + 10],
             param_node_spans: vec![1, 1],
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
+            tensor_params: Vec::new(),
             ir: None,
         }
     }
@@ -5612,6 +5613,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
         }
     }
 
@@ -6907,6 +6909,7 @@ mod tests {
                     param_node_indices: vec![0],
                     param_node_spans: vec![1],
                     transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
+                    tensor_params: Vec::new(),
                     ir: None,
                 }],
                 vec![EffectSlotSnapshot::new_empty()],

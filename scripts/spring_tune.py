@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Tune the dispersive spring reverb (crates/sequencer/src/spring.rs) against
-the reference IR spring_reverb_impulse.wav.
+a reference IR (default: spring_reverb_impulse.wav; see impulses/prepared/ for
+the other spring types).
 
 Usage:
-  python3 scripts/spring_tune.py analyze                 # measure the reference
-  python3 scripts/spring_tune.py plots [--params F] [--tag NAME]
-  python3 scripts/spring_tune.py optimize --stage A|B|C [--params F] [--maxiter N]
+  python3 scripts/spring_tune.py analyze [--ref F]       # measure the reference
+  python3 scripts/spring_tune.py plots [--ref F] [--params F] [--tag NAME]
+  python3 scripts/spring_tune.py optimize --stage A|B|C [--ref F] [--params F] [--maxiter N]
+
+References must be 16-bit / 44.1 kHz / mono wav — scripts/prepare_spring_refs.py
+converts the raw impulses/ captures.
 
 The Rust render binary (target/release/spring_tune) is the single source of
 truth for the candidate DSP; this script only analyzes and optimizes.
@@ -117,10 +121,13 @@ STAGES = {
 
 # ── IR loading / rendering ───────────────────────────────────────────────────
 
-def load_ref():
+def load_ref(path=None):
     import wave
-    w = wave.open(REF_WAV)
-    assert w.getframerate() == SR and w.getnchannels() == 1
+    path = path or REF_WAV
+    w = wave.open(path)
+    assert w.getframerate() == SR and w.getnchannels() == 1 and w.getsampwidth() == 2, (
+        f"{path}: need 16-bit mono {SR} Hz (run scripts/prepare_spring_refs.py)"
+    )
     x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float64) / 32768.0
     return x
 
@@ -149,7 +156,8 @@ def edc_db(x):
 
 def edc_error(ref, cand, floor_trunc_s):
     er, ec = edc_db(ref), edc_db(cand)
-    tgrid = np.geomspace(0.010, min(4.0, floor_trunc_s), 80)
+    hi = min(4.0, floor_trunc_s, (min(len(er), len(ec)) - 1) / SR)
+    tgrid = np.geomspace(0.010, hi, 80)
     idx = (tgrid * SR).astype(int)
     return float(np.sqrt(np.mean((er[idx] - ec[idx]) ** 2)))
 
@@ -180,7 +188,7 @@ def spectrum_error(ref, cand):
 def echo_density(x, win_s=0.025, hop_s=0.005, until_s=1.2):
     win = int(win_s * SR)
     hop = int(hop_s * SR)
-    n = int(until_s * SR)
+    n = min(int(until_s * SR), len(x))
     norm = erfc(1 / np.sqrt(2))
     t, d = [], []
     for start in range(0, n - win, hop):
@@ -193,9 +201,10 @@ def echo_density(x, win_s=0.025, hop_s=0.005, until_s=1.2):
 
 def density_error(ref, cand):
     t, dr = echo_density(ref)
-    _, dc = echo_density(cand)
-    m = t <= 1.0
-    return float(np.sqrt(np.mean((dr[m] - dc[m]) ** 2)))
+    tc, dc = echo_density(cand)
+    n = min(len(dr), len(dc))
+    m = t[:n] <= 1.0
+    return float(np.sqrt(np.mean((dr[:n][m] - dc[:n][m]) ** 2)))
 
 def ridge(x, until_s=0.300, nperseg=256):
     seg = x[: int(until_s * SR)]
@@ -215,9 +224,9 @@ def ridge_error(ref, cand):
 def noise_floor_trunc(ref):
     """Time where the EDC comes within 8 dB of the tail floor."""
     e = edc_db(ref)
-    floor = e[int(6.0 * SR)]
+    floor = e[min(int(6.0 * SR), len(e) - int(0.05 * SR))]
     idx = np.argmax(e < floor + 8)
-    return idx / SR if idx > 0 else 4.5
+    return idx / SR if idx > 0 else min(4.5, len(ref) / SR * 0.9)
 
 # ── Objective ────────────────────────────────────────────────────────────────
 
@@ -327,8 +336,8 @@ def make_plots(ref, cand, out_dir):
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
-def cmd_analyze(_args):
-    ref = load_ref()
+def cmd_analyze(args):
+    ref = load_ref(args.ref)
     refn = normalize(ref)
     print(f"len {len(ref)/SR:.2f}s  peak@{np.abs(ref).argmax()/SR*1000:.1f}ms")
     print(f"noise-floor truncation at {noise_floor_trunc(ref):.2f}s")
@@ -351,7 +360,7 @@ def load_params(path):
     return json.loads(json.dumps(DEFAULT_PARAMS))
 
 def cmd_plots(args):
-    ref = load_ref()
+    ref = load_ref(args.ref)
     params = load_params(args.params)
     cand = render(params)
     out = os.path.join(OUT_DIR, args.tag)
@@ -362,7 +371,7 @@ def cmd_plots(args):
     print(f"plots -> {out}")
 
 def cmd_optimize(args):
-    ref = load_ref()
+    ref = load_ref(args.ref)
     base = load_params(args.params)
     stage = STAGES[args.stage]
     names = stage["names"]
@@ -384,17 +393,20 @@ def cmd_optimize(args):
         if res.fun < best[0]:
             best = (res.fun, res.x)
 
+    tag = (
+        os.path.splitext(os.path.basename(args.ref))[0] + "_" if args.ref else ""
+    )
     params = json.loads(json.dumps(base))
     for name, ui in zip(names, best[1]):
         p_set(params, name, inv(name, ui))
-    out_json = args.out or os.path.join(OUT_DIR, f"best_params_{args.stage}.json")
+    out_json = args.out or os.path.join(OUT_DIR, f"best_params_{tag}{args.stage}.json")
     os.makedirs(os.path.dirname(out_json), exist_ok=True)
     with open(out_json, "w") as f:
         json.dump(params, f, indent=2)
     print(f"best J={best[0]:.4f} -> {out_json}")
 
     cand = render(params)
-    out = os.path.join(OUT_DIR, f"stage_{args.stage}")
+    out = os.path.join(OUT_DIR, f"{tag}stage_{args.stage}")
     make_plots(ref, cand, out)
     full = Objective(ref, dict(edc=1, spec=1, dens=1, ridge=1), params, [])
     print(json.dumps(full.components(cand), indent=2))
@@ -403,12 +415,15 @@ def cmd_optimize(args):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("analyze")
+    p = sub.add_parser("analyze")
+    p.add_argument("--ref")
     p = sub.add_parser("plots")
+    p.add_argument("--ref")
     p.add_argument("--params")
     p.add_argument("--tag", default="manual")
     p = sub.add_parser("optimize")
     p.add_argument("--stage", choices=list(STAGES), required=True)
+    p.add_argument("--ref")
     p.add_argument("--params")
     p.add_argument("--out")
     p.add_argument("--maxiter", type=int, default=400)

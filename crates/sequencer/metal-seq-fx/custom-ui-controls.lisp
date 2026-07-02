@@ -27,6 +27,18 @@
             :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
+(def ui-param-matrix (name width height)
+  (let ((p (custom-ui-current-tensor-param name)))
+    (if p
+      (subtree :key (str "custom-ui-matrix-" (custom-ui-scope-name) "-" name)
+        (matrix :rows (get p :rows) :cols (get p :cols)
+          :value (custom-ui-tensor-bound-values p)
+          :min (get p :min) :max (get p :max)
+          :control :grid
+          :width width :height height
+          :on-cell-change (custom-ui-tensor-cell-change-callback p)))
+      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
+
 ;; Compact knob: ~1.7 cell tall, value nestled in the lower-right of the knob
 ;; arc (default value-align) so the knob itself stays large. For instruments
 ;; that need 3-4 rows of params instead of 2.

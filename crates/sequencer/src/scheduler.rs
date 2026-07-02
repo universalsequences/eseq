@@ -16,7 +16,8 @@ use crate::neural::{NeuralOutput, NeuralRuntime, ParamNodeId};
 use crate::scheduled_event::{
     resolved_chord_transpose, EventSource, ScheduledChordData, ScheduledEffectParam,
     ScheduledEvent, ScheduledEventKind, ScheduledEventQueue, ScheduledInstrumentParam,
-    ScheduledInstrumentParamTarget, ScheduledInstrumentParams, ScheduledSamplerParams, StepEvent,
+    ScheduledInstrumentParamTarget, ScheduledInstrumentParams, ScheduledInstrumentTensorParam,
+    ScheduledInstrumentTensorParams, ScheduledSamplerParams, StepEvent,
 };
 use crate::sequencer::{
     sync_beats, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState, StepParam,
@@ -34,6 +35,14 @@ fn scheduled_instrument_params_from_vec(
     params: Vec<ScheduledInstrumentParam>,
 ) -> ScheduledInstrumentParams {
     params.into_iter().collect::<ScheduledInstrumentParams>()
+}
+
+fn scheduled_instrument_tensor_params_from_vec(
+    params: Vec<ScheduledInstrumentTensorParam>,
+) -> ScheduledInstrumentTensorParams {
+    params
+        .into_iter()
+        .collect::<ScheduledInstrumentTensorParams>()
 }
 
 fn debug_routing_enabled() -> bool {
@@ -64,6 +73,23 @@ fn upsert_instrument_params(
         ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
         ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
     });
+}
+
+fn upsert_instrument_tensor_params(
+    params: &mut ScheduledInstrumentTensorParams,
+    overrides: impl IntoIterator<Item = ScheduledInstrumentTensorParam>,
+) {
+    for override_param in overrides {
+        if let Some(existing) = params
+            .iter_mut()
+            .find(|existing| existing.cell_offset == override_param.cell_offset)
+        {
+            *existing = override_param;
+        } else if !params.is_full() {
+            params.push(override_param);
+        }
+    }
+    params.sort_by_key(|param| param.cell_offset);
 }
 
 fn upsert_effect_params(
@@ -608,6 +634,86 @@ fn resolve_instrument_defaults(
     params
 }
 
+fn resolve_instrument_tensor_params(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+) -> ScheduledInstrumentTensorParams {
+    let slot = &snapshot.tracks[track_idx].instrument_slot;
+    let mut params = ScheduledInstrumentTensorParams::new();
+    for tensor in &slot.tensor_params {
+        let values = tensor
+            .plocks
+            .get(step_idx)
+            .and_then(|values| values.as_ref())
+            .unwrap_or(&tensor.default);
+        if values.len() != tensor.default.len() || values.iter().any(|value| !value.is_finite()) {
+            continue;
+        }
+        if params.is_full() {
+            break;
+        }
+        params.push(ScheduledInstrumentTensorParam {
+            cell_offset: tensor.cell_offset,
+            values: values.clone(),
+        });
+    }
+    params.sort_by_key(|param| param.cell_offset);
+    params
+}
+
+fn resolve_instrument_tensor_defaults(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+) -> ScheduledInstrumentTensorParams {
+    let slot = &snapshot.tracks[track_idx].instrument_slot;
+    let mut params = ScheduledInstrumentTensorParams::new();
+    for tensor in &slot.tensor_params {
+        if tensor.default.iter().any(|value| !value.is_finite()) {
+            continue;
+        }
+        if params.is_full() {
+            break;
+        }
+        params.push(ScheduledInstrumentTensorParam {
+            cell_offset: tensor.cell_offset,
+            values: tensor.default.clone(),
+        });
+    }
+    params.sort_by_key(|param| param.cell_offset);
+    params
+}
+
+fn resolve_instrument_tensor_plocks(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+) -> ScheduledInstrumentTensorParams {
+    let slot = &snapshot.tracks[track_idx].instrument_slot;
+    let mut params = ScheduledInstrumentTensorParams::new();
+    for tensor in &slot.tensor_params {
+        let Some(values) = tensor
+            .plocks
+            .get(step_idx)
+            .and_then(|values| values.as_ref())
+        else {
+            continue;
+        };
+        if values.len() != tensor.default.len() || values.iter().any(|value| !value.is_finite()) {
+            continue;
+        }
+        if params.is_full() {
+            break;
+        }
+        params.push(ScheduledInstrumentTensorParam {
+            cell_offset: tensor.cell_offset,
+            values: values.clone(),
+        });
+    }
+    params.sort_by_key(|param| param.cell_offset);
+    params
+}
+
 fn resolve_effect_defaults(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
@@ -725,6 +831,7 @@ fn enqueue_instrument_param_change<const QUEUE_CAP: usize>(
             kind: ScheduledEventKind::InstrumentParams {
                 track: track_idx,
                 instrument_params,
+                instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             },
         })
         .is_ok()
@@ -891,6 +998,7 @@ fn instrument_sound_fingerprint(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
     instrument_params: &[ScheduledInstrumentParam],
+    instrument_tensor_params: &[ScheduledInstrumentTensorParam],
 ) -> u64 {
     let track = &snapshot.tracks[track_idx];
     let mut hasher = DefaultHasher::new();
@@ -903,6 +1011,12 @@ fn instrument_sound_fingerprint(
         param.target.hash(&mut hasher);
         param.idx.hash(&mut hasher);
         param.value.to_bits().hash(&mut hasher);
+    }
+    for tensor in instrument_tensor_params {
+        tensor.cell_offset.hash(&mut hasher);
+        for value in &tensor.values {
+            value.to_bits().hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -1470,12 +1584,17 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
     chord: ScheduledChordData,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
     let resolved =
         apply_global_transpose_to_resolved(snapshot, track_idx, global_transpose, resolved);
-    let instrument_fingerprint =
-        instrument_sound_fingerprint(snapshot, track_idx, &instrument_params);
+    let instrument_fingerprint = instrument_sound_fingerprint(
+        snapshot,
+        track_idx,
+        &instrument_params,
+        &instrument_tensor_params,
+    );
     if chord.count > 0 {
         let max_delay = chord.delays[..chord.count]
             .iter()
@@ -1510,6 +1629,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                             chord: note_chord,
                             effect_params: effect_params.clone(),
                             instrument_params: instrument_params.clone(),
+                            instrument_tensor_params: instrument_tensor_params.clone(),
                             instrument_fingerprint,
                         },
                     })
@@ -1544,6 +1664,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                 chord,
                 effect_params,
                 instrument_params,
+                instrument_tensor_params,
                 instrument_fingerprint,
             },
         })
@@ -1569,9 +1690,14 @@ fn step_event_from_resolved(
     chord: ScheduledChordData,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
 ) -> StepEvent {
-    let instrument_fingerprint =
-        instrument_sound_fingerprint(snapshot, track_idx, &instrument_params);
+    let instrument_fingerprint = instrument_sound_fingerprint(
+        snapshot,
+        track_idx,
+        &instrument_params,
+        &instrument_tensor_params,
+    );
     StepEvent {
         track: track_idx,
         samples_per_step,
@@ -1579,6 +1705,7 @@ fn step_event_from_resolved(
         chord,
         effect_params,
         instrument_params,
+        instrument_tensor_params,
         sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
         source: EventSource::Step {
             track: track_idx,
@@ -1616,11 +1743,16 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
             event.chord,
             event.effect_params,
             event.instrument_params,
+            event.instrument_tensor_params,
         ),
         EventSource::Network { seed, neuron, .. } => {
             normalize_network_event_destination(snapshot, neuron, seed, &mut event);
-            let instrument_fingerprint =
-                instrument_sound_fingerprint(snapshot, event.track, &event.instrument_params);
+            let instrument_fingerprint = instrument_sound_fingerprint(
+                snapshot,
+                event.track,
+                &event.instrument_params,
+                &event.instrument_tensor_params,
+            );
             enqueue_network_trigger(
                 queue,
                 snapshot,
@@ -1638,6 +1770,7 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
                 event.chord,
                 event.effect_params,
                 event.instrument_params,
+                event.instrument_tensor_params,
                 event.sampler_params,
                 instrument_fingerprint,
             )
@@ -1805,6 +1938,7 @@ fn enqueue_neuron_parameter_events<const QUEUE_CAP: usize>(
                 kind: ScheduledEventKind::InstrumentParams {
                     track,
                     instrument_params,
+                    instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                 },
             })
             .is_err()
@@ -2023,6 +2157,7 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
         chord,
         effect_params: resolve_effect_defaults(snapshot, track_idx),
         instrument_params: resolve_instrument_defaults(snapshot, track_idx),
+        instrument_tensor_params: resolve_instrument_tensor_defaults(snapshot, track_idx),
         sampler_params: resolve_sampler_defaults(snapshot, track_idx),
         source: EventSource::Network {
             seed: None,
@@ -2124,11 +2259,24 @@ fn normalize_network_event_destination(
         } else {
             ScheduledInstrumentParams::new()
         };
+        let event_instrument_tensor_params = if seed.is_none() {
+            std::mem::replace(
+                &mut event.instrument_tensor_params,
+                ScheduledInstrumentTensorParams::new(),
+            )
+        } else {
+            ScheduledInstrumentTensorParams::new()
+        };
         event.effect_params = resolve_effect_defaults(snapshot, event.track);
         event.instrument_params = resolve_instrument_defaults(snapshot, event.track);
+        event.instrument_tensor_params = resolve_instrument_tensor_defaults(snapshot, event.track);
         event.sampler_params = resolve_sampler_defaults(snapshot, event.track);
         upsert_effect_params(&mut event.effect_params, event_effect_params);
         upsert_instrument_params(&mut event.instrument_params, event_instrument_params);
+        upsert_instrument_tensor_params(
+            &mut event.instrument_tensor_params,
+            event_instrument_tensor_params,
+        );
     }
 }
 
@@ -2465,6 +2613,7 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
     chord: ScheduledChordData,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
 ) -> bool {
@@ -2506,6 +2655,7 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                             chord: note_chord,
                             effect_params: effect_params.clone(),
                             instrument_params: instrument_params.clone(),
+                            instrument_tensor_params: instrument_tensor_params.clone(),
                             sampler_params,
                             instrument_fingerprint,
                         },
@@ -2542,6 +2692,7 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                 chord,
                 effect_params,
                 instrument_params,
+                instrument_tensor_params,
                 sampler_params,
                 instrument_fingerprint,
             },
@@ -2575,6 +2726,7 @@ struct MidiFxEvent {
     arp_phase_beats: f32,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
     sampler_params: ScheduledSamplerParams,
     source: EventSource,
 }
@@ -2672,6 +2824,7 @@ fn midi_fx_event_from_step(
     resolved: ResolvedStep,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
 ) -> MidiFxEvent {
     let step = &snapshot.tracks[track_idx].steps[step_idx];
     MidiFxEvent {
@@ -2689,6 +2842,7 @@ fn midi_fx_event_from_step(
         arp_phase_beats,
         effect_params,
         instrument_params,
+        instrument_tensor_params,
         sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
         source: EventSource::Step {
             track: track_idx,
@@ -2743,6 +2897,7 @@ fn midi_fx_event_from_step_event(
         arp_phase_beats,
         effect_params: event.effect_params,
         instrument_params: event.instrument_params,
+        instrument_tensor_params: event.instrument_tensor_params,
         sampler_params: event.sampler_params,
         source: event.source,
     }
@@ -2794,14 +2949,24 @@ fn rebind_midi_fx_event_to_track(
         &mut event.instrument_params,
         ScheduledInstrumentParams::new(),
     );
+    let explicit_instrument_tensor_params = std::mem::replace(
+        &mut event.instrument_tensor_params,
+        ScheduledInstrumentTensorParams::new(),
+    );
     let target_step = midi_fx_event_step_for_track(snapshot, target_track, event.step);
     event.track = target_track;
     event.step = target_step;
     event.effect_params = resolve_effect_params(snapshot, target_track, target_step);
     event.instrument_params = resolve_instrument_params(snapshot, target_track, target_step);
+    event.instrument_tensor_params =
+        resolve_instrument_tensor_params(snapshot, target_track, target_step);
     event.sampler_params = resolve_sampler_params(snapshot, target_track, target_step);
     upsert_effect_params(&mut event.effect_params, explicit_effect_params);
     upsert_instrument_params(&mut event.instrument_params, explicit_instrument_params);
+    upsert_instrument_tensor_params(
+        &mut event.instrument_tensor_params,
+        explicit_instrument_tensor_params,
+    );
     event.source = match event.source {
         EventSource::Network { seed, neuron, .. } => EventSource::Network {
             seed,
@@ -2839,6 +3004,7 @@ fn midi_fx_window_events_from_step(
     resolved: ResolvedStep,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
+    instrument_tensor_params: ScheduledInstrumentTensorParams,
 ) -> Vec<MidiFxEvent> {
     const EPS: f32 = 1e-5;
     const MAX_WINDOWS: usize = 1024;
@@ -2861,6 +3027,7 @@ fn midi_fx_window_events_from_step(
             resolved,
             effect_params,
             instrument_params,
+            instrument_tensor_params,
         )];
     }
 
@@ -2889,6 +3056,7 @@ fn midi_fx_window_events_from_step(
             resolved,
             effect_params,
             instrument_params,
+            instrument_tensor_params,
         )];
     };
     let window_beats = window_beats.max(EPS);
@@ -2958,6 +3126,7 @@ fn midi_fx_window_events_from_step(
             arp_phase_beats: arp_phase_beats + window_start,
             effect_params: effect_params.clone(),
             instrument_params: instrument_params.clone(),
+            instrument_tensor_params: instrument_tensor_params.clone(),
             sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
             source: EventSource::Step {
                 track: track_idx,
@@ -3275,6 +3444,7 @@ fn run_midi_fx_chain_for_track_inner(
                             arp_phase_beats: event.arp_phase_beats,
                             effect_params,
                             instrument_params,
+                            instrument_tensor_params: event.instrument_tensor_params.clone(),
                             sampler_params: event.sampler_params,
                             source: event.source.clone(),
                         };
@@ -3372,8 +3542,12 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
             event.resolved.duration,
             event.chord_step_transpose,
         );
-        let instrument_fingerprint =
-            instrument_sound_fingerprint(snapshot, event.track, &event.instrument_params);
+        let instrument_fingerprint = instrument_sound_fingerprint(
+            snapshot,
+            event.track,
+            &event.instrument_params,
+            &event.instrument_tensor_params,
+        );
         if debug_routing_enabled() {
             eprintln!(
                 "[routing] enqueue source={} track={} step={} sample={} offset={} transpose={} vel={} chord={} fx_params={} inst_params={} sampler_speed={} fingerprint={}",
@@ -3409,6 +3583,7 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
                 chord,
                 event.effect_params,
                 event.instrument_params,
+                event.instrument_tensor_params,
                 event.sampler_params,
                 instrument_fingerprint,
             ),
@@ -3428,6 +3603,7 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
                 chord,
                 event.effect_params,
                 event.instrument_params,
+                event.instrument_tensor_params,
             ),
         };
         if !enqueued {
@@ -3635,6 +3811,9 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 arp_phase_beats: rendered_total_beats as f32,
                 effect_params: resolve_effect_params(snapshot, track_idx, step),
                 instrument_params: resolve_instrument_params(snapshot, track_idx, step),
+                instrument_tensor_params: resolve_instrument_tensor_params(
+                    snapshot, track_idx, step,
+                ),
                 sampler_params: resolve_sampler_params(snapshot, track_idx, step),
                 source: EventSource::Step {
                     track: track_idx,
@@ -3755,6 +3934,9 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 arp_phase_beats: (rendered_total_beats + tick_offset_beats) as f32,
                 effect_params: resolve_effect_params(snapshot, track_idx, step),
                 instrument_params: resolve_instrument_params(snapshot, track_idx, step),
+                instrument_tensor_params: resolve_instrument_tensor_params(
+                    snapshot, track_idx, step,
+                ),
                 sampler_params: resolve_sampler_params(snapshot, track_idx, step),
                 source: EventSource::Step {
                     track: track_idx,
@@ -4222,6 +4404,11 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                     instrument_params: scheduled_instrument_params_from_vec(
                                         output.instrument_params.clone(),
                                     ),
+                                    instrument_tensor_params: resolve_instrument_tensor_params(
+                                        snapshot,
+                                        trigger.track,
+                                        trigger.step,
+                                    ),
                                     sampler_params: resolve_sampler_params(
                                         snapshot,
                                         trigger.track,
@@ -4256,6 +4443,10 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                     effect_params: emitted.effect_params,
                                     instrument_params: scheduled_instrument_params_from_vec(
                                         emitted.instrument_params,
+                                    ),
+                                    instrument_tensor_params: resolve_instrument_tensor_defaults(
+                                        snapshot,
+                                        target_track,
                                     ),
                                     sampler_params: resolve_sampler_params(
                                         snapshot,
@@ -4371,6 +4562,8 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 let effect_params = resolve_effect_params(snapshot, target_track, trigger.step);
                 let instrument_params =
                     resolve_instrument_params(snapshot, target_track, trigger.step);
+                let instrument_tensor_params =
+                    resolve_instrument_tensor_params(snapshot, target_track, trigger.step);
                 let samples_per_quarter = sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
                 if snapshot.tracks[target_track].params.midi_fx_position
                     == MidiFxPosition::PostAccumulator
@@ -4390,6 +4583,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             seed_chord,
                             effect_params.clone(),
                             instrument_params.clone(),
+                            instrument_tensor_params.clone(),
                         );
                         let events = midi_fx_window_events_from_step(
                             snapshot,
@@ -4403,6 +4597,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             resolved,
                             effect_params,
                             instrument_params,
+                            instrument_tensor_params,
                         );
                         let events = run_midi_fx_chain_for_track(
                             runtime,
@@ -4451,6 +4646,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             chord,
                             effect_params,
                             instrument_params,
+                            instrument_tensor_params,
                         );
                         let ok = enqueue_step_event(
                             queue,
@@ -4492,6 +4688,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         chord,
                         effect_params,
                         instrument_params,
+                        instrument_tensor_params,
                     );
                     let ok = enqueue_step_event(
                         queue,
@@ -5397,7 +5594,9 @@ mod tests {
         SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
-    use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
+    use crate::effects::{
+        EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling, TensorParamDescriptor,
+    };
     use crate::graph::{
         EdgeSetSpec, GraphDurationSpec, GraphEdge, GraphEmission, GraphManifest, GraphNode,
         GraphPayload, GraphRuntime, NodeEval, NodeFire, NodeProto, ParamSpec,
@@ -5413,8 +5612,8 @@ mod tests {
     use crate::scheduled_event::{
         resolved_chord_transpose, EventSource, ScheduledChordData, ScheduledEffectParam,
         ScheduledEventKind, ScheduledEventQueue, ScheduledInstrumentParam,
-        ScheduledInstrumentParamTarget, ScheduledInstrumentParams, ScheduledSamplerParams,
-        StepEvent,
+        ScheduledInstrumentParamTarget, ScheduledInstrumentParams, ScheduledInstrumentTensorParams,
+        ScheduledSamplerParams, StepEvent,
     };
     use crate::sequencer::{
         default_empty_effect_chain, SequencerState, StepParam, SwingResolution, Timebase,
@@ -5515,6 +5714,7 @@ mod tests {
                 },
                 effect_params: Vec::new(),
                 instrument_params: ScheduledInstrumentParams::new(),
+                instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                 sampler_params: ScheduledSamplerParams::default(),
                 source: EventSource::Network {
                     seed: Some((0, 0)),
@@ -5640,6 +5840,7 @@ mod tests {
             edge_params: Vec::new(),
             reset_every_beats: None,
             max_poly: None,
+            max_poly_selection: None,
             node_count: None,
         }
     }
@@ -5674,6 +5875,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Step {
                 track: 0,
@@ -6039,6 +6241,7 @@ mod tests {
             chord,
             Vec::new(),
             ScheduledInstrumentParams::new(),
+            ScheduledInstrumentTensorParams::new(),
         ));
 
         let first = queue.pop().expect("first note event");
@@ -6080,6 +6283,7 @@ mod tests {
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
+            ScheduledInstrumentTensorParams::new(),
         ));
 
         let event = queue.pop().expect("global-transposed event");
@@ -6122,6 +6326,7 @@ mod tests {
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
+            ScheduledInstrumentTensorParams::new(),
         ));
 
         let event = queue.pop().expect("opted-out event");
@@ -6153,6 +6358,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
@@ -6207,6 +6413,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: None,
@@ -6480,6 +6687,7 @@ mod tests {
             arp_phase_beats: beat,
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: resolve_sampler_params(&snapshot, 0, 0),
             source: EventSource::Step {
                 track: 0,
@@ -7118,6 +7326,7 @@ mod tests {
                     }],
                     reset_every_beats: None,
                     max_poly: None,
+                    max_poly_selection: None,
                     node_count: None,
                 });
                 Ok(())
@@ -7252,6 +7461,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
@@ -7336,6 +7546,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
@@ -7413,6 +7624,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
@@ -7498,6 +7710,7 @@ mod tests {
             arp_phase_beats: 0.0,
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
@@ -7593,6 +7806,7 @@ mod tests {
             arp_phase_beats: 0.0,
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Step {
                 track: 0,
@@ -7725,6 +7939,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "gain".to_string(),
@@ -7821,6 +8036,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: None,
@@ -7880,6 +8096,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
                 name: "mod1_source".to_string(),
                 min: 0.0,
@@ -7934,6 +8151,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: None,
@@ -8043,6 +8261,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: None,
@@ -8079,8 +8298,10 @@ mod tests {
             ScheduledEventKind::InstrumentParams {
                 track,
                 instrument_params,
+                instrument_tensor_params,
             } => {
                 assert_eq!(track, 1);
+                assert!(instrument_tensor_params.is_empty());
                 assert_eq!(
                     instrument_params.as_slice(),
                     &[ScheduledInstrumentParam {
@@ -8165,6 +8386,7 @@ mod tests {
             },
             effect_params: Vec::new(),
             instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
@@ -8241,6 +8463,7 @@ mod tests {
             output_channels: 1,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -8293,6 +8516,62 @@ mod tests {
                     value: 1.0,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn resolve_instrument_tensor_params_uses_default_and_step_plocked_matrix() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 9;
+        let desc = EffectDescriptor {
+            name: "tensor instrument".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: vec![TensorParamDescriptor {
+                name: "strike_mask".to_string(),
+                shape: vec![2, 2],
+                cell_offset: 64,
+                default: vec![0.1, 0.2, 0.3, 0.4],
+                min: 0.0,
+                max: 1.0,
+            }],
+            params: Vec::new(),
+        };
+        state.pattern.instrument_slots[track].apply_descriptor(&desc, 12);
+        state.pattern.instrument_slots[track]
+            .tensor_params
+            .set_plock_cell(step, 0, 1, 0.95)
+            .expect("tensor p-lock edit");
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let defaults = super::resolve_instrument_tensor_params(&snapshot, track, 0);
+        let plocked = super::resolve_instrument_tensor_params(&snapshot, track, step);
+        let explicit_plocks = super::resolve_instrument_tensor_plocks(&snapshot, track, step);
+        let default_only = super::resolve_instrument_tensor_defaults(&snapshot, track);
+
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].cell_offset, 64);
+        assert_eq!(defaults[0].values, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(default_only.as_slice(), defaults.as_slice());
+        assert_eq!(plocked.len(), 1);
+        assert_eq!(plocked[0].values, vec![0.1, 0.95, 0.3, 0.4]);
+        assert_eq!(explicit_plocks.as_slice(), plocked.as_slice());
+        assert_ne!(
+            super::instrument_sound_fingerprint(
+                &snapshot,
+                track,
+                ScheduledInstrumentParams::new().as_slice(),
+                defaults.as_slice(),
+            ),
+            super::instrument_sound_fingerprint(
+                &snapshot,
+                track,
+                ScheduledInstrumentParams::new().as_slice(),
+                plocked.as_slice(),
+            )
         );
     }
 
@@ -8513,6 +8792,7 @@ mod tests {
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
+            ScheduledInstrumentTensorParams::new(),
         );
 
         assert_eq!(events.len(), 8);
@@ -8574,6 +8854,7 @@ mod tests {
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
+            ScheduledInstrumentTensorParams::new(),
         );
 
         assert_eq!(events.len(), 1);
@@ -8633,6 +8914,7 @@ mod tests {
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
+            ScheduledInstrumentTensorParams::new(),
         );
 
         assert_eq!(events.len(), 1);
@@ -8688,6 +8970,7 @@ mod tests {
             },
             Vec::new(),
             ScheduledInstrumentParams::new(),
+            ScheduledInstrumentTensorParams::new(),
         );
 
         assert_eq!(events.len(), 4);

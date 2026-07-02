@@ -5,6 +5,7 @@
 (def ms-strike ()
   (ui-control-panel-dense-s 0
     (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (ui-lego-matrix-s 0 "strike_mask" "MASK" 4.8 3.05 (ui-accent-cyan))
       (v-stack :width 10.6 :gap 0.18 :align :start
         (h-stack :gap 0.18 :align :start
           (ui-lego-badge-s 0 "STRIKE" 4.4 (ui-accent-cyan))

@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "engine_name": "monomachine/grit/",
+  "source_file": "instruments/monomachine/grit/.lisp",
+  "presets": [
+    {
+      "id": "C64 Lead",
+      "name": "C64 Lead",
+      "base_note_offset": 0.0,
+      "params": {
+        "osc_wave": 2.0, "pw": 0.35, "tune_semi": 7.0, "fine_cents": 4.0,
+        "osc_mode": 0.0, "interlace_hz": 8.0, "interlace": 0.0, "bits": 9.0, "osc2_level": 0.0,
+        "amp_attack_ms": 1.0, "amp_hold_ms": 40.0, "amp_decay_ms": 220.0, "amp_release_ms": 60.0,
+        "glide_ms": 0.0,
+        "flt_base": 140.0, "flt_width": 5.0, "flt_res_lo": 2.5, "flt_res_hi": 0.8,
+        "fenv_attack_ms": 1.0, "fenv_decay_ms": 160.0, "env_to_base": 1.5, "env_to_width": -1.0, "keytrack": 0.3,
+        "am_rate": 55.0, "am_depth": 0.0, "srr": 0.12,
+        "eq_freq": 1100.0, "eq_gain_db": 0.0, "eq_q": 2.2,
+        "drive": 2.0, "pan_width": 0.1, "gain": 0.3
+      }
+    },
+    {
+      "id": "Ring Bell",
+      "name": "Ring Bell",
+      "base_note_offset": 0.0,
+      "params": {
+        "osc_wave": 0.0, "pw": 0.5, "tune_semi": 17.0, "fine_cents": 6.0,
+        "osc_mode": 2.0, "interlace_hz": 8.0, "interlace": 0.0, "bits": 12.0, "osc2_level": 0.15,
+        "amp_attack_ms": 0.5, "amp_hold_ms": 10.0, "amp_decay_ms": 900.0, "amp_release_ms": 300.0,
+        "glide_ms": 0.0,
+        "flt_base": 200.0, "flt_width": 6.0, "flt_res_lo": 1.0, "flt_res_hi": 0.7,
+        "fenv_attack_ms": 1.0, "fenv_decay_ms": 400.0, "env_to_base": 1.0, "env_to_width": 0.0, "keytrack": 0.4,
+        "am_rate": 55.0, "am_depth": 0.0, "srr": 0.08,
+        "eq_freq": 2400.0, "eq_gain_db": 6.0, "eq_q": 3.0,
+        "drive": 1.4, "pan_width": 0.25, "gain": 0.3
+      }
+    },
+    {
+      "id": "Sync Scream",
+      "name": "Sync Scream",
+      "base_note_offset": 0.0,
+      "params": {
+        "osc_wave": 1.0, "pw": 0.5, "tune_semi": -12.0, "fine_cents": 0.0,
+        "osc_mode": 1.0, "interlace_hz": 8.0, "interlace": 0.0, "bits": 16.0, "osc2_level": 0.0,
+        "amp_attack_ms": 1.0, "amp_hold_ms": 200.0, "amp_decay_ms": 500.0, "amp_release_ms": 90.0,
+        "glide_ms": 30.0,
+        "flt_base": 180.0, "flt_width": 4.5, "flt_res_lo": 4.0, "flt_res_hi": 1.5,
+        "fenv_attack_ms": 40.0, "fenv_decay_ms": 500.0, "env_to_base": 2.5, "env_to_width": 0.0, "keytrack": 0.3,
+        "am_rate": 55.0, "am_depth": 0.0, "srr": 0.0,
+        "eq_freq": 1600.0, "eq_gain_db": 8.0, "eq_q": 2.0,
+        "drive": 3.0, "pan_width": 0.15, "gain": 0.28
+      }
+    },
+    {
+      "id": "Acid Gulp",
+      "name": "Acid Gulp",
+      "base_note_offset": -12.0,
+      "params": {
+        "osc_wave": 1.0, "pw": 0.5, "tune_semi": 0.0, "fine_cents": 0.0,
+        "osc_mode": 0.0, "interlace_hz": 8.0, "interlace": 0.0, "bits": 16.0, "osc2_level": 0.0,
+        "amp_attack_ms": 0.5, "amp_hold_ms": 20.0, "amp_decay_ms": 180.0, "amp_release_ms": 50.0,
+        "glide_ms": 55.0,
+        "flt_base": 80.0, "flt_width": 1.0, "flt_res_lo": 7.0, "flt_res_hi": 6.0,
+        "fenv_attack_ms": 0.5, "fenv_decay_ms": 140.0, "env_to_base": 3.8, "env_to_width": 1.0, "keytrack": 0.6,
+        "am_rate": 55.0, "am_depth": 0.0, "srr": 0.0,
+        "eq_freq": 500.0, "eq_gain_db": 5.0, "eq_q": 2.2,
+        "drive": 3.5, "pan_width": 0.05, "gain": 0.32
+      }
+    },
+    {
+      "id": "Interlace Stutter",
+      "name": "Interlace Stutter",
+      "base_note_offset": 0.0,
+      "params": {
+        "osc_wave": 2.0, "pw": 0.22, "tune_semi": 12.0, "fine_cents": 0.0,
+        "osc_mode": 3.0, "interlace_hz": 12.0, "interlace": 0.9, "bits": 8.0, "osc2_level": 0.3,
+        "amp_attack_ms": 1.0, "amp_hold_ms": 600.0, "amp_decay_ms": 1200.0, "amp_release_ms": 120.0,
+        "glide_ms": 0.0,
+        "flt_base": 160.0, "flt_width": 5.5, "flt_res_lo": 2.0, "flt_res_hi": 1.0,
+        "fenv_attack_ms": 1.0, "fenv_decay_ms": 160.0, "env_to_base": 0.8, "env_to_width": 0.0, "keytrack": 0.3,
+        "am_rate": 55.0, "am_depth": 0.0, "srr": 0.25,
+        "eq_freq": 1100.0, "eq_gain_db": 4.0, "eq_q": 2.2,
+        "drive": 2.2, "pan_width": 0.35, "gain": 0.28
+      }
+    },
+    {
+      "id": "LFSR Hat Pitch",
+      "name": "LFSR Hat Pitch",
+      "base_note_offset": 12.0,
+      "params": {
+        "osc_wave": 4.0, "pw": 0.5, "tune_semi": 0.0, "fine_cents": 0.0,
+        "osc_mode": 0.0, "interlace_hz": 8.0, "interlace": 0.0, "bits": 6.0, "osc2_level": 0.0,
+        "amp_attack_ms": 0.3, "amp_hold_ms": 5.0, "amp_decay_ms": 90.0, "amp_release_ms": 40.0,
+        "glide_ms": 0.0,
+        "flt_base": 900.0, "flt_width": 3.5, "flt_res_lo": 1.5, "flt_res_hi": 1.5,
+        "fenv_attack_ms": 0.3, "fenv_decay_ms": 70.0, "env_to_base": 2.0, "env_to_width": -1.5, "keytrack": 0.8,
+        "am_rate": 55.0, "am_depth": 0.0, "srr": 0.15,
+        "eq_freq": 5000.0, "eq_gain_db": 6.0, "eq_q": 2.0,
+        "drive": 1.8, "pan_width": 0.3, "gain": 0.3
+      }
+    },
+    {
+      "id": "Detuned Menace",
+      "name": "Detuned Menace",
+      "base_note_offset": -12.0,
+      "params": {
+        "osc_wave": 3.0, "pw": 0.6, "tune_semi": -5.0, "fine_cents": 12.0,
+        "osc_mode": 2.0, "interlace_hz": 3.0, "interlace": 0.35, "bits": 10.0, "osc2_level": 0.5,
+        "amp_attack_ms": 8.0, "amp_hold_ms": 900.0, "amp_decay_ms": 2000.0, "amp_release_ms": 300.0,
+        "glide_ms": 90.0,
+        "flt_base": 60.0, "flt_width": 4.0, "flt_res_lo": 1.8, "flt_res_hi": 0.7,
+        "fenv_attack_ms": 300.0, "fenv_decay_ms": 1500.0, "env_to_base": 1.2, "env_to_width": -2.0, "keytrack": 0.2,
+        "am_rate": 1.3, "am_depth": 0.3, "srr": 0.2,
+        "eq_freq": 700.0, "eq_gain_db": 7.0, "eq_q": 1.8,
+        "drive": 2.8, "pan_width": 0.5, "gain": 0.26
+      }
+    },
+    {
+      "id": "Arp Fodder",
+      "name": "Arp Fodder",
+      "base_note_offset": 0.0,
+      "params": {
+        "osc_wave": 2.0, "pw": 0.5, "tune_semi": 12.0, "fine_cents": 0.0,
+        "osc_mode": 1.0, "interlace_hz": 8.0, "interlace": 0.0, "bits": 12.0, "osc2_level": 0.0,
+        "amp_attack_ms": 0.5, "amp_hold_ms": 15.0, "amp_decay_ms": 130.0, "amp_release_ms": 40.0,
+        "glide_ms": 0.0,
+        "flt_base": 220.0, "flt_width": 4.0, "flt_res_lo": 3.0, "flt_res_hi": 1.2,
+        "fenv_attack_ms": 0.5, "fenv_decay_ms": 110.0, "env_to_base": 2.2, "env_to_width": 0.0, "keytrack": 0.5,
+        "am_rate": 55.0, "am_depth": 0.0, "srr": 0.1,
+        "eq_freq": 1400.0, "eq_gain_db": 3.0, "eq_q": 2.2,
+        "drive": 2.0, "pan_width": 0.2, "gain": 0.3
+      }
+    }
+  ]
+}

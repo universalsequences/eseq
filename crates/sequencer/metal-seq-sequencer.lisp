@@ -995,56 +995,57 @@
 
 (def seqv-expanded-track-quick-controls (track track-id)
   (let ((mode (seqv-param-mode track-id)))
-    (v-stack (box :height 0.2 :width 1)
-    (h-stack :gap 0.55 :align :center
-      (box :width 9.4 :height 1.3
-        :key (str "seqv-expanded-step-summary-" track-id)
-        (label (seqv-param-name mode)
-          :font-size 11 :width 9.4 :color :dim :bg :transparent))
-      (if (= mode 5)
-        (box :width 8 :height 1.3
-          :key (str "seqv-expanded-sync-label-" track-id)
-          (label (seqv-expanded-sync-current-label track track-id)
-            :font-size 11 :color :white :bg :transparent))
-        (number-picker :key (str "seqv-expanded-param-number-picker-" track-id)
-          :value (seqv-param-value-at track mode (seqv-current-step track track-id))
-          :min (seqv-param-min mode) :max (seqv-param-max mode) :decimals (seqv-param-decimals mode)
-          :on-change (lambda (v) (seqv-set-expanded-current-param track track-id mode v))
-          :width 8 :height 1.3 :font-size 11))
-      (h-stack :gap 0.4 :align :center
-        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-          :key (str "seqv-expanded-half-" track-id)
-          :on-click |x y r| (seqv-halve-track-pattern track track-id)
-          (v-stack :align :center
-            (label "-"
-              :font-size 12
-              :color :white
-              :bg :transparent)))
-        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
-          :key (str "seqv-expanded-double-" track-id)
-          :on-click |x y r| (seqv-double-track-pattern track track-id)
-          (v-stack :align :center
-            (label "+"
-              :font-size 12
-              :color :white
-              :bg :transparent)))
-        (box :background "transport-btn-bg" :padding 0.2 :height 1.4
-          :key (str "seqv-expanded-pages-" track-id)
-          (h-stack :gap 0.1 :align :center
-            (each (range 0 (seqv-page-count track)) |page|
-              (box :width page-button-width :height 1.1
-                :key (str "seqv-expanded-page-" track-id "-" page)
-                :background "pattern-pill-bg"
-                :active (seqv-page-active-binding track-id page)
-                :style pattern-control-style
-                :on-click |x y r| (seqv-goto-page track track-id page)
-                (v-stack :align :center
-                  (label (fmt " {} " (+ page 1))
-                    :font-size 11
-                    :active (seqv-page-active-binding track-id page)
-                    :active-color :white
-                    :color :dim
-                    :bg :transparent)))))))))))
+    (v-stack 
+      (box :height 0.4 :width 1)
+      (h-stack :gap 0.55 :align :center
+        (box :width 9.4 :height 1.3
+          :key (str "seqv-expanded-step-summary-" track-id)
+          (label (seqv-param-name mode)
+            :font-size 11 :width 9.4 :color :white :bg :transparent))
+        (if (= mode 5)
+          (box :width 8 :height 1.3
+            :key (str "seqv-expanded-sync-label-" track-id)
+            (label (seqv-expanded-sync-current-label track track-id)
+              :font-size 11 :color :white :bg :transparent))
+          (number-picker :key (str "seqv-expanded-param-number-picker-" track-id)
+            :value (seqv-param-value-at track mode (seqv-current-step track track-id))
+            :min (seqv-param-min mode) :max (seqv-param-max mode) :decimals (seqv-param-decimals mode)
+            :on-change (lambda (v) (seqv-set-expanded-current-param track track-id mode v))
+            :width 8 :height 1.3 :font-size 11))
+        (h-stack :gap 0.4 :align :center
+          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+            :key (str "seqv-expanded-half-" track-id)
+            :on-click |x y r| (seqv-halve-track-pattern track track-id)
+            (v-stack :align :center
+              (label "-"
+                :font-size 12
+                :color :white
+                :bg :transparent)))
+          (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+            :key (str "seqv-expanded-double-" track-id)
+            :on-click |x y r| (seqv-double-track-pattern track track-id)
+            (v-stack :align :center
+              (label "+"
+                :font-size 12
+                :color :white
+                :bg :transparent)))
+          (box :background "transport-btn-bg" :padding 0.2 :height 1.4
+            :key (str "seqv-expanded-pages-" track-id)
+            (h-stack :gap 0.1 :align :center
+              (each (range 0 (seqv-page-count track)) |page|
+                (box :width page-button-width :height 1.1
+                  :key (str "seqv-expanded-page-" track-id "-" page)
+                  :background "pattern-pill-bg"
+                  :active (seqv-page-active-binding track-id page)
+                  :style pattern-control-style
+                  :on-click |x y r| (seqv-goto-page track track-id page)
+                  (v-stack :align :center
+                    (label (fmt " {} " (+ page 1))
+                      :font-size 11
+                      :active (seqv-page-active-binding track-id page)
+                      :active-color :white
+                      :color :dim
+                      :bg :transparent)))))))))))
 
 (def seqv-expanded-track-editor (track track-id)
   (let ((mode (seqv-param-mode track-id)))

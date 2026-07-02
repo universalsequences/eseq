@@ -514,6 +514,23 @@ pub enum AppCommand {
         value: f32,
     },
 
+    /// Edit one cell in an instrument tensor default.
+    SetInstrumentTensorCell {
+        track: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    },
+
+    /// Edit one cell in a whole-matrix instrument tensor p-lock on multiple steps.
+    SetInstrumentTensorPlockCellMulti {
+        track: usize,
+        steps: Vec<usize>,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    },
+
     /// Set the instrument base-note offset.
     SetInstrumentBaseNoteOffset {
         track: usize,
@@ -653,7 +670,7 @@ mod tests {
     use crate::audiograph::LiveGraphPtr;
     use crate::effects::{
         EffectDescriptor, EffectSlotSnapshot, InstrumentModulationTarget, ParamDescriptor,
-        ParamKind, ParamScaling,
+        ParamKind, ParamScaling, TensorParamDescriptor,
     };
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
@@ -692,6 +709,7 @@ mod tests {
                     depth_unit: None,
                 },
             ],
+            tensor_params: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "xyz".to_string(),
@@ -768,6 +786,51 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.graph.effect_descriptors = vec![vec![desc]];
         app
+    }
+
+    fn test_app_with_instrument_descriptor(desc: EffectDescriptor) -> App {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 42);
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            state,
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.graph.track_instrument_types = vec![InstrumentType::Custom];
+        app.graph.instrument_descriptors = vec![desc];
+        app
+    }
+
+    fn tensor_instrument_descriptor() -> EffectDescriptor {
+        EffectDescriptor {
+            name: "tensor instrument".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: vec![TensorParamDescriptor {
+                name: "strike_mask".to_string(),
+                shape: vec![2, 2],
+                cell_offset: 64,
+                default: vec![0.1, 0.2, 0.3, 0.4],
+                min: 0.0,
+                max: 1.0,
+            }],
+            params: Vec::new(),
+        }
     }
 
     fn test_app_with_bus_effect_descriptor(desc: EffectDescriptor) -> App {
@@ -869,6 +932,23 @@ mod tests {
             &AppCommand::SetInstrumentParam {
                 track: 0,
                 param_idx: 0,
+                value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetInstrumentTensorCell {
+                track: 0,
+                tensor_idx: 0,
+                cell_idx: 0,
+                value: 0.5,
+            }
+        ));
+        assert!(command_mutates_sequencer_state(
+            &AppCommand::SetInstrumentTensorPlockCellMulti {
+                track: 0,
+                steps: vec![0],
+                tensor_idx: 0,
+                cell_idx: 0,
                 value: 0.5,
             }
         ));
@@ -1075,6 +1155,62 @@ mod tests {
             "rack sampler p-locks need node identity for scheduler/audio resolution"
         );
         assert!(rack.slots[0].track_sound_state.dirty);
+    }
+
+    #[test]
+    fn instrument_tensor_default_cell_command_updates_default_without_plock() {
+        let mut app = test_app_with_instrument_descriptor(tensor_instrument_descriptor());
+
+        apply_command(
+            &mut app,
+            AppCommand::SetInstrumentTensorCell {
+                track: 0,
+                tensor_idx: 0,
+                cell_idx: 2,
+                value: 0.95,
+            },
+        );
+
+        let slot = &app.state.pattern.instrument_slots[0];
+        assert_eq!(
+            slot.tensor_params.default_values(0).unwrap(),
+            vec![0.1, 0.2, 0.95, 0.4]
+        );
+        assert_eq!(slot.tensor_params.plock_values(3, 0), None);
+        assert!(
+            app.state.pattern.track_sound_state.lock().unwrap()[0].dirty,
+            "default tensor edits should refresh live instrument voices"
+        );
+    }
+
+    #[test]
+    fn instrument_tensor_plock_cell_command_writes_whole_matrix_without_changing_default() {
+        let mut app = test_app_with_instrument_descriptor(tensor_instrument_descriptor());
+
+        apply_command(
+            &mut app,
+            AppCommand::SetInstrumentTensorPlockCellMulti {
+                track: 0,
+                steps: vec![2, 3],
+                tensor_idx: 0,
+                cell_idx: 1,
+                value: 0.85,
+            },
+        );
+
+        let slot = &app.state.pattern.instrument_slots[0];
+        assert_eq!(
+            slot.tensor_params.default_values(0).unwrap(),
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(
+            slot.tensor_params.plock_values(2, 0).unwrap(),
+            vec![0.1, 0.85, 0.3, 0.4]
+        );
+        assert_eq!(
+            slot.tensor_params.plock_values(3, 0).unwrap(),
+            vec![0.1, 0.85, 0.3, 0.4]
+        );
     }
 
     #[test]
@@ -1637,6 +1773,36 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             for step in steps {
                 app.state.pattern.instrument_slots[track].set_plock(step, param_idx, value);
                 sync_instrument_mod_active_plock(app, track, step, param_idx);
+            }
+        }
+
+        AppCommand::SetInstrumentTensorCell {
+            track,
+            tensor_idx,
+            cell_idx,
+            value,
+        } => {
+            let slot = &app.state.pattern.instrument_slots[track];
+            if let Some(values) = slot
+                .tensor_params
+                .set_default_cell(tensor_idx, cell_idx, value)
+            {
+                app.send_instrument_tensor_param(track, tensor_idx, &values);
+                app.mark_track_sound_dirty(track);
+            }
+        }
+
+        AppCommand::SetInstrumentTensorPlockCellMulti {
+            track,
+            steps,
+            tensor_idx,
+            cell_idx,
+            value,
+        } => {
+            let slot = &app.state.pattern.instrument_slots[track];
+            for step in steps {
+                slot.tensor_params
+                    .set_plock_cell(step, tensor_idx, cell_idx, value);
             }
         }
 

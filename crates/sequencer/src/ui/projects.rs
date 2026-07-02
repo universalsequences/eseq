@@ -151,6 +151,17 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
         defaults: desc.params.iter().map(|param| param.default).collect(),
         plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
         plock_param_ids: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+        tensor_params: desc
+            .tensor_params
+            .iter()
+            .map(|tensor| crate::effects::TensorParamSnapshot {
+                name: tensor.name.clone(),
+                shape: tensor.shape.clone(),
+                cell_offset: tensor.cell_offset,
+                default: tensor.default.clone(),
+                plocks: Vec::new(),
+            })
+            .collect(),
         param_node_indices: desc
             .params
             .iter()
@@ -493,6 +504,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         defaults,
         plocks,
         plock_param_ids,
+        tensor_params: slot.tensor_params.clone(),
         param_node_indices: desc.params.iter().map(|p| p.node_param_idx).collect(),
         param_node_spans: desc
             .params
@@ -634,6 +646,7 @@ fn project_bus_pattern_snapshot_from_ui(
                     defaults,
                     plocks: plocks.clone(),
                     plock_param_ids: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+                    tensor_params: Vec::new(),
                     param_node_indices: Vec::new(),
                     param_node_spans: Vec::new(),
                     ir: None,
@@ -2327,6 +2340,7 @@ impl App {
                                     defaults: Vec::new(),
                                     plocks: vec![Vec::new(); MAX_STEPS],
                                     plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                    tensor_params: Vec::new(),
                                     param_node_indices: Vec::new(),
                                     param_node_spans: Vec::new(),
                                     ir: None,
@@ -2361,6 +2375,7 @@ impl App {
                                 defaults,
                                 plocks: vec![Vec::new(); MAX_STEPS],
                                 plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                tensor_params: Vec::new(),
                                 param_node_indices: sampler_desc
                                     .params
                                     .iter()
@@ -2385,6 +2400,7 @@ impl App {
                                 defaults: Vec::new(),
                                 plocks: vec![Vec::new(); MAX_STEPS],
                                 plock_param_ids: vec![Vec::new(); MAX_STEPS],
+                                tensor_params: Vec::new(),
                                 param_node_indices: Vec::new(),
                                 param_node_spans: Vec::new(),
                                 ir: None,
@@ -2601,6 +2617,7 @@ mod tests {
             plock_param_ids: (0..MAX_STEPS).map(|_| vec![None]).collect(),
             param_node_indices: vec![0],
             param_node_spans: vec![1],
+            tensor_params: Vec::new(),
             ir: None,
         };
 
@@ -2630,6 +2647,7 @@ mod tests {
             param_node_indices,
             param_node_spans: vec![1; num_params],
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
+            tensor_params: Vec::new(),
             ir: None,
         }
     }
@@ -2846,6 +2864,7 @@ mod tests {
             plock_param_ids: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![9],
             param_node_spans: vec![1],
+            tensor_params: Vec::new(),
             ir: None,
         };
         let mut project = minimal_project_with_effect_slots(
@@ -2884,6 +2903,7 @@ mod tests {
             plock_param_ids: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![11],
             param_node_spans: vec![1],
+            tensor_params: Vec::new(),
             ir: None,
         };
         let mut project = minimal_project_with_effect_slots(
@@ -2929,6 +2949,7 @@ mod tests {
                 crate::voice_modulator::MOD_PARAM_BASE + 1,
             ],
             param_node_spans: vec![1, 1, 1, 1],
+            tensor_params: Vec::new(),
             ir: None,
         };
 
@@ -2938,6 +2959,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 test_param("attack", 0.01, crate::lisp_host::HEADER_SLOTS as u32),
                 test_param("tone", 0.02, crate::lisp_host::HEADER_SLOTS as u32 + 1),
@@ -2990,6 +3012,7 @@ mod tests {
                 crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE + 1,
             ],
             param_node_spans: vec![1, 1, 1, 1],
+            tensor_params: Vec::new(),
             ir: None,
         };
 
@@ -2999,6 +3022,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 test_param("attack", 0.01, crate::lisp_host::HEADER_SLOTS as u32),
                 test_param("tone", 0.02, crate::lisp_host::HEADER_SLOTS as u32 + 1),
@@ -3039,6 +3063,7 @@ mod tests {
             plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
             param_node_indices: vec![10, 14, 18, 22],
             param_node_spans: vec![1, 1, 1, 1],
+            tensor_params: Vec::new(),
             ir: None,
         };
 
@@ -3048,6 +3073,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 test_param("attack", 0.01, 10),
                 test_param("__host_mod__attack__lane2__source", 0.0, 14),
@@ -3081,6 +3107,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 test_param("attack", 0.01, 10),
                 test_param("__host_mod__attack__lane2__source", 0.0, 14),
@@ -3111,6 +3138,7 @@ mod tests {
                 .iter()
                 .map(|param| param.node_param_span.max(1))
                 .collect(),
+            tensor_params: Vec::new(),
             ir: None,
         };
 
@@ -3142,6 +3170,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 test_param("wave", 0.12, 10),
                 test_param("cutoff", 7200.0, 14),
@@ -3160,6 +3189,7 @@ mod tests {
                 .map(|param| param.node_param_idx)
                 .collect(),
             param_node_spans: vec![1, 4, 1, 1],
+            tensor_params: Vec::new(),
             ir: None,
         };
 
@@ -3179,6 +3209,7 @@ mod tests {
             output_channels: 2,
             instrument_modulators: Vec::new(),
             instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
             params: vec![
                 test_param("cutoff", 0.01, 10),
                 test_param("mod cutoff lane 1 src", 1.0, 14),
@@ -3206,6 +3237,7 @@ mod tests {
                 .iter()
                 .map(|param| param.node_param_span.max(1))
                 .collect(),
+            tensor_params: Vec::new(),
             ir: None,
         };
 
