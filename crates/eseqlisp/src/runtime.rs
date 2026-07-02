@@ -1447,6 +1447,30 @@ impl Runtime {
         self.register_native_impl(name, Some(signature.into()), Some(docs.into()), f);
     }
 
+    pub fn register_vm_native_with_docs<F>(
+        &mut self,
+        name: &str,
+        signature: impl Into<String>,
+        docs: impl Into<String>,
+        f: F,
+    ) where
+        F: Fn(Vec<Value>, &mut crate::vm::VM) -> Value + 'static,
+    {
+        self.vm.register_native_with_vm(name, f);
+        self.symbol_metadata.insert(
+            name.to_string(),
+            SymbolMetadata {
+                signature: signature.into(),
+                docs: docs.into(),
+            },
+        );
+        self.invalidate_symbol_cache();
+    }
+
+    pub fn add_global_store_hook(&mut self, hook: crate::vm::GlobalStoreHook) {
+        self.vm.add_global_store_hook(hook);
+    }
+
     pub fn document_symbol(
         &mut self,
         name: impl Into<String>,

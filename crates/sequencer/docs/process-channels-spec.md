@@ -274,6 +274,34 @@ needs zero new syntax when that layer arrives.
 
 ---
 
+## Runtime boundary: authoring VM vs scheduler VM
+
+There are two ESeqLisp runtimes: the UI runtime (regular buffers, where authoring happens) and the scratch/control runtime (where the scheduler executes process bodies). Lisp closure values are **not portable** between them — compiled function IDs, environment cells, and host handles are VM-local. The boundary rule:
+
+**Process definitions cross the boundary as source text, in exactly one place.** `def-process` bodies ship as source and are compiled in the scheduler VM. Everything callback-shaped lowers to that path — there is no separate callback-publication mechanism:
+
+- `every`, `after`, `on`, and `tap` are all sugar for an anonymous process instance. In particular, `tap` lowers to a process with a single `:listen` inlet on the channel and the lambda as its handler. Taps thereby inherit process shipping, hot-swap, `(ps)` visibility, `start`/`stop`, and error reporting for free.
+
+### Capture rules (apply to ALL shipped bodies)
+
+At publish time (in the UI runtime), free variables of a shipped body are resolved and inlined **by value**. Portable values: numbers, strings, keywords, bools, nil, lists/maps of those, `pat` values, channel references (by name), process handles (by name). Anything else — functions, widgets, host handles, `Rc` values — is an immediate authoring-time error naming the variable and suggesting the fix ("reference a channel or make it a process inlet").
+
+Capture is a snapshot; it does not track later mutation of the source binding. Live-tunable values belong in channels or process inlets — that is the sanctioned mutable capture.
+
+### Identity and ownership
+
+A shipped declaration's ID defaults to (buffer name, ordinal within that buffer's evaluation), with optional explicit `:key` for stability across reordering — the same convention as UI widget keys. Re-evaluating a buffer republishes the buffer's full declaration set; the scheduler diffs by ID: changed declarations are replaced (preserving `:state` by name per the hot-swap rule), absent ones are stopped and removed. The buffer is the ownership unit, exactly like effect-buffer widgets.
+
+### Scheduler-safe native set
+
+Shipped bodies may call: pure lisp, the mutation surface (`graph-*`, `transpose!`, plocks), and process natives (`emit`, `send`, `play-pat`, handle messages). They may not call UI natives (`reactive-set`, widgets) or buffer/host natives. Call sites are checked against the whitelist at publish time in the UI runtime so violations surface as immediate buffer diagnostics; the scheduler VM keeps a backstop check.
+
+### The reverse direction (scheduler → UI)
+
+UI reactions to channel activity do not cross into the scheduler. Channel last-values/messages are mirrored back through the `SequencerState` snapshot; `bind-chan` reads them reactively, and an optional `tap-ui` runs a callback locally in the UI runtime (frame-rate timing, no mutation surface). Rule of thumb: `tap` = musical time, scheduler VM, sample-accurate; `tap-ui`/`bind-chan` = render time, UI VM.
+
+---
+
 ## Deliberately excluded
 
 - Second wiring mechanism, second channel kind beyond value/message, special-cased process types.

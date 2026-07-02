@@ -17147,6 +17147,65 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_process_ui_demo_script_picker_registers_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let process_state = Arc::new(SequencerState::new(
+            16,
+            (0..16)
+                .map(|_| sequencer::sequencer::default_empty_effect_chain())
+                .collect(),
+        ));
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            editor.runtime_mut(),
+            process_state,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (set-window-buffer "*sequencer*")
+                (set! seq-script-picker-source-buffer "*sequencer*")
+                "#,
+            )
+            .expect("select sequencer source buffer");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seq-script-load-file
+                    (path-join (seq-script-default-dir) "process-ui-control-demo.lisp"))"#,
+            )
+            .expect("load process UI demo through script picker path");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.active_buffer().name,
+            "*sequencer*",
+            "script picker load should return to the source buffer"
+        );
+        assert_eq!(
+            tile_tabs_for_buffer(&editor, "*sequencer*"),
+            vec![
+                ("Seq".to_string(), "*sequencer*".to_string()),
+                ("Process UI".to_string(), "*process-ui*".to_string())
+            ],
+            "process UI demo should register a main step-panel tab through the script contract"
+        );
+        let scratch = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*scratch*")
+            .map(|buffer| buffer.text())
+            .unwrap_or_default();
+        assert!(
+            scratch.contains("process-ui-control-demo.lisp"),
+            "picker load should persist the process UI demo load form; scratch={scratch:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_script_picker_load_syncs_hidden_scratch_into_project_state() {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
@@ -28614,10 +28673,22 @@ mod tests {
                 vec!["engine", "ptch", "dec"],
             ),
             (
+                "drums/ultrakick/",
+                "instruments/drums/ultrakick/dsp.lisp",
+                "instruments/drums/ultrakick/ui.lisp",
+                vec!["engine", "ptch", "dec"],
+            ),
+            (
                 "drums/md-snare/",
                 "instruments/drums/md-snare/dsp.lisp",
                 "instruments/drums/md-snare/ui.lisp",
                 vec!["engine", "snap", "clip"],
+            ),
+            (
+                "drums/ultrasnare/",
+                "instruments/drums/ultrasnare/dsp.lisp",
+                "instruments/drums/ultrasnare/ui.lisp",
+                vec!["engine", "wire", "dec"],
             ),
             (
                 "drums/md-hat/",
@@ -28642,6 +28713,12 @@ mod tests {
                 "instruments/drums/md-perc/dsp.lisp",
                 "instruments/drums/md-perc/ui.lisp",
                 vec!["engine", "clpy", "hard"],
+            ),
+            (
+                "drums/ultraperc/",
+                "instruments/drums/ultraperc/dsp.lisp",
+                "instruments/drums/ultraperc/ui.lisp",
+                vec!["engine", "ratl", "dec"],
             ),
         ];
 

@@ -28,6 +28,7 @@ use crate::voice::MAX_VOICES;
 // tests call the same extracted production pass. Keep the stack budget explicit
 // instead of depending on platform thread defaults.
 const SCHEDULER_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+const PROCESS_EVENT_CASCADE_LIMIT: usize = 1024;
 
 fn scheduled_instrument_params_from_vec(
     params: Vec<ScheduledInstrumentParam>,
@@ -1461,6 +1462,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
     sample_time: u64,
     event_beat: f64,
     samples_per_quarter: f32,
+    global_transpose: f32,
     track_idx: usize,
     step_idx: usize,
     samples_per_step: f32,
@@ -1470,6 +1472,8 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
     instrument_params: ScheduledInstrumentParams,
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
+    let resolved =
+        apply_global_transpose_to_resolved(snapshot, track_idx, global_transpose, resolved);
     let instrument_fingerprint =
         instrument_sound_fingerprint(snapshot, track_idx, &instrument_params);
     if chord.count > 0 {
@@ -1592,6 +1596,7 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
     sample_time: u64,
     event_beat: f64,
     samples_per_quarter: f32,
+    global_transpose: f32,
     mut event: StepEvent,
 ) -> bool {
     match event.source.clone() {
@@ -1603,6 +1608,7 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
             sample_time,
             event_beat,
             samples_per_quarter,
+            global_transpose,
             event.track,
             step,
             event.samples_per_step,
@@ -1623,6 +1629,7 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
                 sample_time,
                 event_beat,
                 samples_per_quarter,
+                global_transpose,
                 event.track,
                 neuron,
                 seed,
@@ -1660,6 +1667,7 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
     sample_time: u64,
     event_beat: f64,
     samples_per_quarter: f32,
+    global_transpose: f32,
     arp_phase_beats: f32,
     mut event: StepEvent,
     debug_accum: bool,
@@ -1696,6 +1704,7 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
             sample_time,
             event_beat,
             samples_per_quarter,
+            global_transpose,
             event,
         );
     };
@@ -1718,6 +1727,7 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
             sample_time,
             event_beat,
             samples_per_quarter,
+            global_transpose,
             event,
         );
     }
@@ -1772,6 +1782,7 @@ fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
         sample_time,
         event_beat,
         samples_per_quarter,
+        global_transpose,
         events,
     )
 }
@@ -1835,6 +1846,7 @@ fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
     pattern_epoch: u64,
     sample_time: u64,
     samples_per_quarter: f32,
+    global_transpose: f32,
     arp_phase_beats: f32,
     output: NeuralOutput,
     debug_accum: bool,
@@ -1854,6 +1866,7 @@ fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
                     sample_time,
                     arp_phase_beats as f64,
                     samples_per_quarter,
+                    global_transpose,
                     arp_phase_beats,
                     event,
                     debug_accum,
@@ -1882,6 +1895,7 @@ fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
         sample_time,
         arp_phase_beats as f64,
         samples_per_quarter,
+        global_transpose,
         arp_phase_beats,
         event,
         debug_accum,
@@ -1893,6 +1907,9 @@ enum EmittedNetworkEventSource {
     Generator {
         index: usize,
     },
+    Process {
+        runtime_id: u64,
+    },
     Graph {
         graph_index: usize,
         node_index: usize,
@@ -1903,6 +1920,7 @@ impl EmittedNetworkEventSource {
     fn event_source_index(self) -> usize {
         match self {
             Self::Generator { index } => index,
+            Self::Process { runtime_id } => runtime_id as usize,
             Self::Graph { node_index, .. } => node_index,
         }
     }
@@ -1910,14 +1928,16 @@ impl EmittedNetworkEventSource {
     fn label(self) -> &'static str {
         match self {
             Self::Generator { .. } => "generator",
+            Self::Process { .. } => "process",
             Self::Graph { .. } => "graph",
         }
     }
 
     fn owner_index(self) -> usize {
         match self {
-            Self::Generator { index }
-            | Self::Graph {
+            Self::Generator { index } => index,
+            Self::Process { runtime_id } => runtime_id as usize,
+            Self::Graph {
                 graph_index: index, ..
             } => index,
         }
@@ -1925,7 +1945,7 @@ impl EmittedNetworkEventSource {
 
     fn resolve_track(self, emitted_track: Option<usize>) -> Option<usize> {
         match self {
-            Self::Generator { .. } => emitted_track.or(Some(0)),
+            Self::Generator { .. } | Self::Process { .. } => emitted_track.or(Some(0)),
             Self::Graph { .. } => emitted_track,
         }
     }
@@ -1941,6 +1961,7 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
     sample_time: u64,
     samples_per_quarter: f32,
     arp_phase_beats: f32,
+    global_transpose: f32,
     source: EmittedNetworkEventSource,
     emitted: lisp_host::EmittedAccumulatorEvent,
     debug_accum: bool,
@@ -2025,10 +2046,63 @@ fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
         sample_time,
         arp_phase_beats as f64,
         samples_per_quarter,
+        global_transpose,
         arp_phase_beats,
         event,
         debug_accum,
     )
+}
+
+fn enqueue_due_process_emissions<const QUEUE_CAP: usize>(
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    quantizer_state: &mut MidiFxQuantizerState,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    pattern_epoch: u64,
+    chunk_start_beats: f64,
+    chunk_start_sample: u64,
+    up_to_beat: f64,
+    samples_per_quarter: f64,
+    debug_accum: bool,
+) -> bool {
+    for emission in process_runtime.take_due_emissions(up_to_beat) {
+        let sample_time = chunk_start_sample.saturating_add(
+            ((emission.beat - chunk_start_beats).max(0.0) * samples_per_quarter).round() as u64,
+        );
+        if debug_routing_enabled() {
+            eprintln!(
+                "[routing] process-emission process={} track={:?} sample={} beat={:.6} transpose={} vel={}",
+                emission.process_runtime_id,
+                emission.event.track,
+                sample_time,
+                emission.beat,
+                emission.event.resolved.transpose,
+                emission.event.resolved.velocity
+            );
+        }
+        if !enqueue_emitted_network_event_with_midi_fx(
+            queue,
+            snapshot,
+            track_output_events,
+            scratch_runtime.as_mut(),
+            Some(&mut *quantizer_state),
+            pattern_epoch,
+            sample_time,
+            samples_per_quarter as f32,
+            emission.beat as f32,
+            process_runtime.global_transpose(),
+            EmittedNetworkEventSource::Process {
+                runtime_id: emission.process_runtime_id,
+            },
+            emission.event,
+            debug_accum,
+        ) {
+            return false;
+        }
+    }
+    true
 }
 
 fn normalize_network_event_destination(
@@ -2356,6 +2430,24 @@ fn apply_fit_to_scale_to_trigger(
     (resolved, chord)
 }
 
+fn apply_global_transpose_to_resolved(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    global_transpose: f32,
+    mut resolved: ResolvedStep,
+) -> ResolvedStep {
+    if global_transpose.abs() > f32::EPSILON
+        && snapshot
+            .tracks
+            .get(track_idx)
+            .map(|track| track.params.global_transpose)
+            .unwrap_or(false)
+    {
+        resolved.transpose += global_transpose;
+    }
+    resolved
+}
+
 fn enqueue_network_trigger<const QUEUE_CAP: usize>(
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
@@ -2364,6 +2456,7 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
     sample_time: u64,
     event_beat: f64,
     samples_per_quarter: f32,
+    global_transpose: f32,
     track_idx: usize,
     source_neuron: usize,
     seed: Option<(usize, usize)>,
@@ -2376,6 +2469,8 @@ fn enqueue_network_trigger<const QUEUE_CAP: usize>(
     instrument_fingerprint: u64,
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
+    let resolved =
+        apply_global_transpose_to_resolved(snapshot, track_idx, global_transpose, resolved);
     if chord.count > 0 {
         let max_delay = chord.delays[..chord.count]
             .iter()
@@ -3066,7 +3161,11 @@ fn run_midi_fx_chain_for_track_inner(
                     stage_idx,
                     event_source_label(&event.source),
                     event.chord.len(),
-                    event.note_spans.as_ref().map(|spans| spans.len()).unwrap_or(0),
+                    event
+                        .note_spans
+                        .as_ref()
+                        .map(|spans| spans.len())
+                        .unwrap_or(0),
                     event.offset_beats,
                     event.step_beats,
                     event.resolved.transpose,
@@ -3257,6 +3356,7 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
     base_sample_time: u64,
     base_beat: f64,
     samples_per_quarter: f32,
+    global_transpose: f32,
     events: Vec<MidiFxEvent>,
 ) -> bool {
     let mut ok = true;
@@ -3300,6 +3400,7 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
                 sample_time,
                 base_beat + event.offset_beats as f64,
                 samples_per_quarter,
+                global_transpose,
                 event.track,
                 neuron,
                 seed,
@@ -3319,6 +3420,7 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
                 sample_time,
                 base_beat + event.offset_beats as f64,
                 samples_per_quarter,
+                global_transpose,
                 event.track,
                 event.step,
                 event.samples_per_step,
@@ -3557,6 +3659,7 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 rendered_sample,
                 rendered_total_beats,
                 samples_per_quarter,
+                0.0,
                 events,
             ) {
                 break;
@@ -3676,6 +3779,7 @@ fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
                 live_tracks[track_idx].next_tick_sample,
                 rendered_total_beats + tick_offset_beats,
                 samples_per_quarter,
+                0.0,
                 events,
             ) {
                 break;
@@ -3744,6 +3848,7 @@ struct SchedulerLookaheadState {
     midi_fx_quantizer_state: MidiFxQuantizerState,
     neural_runtime: NeuralRuntime,
     generator_runtime: crate::generator::GeneratorRuntime,
+    process_runtime: crate::process::ProcessRuntime,
     graph_manifests: Vec<crate::graph::GraphManifest>,
     graph_runtimes: Vec<crate::graph::GraphRuntime>,
     debug_graph_drive_chunks: u32,
@@ -3759,6 +3864,7 @@ impl SchedulerLookaheadState {
             midi_fx_quantizer_state: MidiFxQuantizerState::default(),
             neural_runtime: NeuralRuntime::default(),
             generator_runtime: crate::generator::GeneratorRuntime::default(),
+            process_runtime: crate::process::ProcessRuntime::default(),
             graph_manifests: Vec::new(),
             graph_runtimes: Vec::new(),
             debug_graph_drive_chunks: 0,
@@ -3862,6 +3968,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let midi_fx_quantizer_state = &mut scheduler.midi_fx_quantizer_state;
     let neural_runtime = &mut scheduler.neural_runtime;
     let generator_runtime = &mut scheduler.generator_runtime;
+    let process_runtime = &mut scheduler.process_runtime;
     let graph_manifests = &mut scheduler.graph_manifests;
     let graph_runtimes = &mut scheduler.graph_runtimes;
     let mut debug_graph_drive_chunks = scheduler.debug_graph_drive_chunks;
@@ -4207,6 +4314,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                         samples_per_quarter.into(),
                                     ),
                                     samples_per_quarter,
+                                    process_runtime.global_transpose(),
                                     final_events,
                                 ) {
                                     chunk_enqueued = false;
@@ -4318,6 +4426,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 samples_per_quarter.into(),
                             ),
                             samples_per_quarter.into(),
+                            process_runtime.global_transpose(),
                             events,
                         ) {
                             chunk_enqueued = false;
@@ -4356,6 +4465,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 samples_per_quarter.into(),
                             ),
                             samples_per_quarter,
+                            process_runtime.global_transpose(),
                             step_event.clone(),
                         );
                         let seed_beats = trigger.absolute_beats;
@@ -4396,6 +4506,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             samples_per_quarter.into(),
                         ),
                         samples_per_quarter,
+                        process_runtime.global_transpose(),
                         step_event.clone(),
                     );
                     let seed_beats = trigger.absolute_beats;
@@ -4469,6 +4580,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 pattern_epoch,
                 sample_time,
                 samples_per_quarter as f32,
+                process_runtime.global_transpose(),
                 event_beats,
                 output,
                 debug_accum,
@@ -4549,6 +4661,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     emission.sample_time,
                     samples_per_quarter as f32,
                     event_beats,
+                    process_runtime.global_transpose(),
                     EmittedNetworkEventSource::Generator {
                         index: emission.generator_index,
                     },
@@ -4558,6 +4671,102 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     chunk_enqueued = false;
                     break;
                 }
+            }
+            if !chunk_enqueued {
+                break;
+            }
+        }
+
+        // Scheduler-owned processes: self-clocked like generators, but with
+        // named inlets/outlets/channels and a pending store for future emits.
+        if !process_runtime.is_empty() {
+            if scratch_runtime.is_some() {
+                let invocations = process_runtime.process_block(
+                    chunk_start_beats,
+                    chunk_end_beats,
+                    scheduled_until_sample,
+                    samples_per_quarter,
+                );
+                for invocation in invocations {
+                    let mut pending_invocations = vec![invocation];
+                    let mut processed_invocations = 0usize;
+                    while let Some(invocation) = pending_invocations.pop() {
+                        processed_invocations += 1;
+                        if processed_invocations > PROCESS_EVENT_CASCADE_LIMIT {
+                            if debug_accum || debug_routing_enabled() {
+                                eprintln!(
+                                    "[process] listener cascade limit exceeded limit={}",
+                                    PROCESS_EVENT_CASCADE_LIMIT
+                                );
+                            }
+                            chunk_enqueued = false;
+                            break;
+                        }
+                        let invocation_beat = invocation.beat;
+                        let process_runtime_id = invocation.runtime_id;
+                        let Some(scratch) = scratch_runtime.as_mut() else {
+                            break;
+                        };
+                        match scratch.invoke_process_run(invocation) {
+                            Ok(result) => {
+                                let mut followups = process_runtime.apply_run_result(result);
+                                followups.reverse();
+                                pending_invocations.extend(followups);
+                            }
+                            Err(err) => {
+                                if debug_accum || debug_routing_enabled() {
+                                    eprintln!(
+                                        "[process] run error process={} beat={:.6} err={}",
+                                        process_runtime_id, invocation_beat, err
+                                    );
+                                }
+                            }
+                        }
+                        if !enqueue_due_process_emissions(
+                            queue,
+                            snapshot,
+                            &mut track_output_events,
+                            scratch_runtime,
+                            midi_fx_quantizer_state,
+                            process_runtime,
+                            pattern_epoch,
+                            chunk_start_beats,
+                            scheduled_until_sample,
+                            invocation_beat,
+                            samples_per_quarter,
+                            debug_accum,
+                        ) {
+                            chunk_enqueued = false;
+                            break;
+                        }
+                    }
+                    if !chunk_enqueued {
+                        break;
+                    }
+                }
+                if chunk_enqueued
+                    && !enqueue_due_process_emissions(
+                        queue,
+                        snapshot,
+                        &mut track_output_events,
+                        scratch_runtime,
+                        midi_fx_quantizer_state,
+                        process_runtime,
+                        pattern_epoch,
+                        chunk_start_beats,
+                        scheduled_until_sample,
+                        chunk_end_beats,
+                        samples_per_quarter,
+                        debug_accum,
+                    )
+                {
+                    chunk_enqueued = false;
+                }
+            } else if debug_routing_enabled() {
+                eprintln!(
+                    "[routing] skip process-block reason=no-scratch-runtime chunk=({:.6}..{:.6})",
+                    chunk_start_beats, chunk_end_beats
+                );
             }
             if !chunk_enqueued {
                 break;
@@ -4667,6 +4876,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     emission.sample_time,
                     samples_per_quarter as f32,
                     event_beats,
+                    process_runtime.global_transpose(),
                     EmittedNetworkEventSource::Graph {
                         graph_index,
                         node_index: emission.node_index,
@@ -4715,6 +4925,7 @@ fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     deadline_sample,
                     pending.deadline_beats,
                     samples_per_quarter as f32,
+                    process_runtime.global_transpose(),
                     events,
                 ) {
                     chunk_enqueued = false;
@@ -4767,6 +4978,7 @@ pub fn spawn_scheduler_thread(
             let mut last_live_midi_fx_active = false;
             let mut scratch_source_version = u64::MAX;
             let mut published_sequencers_version = u64::MAX;
+            let mut published_process_authoring_version = u64::MAX;
             let mut scratch_runtime = None;
             let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
             let debug_graph = std::env::var_os("TINYSEQ_DEBUG_GRAPH").is_some();
@@ -4795,8 +5007,12 @@ pub fn spawn_scheduler_thread(
                 let topology_edit_in_flight = state.topology_edit_in_flight();
 
                 let latest_published_sequencers_version = state.published_sequencers_version();
+                let latest_published_process_authoring_version =
+                    state.published_process_authoring_version();
                 if latest_scratch_source_version != scratch_source_version
                     || latest_published_sequencers_version != published_sequencers_version
+                    || latest_published_process_authoring_version
+                        != published_process_authoring_version
                 {
                     let user_source = state.scratch_source();
                     if debug_accum {
@@ -4833,7 +5049,8 @@ pub fn spawn_scheduler_thread(
                     // editor file, published via SequencerState). These need a runtime
                     // to live in even when there is no scratch/midi-fx source.
                     let published = state.published_sequencers();
-                    if !published.is_empty() {
+                    let published_process_authoring = state.published_process_authoring();
+                    if !published.is_empty() || !published_process_authoring.is_empty() {
                         let runtime = scratch_runtime.get_or_insert_with(|| {
                             build_scheduler_scratch_runtime(Arc::clone(&state), "", debug_accum)
                                 .unwrap_or_else(|| {
@@ -4858,11 +5075,24 @@ pub fn spawn_scheduler_thread(
                     }
                     scratch_source_version = latest_scratch_source_version;
                     published_sequencers_version = latest_published_sequencers_version;
+                    published_process_authoring_version =
+                        latest_published_process_authoring_version;
                     let generator_defs = scratch_runtime
                         .as_ref()
                         .map(|runtime| runtime.sequencer_defs())
                         .unwrap_or_default();
                     lookahead_state.generator_runtime.sync_definitions(&generator_defs, lookahead_state.clock.total_beats);
+                    let process_authoring = scratch_runtime
+                        .as_ref()
+                        .map(|runtime| runtime.process_authoring_snapshot())
+                        .unwrap_or_default();
+                    let process_authoring = crate::process::merge_authoring_snapshots(
+                        process_authoring,
+                        published_process_authoring.to_runtime(),
+                    );
+                    lookahead_state
+                        .process_runtime
+                        .sync_authoring(process_authoring, lookahead_state.clock.total_beats);
 
                     let new_manifests: Vec<crate::graph::GraphManifest> =
                         published.iter().filter_map(|s| s.graph.clone()).collect();
@@ -4914,6 +5144,7 @@ pub fn spawn_scheduler_thread(
                 {
                     queue.clear();
                     lookahead_state.midi_fx_quantizer_state.reset();
+                    lookahead_state.process_runtime.clear_scene_pending();
                 }
 
                 drain_live_keyboard_inputs(
@@ -4934,6 +5165,11 @@ pub fn spawn_scheduler_thread(
                             rendered,
                             previous_scheduled_until,
                         );
+                        lookahead_state
+                            .process_runtime
+                            .reset_transport(lookahead_state.clock.total_beats);
+                    } else {
+                        lookahead_state.process_runtime.reset_transport(0.0);
                     }
                     last_live_midi_fx_active = live_midi_fx_active;
                 }
@@ -4978,6 +5214,7 @@ pub fn spawn_scheduler_thread(
                     lookahead_state.midi_fx_quantizer_state.reset();
                     lookahead_state.neural_runtime.reset_state(0.0);
                     lookahead_state.generator_runtime.reset(0.0);
+                    lookahead_state.process_runtime.reset_transport(0.0);
                     for graph in &mut lookahead_state.graph_runtimes {
                         graph.reset(0.0);
                     }
@@ -4990,6 +5227,7 @@ pub fn spawn_scheduler_thread(
                 if topology_edit_in_flight {
                     queue.clear();
                     lookahead_state.midi_fx_quantizer_state.reset();
+                    lookahead_state.process_runtime.clear_scene_pending();
                     // Freeze future scheduling while the topology edit is in
                     // flight, but preserve the clock's current musical phase
                     // so resuming after the edit does not jump backwards.
@@ -5060,6 +5298,7 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     lookahead_state.pending_accum_reset = [true; MAX_TRACKS];
                     lookahead_state.neural_runtime.reset_state(lookahead_state.clock.total_beats);
+                    lookahead_state.process_runtime.reset_transport(0.0);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
                 } else if last_topology_epoch != topology_epoch {
                     let previous_scheduled_until = scheduled_until_sample;
@@ -5069,6 +5308,9 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     lookahead_state.pending_accum_reset = [true; MAX_TRACKS];
                     lookahead_state.neural_runtime.reset_state(lookahead_state.clock.total_beats);
+                    lookahead_state
+                        .process_runtime
+                        .reset_transport(lookahead_state.clock.total_beats);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
                 } else if last_pattern_epoch != pattern_epoch {
                     // Track topology edits bump pattern_epoch without changing the
@@ -5081,6 +5323,9 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     lookahead_state.pending_accum_reset = [true; MAX_TRACKS];
                     lookahead_state.neural_runtime.reset_state(lookahead_state.clock.total_beats);
+                    lookahead_state
+                        .process_runtime
+                        .reset_transport(lookahead_state.clock.total_beats);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
                 } else if last_pattern != pattern {
                     // Pattern switches should replace future scheduled content without
@@ -5092,6 +5337,9 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     lookahead_state.pending_accum_reset = [true; MAX_TRACKS];
                     lookahead_state.neural_runtime.reset_state(lookahead_state.clock.total_beats);
+                    lookahead_state
+                        .process_runtime
+                        .reset_transport(lookahead_state.clock.total_beats);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
                 }
 
@@ -5783,6 +6031,7 @@ mod tests {
             1_000,
             0.0,
             48_000.0,
+            0.0,
             0,
             0,
             6_000.0,
@@ -5800,6 +6049,89 @@ mod tests {
         assert_eq!(track_output_events[0].beat, 0.0);
         assert_eq!(track_output_events[1].beat, 0.0625);
         assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn enqueue_resolved_trigger_applies_global_transpose_for_opted_in_track() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<8>::new();
+        let mut track_output_events = Vec::new();
+
+        assert!(enqueue_resolved_trigger(
+            &queue,
+            &snapshot,
+            &mut track_output_events,
+            0,
+            1_000,
+            0.0,
+            48_000.0,
+            5.0,
+            0,
+            0,
+            6_000.0,
+            test_resolved_step(),
+            ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            Vec::new(),
+            ScheduledInstrumentParams::new(),
+        ));
+
+        let event = queue.pop().expect("global-transposed event");
+        match event.kind {
+            ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
+                assert_eq!(resolved.transpose, 5.0);
+            }
+            other => panic!("unexpected event kind: {other:?}"),
+        }
+        assert_eq!(track_output_events[0].transpose, 5.0);
+    }
+
+    #[test]
+    fn enqueue_resolved_trigger_respects_global_transpose_opt_out() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.pattern.track_params[0].set_global_transpose(false);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<8>::new();
+        let mut track_output_events = Vec::new();
+
+        assert!(enqueue_resolved_trigger(
+            &queue,
+            &snapshot,
+            &mut track_output_events,
+            0,
+            1_000,
+            0.0,
+            48_000.0,
+            5.0,
+            0,
+            0,
+            6_000.0,
+            test_resolved_step(),
+            ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            Vec::new(),
+            ScheduledInstrumentParams::new(),
+        ));
+
+        let event = queue.pop().expect("opted-out event");
+        match event.kind {
+            ScheduledEventKind::ResolvedTrigger { resolved, .. } => {
+                assert_eq!(resolved.transpose, 0.0);
+            }
+            other => panic!("unexpected event kind: {other:?}"),
+        }
+        assert_eq!(track_output_events[0].transpose, 0.0);
     }
 
     #[test]
@@ -5895,6 +6227,7 @@ mod tests {
             0.0,
             48_000.0,
             0.0,
+            0.0,
             event,
             false,
         ));
@@ -5955,6 +6288,7 @@ mod tests {
             0,
             1_000,
             48_000.0,
+            0.0,
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             lisp_host::EmittedAccumulatorEvent {
@@ -6041,6 +6375,7 @@ mod tests {
             0,
             1_000,
             48_000.0,
+            0.0,
             0.0,
             EmittedNetworkEventSource::Generator { index: 0 },
             lisp_host::EmittedAccumulatorEvent {
@@ -6412,6 +6747,7 @@ mod tests {
             graph_emissions[0].sample_time,
             48_000.0,
             1.0,
+            0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
                 node_index: graph_emissions[0].node_index,
@@ -6463,6 +6799,7 @@ mod tests {
             0,
             1_000,
             48_000.0,
+            0.0,
             0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
@@ -6528,6 +6865,7 @@ mod tests {
             0,
             1_000,
             48_000.0,
+            0.0,
             0.0,
             EmittedNetworkEventSource::Graph {
                 graph_index: 0,
@@ -6934,6 +7272,7 @@ mod tests {
             1_000,
             48_000.0,
             0.0,
+            0.0,
             NeuralOutput {
                 sample_time: 1_000,
                 event,
@@ -7017,6 +7356,7 @@ mod tests {
             0.0,
             48_000.0,
             0.0,
+            0.0,
             event,
             false,
         ));
@@ -7092,6 +7432,7 @@ mod tests {
             1_000,
             0.0,
             48_000.0,
+            0.0,
             0.0,
             event,
             false,
@@ -7722,6 +8063,7 @@ mod tests {
             1234,
             48_000.0,
             0.0,
+            0.0,
             NeuralOutput {
                 sample_time: 1234,
                 event,
@@ -7842,6 +8184,7 @@ mod tests {
             7,
             1234,
             48_000.0,
+            0.0,
             0.0,
             NeuralOutput {
                 sample_time: 1234,

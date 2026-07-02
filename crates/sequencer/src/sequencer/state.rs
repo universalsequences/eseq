@@ -8,17 +8,17 @@ use crate::effects::{
 };
 use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
 use crate::neural::{
-    NeuralVisualizationSnapshot, ProjectNeuralNetwork,
-    remap_neural_network_routes_after_track_delete,
+    remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
+    ProjectNeuralNetwork,
 };
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, CustomInstrumentRunMode, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
-    InstrumentType, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_STEPS,
-    MAX_TRACKS, ModConnection, NUM_PARAMS, RackRouting, StepData, StepParam, SwingPLockData,
-    SwingResolution, SwingResolutionPLockData, TRACK_PATTERN_WORDS, Timebase, TimebasePLockData,
-    TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
+    ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection, RackRouting,
+    StepData, StepParam, SwingPLockData, SwingResolution, SwingResolutionPLockData, Timebase,
+    TimebasePLockData, TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
+    DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
+    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
 use super::{BusId, TrackOutput};
@@ -2367,6 +2367,8 @@ pub struct SequencerState {
     scratch_source_version: AtomicU64,
     published_sequencers: Mutex<Vec<PublishedSequencer>>,
     published_sequencers_version: AtomicU64,
+    published_process_authoring: Mutex<crate::process::PublishedProcessAuthoringSnapshot>,
+    published_process_authoring_version: AtomicU64,
     scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
     pending_accumulator_reset_all: AtomicBool,
@@ -2433,6 +2435,7 @@ fn capture_track_params_snapshot(track_params: &TrackParams) -> TrackParamsSnaps
         accum_mode: track_params.get_accum_mode(),
         fts_scale: track_params.get_fts_scale(),
         mute_group: track_params.get_mute_group(),
+        global_transpose: track_params.uses_global_transpose(),
     }
 }
 
@@ -2621,6 +2624,10 @@ impl SequencerState {
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
             published_sequencers_version: AtomicU64::new(0),
+            published_process_authoring: Mutex::new(
+                crate::process::PublishedProcessAuthoringSnapshot::default(),
+            ),
+            published_process_authoring_version: AtomicU64::new(0),
             scratch_effect_descriptors: Mutex::new(Vec::new()),
             scratch_instrument_descriptors: Mutex::new(Vec::new()),
             pending_accumulator_reset_all: AtomicBool::new(false),
@@ -3804,6 +3811,7 @@ impl SequencerState {
         params.set_accum_mode(defaults.accum_mode);
         params.set_fts_scale(defaults.fts_scale);
         params.set_mute_group(defaults.mute_group);
+        params.set_global_transpose(defaults.global_transpose);
     }
 
     pub fn clear_live_track_state(&self, track_count: usize) {
@@ -4205,6 +4213,22 @@ impl SequencerState {
     }
     pub fn published_sequencers_version(&self) -> u64 {
         self.published_sequencers_version.load(Ordering::Acquire)
+    }
+    /// Publish the complete UI-authored process/channel authoring snapshot.
+    pub fn publish_process_authoring(
+        &self,
+        snapshot: crate::process::PublishedProcessAuthoringSnapshot,
+    ) {
+        *self.published_process_authoring.lock().unwrap() = snapshot;
+        self.published_process_authoring_version
+            .fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn published_process_authoring(&self) -> crate::process::PublishedProcessAuthoringSnapshot {
+        self.published_process_authoring.lock().unwrap().clone()
+    }
+    pub fn published_process_authoring_version(&self) -> u64 {
+        self.published_process_authoring_version
+            .load(Ordering::Acquire)
     }
     pub fn scratch_runtime_descriptors(
         &self,
@@ -5223,7 +5247,11 @@ impl SequencerState {
         for (i, &step) in steps.iter().enumerate() {
             let src = if direction > 0 {
                 // Rotate right: slot i gets content from slot i-1 (last wraps to first)
-                if i == 0 { n - 1 } else { i - 1 }
+                if i == 0 {
+                    n - 1
+                } else {
+                    i - 1
+                }
             } else {
                 // Rotate left: slot i gets content from slot i+1 (first wraps to last)
                 (i + 1) % n
@@ -5340,8 +5368,8 @@ impl SequencerState {
 mod tests {
     use super::*;
     use crate::effects::{
-        BUILTIN_SLOT_COUNT, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
-        ParamScaling,
+        EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+        BUILTIN_SLOT_COUNT,
     };
     use crate::sequencer::ModDestination;
 
@@ -5374,6 +5402,7 @@ mod tests {
             accum_mode: id as u32,
             fts_scale: id + 1,
             mute_group: (id % 9) as u8,
+            global_transpose: id % 2 == 0,
         }
     }
 
@@ -5954,11 +5983,9 @@ mod tests {
         initial.slots[0].mute = true;
         initial.slots[0].solo = false;
         initial.slots[0].max_polyphony = 6;
-        assert!(
-            initial.slots[0]
-                .param_plocks
-                .set(4, RackSlotParam::Gain, 0.25)
-        );
+        assert!(initial.slots[0]
+            .param_plocks
+            .set(4, RackSlotParam::Gain, 0.25));
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let replacement = RackSlotSnapshot {
@@ -6035,11 +6062,9 @@ mod tests {
         initial.slots[0].mute = true;
         initial.slots[0].solo = false;
         initial.slots[0].max_polyphony = 6;
-        assert!(
-            initial.slots[0]
-                .param_plocks
-                .set(4, RackSlotParam::Gain, 0.25)
-        );
+        assert!(initial.slots[0]
+            .param_plocks
+            .set(4, RackSlotParam::Gain, 0.25));
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let mut replacement = sample_sampler_rack_slot(321, "replacement", 48_000, 88, Some(9));
@@ -6105,12 +6130,8 @@ mod tests {
         state.restore_current_pattern_from_repository().unwrap();
 
         let descriptor = EffectDescriptor::builtin_sampler();
-        assert!(
-            state.sync_rack_slot_instrument_bindings_for_current_pattern(
-                0,
-                &[(descriptor, 999, 1000)]
-            )
-        );
+        assert!(state
+            .sync_rack_slot_instrument_bindings_for_current_pattern(0, &[(descriptor, 999, 1000)]));
 
         let live = state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref()
@@ -7292,12 +7313,10 @@ mod tests {
             &names,
             &instrument_types,
         ));
-        assert!(
-            state
-                .track_pattern_cells(0)
-                .into_iter()
-                .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden)
-        );
+        assert!(state
+            .track_pattern_cells(0)
+            .into_iter()
+            .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden));
 
         assert!(state.set_scene_cell(
             0,
@@ -7424,12 +7443,10 @@ mod tests {
         ));
         assert_eq!(state.scene_track_pattern_id(1, 0), None);
         assert!(!state.is_scene_silenced(0));
-        assert!(
-            state
-                .track_pattern_cells(0)
-                .iter()
-                .all(|cell| cell.pattern_id != second_id)
-        );
+        assert!(state
+            .track_pattern_cells(0)
+            .iter()
+            .all(|cell| cell.pattern_id != second_id));
 
         assert!(state.delete_track_pattern(
             0,

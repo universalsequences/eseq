@@ -1560,6 +1560,10 @@ impl Compiler {
             // program for the *sequencer* runtime, so it must be captured as data
             // here (in the UI/editor runtime) and shipped, not evaluated locally.
             let is_def_sequencer = matches!(op, Expression::Symbol(s) if s == "def-sequencer");
+            let is_def_process = matches!(op, Expression::Symbol(s) if s == "def-process");
+            let is_defchan = matches!(op, Expression::Symbol(s) if s == "defchan");
+            let is_process_sugar = matches!(op, Expression::Symbol(s)
+                if s == "every" || s == "after" || s == "on" || s == "tap");
             // Graph-mode `def-sequencer`: the *entire* body (`:shape`, sequencer-level
             // config, `def-node` and `edges` sub-forms) is a manifest for the sequencer
             // runtime and must be captured as data, not evaluated here. Detected by the
@@ -1586,6 +1590,10 @@ impl Compiler {
                     quote_next = false;
                     continue;
                 }
+                if is_process_sugar {
+                    self.compile_quoted_expression(elem)?;
+                    continue;
+                }
                 match elem {
                     Expression::Number(c) => {
                         let constant_idx = self.use_constant(*c);
@@ -1597,6 +1605,10 @@ impl Compiler {
                     }
                     Expression::Symbol(c) => match op {
                         Expression::Symbol(s) if s == "def" && i == 0 => continue,
+                        Expression::Symbol(_) if (is_def_process || is_defchan) && i == 0 => {
+                            let idx = self.use_string_constant(c);
+                            self.emit(OpCode::PushSymbol(idx));
+                        }
                         _ => {
                             self.compile_expression(&Expression::Symbol(c.clone()))?;
                         }
@@ -1611,6 +1623,19 @@ impl Compiler {
                             quote_next = true;
                         }
                         if is_def_sequencer && (k == "tick" || k == "init") {
+                            quote_next = true;
+                        }
+                        if is_def_process
+                            && (k == "in"
+                                || k == "out"
+                                || k == "state"
+                                || k == "every"
+                                || k == "phase"
+                                || k == "listen"
+                                || k == "run"
+                                || k == "init"
+                                || k.starts_with("on-"))
+                        {
                             quote_next = true;
                         }
                     }

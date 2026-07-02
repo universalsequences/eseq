@@ -35,6 +35,7 @@ pub enum VMError {
 }
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
+pub type GlobalStoreHook = Rc<dyn Fn(&str, &Value)>;
 pub type NodeId = u32;
 
 fn debug_lisp_callback_errors_enabled() -> bool {
@@ -120,6 +121,11 @@ pub enum Value {
         slot: Arc<AtomicU64>,
     },
     NativeFunction(NativeFn),
+    HostHandle {
+        kind: String,
+        id: u64,
+        callable: NativeFn,
+    },
 }
 
 #[derive(Clone)]
@@ -376,6 +382,7 @@ pub fn format_lisp_value(value: &Value) -> String {
             ..
         } => format_binding_ref(namespace, field, *index),
         Value::NativeFunction(_) => "<native>".to_string(),
+        Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
     }
 }
 
@@ -424,6 +431,7 @@ pub fn format_lisp_source(value: &Value) -> String {
             ..
         } => format_binding_ref(namespace, field, *index),
         Value::NativeFunction(_) => "<native>".to_string(),
+        Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
     }
 }
 
@@ -603,6 +611,18 @@ impl PartialEq for Value {
                     ..
                 },
             ) => a_ns == b_ns && a_field == b_field && a_index == b_index && a_kind == b_kind,
+            (
+                Self::HostHandle {
+                    kind: a_kind,
+                    id: a_id,
+                    ..
+                },
+                Self::HostHandle {
+                    kind: b_kind,
+                    id: b_id,
+                    ..
+                },
+            ) => a_kind == b_kind && a_id == b_id,
             _ => false,
         }
     }
@@ -636,6 +656,11 @@ impl Clone for Value {
                 slot: slot.clone(),
             },
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
+            Self::HostHandle { kind, id, callable } => Self::HostHandle {
+                kind: kind.clone(),
+                id: *id,
+                callable: callable.clone(),
+            },
         }
     }
 }
@@ -1162,6 +1187,11 @@ impl Value {
                 slot: slot.clone(),
             },
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
+            Self::HostHandle { kind, id, callable } => Self::HostHandle {
+                kind: kind.clone(),
+                id: *id,
+                callable: callable.clone(),
+            },
         }
     }
 }
@@ -1448,6 +1478,7 @@ pub struct VM {
     pub source_manager: SourceManager,
     pub(crate) source_load_errors: Vec<String>,
     preserve_state_on_redefinition: bool,
+    global_store_hooks: Vec<GlobalStoreHook>,
 }
 
 pub struct VmStateSnapshot {
@@ -2771,6 +2802,7 @@ impl VM {
             source_manager: SourceManager::new(),
             source_load_errors: Vec::new(),
             preserve_state_on_redefinition: false,
+            global_store_hooks: Vec::new(),
         };
         vm.register_native(SOURCE_ORIGIN_NATIVE, source_origin_native);
         vm
@@ -2788,6 +2820,10 @@ impl VM {
     ) {
         let idx = self.ensure_global(name);
         self.globals[idx] = Some(Rc::new(RefCell::new(Value::NativeFunction(Rc::new(f)))));
+    }
+
+    pub fn add_global_store_hook(&mut self, hook: GlobalStoreHook) {
+        self.global_store_hooks.push(hook);
     }
 
     pub fn current_source_symbol(&self) -> Option<String> {
@@ -3507,6 +3543,13 @@ impl VM {
             }
             Value::NativeFunction(f) => {
                 let result = f(args, self);
+                if self.execution_depth == 0 && !self.processing_reactive {
+                    self.process_dirty_reactive()?;
+                }
+                Ok(Some(result))
+            }
+            Value::HostHandle { callable, .. } => {
+                let result = callable(args, self);
                 if self.execution_depth == 0 && !self.processing_reactive {
                     self.process_dirty_reactive()?;
                 }
@@ -4390,7 +4433,16 @@ impl VM {
                         if idx >= self.globals.len() {
                             self.globals.resize(idx + 1, None);
                         }
-                        self.globals[idx] = stack.pop();
+                        let stored = stack.pop();
+                        self.globals[idx] = stored.clone();
+                        if let (Some(name), Some(value)) =
+                            (self.global_names.get(idx), stored.as_ref())
+                        {
+                            let value = value.borrow().clone();
+                            for hook in &self.global_store_hooks {
+                                hook(name, &value);
+                            }
+                        }
                         frame.pc += 1;
                     }
                 }
@@ -4799,6 +4851,18 @@ impl VM {
                                 stack.push(Rc::new(RefCell::new(result)));
                                 frames.last_mut().unwrap().pc += 1;
                             }
+                            Value::HostHandle { callable, .. } => {
+                                let f = callable.clone();
+                                drop(borrowed);
+                                let mut args: Vec<Value> = (0..arity)
+                                    .filter_map(|_| stack.pop())
+                                    .map(|v| v.borrow().clone())
+                                    .collect();
+                                args.reverse();
+                                let result = f(args, self);
+                                stack.push(Rc::new(RefCell::new(result)));
+                                frames.last_mut().unwrap().pc += 1;
+                            }
                             _ => {
                                 return Err(VMError::ExpectedFunction);
                             }
@@ -4922,7 +4986,7 @@ impl VM {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
     use super::{
         EffectTarget, PendingUiUpdate, ReactiveDag, ReactiveNode, ReactiveSource,
@@ -4966,6 +5030,54 @@ mod tests {
             panic!("{key} is not a number: {prop:?}");
         };
         number as usize
+    }
+
+    #[test]
+    fn global_store_hooks_observe_def_bindings() {
+        let mut vm = VM::new(Vec::new());
+        let observed = Rc::new(RefCell::new(Vec::<(String, Value)>::new()));
+        let observed_for_hook = Rc::clone(&observed);
+        vm.add_global_store_hook(Rc::new(move |name, value| {
+            observed_for_hook
+                .borrow_mut()
+                .push((name.to_string(), value.clone()));
+        }));
+
+        vm.eval_str("(def process-instance 42)")
+            .expect("global def eval");
+
+        assert_eq!(
+            observed.borrow().as_slice(),
+            &[("process-instance".to_string(), Value::Number(42.0))]
+        );
+    }
+
+    #[test]
+    fn host_handles_are_callable_lisp_values() {
+        let mut vm = VM::new(Vec::new());
+        let call_count = Rc::new(RefCell::new(0usize));
+        let call_count_for_maker = Rc::clone(&call_count);
+        vm.register_native("make-host-handle", move |_| {
+            let call_count_for_handle = Rc::clone(&call_count_for_maker);
+            Value::HostHandle {
+                kind: "test".to_string(),
+                id: 7,
+                callable: Rc::new(move |args, _| {
+                    *call_count_for_handle.borrow_mut() += 1;
+                    match args.as_slice() {
+                        [Value::Number(left), Value::Number(right)] => Value::Number(left + right),
+                        _ => Value::Nil,
+                    }
+                }),
+            }
+        });
+
+        let result = vm
+            .eval_str("(def h (make-host-handle)) (h 2 5)")
+            .expect("host handle eval");
+
+        assert_eq!(result, Some(Value::Number(7.0)));
+        assert_eq!(*call_count.borrow(), 1);
     }
 
     #[test]

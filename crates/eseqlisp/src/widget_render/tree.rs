@@ -371,7 +371,7 @@ fn hash_tree_item_value(value: &Value, state: &mut DefaultHasher) {
             index.hash(state);
             kind.hash(state);
         }
-        Value::NativeFunction(_) => {
+        Value::NativeFunction(_) | Value::HostHandle { .. } => {
             11_u8.hash(state);
         }
     }

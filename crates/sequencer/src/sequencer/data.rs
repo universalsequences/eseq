@@ -719,6 +719,7 @@ pub struct TrackParams {
     pub accum_mode: AtomicU32,
     pub fts_scale: AtomicU32,
     pub mute_group: AtomicU32,
+    pub global_transpose: AtomicBool,
 }
 
 impl TrackParams {
@@ -748,6 +749,7 @@ impl TrackParams {
             accum_mode: AtomicU32::new(0),
             fts_scale: AtomicU32::new(0),
             mute_group: AtomicU32::new(0),
+            global_transpose: AtomicBool::new(true),
         }
     }
 
@@ -939,6 +941,12 @@ impl TrackParams {
         self.mute_group
             .store(group.min(8) as u32, Ordering::Relaxed);
     }
+    pub fn uses_global_transpose(&self) -> bool {
+        self.global_transpose.load(Ordering::Relaxed)
+    }
+    pub fn set_global_transpose(&self, enabled: bool) {
+        self.global_transpose.store(enabled, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -982,6 +990,7 @@ pub struct TrackParamsSnapshot {
     pub accum_mode: u32,
     pub fts_scale: usize,
     pub mute_group: u8,
+    pub global_transpose: bool,
 }
 
 impl Default for TrackParamsSnapshot {
@@ -1011,6 +1020,7 @@ impl Default for TrackParamsSnapshot {
             accum_mode: 0,
             fts_scale: 0,
             mute_group: 0,
+            global_transpose: true,
         }
     }
 }

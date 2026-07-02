@@ -377,6 +377,8 @@ pub struct ProjectTrackParams {
     pub fts_scale: usize,
     #[serde(default)]
     pub mute_group: u8,
+    #[serde(default = "default_true")]
+    pub global_transpose: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -641,6 +643,7 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
             mute_group: value.mute_group.min(8),
+            global_transpose: value.global_transpose,
         }
     }
 }
@@ -676,6 +679,7 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
             mute_group: value.mute_group.min(8),
+            global_transpose: value.global_transpose,
         }
     }
 }
@@ -1213,6 +1217,10 @@ fn default_max_polyphony() -> usize {
     6
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_track_volume() -> f32 {
     crate::mixer_volume::default_fader()
 }
@@ -1579,6 +1587,7 @@ mod tests {
                         accum_mode: 2,
                         fts_scale: 0,
                         mute_group: 3,
+                        global_transpose: true,
                     },
                     ProjectTrackParams {
                         gate: false,
@@ -1605,6 +1614,7 @@ mod tests {
                         accum_mode: 0,
                         fts_scale: 0,
                         mute_group: 0,
+                        global_transpose: true,
                     },
                 ],
                 effect_slots: vec![vec![], vec![]],

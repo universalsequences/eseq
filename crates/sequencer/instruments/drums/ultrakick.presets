@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "engine_name": "drums/ultrakick/",
+  "source_file": "instruments/drums/ultrakick/dsp.lisp",
+  "presets": [
+    {"id": "Deep Thump", "name": "Deep Thump", "base_note_offset": -24.0, "params": {"engine": 1, "ptch": -30, "dec": 700, "sweep": 30, "swpt": 40, "bx": 0.2, "by": 0.3, "bz": 0.1, "ttyp": 1, "tamt": 0.3, "ttun": 900, "tdec": 8, "sub": 0.4, "nois": 0.05, "pnch": 0.3, "driv": 0.15}},
+    {"id": "909 Punch", "name": "909 Punch", "base_note_offset": -24.0, "params": {"engine": 1, "ptch": -22, "dec": 340, "sweep": 48, "swpt": 22, "by": 0.55, "ttyp": 0, "tamt": 0.6, "ttun": 4500, "tdec": 4, "sub": 0.15, "pnch": 0.5, "driv": 0.3}},
+    {"id": "808 Ultra", "name": "808 Ultra", "base_note_offset": -24.0, "params": {"engine": 1, "ptch": -30, "dec": 1600, "sweep": 26, "swpt": 55, "bx": 0.12, "by": 0.15, "ttyp": 1, "tamt": 0.2, "ttun": 700, "sub": 0.5, "sdec": 1800, "stun": -12, "driv": 0.1, "hold": 30}},
+    {"id": "FM Clicker", "name": "FM Clicker", "base_note_offset": -24.0, "params": {"engine": 2, "ptch": -26, "dec": 420, "sweep": 40, "swpt": 18, "bx": 0.7, "by": 0.45, "bz": 0.3, "ttyp": 2, "tamt": 0.5, "ttun": 2600, "tdec": 5, "pnch": 0.4}},
+    {"id": "Modal Knock", "name": "Modal Knock", "base_note_offset": -24.0, "params": {"engine": 3, "ptch": -20, "dec": 600, "sweep": 18, "swpt": 30, "bx": 0.5, "by": 0.4, "bz": 0.3, "ttyp": 1, "tamt": 0.35, "ttun": 1100, "pnch": 0.45, "driv": 0.2}},
+    {"id": "Fold Rumbler", "name": "Fold Rumbler", "base_note_offset": -24.0, "params": {"engine": 4, "ptch": -32, "dec": 900, "sweep": 24, "swpt": 45, "bx": 0.6, "by": 0.35, "bz": 0.2, "tamt": 0.3, "sub": 0.35, "driv": 0.5, "dirt": 0.15, "hpf": 28}},
+    {"id": "Hard Techno", "name": "Hard Techno", "base_note_offset": -24.0, "params": {"engine": 4, "ptch": -24, "dec": 380, "sweep": 55, "swpt": 14, "bx": 0.8, "by": 0.5, "bz": 0.3, "ttyp": 3, "tamt": 0.7, "ttun": 3800, "tdec": 6, "pnch": 0.6, "driv": 0.8, "dirt": 0.3, "sub": 0.2}},
+    {"id": "Lo-Fi Knock", "name": "Lo-Fi Knock", "base_note_offset": -24.0, "params": {"engine": 1, "ptch": -26, "dec": 420, "sweep": 34, "by": 0.4, "ttyp": 1, "tamt": 0.4, "ttun": 800, "dirt": 0.6, "lpf": 5000, "driv": 0.35, "nois": 0.15, "ndec": 60}}
+  ]
+}

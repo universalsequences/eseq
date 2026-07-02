@@ -1008,7 +1008,7 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
             index.hash(hasher);
             kind.hash(hasher);
         }
-        Value::NativeFunction(_) => {}
+        Value::NativeFunction(_) | Value::HostHandle { .. } => {}
     }
 }
 

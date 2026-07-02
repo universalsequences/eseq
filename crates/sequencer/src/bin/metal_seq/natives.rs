@@ -333,6 +333,11 @@ pub(crate) fn init_runtime(
         Arc::clone(&selected_neural_neurons),
     );
     sequencer::lisp_host::register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+    sequencer::lisp_host::register_published_process_authoring_natives(
+        &mut runtime,
+        Arc::clone(&state),
+        Arc::clone(&ui_epoch),
+    );
     let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
@@ -2569,26 +2574,38 @@ pub(crate) fn init_runtime(
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-param", move |args, _ctx| {
-        let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
-            (args.first(), args.get(1))
+        let (Some(Value::Keyword(param_name)), Some(param_value)) = (args.first(), args.get(1))
         else {
             return Err("seq-set-track-param: expected (:param value)".into());
+        };
+        let numeric_value = match param_value {
+            Value::Number(value) => Some(*value),
+            _ => None,
         };
         let track = ct.load(Ordering::Relaxed);
         let tp = &st.pattern.track_params[track];
         let invalidation = match param_name.as_str() {
             "attack" => {
-                let v = (*val as f32).clamp(0.0, 500.0);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :attack expects a number".into());
+                };
+                let v = (val as f32).clamp(0.0, 500.0);
                 tp.set_attack_ms(v);
                 (TrackParamInvalidation::Attack, Ok(Value::Number(v as f64)))
             }
             "release" => {
-                let v = (*val as f32).clamp(0.0, 2000.0);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :release expects a number".into());
+                };
+                let v = (val as f32).clamp(0.0, 2000.0);
                 tp.set_release_ms(v);
                 (TrackParamInvalidation::Release, Ok(Value::Number(v as f64)))
             }
             "swing" => {
-                let v = (*val as f32).clamp(50.0, 75.0);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :swing expects a number".into());
+                };
+                let v = (val as f32).clamp(50.0, 75.0);
                 let steps = sel.lock().unwrap();
                 if steps.is_empty() {
                     tp.set_swing(v);
@@ -2600,7 +2617,10 @@ pub(crate) fn init_runtime(
                 (TrackParamInvalidation::Swing, Ok(Value::Number(v as f64)))
             }
             "num-steps" => {
-                let v = (*val as usize).clamp(1, MAX_STEPS);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :num-steps expects a number".into());
+                };
+                let v = (val as usize).clamp(1, MAX_STEPS);
                 tp.set_num_steps(v);
                 (
                     TrackParamInvalidation::NumSteps,
@@ -2608,12 +2628,18 @@ pub(crate) fn init_runtime(
                 )
             }
             "send" => {
-                let v = (*val as f32).clamp(0.0, 1.0);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :send expects a number".into());
+                };
+                let v = (val as f32).clamp(0.0, 1.0);
                 tp.set_send(v);
                 (TrackParamInvalidation::Send, Ok(Value::Number(v as f64)))
             }
             "gate" => {
-                let want_on = *val != 0.0;
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :gate expects a number".into());
+                };
+                let want_on = val != 0.0;
                 if want_on != tp.is_gate_on() {
                     tp.toggle_gate();
                 }
@@ -2623,7 +2649,10 @@ pub(crate) fn init_runtime(
                 )
             }
             "poly" => {
-                let want_on = *val != 0.0;
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :poly expects a number".into());
+                };
+                let want_on = val != 0.0;
                 if want_on != tp.is_polyphonic() {
                     tp.toggle_polyphonic();
                 }
@@ -2633,17 +2662,40 @@ pub(crate) fn init_runtime(
                 )
             }
             "max-poly" | "max-polyphony" | "voices" => {
-                tp.set_max_polyphony((*val).round().max(1.0) as usize);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :max-poly expects a number".into());
+                };
+                tp.set_max_polyphony(val.round().max(1.0) as usize);
                 (
                     TrackParamInvalidation::MaxPolyphony,
                     Ok(Value::Number(tp.get_max_polyphony() as f64)),
                 )
             }
             "mute-group" => {
-                tp.set_mute_group((*val).round().clamp(0.0, 8.0) as u8);
+                let Some(val) = numeric_value else {
+                    return Err("seq-set-track-param: :mute-group expects a number".into());
+                };
+                tp.set_mute_group(val.round().clamp(0.0, 8.0) as u8);
                 (
                     TrackParamInvalidation::MuteGroup,
                     Ok(Value::Number(tp.get_mute_group() as f64)),
+                )
+            }
+            "global-transpose" => {
+                let enabled = match param_value {
+                    Value::Bool(value) => *value,
+                    Value::Number(value) => *value != 0.0,
+                    _ => {
+                        return Err(
+                            "seq-set-track-param: :global-transpose expects a bool or number"
+                                .into(),
+                        )
+                    }
+                };
+                tp.set_global_transpose(enabled);
+                (
+                    TrackParamInvalidation::GlobalTranspose,
+                    Ok(Value::Bool(tp.uses_global_transpose())),
                 )
             }
             other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),

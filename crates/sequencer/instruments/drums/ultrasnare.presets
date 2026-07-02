@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "engine_name": "drums/ultrasnare/",
+  "source_file": "instruments/drums/ultrasnare/dsp.lisp",
+  "presets": [
+    {"id": "909 Crack", "name": "909 Crack", "base_note_offset": -12.0, "params": {"engine": 1, "ptch": -3, "dec": 240, "sweep": 16, "swpt": 24, "bx": 0.45, "by": 0.35, "bz": 0.35, "ttyp": 0, "tamt": 0.5, "ttun": 4200, "tdec": 4, "wire": 0.7, "wtun": 5200, "wdec": 200, "pnch": 0.45, "driv": 0.25}},
+    {"id": "808 Paper", "name": "808 Paper", "base_note_offset": -12.0, "params": {"engine": 1, "ptch": 2, "dec": 150, "sweep": 8, "bx": 0.3, "by": 0.15, "bz": 0.28, "ttyp": 0, "tamt": 0.3, "ttun": 3000, "wire": 0.8, "wtun": 6500, "wdec": 120, "ring": 0.05, "pnch": 0.3}},
+    {"id": "Deep Fat", "name": "Deep Fat", "base_note_offset": -12.0, "params": {"engine": 1, "ptch": -8, "dec": 420, "sweep": 20, "swpt": 35, "bx": 0.55, "by": 0.5, "bz": 0.3, "ttyp": 1, "tamt": 0.45, "ttun": 1400, "tdec": 8, "wire": 0.55, "wtun": 3200, "wdec": 320, "pnch": 0.5, "driv": 0.35}},
+    {"id": "FM Zap Snare", "name": "FM Zap Snare", "base_note_offset": -12.0, "params": {"engine": 2, "ptch": -2, "dec": 280, "sweep": 22, "swpt": 18, "bx": 0.6, "by": 0.5, "bz": 0.25, "ttyp": 2, "tamt": 0.45, "ttun": 2800, "wire": 0.5, "wtun": 5000, "wdec": 180, "pnch": 0.4, "driv": 0.2}},
+    {"id": "Modal Shell", "name": "Modal Shell", "base_note_offset": -12.0, "params": {"engine": 3, "ptch": -5, "dec": 380, "sweep": 10, "bx": 0.55, "by": 0.4, "bz": 0.35, "ttyp": 1, "tamt": 0.4, "ttun": 1600, "tdec": 7, "wire": 0.45, "wtun": 4000, "wdec": 260, "ring": 0.3, "rtun": 6.3, "rdec": 320, "pnch": 0.4}},
+    {"id": "Big Clap", "name": "Big Clap", "base_note_offset": -12.0, "params": {"engine": 4, "dec": 200, "sweep": 0, "bx": 0.45, "by": 0.55, "bz": 0.5, "tamt": 0.15, "ttyp": 0, "wire": 0.3, "wtun": 4500, "wdec": 300, "ring": 0.0, "pnch": 0.5, "driv": 0.3}},
+    {"id": "Rim Clack", "name": "Rim Clack", "base_note_offset": -12.0, "params": {"engine": 3, "ptch": 4, "dec": 140, "sweep": 6, "bx": 0.7, "by": 0.3, "bz": 0.6, "ttyp": 3, "tamt": 0.85, "ttun": 5000, "tdec": 5, "wire": 0.2, "wdec": 90, "ring": 0.35, "rtun": 7.5, "rdec": 180, "pnch": 0.45, "driv": 0.2}},
+    {"id": "Trash Break", "name": "Trash Break", "base_note_offset": -12.0, "params": {"engine": 1, "ptch": -6, "dec": 260, "sweep": 14, "bx": 0.5, "by": 0.6, "bz": 0.4, "ttyp": 1, "tamt": 0.5, "ttun": 2200, "wire": 0.85, "wtun": 3600, "wdec": 240, "dirt": 0.55, "driv": 0.45, "lpf": 7500, "pnch": 0.55}}
+  ]
+}

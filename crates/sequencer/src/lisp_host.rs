@@ -3374,6 +3374,10 @@ type SharedAccumulatorEvalContext = Arc<Mutex<Option<AccumulatorEvalContext>>>;
 
 type SharedRegisteredSequencers = Arc<Mutex<Vec<RegisteredSequencer>>>;
 type SharedGeneratorTickContext = Arc<Mutex<Option<GeneratorTickContext>>>;
+type SharedProcessAuthoring = Arc<Mutex<ProcessAuthoringRegistry>>;
+type SharedProcessEvalContext = Arc<Mutex<Option<ProcessEvalContext>>>;
+type ProcessPublishHook = Arc<dyn Fn(crate::process::PublishedProcessAuthoringSnapshot) + 'static>;
+const UI_PROCESS_HANDLE_BASE: u64 = 1_u64 << 48;
 /// A lisp `def-sequencer` definition as held by the scheduler-side VM: its id
 /// (stable hash of the name, for hot-reload matching), display name, `:resolution`
 /// timebase, and the `:tick` closure to invoke per boundary crossing.
@@ -3397,6 +3401,96 @@ pub(crate) struct GeneratorTickContext {
     emitted: Vec<EmittedAccumulatorEvent>,
 }
 
+#[derive(Default)]
+struct ProcessAuthoringRegistry {
+    next_handle_id: u64,
+    defs: Vec<crate::process::ProcessDef>,
+    instances: Vec<crate::process::AuthoredProcessInstance>,
+    channels: Vec<crate::process::AuthoredChannel>,
+    patches: Vec<crate::process::AuthoredPatch>,
+    outlet_handles: HashMap<u64, crate::process::ProcessOutletRef>,
+    channel_handles: HashMap<u64, String>,
+}
+
+impl ProcessAuthoringRegistry {
+    fn with_handle_base(handle_base: u64) -> Self {
+        Self {
+            next_handle_id: handle_base,
+            ..Self::default()
+        }
+    }
+
+    fn next_id(&mut self) -> u64 {
+        self.next_handle_id = self.next_handle_id.saturating_add(1).max(1);
+        self.next_handle_id
+    }
+
+    fn upsert_def(&mut self, def: crate::process::ProcessDef) {
+        if let Some(existing) = self.defs.iter_mut().find(|entry| entry.id == def.id) {
+            *existing = def;
+        } else {
+            self.defs.push(def);
+        }
+    }
+
+    fn upsert_instance(&mut self, instance: crate::process::AuthoredProcessInstance) {
+        if let Some(existing) = self
+            .instances
+            .iter_mut()
+            .find(|entry| entry.handle_id == instance.handle_id)
+        {
+            *existing = instance;
+        } else {
+            self.instances.push(instance);
+        }
+    }
+
+    fn name_instance(&mut self, handle_id: crate::process::AuthoredHandleId, name: &str) {
+        self.instances
+            .retain(|entry| entry.handle_id == handle_id || entry.name.as_deref() != Some(name));
+        if let Some(instance) = self
+            .instances
+            .iter_mut()
+            .find(|entry| entry.handle_id == handle_id)
+        {
+            instance.name = Some(name.to_string());
+            instance.anonymous = false;
+        }
+    }
+
+    fn name_channel(&mut self, handle_id: crate::process::AuthoredHandleId, name: &str) {
+        self.channels
+            .retain(|entry| entry.handle_id == handle_id || entry.name.as_deref() != Some(name));
+        if let Some(channel) = self
+            .channels
+            .iter_mut()
+            .find(|entry| entry.handle_id == handle_id)
+        {
+            channel.name = Some(name.to_string());
+        }
+    }
+
+    fn snapshot(&self) -> crate::process::ProcessAuthoringSnapshot {
+        crate::process::ProcessAuthoringSnapshot {
+            defs: self.defs.clone(),
+            instances: self.instances.clone(),
+            channels: self.channels.clone(),
+            patches: self.patches.clone(),
+        }
+    }
+}
+
+pub(crate) struct ProcessEvalContext {
+    runtime_id: u64,
+    beat: f64,
+    inlets: HashMap<String, EValue>,
+    state: HashMap<String, EValue>,
+    event: Option<EValue>,
+    outputs: Vec<crate::process::ProcessOutput>,
+    emissions: Vec<EmittedAccumulatorEvent>,
+    transpose: Option<f32>,
+}
+
 pub struct ScratchControlRuntime {
     runtime: Runtime,
     context: SharedSequencerEvalContext,
@@ -3408,6 +3502,8 @@ pub struct ScratchControlRuntime {
     accumulator_eval: SharedAccumulatorEvalContext,
     sequencers: SharedRegisteredSequencers,
     generator_tick: SharedGeneratorTickContext,
+    process_authoring: SharedProcessAuthoring,
+    process_eval: SharedProcessEvalContext,
     graph_node: SharedGraphNodeContext,
     graph_updates: HashMap<u64, CompiledGraphUpdate>,
     runtime_globals: Vec<String>,
@@ -3433,6 +3529,8 @@ impl ScratchControlRuntime {
         let accumulator_eval = Arc::new(Mutex::new(None));
         let sequencers = Arc::new(Mutex::new(Vec::new()));
         let generator_tick = Arc::new(Mutex::new(None));
+        let process_authoring = Arc::new(Mutex::new(ProcessAuthoringRegistry::default()));
+        let process_eval = Arc::new(Mutex::new(None));
         let graph_node: SharedGraphNodeContext = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::new();
         runtime.set_theme_sync_enabled(false);
@@ -3449,7 +3547,15 @@ impl ScratchControlRuntime {
             Arc::clone(&sequencers),
             Arc::clone(&generator_tick),
         );
+        register_process_natives(
+            &mut runtime,
+            Arc::clone(&process_authoring),
+            Arc::clone(&process_eval),
+            None,
+            true,
+        );
         graph_update::register_graph_node_natives(&mut runtime, Arc::clone(&graph_node));
+        register_process_graph_emit_native(&mut runtime, Arc::clone(&process_eval));
         let mut this = Self {
             runtime,
             context,
@@ -3461,6 +3567,8 @@ impl ScratchControlRuntime {
             accumulator_eval,
             sequencers,
             generator_tick,
+            process_authoring,
+            process_eval,
             graph_node,
             graph_updates: HashMap::new(),
             runtime_globals: Vec::new(),
@@ -3820,6 +3928,8 @@ impl ScratchControlRuntime {
         SharedAccumulatorEvalContext,
         SharedRegisteredSequencers,
         SharedGeneratorTickContext,
+        SharedProcessAuthoring,
+        SharedProcessEvalContext,
         SharedGraphNodeContext,
     ) {
         (
@@ -3833,6 +3943,8 @@ impl ScratchControlRuntime {
             self.accumulator_eval,
             self.sequencers,
             self.generator_tick,
+            self.process_authoring,
+            self.process_eval,
             self.graph_node,
         )
     }
@@ -3849,6 +3961,8 @@ impl ScratchControlRuntime {
         accumulator_eval: SharedAccumulatorEvalContext,
         sequencers: SharedRegisteredSequencers,
         generator_tick: SharedGeneratorTickContext,
+        process_authoring: SharedProcessAuthoring,
+        process_eval: SharedProcessEvalContext,
         graph_node: SharedGraphNodeContext,
     ) -> Self {
         let mut this = Self {
@@ -3862,6 +3976,8 @@ impl ScratchControlRuntime {
             accumulator_eval,
             sequencers,
             generator_tick,
+            process_authoring,
+            process_eval,
             graph_node,
             graph_updates: HashMap::new(),
             runtime_globals: Vec::new(),
@@ -3970,6 +4086,1466 @@ impl ScratchControlRuntime {
             state: ctx.state,
         })
     }
+
+    pub fn process_authoring_snapshot(&self) -> crate::process::ProcessAuthoringSnapshot {
+        self.process_authoring
+            .lock()
+            .map(|registry| registry.snapshot())
+            .unwrap_or_default()
+    }
+
+    pub fn invoke_process_run(
+        &mut self,
+        invocation: crate::process::ProcessRunInvocation,
+    ) -> Result<crate::process::ProcessRunResult, String> {
+        {
+            let mut ctx = self
+                .process_eval
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            *ctx = Some(ProcessEvalContext {
+                runtime_id: invocation.runtime_id,
+                beat: invocation.beat,
+                inlets: invocation.inlets,
+                state: invocation.state,
+                event: invocation.event,
+                outputs: Vec::new(),
+                emissions: Vec::new(),
+                transpose: None,
+            });
+        }
+        self.runtime
+            .eval_str(&invocation.source)
+            .map_err(|error| format!("{error:?}"))?;
+        let ctx = self
+            .process_eval
+            .lock()
+            .map_err(|_| "failed to lock process eval context".to_string())?
+            .take()
+            .ok_or_else(|| "process run did not produce a context".to_string())?;
+        Ok(crate::process::ProcessRunResult {
+            runtime_id: invocation.runtime_id,
+            beat: invocation.beat,
+            sample_time: invocation.sample_time,
+            state: ctx.state,
+            outputs: ctx.outputs,
+            emissions: ctx.emissions,
+            transpose: ctx.transpose,
+        })
+    }
+}
+
+fn publish_process_authoring(
+    process_authoring: &SharedProcessAuthoring,
+    publish: &Option<ProcessPublishHook>,
+) {
+    let Some(publish) = publish else {
+        return;
+    };
+    if let Ok(registry) = process_authoring.lock() {
+        match registry.snapshot().to_published() {
+            Ok(snapshot) => publish(snapshot),
+            Err(error) => eprintln!("[process] publish error: {error}"),
+        }
+    }
+}
+
+fn register_process_natives(
+    runtime: &mut Runtime,
+    process_authoring: SharedProcessAuthoring,
+    process_eval: SharedProcessEvalContext,
+    publish: Option<ProcessPublishHook>,
+    register_execution_natives: bool,
+) {
+    let process_authoring_for_hook = Arc::clone(&process_authoring);
+    let publish_for_hook = publish.clone();
+    runtime.add_global_store_hook(Rc::new(move |name, value| {
+        let EValue::HostHandle { kind, id, .. } = value else {
+            return;
+        };
+        let handle_id = crate::process::AuthoredHandleId(*id);
+        if let Ok(mut registry) = process_authoring_for_hook.lock() {
+            match kind.as_str() {
+                "process" => registry.name_instance(handle_id, name),
+                "channel" => registry.name_channel(handle_id, name),
+                _ => {}
+            }
+        }
+        publish_process_authoring(&process_authoring_for_hook, &publish_for_hook);
+    }));
+
+    let process_authoring_for_def = Arc::clone(&process_authoring);
+    let publish_for_def = publish.clone();
+    runtime.register_vm_native_with_docs(
+        "def-process",
+        "(def-process name :in (...) :out (...) :state (...) :every (beats n) :run body)",
+        "Define a scheduler-side musical process class.",
+        move |args, vm| match register_process_def(
+            args,
+            vm,
+            &process_authoring_for_def,
+            publish_for_def.clone(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("[process] def-process error: {error}");
+                EValue::Bool(false)
+            }
+        },
+    );
+
+    let process_authoring_for_defchan = Arc::clone(&process_authoring);
+    let publish_for_defchan = publish.clone();
+    runtime.register_native_with_docs(
+        "defchan",
+        "(defchan name [initial])",
+        "Declare a late-bound musical value/message channel.",
+        move |args, _ctx| {
+            let name = process_symbol_name(
+                args.first()
+                    .ok_or_else(|| "defchan expects a channel name".to_string())?,
+            )?;
+            let mut registry = process_authoring_for_defchan
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let handle_id = crate::process::AuthoredHandleId(registry.next_id());
+            let initial = args.get(1).cloned();
+            registry.channels.push(crate::process::AuthoredChannel {
+                handle_id,
+                name: Some(name.clone()),
+                initial,
+                message_only: args.len() == 1,
+            });
+            registry.channel_handles.insert(handle_id.0, name);
+            let handle =
+                process_channel_handle(Arc::clone(&process_authoring_for_defchan), handle_id);
+            drop(registry);
+            publish_process_authoring(&process_authoring_for_defchan, &publish_for_defchan);
+            Ok(handle)
+        },
+    );
+
+    let process_authoring_for_start = Arc::clone(&process_authoring);
+    let publish_for_start = publish.clone();
+    runtime.register_native_with_docs(
+        "start",
+        "(start process)",
+        "Start a process instance.",
+        move |args, _ctx| {
+            set_process_running(&process_authoring_for_start, args.first(), true)?;
+            publish_process_authoring(&process_authoring_for_start, &publish_for_start);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let process_authoring_for_stop = Arc::clone(&process_authoring);
+    let publish_for_stop = publish.clone();
+    runtime.register_native_with_docs(
+        "stop",
+        "(stop process)",
+        "Stop a process instance.",
+        move |args, _ctx| {
+            set_process_running(&process_authoring_for_stop, args.first(), false)?;
+            publish_process_authoring(&process_authoring_for_stop, &publish_for_stop);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let process_authoring_for_every = Arc::clone(&process_authoring);
+    let publish_for_every = publish.clone();
+    runtime.register_native_with_docs(
+        "every",
+        "(every time body...)",
+        "Create and start an anonymous process that runs on a quantized musical interval.",
+        move |args, _ctx| {
+            let interval = args
+                .first()
+                .ok_or_else(|| "every expects a time expression".to_string())
+                .and_then(parse_process_time_expr)?;
+            let run_source = process_body_source(
+                args.get(1..)
+                    .ok_or_else(|| "every expects a body".to_string())?,
+            )?;
+            let handle = construct_process_instance(
+                &process_authoring_for_every,
+                "__anonymous_every",
+                Vec::new(),
+                true,
+                true,
+                Some(interval),
+                Some(run_source),
+                false,
+                publish_for_every.clone(),
+            )?;
+            publish_process_authoring(&process_authoring_for_every, &publish_for_every);
+            Ok(handle)
+        },
+    );
+
+    let process_authoring_for_after = Arc::clone(&process_authoring);
+    let publish_for_after = publish.clone();
+    runtime.register_native_with_docs(
+        "after",
+        "(after time body...)",
+        "Create and start an anonymous one-shot process that runs after a musical delay.",
+        move |args, _ctx| {
+            let delay = args
+                .first()
+                .ok_or_else(|| "after expects a time expression".to_string())
+                .and_then(parse_process_time_expr)?;
+            let run_source = process_body_source(
+                args.get(1..)
+                    .ok_or_else(|| "after expects a body".to_string())?,
+            )?;
+            let handle = construct_process_instance(
+                &process_authoring_for_after,
+                "__anonymous_after",
+                Vec::new(),
+                true,
+                true,
+                Some(delay),
+                Some(run_source),
+                true,
+                publish_for_after.clone(),
+            )?;
+            publish_process_authoring(&process_authoring_for_after, &publish_for_after);
+            Ok(handle)
+        },
+    );
+
+    let process_authoring_for_on = Arc::clone(&process_authoring);
+    let publish_for_on = publish.clone();
+    runtime.register_native_with_docs(
+        "on",
+        "(on source callback)",
+        "Create and start an anonymous process that runs when an event source fires.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("on expects source and callback".to_string());
+            }
+            let source = parse_process_event_source_ref(&process_authoring_for_on, &args[0])?;
+            let handle = construct_anonymous_listener_process(
+                &process_authoring_for_on,
+                "on",
+                source,
+                &args[1],
+                publish_for_on.clone(),
+            )?;
+            publish_process_authoring(&process_authoring_for_on, &publish_for_on);
+            Ok(handle)
+        },
+    );
+
+    let process_authoring_for_patch = Arc::clone(&process_authoring);
+    let publish_for_patch = publish.clone();
+    runtime.register_native_with_docs(
+        "patch",
+        "(patch source target)",
+        "Connect a process outlet/channel source to a process inlet/channel target.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("patch expects source and target".to_string());
+            }
+            let source = parse_process_source_ref(&process_authoring_for_patch, &args[0])?;
+            let target = parse_process_target_ref(&process_authoring_for_patch, &args[1])?;
+            process_authoring_for_patch
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?
+                .patches
+                .push(crate::process::AuthoredPatch { source, target });
+            publish_process_authoring(&process_authoring_for_patch, &publish_for_patch);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let process_authoring_for_tap = Arc::clone(&process_authoring);
+    let publish_for_tap = publish.clone();
+    runtime.register_native_with_docs(
+        "tap",
+        "(tap source callback)",
+        "Create and start an anonymous process that runs whenever a source publishes.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("tap expects source and callback".to_string());
+            }
+            let source = parse_process_event_source_ref(&process_authoring_for_tap, &args[0])?;
+            let handle = construct_anonymous_listener_process(
+                &process_authoring_for_tap,
+                "tap",
+                source,
+                &args[1],
+                publish_for_tap.clone(),
+            )?;
+            publish_process_authoring(&process_authoring_for_tap, &publish_for_tap);
+            Ok(handle)
+        },
+    );
+
+    let process_authoring_for_send = Arc::clone(&process_authoring);
+    let process_eval_for_send = Arc::clone(&process_eval);
+    let publish_for_send = publish.clone();
+    runtime.register_native_with_docs(
+        "send",
+        "(send channel value)",
+        "Publish a value/message to a process channel.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("send expects channel and value".to_string());
+            }
+            let channel = parse_channel_name(&process_authoring_for_send, &args[0])?;
+            let value = args[1].clone();
+            let mut eval = process_eval_for_send
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            if let Some(ctx) = eval.as_mut() {
+                // Runtime propagation is performed by the scheduler after the run
+                // result returns.
+                ctx.outputs.push(crate::process::ProcessOutput {
+                    name: format!("__chan:{channel}"),
+                    value: value.clone(),
+                });
+            } else {
+                drop(eval);
+                let mut registry = process_authoring_for_send
+                    .lock()
+                    .map_err(|_| "failed to lock process registry".to_string())?;
+                if let Some(authored) = registry
+                    .channels
+                    .iter_mut()
+                    .rev()
+                    .find(|authored| authored.name.as_deref() == Some(channel.as_str()))
+                {
+                    if !authored.message_only {
+                        authored.initial = Some(value.clone());
+                    }
+                }
+                drop(registry);
+                publish_process_authoring(&process_authoring_for_send, &publish_for_send);
+            }
+            Ok(value)
+        },
+    );
+
+    if !register_execution_natives {
+        let process_authoring_for_ps = Arc::clone(&process_authoring);
+        runtime.register_native_with_docs(
+            "ps",
+            "(ps)",
+            "Return authored process/channel status.",
+            move |_args, _ctx| {
+                let registry = process_authoring_for_ps
+                    .lock()
+                    .map_err(|_| "failed to lock process registry".to_string())?;
+                Ok(process_status_value(&registry))
+            },
+        );
+        return;
+    }
+
+    let process_eval_for_in = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "in",
+        "(in :name)",
+        "Read a process inlet.",
+        move |args, _ctx| {
+            let key = process_key_arg(args.first(), "in")?;
+            let guard = process_eval_for_in
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("in called outside process execution".to_string());
+            };
+            Ok(ctx.inlets.get(&key).cloned().unwrap_or(EValue::Nil))
+        },
+    );
+
+    let process_eval_for_out = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "out",
+        "(out :name value)",
+        "Publish a process outlet value.",
+        move |args, _ctx| {
+            let key = process_key_arg(args.first(), "out")?;
+            let value = args.get(1).cloned().unwrap_or(EValue::Nil);
+            let mut guard = process_eval_for_out
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("out called outside process execution".to_string());
+            };
+            ctx.outputs.push(crate::process::ProcessOutput {
+                name: key,
+                value: value.clone(),
+            });
+            Ok(value)
+        },
+    );
+
+    let process_eval_for_state_get = Arc::clone(&process_eval);
+    runtime.register_native("__process-state-get", move |args, _ctx| {
+        let key = process_key_arg(args.first(), "__process-state-get")?;
+        let guard = process_eval_for_state_get
+            .lock()
+            .map_err(|_| "failed to lock process eval context".to_string())?;
+        let Some(ctx) = guard.as_ref() else {
+            return Err("__process-state-get called outside process execution".to_string());
+        };
+        Ok(ctx.state.get(&key).cloned().unwrap_or(EValue::Nil))
+    });
+
+    let process_eval_for_state_set = Arc::clone(&process_eval);
+    runtime.register_native("__process-state-set!", move |args, _ctx| {
+        let key = process_key_arg(args.first(), "__process-state-set!")?;
+        let value = args.get(1).cloned().unwrap_or(EValue::Nil);
+        let mut guard = process_eval_for_state_set
+            .lock()
+            .map_err(|_| "failed to lock process eval context".to_string())?;
+        let Some(ctx) = guard.as_mut() else {
+            return Err("__process-state-set! called outside process execution".to_string());
+        };
+        ctx.state.insert(key, value.clone());
+        Ok(value)
+    });
+
+    let process_eval_for_event = Arc::clone(&process_eval);
+    runtime.register_native("__process-event-value", move |_args, _ctx| {
+        let guard = process_eval_for_event
+            .lock()
+            .map_err(|_| "failed to lock process eval context".to_string())?;
+        let Some(ctx) = guard.as_ref() else {
+            return Err("__process-event-value called outside process execution".to_string());
+        };
+        Ok(ctx.event.clone().unwrap_or(EValue::Nil))
+    });
+
+    let process_eval_for_transpose = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "transpose!",
+        "(transpose! semitones)",
+        "Set scheduler global transpose for future note-ons.",
+        move |args, _ctx| {
+            let Some(EValue::Number(value)) = args.first() else {
+                return Err("transpose! expects a number".to_string());
+            };
+            let mut guard = process_eval_for_transpose
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("transpose! called outside process execution".to_string());
+            };
+            ctx.transpose = Some(*value as f32);
+            Ok(EValue::Number(*value))
+        },
+    );
+
+    let process_authoring_for_ps = Arc::clone(&process_authoring);
+    runtime.register_native_with_docs(
+        "ps",
+        "(ps)",
+        "Return authored process/channel status.",
+        move |_args, _ctx| {
+            let registry = process_authoring_for_ps
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            Ok(process_status_value(&registry))
+        },
+    );
+}
+
+fn register_process_graph_emit_native(
+    runtime: &mut Runtime,
+    process_eval: SharedProcessEvalContext,
+) {
+    runtime.register_native_with_docs(
+        "emit",
+        "(emit :track n :after beats :note n :vel v :duration d) or (emit :note n :vel v :dur d)",
+        "Emit a process event when called from a process body; otherwise build a graph update emit map.",
+        move |args, _ctx| {
+            let mut guard = process_eval
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            if let Some(ctx) = guard.as_mut() {
+                let event = build_process_emit_event(&args)?;
+                ctx.emissions.push(event);
+                return Ok(EValue::Bool(true));
+            }
+            drop(guard);
+            graph_update::build_graph_emit_value(&args)
+        },
+    );
+}
+
+pub fn register_published_process_authoring_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+    ui_epoch: Arc<AtomicUsize>,
+) {
+    let process_authoring = Arc::new(Mutex::new(ProcessAuthoringRegistry::with_handle_base(
+        UI_PROCESS_HANDLE_BASE,
+    )));
+    let process_eval = Arc::new(Mutex::new(None));
+    let publish: ProcessPublishHook = Arc::new(move |snapshot| {
+        state.publish_process_authoring(snapshot);
+        ui_epoch.fetch_add(1, Ordering::Relaxed);
+    });
+    register_process_natives(
+        runtime,
+        process_authoring,
+        process_eval,
+        Some(publish),
+        false,
+    );
+}
+
+fn register_process_def(
+    args: Vec<EValue>,
+    vm: &mut eseqlisp::vm::VM,
+    process_authoring: &SharedProcessAuthoring,
+    publish: Option<ProcessPublishHook>,
+) -> Result<EValue, String> {
+    let name = process_symbol_name(
+        args.first()
+            .ok_or_else(|| "def-process expects a process name".to_string())?,
+    )?;
+    let def = parse_process_def(&name, &args[1..])?;
+    process_authoring
+        .lock()
+        .map_err(|_| "failed to lock process registry".to_string())?
+        .upsert_def(def.clone());
+    publish_process_authoring(process_authoring, &publish);
+    let process_authoring_for_constructor = Arc::clone(process_authoring);
+    let publish_for_constructor = publish.clone();
+    let class_name = name.clone();
+    vm.register_native_with_vm(
+        &name,
+        move |ctor_args, _vm| match construct_process_instance(
+            &process_authoring_for_constructor,
+            &class_name,
+            ctor_args,
+            false,
+            false,
+            None,
+            None,
+            false,
+            publish_for_constructor.clone(),
+        ) {
+            Ok(value) => {
+                publish_process_authoring(
+                    &process_authoring_for_constructor,
+                    &publish_for_constructor,
+                );
+                value
+            }
+            Err(error) => {
+                eprintln!("[process] constructor error: {error}");
+                EValue::Bool(false)
+            }
+        },
+    );
+    Ok(EValue::String(name))
+}
+
+fn process_symbol_name(value: &EValue) -> Result<String, String> {
+    match value {
+        EValue::String(name) | EValue::Symbol(name) | EValue::Keyword(name) => Ok(name
+            .trim_start_matches(':')
+            .trim_start_matches('@')
+            .to_string()),
+        _ => Err("expected symbol/string name".to_string()),
+    }
+}
+
+fn process_key_arg(value: Option<&EValue>, native: &str) -> Result<String, String> {
+    process_symbol_name(value.ok_or_else(|| format!("{native} expects a key"))?)
+}
+
+fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::ProcessDef, String> {
+    let mut inlets = Vec::new();
+    let mut outlets = Vec::new();
+    let mut state = Vec::new();
+    let mut every = None;
+    let mut run_value = None;
+    let mut listen_value = None;
+    let mut handlers: HashMap<String, EValue> = HashMap::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = process_symbol_name(&args[idx])?.to_ascii_lowercase();
+        idx += 1;
+        let Some(value) = args.get(idx) else {
+            return Err(format!("def-process missing value for :{key}"));
+        };
+        match key.as_str() {
+            "in" => inlets = parse_process_inlets(value)?,
+            "out" => outlets = parse_process_outlets(value)?,
+            "state" => state = parse_process_state(value)?,
+            "every" => every = Some(parse_process_time_expr(value)?),
+            "run" => run_value = Some(value.clone()),
+            "listen" => listen_value = Some(value.clone()),
+            other if other.starts_with("on-") => {
+                handlers.insert(other.trim_start_matches("on-").to_string(), value.clone());
+            }
+            "phase" | "init" => {}
+            other => return Err(format!("def-process unknown key :{other}")),
+        }
+        idx += 1;
+    }
+    let state_names = state
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
+    let run_source = run_value
+        .as_ref()
+        .map(|value| wrap_process_body_source(&state_names, value));
+    let listens = listen_value
+        .as_ref()
+        .map(|value| parse_process_listens(value, &handlers, &state_names))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(crate::process::ProcessDef {
+        id: crate::process::stable_process_id(name),
+        name: name.to_string(),
+        inlets,
+        outlets,
+        state,
+        every,
+        run_source,
+        listens,
+    })
+}
+
+fn value_list(value: &EValue) -> Option<Vec<EValue>> {
+    match value {
+        EValue::List(items) => Some(items.iter().map(|item| item.borrow().clone()).collect()),
+        _ => None,
+    }
+}
+
+fn parse_process_inlets(value: &EValue) -> Result<Vec<crate::process::ProcessInletDef>, String> {
+    let entries = value_list(value).ok_or_else(|| ":in expects a list".to_string())?;
+    entries
+        .iter()
+        .map(|entry| {
+            let items =
+                value_list(entry).ok_or_else(|| "inlet declaration must be a list".to_string())?;
+            let name = process_symbol_name(
+                items
+                    .first()
+                    .ok_or_else(|| "inlet declaration missing name".to_string())?,
+            )?;
+            let default = keyword_value(&items, "default").unwrap_or(EValue::Number(0.0));
+            Ok(crate::process::ProcessInletDef { name, default })
+        })
+        .collect()
+}
+
+fn parse_process_outlets(value: &EValue) -> Result<Vec<crate::process::ProcessOutletDef>, String> {
+    let entries = value_list(value).ok_or_else(|| ":out expects a list".to_string())?;
+    entries
+        .iter()
+        .map(|entry| {
+            let items =
+                value_list(entry).ok_or_else(|| "outlet declaration must be a list".to_string())?;
+            let name = process_symbol_name(
+                items
+                    .first()
+                    .ok_or_else(|| "outlet declaration missing name".to_string())?,
+            )?;
+            Ok(crate::process::ProcessOutletDef { name })
+        })
+        .collect()
+}
+
+fn parse_process_state(value: &EValue) -> Result<Vec<crate::process::ProcessStateDef>, String> {
+    let entries = value_list(value).ok_or_else(|| ":state expects a list".to_string())?;
+    entries
+        .iter()
+        .map(|entry| {
+            let items =
+                value_list(entry).ok_or_else(|| "state declaration must be a list".to_string())?;
+            let name = process_symbol_name(
+                items
+                    .first()
+                    .ok_or_else(|| "state declaration missing name".to_string())?,
+            )?;
+            let initial = items.get(1).cloned().unwrap_or(EValue::Number(0.0));
+            Ok(crate::process::ProcessStateDef { name, initial })
+        })
+        .collect()
+}
+
+fn parse_process_listens(
+    value: &EValue,
+    handlers: &HashMap<String, EValue>,
+    state_names: &[String],
+) -> Result<Vec<crate::process::ProcessListenDef>, String> {
+    let entries = value_list(value).ok_or_else(|| ":listen expects a list".to_string())?;
+    entries
+        .iter()
+        .map(|entry| {
+            let items =
+                value_list(entry).ok_or_else(|| "listen declaration must be a list".to_string())?;
+            let name = process_symbol_name(
+                items
+                    .first()
+                    .ok_or_else(|| "listen declaration missing name".to_string())?,
+            )?;
+            let source_value = items
+                .get(1)
+                .ok_or_else(|| "listen declaration missing event source".to_string())?;
+            let source = parse_process_event_source(source_value)?;
+            let handler = handlers
+                .get(&name)
+                .ok_or_else(|| format!("listen :{name} missing :on-{name} handler"))?;
+            Ok(crate::process::ProcessListenDef {
+                name,
+                source,
+                handler_source: wrap_process_handler_source(state_names, handler)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_process_event_source(
+    value: &EValue,
+) -> Result<crate::process::ProcessEventSource, String> {
+    if matches!(
+        value,
+        EValue::String(_) | EValue::Symbol(_) | EValue::Keyword(_)
+    ) {
+        return Ok(crate::process::ProcessEventSource::Channel(
+            process_symbol_name(value)?,
+        ));
+    }
+    let items = value_list(value).ok_or_else(|| "event source must be a list".to_string())?;
+    let head = process_symbol_name(
+        items
+            .first()
+            .ok_or_else(|| "event source missing head".to_string())?,
+    )?;
+    match head.as_str() {
+        "track-fires" => {
+            let Some(EValue::Number(track)) = items.get(1) else {
+                return Err("track-fires expects a track number".to_string());
+            };
+            Ok(crate::process::ProcessEventSource::TrackFires(
+                *track as usize,
+            ))
+        }
+        "seq-fires" => {
+            let name = items
+                .get(1)
+                .map(process_symbol_name)
+                .transpose()?
+                .unwrap_or_default();
+            Ok(crate::process::ProcessEventSource::SeqFires(name))
+        }
+        "chan" | "channel" => {
+            let name = items
+                .get(1)
+                .map(process_symbol_name)
+                .transpose()?
+                .unwrap_or_default();
+            Ok(crate::process::ProcessEventSource::Channel(name))
+        }
+        other => Err(format!("unknown process event source {other}")),
+    }
+}
+
+fn keyword_value(items: &[EValue], key: &str) -> Option<EValue> {
+    let mut idx = 0;
+    while idx + 1 < items.len() {
+        if process_symbol_name(&items[idx])
+            .ok()
+            .is_some_and(|name| name.eq_ignore_ascii_case(key))
+        {
+            return Some(items[idx + 1].clone());
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn parse_process_time_expr(value: &EValue) -> Result<crate::process::ProcessTimeExpr, String> {
+    match value {
+        EValue::Number(beats) => Ok(crate::process::ProcessTimeExpr::Beats(*beats)),
+        EValue::Keyword(_) | EValue::Symbol(_) | EValue::String(_) => {
+            let tb = parse_timebase_arg(std::slice::from_ref(value), 0)?;
+            Ok(crate::process::ProcessTimeExpr::Beats(tb.step_beats(
+                crate::generator::GENERATOR_RESOLUTION_REF_STEPS,
+            )))
+        }
+        EValue::List(_) => {
+            let items =
+                value_list(value).ok_or_else(|| "time expression must be a list".to_string())?;
+            let head = process_symbol_name(
+                items
+                    .first()
+                    .ok_or_else(|| "time expression missing head".to_string())?,
+            )?;
+            match head.as_str() {
+                "beats" => {
+                    let Some(EValue::Number(beats)) = items.get(1) else {
+                        return Err("(beats n) expects a number".to_string());
+                    };
+                    Ok(crate::process::ProcessTimeExpr::Beats(*beats))
+                }
+                "bars" => {
+                    let Some(EValue::Number(bars)) = items.get(1) else {
+                        return Err("(bars n) expects a number".to_string());
+                    };
+                    Ok(crate::process::ProcessTimeExpr::Beats(*bars * 4.0))
+                }
+                "in" => {
+                    let inlet = process_symbol_name(
+                        items
+                            .get(1)
+                            .ok_or_else(|| "(in :name) expects an inlet".to_string())?,
+                    )?;
+                    Ok(crate::process::ProcessTimeExpr::Inlet(inlet))
+                }
+                other => Err(format!("unsupported process time expression {other}")),
+            }
+        }
+        _ => Err("unsupported process time expression".to_string()),
+    }
+}
+
+fn wrap_process_source_with_state(state_names: &[String], body_source: String) -> String {
+    if state_names.is_empty() {
+        return body_source;
+    }
+    let params = state_names.join(" ");
+    let args = state_names
+        .iter()
+        .map(|name| format!("(__process-state-get :{name})"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let stores = state_names
+        .iter()
+        .map(|name| format!("(__process-state-set! :{name} {name})"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("((lambda ({params}) (do {body_source} {stores})) {args})")
+}
+
+fn wrap_process_body_source(state_names: &[String], body: &EValue) -> String {
+    wrap_process_source_with_state(state_names, eseqlisp::vm::format_lisp_source(body))
+}
+
+fn wrap_process_handler_source(state_names: &[String], handler: &EValue) -> Result<String, String> {
+    let items =
+        value_list(handler).ok_or_else(|| "process event handler expects a lambda".to_string())?;
+    let head = process_symbol_name(
+        items
+            .first()
+            .ok_or_else(|| "process event handler lambda is empty".to_string())?,
+    )?;
+    if head != "lambda" {
+        return Err("process event handler expects a lambda".to_string());
+    }
+    let args = value_list(
+        items
+            .get(1)
+            .ok_or_else(|| "process event handler lambda missing args".to_string())?,
+    )
+    .ok_or_else(|| "process event handler lambda args must be a list".to_string())?;
+    if args.len() != 1 {
+        return Err("process event handler lambda expects exactly one argument".to_string());
+    }
+    let event_arg = process_symbol_name(&args[0])?;
+    let body = items
+        .get(2..)
+        .ok_or_else(|| "process event handler lambda missing body".to_string())?;
+    let body_source = process_body_source(body)?;
+    let mut params = state_names.to_vec();
+    params.push(event_arg);
+    let mut call_args = state_names
+        .iter()
+        .map(|name| format!("(__process-state-get :{name})"))
+        .collect::<Vec<_>>();
+    call_args.push("(__process-event-value)".to_string());
+    let stores = state_names
+        .iter()
+        .map(|name| format!("(__process-state-set! :{name} {name})"))
+        .collect::<Vec<_>>();
+    let body_with_stores = if stores.is_empty() {
+        body_source
+    } else {
+        format!("(do {body_source} {})", stores.join(" "))
+    };
+    Ok(format!(
+        "((lambda ({}) {}) {})",
+        params.join(" "),
+        body_with_stores,
+        call_args.join(" ")
+    ))
+}
+
+fn process_body_source(body: &[EValue]) -> Result<String, String> {
+    match body {
+        [] => Err("process body cannot be empty".to_string()),
+        [single] => Ok(eseqlisp::vm::format_lisp_source(single)),
+        forms => Ok(format!(
+            "(do {})",
+            forms
+                .iter()
+                .map(eseqlisp::vm::format_lisp_source)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )),
+    }
+}
+
+fn construct_process_instance(
+    process_authoring: &SharedProcessAuthoring,
+    class_name: &str,
+    args: Vec<EValue>,
+    anonymous: bool,
+    running: bool,
+    every: Option<crate::process::ProcessTimeExpr>,
+    run_source: Option<String>,
+    one_shot: bool,
+    publish: Option<ProcessPublishHook>,
+) -> Result<EValue, String> {
+    let inlets = parse_process_constructor_inlets(process_authoring, &args)?;
+    let mut registry = process_authoring
+        .lock()
+        .map_err(|_| "failed to lock process registry".to_string())?;
+    let handle_id = crate::process::AuthoredHandleId(registry.next_id());
+    registry.upsert_instance(crate::process::AuthoredProcessInstance {
+        handle_id,
+        name: None,
+        class_name: class_name.to_string(),
+        inlets,
+        running,
+        anonymous,
+        one_shot,
+        every,
+        run_source,
+    });
+    Ok(process_instance_handle(
+        Arc::clone(process_authoring),
+        handle_id,
+        publish,
+    ))
+}
+
+fn construct_anonymous_listener_process(
+    process_authoring: &SharedProcessAuthoring,
+    kind: &str,
+    source: crate::process::ProcessEventSource,
+    handler: &EValue,
+    publish: Option<ProcessPublishHook>,
+) -> Result<EValue, String> {
+    let handler_source = wrap_process_handler_source(&[], handler)?;
+    let mut registry = process_authoring
+        .lock()
+        .map_err(|_| "failed to lock process registry".to_string())?;
+    let handle_id = crate::process::AuthoredHandleId(registry.next_id());
+    let class_name = format!("__anonymous_{kind}_{}", handle_id.0);
+    registry.upsert_def(crate::process::ProcessDef {
+        id: crate::process::stable_process_id(&class_name),
+        name: class_name.clone(),
+        inlets: Vec::new(),
+        outlets: Vec::new(),
+        state: Vec::new(),
+        every: None,
+        run_source: None,
+        listens: vec![crate::process::ProcessListenDef {
+            name: "event".to_string(),
+            source,
+            handler_source,
+        }],
+    });
+    registry.upsert_instance(crate::process::AuthoredProcessInstance {
+        handle_id,
+        name: None,
+        class_name,
+        inlets: HashMap::new(),
+        running: true,
+        anonymous: true,
+        one_shot: false,
+        every: None,
+        run_source: None,
+    });
+    drop(registry);
+    Ok(process_instance_handle(
+        Arc::clone(process_authoring),
+        handle_id,
+        publish,
+    ))
+}
+
+fn parse_process_constructor_inlets(
+    process_authoring: &SharedProcessAuthoring,
+    args: &[EValue],
+) -> Result<HashMap<String, crate::process::ProcessInletValue>, String> {
+    if args.len() % 2 != 0 {
+        return Err("process constructor expects keyword/value inlet pairs".to_string());
+    }
+    let mut inlets = HashMap::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = process_symbol_name(&args[idx])?;
+        let value = parse_inlet_value(process_authoring, &args[idx + 1])?;
+        inlets.insert(key, value);
+        idx += 2;
+    }
+    Ok(inlets)
+}
+
+fn parse_inlet_value(
+    process_authoring: &SharedProcessAuthoring,
+    value: &EValue,
+) -> Result<crate::process::ProcessInletValue, String> {
+    match value {
+        EValue::HostHandle { kind, id, .. } if kind == "process-outlet" => {
+            let registry = process_authoring
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let outlet = registry
+                .outlet_handles
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "unknown process outlet handle".to_string())?;
+            Ok(crate::process::ProcessInletValue::Outlet(outlet))
+        }
+        EValue::HostHandle { kind, id, .. } if kind == "channel" => {
+            let registry = process_authoring
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let name = registry
+                .channel_handles
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "unknown channel handle".to_string())?;
+            Ok(crate::process::ProcessInletValue::Channel(name))
+        }
+        _ => Ok(crate::process::ProcessInletValue::Literal(value.clone())),
+    }
+}
+
+fn process_instance_handle(
+    process_authoring: SharedProcessAuthoring,
+    handle_id: crate::process::AuthoredHandleId,
+    publish: Option<ProcessPublishHook>,
+) -> EValue {
+    EValue::HostHandle {
+        kind: "process".to_string(),
+        id: handle_id.0,
+        callable: Rc::new(move |args, _vm| {
+            let publish_after_call = args.len() == 2;
+            match process_handle_call(&process_authoring, handle_id, args) {
+                Ok(value) => {
+                    if publish_after_call {
+                        publish_process_authoring(&process_authoring, &publish);
+                    }
+                    value
+                }
+                Err(error) => {
+                    eprintln!("[process] handle error: {error}");
+                    EValue::Bool(false)
+                }
+            }
+        }),
+    }
+}
+
+fn process_channel_handle(
+    process_authoring: SharedProcessAuthoring,
+    handle_id: crate::process::AuthoredHandleId,
+) -> EValue {
+    EValue::HostHandle {
+        kind: "channel".to_string(),
+        id: handle_id.0,
+        callable: Rc::new(move |_args, _vm| EValue::Bool(true)),
+    }
+}
+
+fn process_outlet_handle(
+    process_authoring: SharedProcessAuthoring,
+    outlet: crate::process::ProcessOutletRef,
+) -> Result<EValue, String> {
+    let mut registry = process_authoring
+        .lock()
+        .map_err(|_| "failed to lock process registry".to_string())?;
+    let handle_id = registry.next_id();
+    registry.outlet_handles.insert(handle_id, outlet);
+    Ok(EValue::HostHandle {
+        kind: "process-outlet".to_string(),
+        id: handle_id,
+        callable: Rc::new(move |_args, _vm| EValue::Bool(true)),
+    })
+}
+
+fn process_handle_call(
+    process_authoring: &SharedProcessAuthoring,
+    handle_id: crate::process::AuthoredHandleId,
+    args: Vec<EValue>,
+) -> Result<EValue, String> {
+    match args.as_slice() {
+        [key] => {
+            let outlet = process_symbol_name(key)?;
+            process_outlet_handle(
+                Arc::clone(process_authoring),
+                crate::process::ProcessOutletRef {
+                    process_handle_id: handle_id,
+                    outlet,
+                },
+            )
+        }
+        [key, value] => {
+            let inlet = process_symbol_name(key)?;
+            let value = parse_inlet_value(process_authoring, value)?;
+            let mut registry = process_authoring
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let instance = registry
+                .instances
+                .iter_mut()
+                .find(|entry| entry.handle_id == handle_id)
+                .ok_or_else(|| "unknown process handle".to_string())?;
+            instance.inlets.insert(inlet, value);
+            Ok(EValue::Bool(true))
+        }
+        _ => Err("process handle expects :outlet or :inlet value".to_string()),
+    }
+}
+
+fn set_process_running(
+    process_authoring: &SharedProcessAuthoring,
+    value: Option<&EValue>,
+    running: bool,
+) -> Result<(), String> {
+    let Some(EValue::HostHandle { kind, id, .. }) = value else {
+        return Err("start/stop expects a process handle".to_string());
+    };
+    if kind != "process" {
+        return Err("start/stop expects a process handle".to_string());
+    }
+    let mut registry = process_authoring
+        .lock()
+        .map_err(|_| "failed to lock process registry".to_string())?;
+    let instance = registry
+        .instances
+        .iter_mut()
+        .find(|entry| entry.handle_id.0 == *id)
+        .ok_or_else(|| "unknown process handle".to_string())?;
+    instance.running = running;
+    Ok(())
+}
+
+fn parse_channel_name(
+    process_authoring: &SharedProcessAuthoring,
+    value: &EValue,
+) -> Result<String, String> {
+    match value {
+        EValue::HostHandle { kind, id, .. } if kind == "channel" => {
+            let registry = process_authoring
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            registry
+                .channel_handles
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "unknown channel handle".to_string())
+        }
+        EValue::String(_) | EValue::Symbol(_) | EValue::Keyword(_) => process_symbol_name(value),
+        _ => Err("expected channel handle or name".to_string()),
+    }
+}
+
+fn parse_process_source_ref(
+    process_authoring: &SharedProcessAuthoring,
+    value: &EValue,
+) -> Result<crate::process::ProcessSourceRef, String> {
+    match value {
+        EValue::HostHandle { kind, id, .. } if kind == "process-outlet" => {
+            let registry = process_authoring
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let outlet = registry
+                .outlet_handles
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "unknown process outlet handle".to_string())?;
+            Ok(crate::process::ProcessSourceRef::Outlet(outlet))
+        }
+        EValue::HostHandle { kind, id, .. } if kind == "channel" => {
+            let registry = process_authoring
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let name = registry
+                .channel_handles
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "unknown channel handle".to_string())?;
+            Ok(crate::process::ProcessSourceRef::Channel(name))
+        }
+        EValue::String(_) | EValue::Symbol(_) | EValue::Keyword(_) => Ok(
+            crate::process::ProcessSourceRef::Channel(process_symbol_name(value)?),
+        ),
+        EValue::List(items) => {
+            let items = items
+                .iter()
+                .map(|item| item.borrow().clone())
+                .collect::<Vec<_>>();
+            let head = process_symbol_name(
+                items
+                    .first()
+                    .ok_or_else(|| "source expression missing head".to_string())?,
+            )?;
+            match head.as_str() {
+                "chan" | "channel" => {
+                    let name = process_symbol_name(
+                        items
+                            .get(1)
+                            .ok_or_else(|| "channel source expects a name".to_string())?,
+                    )?;
+                    Ok(crate::process::ProcessSourceRef::Channel(name))
+                }
+                process_name => {
+                    if items.len() != 2 {
+                        return Err(
+                            "process outlet source expects (process-name :outlet)".to_string()
+                        );
+                    }
+                    let outlet = process_symbol_name(&items[1])?;
+                    let registry = process_authoring
+                        .lock()
+                        .map_err(|_| "failed to lock process registry".to_string())?;
+                    let instance = registry
+                        .instances
+                        .iter()
+                        .rev()
+                        .find(|entry| entry.name.as_deref() == Some(process_name))
+                        .ok_or_else(|| format!("unknown process instance {process_name}"))?;
+                    Ok(crate::process::ProcessSourceRef::Outlet(
+                        crate::process::ProcessOutletRef {
+                            process_handle_id: instance.handle_id,
+                            outlet,
+                        },
+                    ))
+                }
+            }
+        }
+        _ => Err("source must be a process outlet or channel".to_string()),
+    }
+}
+
+fn parse_process_event_source_ref(
+    process_authoring: &SharedProcessAuthoring,
+    value: &EValue,
+) -> Result<crate::process::ProcessEventSource, String> {
+    if let Ok(source) = parse_process_source_ref(process_authoring, value) {
+        return Ok(match source {
+            crate::process::ProcessSourceRef::Channel(name) => {
+                crate::process::ProcessEventSource::Channel(name)
+            }
+            crate::process::ProcessSourceRef::Outlet(outlet) => {
+                crate::process::ProcessEventSource::Outlet(outlet)
+            }
+        });
+    }
+    parse_process_event_source(value)
+}
+
+fn parse_process_target_ref(
+    process_authoring: &SharedProcessAuthoring,
+    value: &EValue,
+) -> Result<crate::process::ProcessTargetRef, String> {
+    match value {
+        EValue::HostHandle { kind, id, .. } if kind == "channel" => {
+            let registry = process_authoring
+                .lock()
+                .map_err(|_| "failed to lock process registry".to_string())?;
+            let name = registry
+                .channel_handles
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "unknown channel handle".to_string())?;
+            Ok(crate::process::ProcessTargetRef::Channel(name))
+        }
+        EValue::List(_) => {
+            Err("explicit inlet target handles are not represented as lists".to_string())
+        }
+        _ => Err(
+            "target must be a channel in v1 or an inlet patch through constructor nesting"
+                .to_string(),
+        ),
+    }
+}
+
+fn build_process_emit_event(args: &[EValue]) -> Result<EmittedAccumulatorEvent, String> {
+    let mut idx = 0;
+    if args
+        .first()
+        .is_some_and(|value| !matches!(value, EValue::Keyword(_)))
+    {
+        idx = 1;
+    }
+    let mut resolved = crate::generator::default_resolved();
+    let mut track = None;
+    let mut offset_beats = 0.0_f32;
+    while idx < args.len() {
+        let key = process_symbol_name(&args[idx])?.to_ascii_lowercase();
+        idx += 1;
+        let Some(value) = args.get(idx) else {
+            return Err(format!("emit missing value for :{key}"));
+        };
+        match (key.as_str(), value) {
+            ("track", EValue::Number(value)) => track = Some((*value).max(0.0) as usize),
+            ("after", value) => {
+                offset_beats = parse_process_time_expr(value)?.beats(&HashMap::new()) as f32
+            }
+            ("note" | "transpose", EValue::Number(value)) => resolved.transpose = *value as f32,
+            ("vel" | "velocity", EValue::Number(value)) => resolved.velocity = *value as f32,
+            ("duration" | "dur", EValue::Number(value)) => resolved.duration = *value as f32,
+            ("speed", EValue::Number(value)) => resolved.speed = *value as f32,
+            ("pan", EValue::Number(value)) => resolved.pan = *value as f32,
+            ("chop", EValue::Number(value)) => resolved.chop = *value as f32,
+            _ => {}
+        }
+        idx += 1;
+    }
+    Ok(EmittedAccumulatorEvent {
+        offset_beats,
+        track,
+        resolved,
+        chord: Vec::new(),
+        chord_durations: Vec::new(),
+        chord_step_transpose: 0.0,
+        effect_params: Vec::new(),
+        instrument_params: Vec::new(),
+    })
+}
+
+fn process_status_value(registry: &ProcessAuthoringRegistry) -> EValue {
+    process_map([
+        (
+            "defs",
+            process_list(registry.defs.iter().map(|def| {
+                process_map([
+                    ("id", EValue::Number(def.id as f64)),
+                    ("name", EValue::String(def.name.clone())),
+                    (
+                        "inlets",
+                        process_string_list(def.inlets.iter().map(|inlet| &inlet.name)),
+                    ),
+                    (
+                        "outlets",
+                        process_string_list(def.outlets.iter().map(|outlet| &outlet.name)),
+                    ),
+                    (
+                        "state",
+                        process_string_list(def.state.iter().map(|cell| &cell.name)),
+                    ),
+                    ("run-source", EValue::Bool(def.run_source.is_some())),
+                ])
+            })),
+        ),
+        (
+            "instances",
+            process_list(registry.instances.iter().map(|instance| {
+                process_map([
+                    ("id", EValue::Number(instance.handle_id.0 as f64)),
+                    (
+                        "name",
+                        instance
+                            .name
+                            .as_ref()
+                            .map(|name| EValue::String(name.clone()))
+                            .unwrap_or(EValue::Nil),
+                    ),
+                    ("class", EValue::String(instance.class_name.clone())),
+                    ("running", EValue::Bool(instance.running)),
+                    ("anonymous", EValue::Bool(instance.anonymous)),
+                    ("one-shot", EValue::Bool(instance.one_shot)),
+                    (
+                        "inlets",
+                        process_list(instance.inlets.iter().map(|(name, value)| {
+                            process_map([
+                                ("name", EValue::String(name.clone())),
+                                ("value", process_inlet_status_value(value)),
+                            ])
+                        })),
+                    ),
+                ])
+            })),
+        ),
+        (
+            "channels",
+            process_list(registry.channels.iter().map(|channel| {
+                process_map([
+                    ("id", EValue::Number(channel.handle_id.0 as f64)),
+                    (
+                        "name",
+                        channel
+                            .name
+                            .as_ref()
+                            .map(|name| EValue::String(name.clone()))
+                            .unwrap_or(EValue::Nil),
+                    ),
+                    ("message-only", EValue::Bool(channel.message_only)),
+                    ("initial", channel.initial.clone().unwrap_or(EValue::Nil)),
+                ])
+            })),
+        ),
+        ("patches", EValue::Number(registry.patches.len() as f64)),
+        (
+            "listeners",
+            EValue::Number(
+                registry
+                    .defs
+                    .iter()
+                    .map(|def| def.listens.len())
+                    .sum::<usize>() as f64,
+            ),
+        ),
+    ])
+}
+
+fn process_inlet_status_value(value: &crate::process::ProcessInletValue) -> EValue {
+    match value {
+        crate::process::ProcessInletValue::Literal(value) => process_map([
+            ("kind", EValue::Keyword("literal".to_string())),
+            ("value", value.clone()),
+        ]),
+        crate::process::ProcessInletValue::Channel(name) => process_map([
+            ("kind", EValue::Keyword("channel".to_string())),
+            ("name", EValue::String(name.clone())),
+        ]),
+        crate::process::ProcessInletValue::Outlet(outlet) => process_map([
+            ("kind", EValue::Keyword("outlet".to_string())),
+            (
+                "process-id",
+                EValue::Number(outlet.process_handle_id.0 as f64),
+            ),
+            ("outlet", EValue::String(outlet.outlet.clone())),
+        ]),
+    }
+}
+
+fn process_string_list<'a>(items: impl IntoIterator<Item = &'a String>) -> EValue {
+    process_list(items.into_iter().map(|item| EValue::String(item.clone())))
+}
+
+fn process_list(items: impl IntoIterator<Item = EValue>) -> EValue {
+    EValue::List(
+        items
+            .into_iter()
+            .map(|value| Rc::new(RefCell::new(value)))
+            .collect(),
+    )
+}
+
+fn process_map(items: impl IntoIterator<Item = (&'static str, EValue)>) -> EValue {
+    EValue::Map(
+        items
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value))))
+            .collect(),
+    )
 }
 
 fn register_sequencer_natives(
@@ -9879,6 +11455,8 @@ pub fn run_embedded_scratch_flow(
         accumulator_eval,
         sequencers,
         generator_tick,
+        process_authoring,
+        process_eval,
         graph_node,
     ) = control_runtime.into_parts();
     let init_src = read_eseqlisp_init_source();
@@ -9974,6 +11552,8 @@ pub fn run_embedded_scratch_flow(
                     accumulator_eval,
                     sequencers,
                     generator_tick,
+                    process_authoring,
+                    process_eval,
                     graph_node,
                 ),
             ));
@@ -10464,10 +12044,11 @@ mod tests {
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,
         effect_sidechain_inputs, fallback_effect_descriptors, fallback_instrument_descriptors,
         new_eval_context, parse_manifest, read_eseqlisp_init_source,
-        register_graph_authoring_natives, register_sequencer_natives,
-        scratch_runtime_with_fallbacks, selected_neural_instrument_plock_value,
-        set_selected_neural_instrument_plocks, shared_native_metadata, AccumulatorNoteSpan,
-        DGenParam, DGenSidechainInput, ScratchControlRuntime, SelectedNeuralNeuron,
+        register_graph_authoring_natives, register_published_process_authoring_natives,
+        register_sequencer_natives, scratch_runtime_with_fallbacks,
+        selected_neural_instrument_plock_value, set_selected_neural_instrument_plocks,
+        shared_native_metadata, AccumulatorNoteSpan, DGenParam, DGenSidechainInput,
+        ScratchControlRuntime, SelectedNeuralNeuron,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
@@ -10485,6 +12066,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::collections::HashMap;
     use std::rc::Rc;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     // ── graph-mode manifest parsing ──
@@ -11030,8 +12612,7 @@ mod tests {
         };
         use crate::sequencer::Timebase;
 
-        let update_source =
-            "(emit :note (if (>= (param :transpose-reset) 1) (param :transpose) (+ (in-note) (param :transpose))) :vel (in-vel))";
+        let update_source = "(emit :note (if (>= (param :transpose-reset) 1) (param :transpose) (+ (in-note) (param :transpose))) :vel (in-vel))";
         let manifest = GraphManifest {
             id: 33,
             name: "g".into(),
@@ -17687,6 +19268,510 @@ mod tests {
         // ticks, so transpose climbs 1,2,3,4.
         let transposes: Vec<f32> = out.iter().map(|e| e.event.resolved.transpose).collect();
         assert_eq!(transposes, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn def_process_named_instance_preserves_state_across_scheduler_ticks() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process counter
+                  :in ((step :float 0 12 :default 1))
+                  :out ((value :float))
+                  :state ((x 0))
+                  :every (beats 1)
+                  :run (do
+                    (set! x (+ x (in :step)))
+                    (out :value x)))
+
+                (def wander (counter :step 2))
+                (start wander)
+                "#,
+            )
+            .expect("def-process");
+
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+
+        let first = processes.process_block(0.0, 1.0, 0, 48_000.0);
+        assert_eq!(first.len(), 1);
+        let first_result = scratch
+            .invoke_process_run(first[0].clone())
+            .expect("first process tick");
+        assert_eq!(first_result.outputs[0].value, Value::Number(2.0));
+        processes.apply_run_result(first_result);
+
+        let second = processes.process_block(1.0, 2.0, 48_000, 48_000.0);
+        assert_eq!(second.len(), 1);
+        let second_result = scratch
+            .invoke_process_run(second[0].clone())
+            .expect("second process tick");
+        assert_eq!(second_result.outputs[0].value, Value::Number(4.0));
+    }
+
+    #[test]
+    fn process_transpose_wander_demo_loads_and_ticks() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            (0..2).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(2),
+            fallback_instrument_descriptors(2),
+            0,
+            0,
+        );
+        let script_path = format!(
+            "{}/scripts/process-transpose-wander-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source =
+            std::fs::read_to_string(&script_path).expect("read process transpose demo script");
+        scratch
+            .eval_source_at_path(script_path, &source)
+            .expect("evaluate process transpose demo script");
+
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+
+        let mut outlet_values = Vec::new();
+        let mut emitted_marker_count = 0;
+        for beat in 0..4 {
+            let invocations =
+                processes.process_block(beat as f64, beat as f64 + 1.0, beat * 48_000, 48_000.0);
+            assert_eq!(
+                invocations.len(),
+                1,
+                "expected one process tick at beat {beat}"
+            );
+            let result = scratch
+                .invoke_process_run(invocations[0].clone())
+                .expect("invoke process demo tick");
+            assert_eq!(
+                result.outputs.len(),
+                2,
+                "demo should publish one outlet and one channel send"
+            );
+            outlet_values.extend(result.outputs.iter().find_map(|output| {
+                (output.name == "value").then_some(match &output.value {
+                    Value::Number(value) => *value,
+                    _ => panic!("value outlet should be numeric"),
+                })
+            }));
+            if !result.emissions.is_empty() {
+                emitted_marker_count += result.emissions.len();
+                assert_eq!(result.emissions[0].track, Some(0));
+            }
+            processes.apply_run_result(result);
+        }
+
+        assert_eq!(outlet_values, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(processes.global_transpose(), 4.0);
+        assert_eq!(emitted_marker_count, 1);
+        let due = processes.take_due_emissions(4.0);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].beat, 4.0);
+    }
+
+    #[test]
+    fn process_transpose_wander_demo_publishes_from_regular_runtime() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            (0..2).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut authoring = Runtime::new();
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::clone(&ui_epoch),
+        );
+
+        let script_path = format!(
+            "{}/scripts/process-transpose-wander-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source =
+            std::fs::read_to_string(&script_path).expect("read process transpose demo script");
+        authoring
+            .eval_source_at_path(script_path.into(), &source)
+            .expect("evaluate process demo in regular runtime");
+        assert!(
+            ui_epoch.load(Ordering::Acquire) > 0,
+            "regular runtime process authoring should publish"
+        );
+
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(2),
+            fallback_instrument_descriptors(2),
+            0,
+            0,
+        );
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(state.published_process_authoring().to_runtime(), 0.0);
+
+        let mut outlet_values = Vec::new();
+        for beat in 0..4 {
+            let invocations =
+                processes.process_block(beat as f64, beat as f64 + 1.0, beat * 48_000, 48_000.0);
+            assert_eq!(
+                invocations.len(),
+                1,
+                "expected one process tick at beat {beat}"
+            );
+            let result = scratch
+                .invoke_process_run(invocations[0].clone())
+                .expect("invoke regular-runtime published process tick");
+            outlet_values.extend(result.outputs.iter().find_map(|output| {
+                (output.name == "value").then_some(match &output.value {
+                    Value::Number(value) => *value,
+                    _ => panic!("value outlet should be numeric"),
+                })
+            }));
+            processes.apply_run_result(result);
+        }
+
+        assert_eq!(outlet_values, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(processes.global_transpose(), 4.0);
+        assert_eq!(processes.take_due_emissions(4.0).len(), 1);
+    }
+
+    #[test]
+    fn process_ui_control_demo_publishes_inlet_changes_from_regular_runtime() {
+        fn collect_widgets<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+            out: &mut Vec<&'a eseqlisp::layout::LayoutNode>,
+        ) {
+            if node.widget_type == widget_type {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_widgets(child, widget_type, out);
+            }
+        }
+
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        fn assert_measured(node: &eseqlisp::layout::LayoutNode) {
+            assert!(node.rect.row.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.col.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.height.is_finite(), "{:?}", node.rect);
+            assert!(node.rect.width > 0.0, "{:?}", node.rect);
+            assert!(node.rect.height > 0.0, "{:?}", node.rect);
+        }
+
+        fn inlet_number(instance: &crate::process::AuthoredProcessInstance, name: &str) -> f64 {
+            match instance.inlets.get(name) {
+                Some(crate::process::ProcessInletValue::Literal(Value::Number(value))) => *value,
+                other => panic!("expected numeric inlet {name}, got {other:?}"),
+            }
+        }
+
+        fn inlet_bool(instance: &crate::process::AuthoredProcessInstance, name: &str) -> bool {
+            match instance.inlets.get(name) {
+                Some(crate::process::ProcessInletValue::Literal(Value::Bool(value))) => *value,
+                other => panic!("expected bool inlet {name}, got {other:?}"),
+            }
+        }
+
+        let state = Arc::new(SequencerState::new(
+            16,
+            (0..16).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut authoring = Runtime::new();
+        authoring.register_reactive(
+            "SEQ",
+            vec![
+                ("track-events", Value::List(Vec::new())),
+                ("track-event-current-beat", Value::Number(0.0)),
+                ("track-colors", Value::List(Vec::new())),
+            ],
+            true,
+        );
+        authoring
+            .eval_str(
+                r#"
+                (defstate seq-registered-step-tabs '())
+                (def seq-register-script-step-sequencer-tab (label buffer sequencer source-path)
+                  (set! seq-registered-step-tabs
+                    (append
+                      (filter (lambda (tab) (not (= (nth tab 1) buffer)))
+                        seq-registered-step-tabs)
+                      (list (list label buffer sequencer source-path)))))
+                "#,
+            )
+            .expect("install sequencer tab registration test stub");
+
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::clone(&ui_epoch),
+        );
+
+        let script_path = format!(
+            "{}/scripts/process-ui-control-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source =
+            std::fs::read_to_string(&script_path).expect("read process UI control demo script");
+        authoring
+            .eval_source_at_path(script_path.into(), &source)
+            .expect("evaluate process UI demo in regular runtime");
+        assert!(
+            ui_epoch.load(Ordering::Acquire) > 0,
+            "regular runtime process UI demo should publish"
+        );
+        assert_eq!(
+            authoring
+                .eval_str("script-buffer-name")
+                .expect("read script buffer name"),
+            Some(Value::String("*process-ui*".to_string()))
+        );
+        assert_eq!(
+            authoring
+                .eval_str("script-tab-label")
+                .expect("read script tab label"),
+            Some(Value::String("Process UI".to_string()))
+        );
+        assert_eq!(
+            authoring
+                .eval_str("seq-registered-step-tabs")
+                .expect("read registered step tabs"),
+            Some(gv_list(vec![gv_list(vec![
+                Value::String("Process UI".to_string()),
+                Value::String("*process-ui*".to_string()),
+                Value::String(String::new()),
+                Value::String(String::new()),
+            ])]))
+        );
+
+        let tree = authoring
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("process UI demo should publish a widget tree");
+        let layout = authoring
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((56.0, 20.0)))
+            .expect("process UI demo widget tree should lay out");
+        for key in [
+            "process-ui-step",
+            "process-ui-range",
+            "process-ui-period",
+            "process-ui-marker-every",
+            "process-ui-track",
+            "process-ui-enabled",
+            "process-ui-markers",
+            "process-ui-track-event-view",
+        ] {
+            let widget =
+                find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing {key}"));
+            assert_measured(widget);
+        }
+        let mut number_pickers = Vec::new();
+        collect_widgets(&layout, "number-picker", &mut number_pickers);
+        assert_eq!(
+            number_pickers.len(),
+            4,
+            "expected four numeric process controls"
+        );
+        let mut toggles = Vec::new();
+        collect_widgets(&layout, "toggle", &mut toggles);
+        assert_eq!(toggles.len(), 2, "expected run/emit toggles");
+        let mut event_views = Vec::new();
+        collect_widgets(&layout, "event-view", &mut event_views);
+        assert_eq!(event_views.len(), 1, "expected one track event view");
+
+        authoring
+            .eval_str(
+                r#"
+                (process-ui-set-step 3.5)
+                (process-ui-set-range 12)
+                (process-ui-set-period 0.5)
+                (process-ui-set-marker-every 2)
+                (process-ui-set-track "Track 4")
+                (process-ui-set-enabled false)
+                (process-ui-set-markers false)
+                "#,
+            )
+            .expect("process UI setters should update process inlets");
+
+        let snapshot = state.published_process_authoring().to_runtime();
+        let instance = snapshot
+            .instances
+            .iter()
+            .find(|instance| instance.name.as_deref() == Some("process-ui-wander"))
+            .expect("named process-ui-wander instance");
+        assert_eq!(instance.class_name, "process-ui-bounce");
+        assert!(instance.running, "demo process should be running");
+        assert_eq!(inlet_number(instance, "step"), 3.5);
+        assert_eq!(inlet_number(instance, "range"), 12.0);
+        assert_eq!(inlet_number(instance, "period"), 0.5);
+        assert_eq!(inlet_number(instance, "marker-every"), 2.0);
+        assert_eq!(inlet_number(instance, "track"), 3.0);
+        assert!(!inlet_bool(instance, "enabled"));
+        assert!(!inlet_bool(instance, "markers"));
+    }
+
+    #[test]
+    fn process_tap_from_regular_runtime_publishes_listener_process() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::clone(&ui_epoch),
+        );
+
+        let result = authoring
+            .eval_str("(def c (defchan c 0)) (tap c (lambda (v) (transpose! v)))")
+            .expect("tap evaluation should publish listener process");
+
+        assert!(matches!(result, Some(Value::HostHandle { kind, .. }) if kind == "process"));
+        assert!(
+            ui_epoch.load(Ordering::Acquire) > 0,
+            "regular runtime tap should publish"
+        );
+
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(state.published_process_authoring().to_runtime(), 0.0);
+
+        let invocations = processes.send_channel_at("c", Value::Number(5.0), 2.0, 96_000);
+        assert_eq!(invocations.len(), 1);
+        let result = scratch
+            .invoke_process_run(invocations[0].clone())
+            .expect("invoke tap listener");
+        assert!(processes.apply_run_result(result).is_empty());
+        assert_eq!(processes.global_transpose(), 5.0);
+    }
+
+    #[test]
+    fn process_on_from_regular_runtime_publishes_channel_listener_process() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut authoring = Runtime::new();
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::clone(&ui_epoch),
+        );
+
+        authoring
+            .eval_str("(def c (defchan c 0)) (on (channel c) (lambda (v) (transpose! (+ v 1))))")
+            .expect("on evaluation should publish listener process");
+
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(state.published_process_authoring().to_runtime(), 0.0);
+
+        let invocations = processes.send_channel_at("c", Value::Number(4.0), 2.0, 96_000);
+        assert_eq!(invocations.len(), 1);
+        let result = scratch
+            .invoke_process_run(invocations[0].clone())
+            .expect("invoke on listener");
+        assert!(processes.apply_run_result(result).is_empty());
+        assert_eq!(processes.global_transpose(), 5.0);
+    }
+
+    #[test]
+    fn def_process_listen_handler_receives_channel_event_and_preserves_state() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def c (defchan c 0))
+                (def-process counter
+                  :out ((seen :float))
+                  :state ((total 0))
+                  :listen ((event (channel c)))
+                  :on-event (lambda (v)
+                    (do
+                      (set! total (+ total v))
+                      (out :seen total))))
+                (def listener (counter))
+                (start listener)
+                "#,
+            )
+            .expect("define listener process");
+
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+
+        let first = processes.send_channel_at("c", Value::Number(2.0), 1.0, 48_000);
+        assert_eq!(first.len(), 1);
+        let first_result = scratch
+            .invoke_process_run(first[0].clone())
+            .expect("invoke first listener event");
+        assert_eq!(
+            first_result
+                .outputs
+                .iter()
+                .find(|output| output.name == "seen")
+                .map(|output| output.value.clone()),
+            Some(Value::Number(2.0))
+        );
+        assert!(processes.apply_run_result(first_result).is_empty());
+
+        let second = processes.send_channel_at("c", Value::Number(3.0), 2.0, 96_000);
+        assert_eq!(second.len(), 1);
+        let second_result = scratch
+            .invoke_process_run(second[0].clone())
+            .expect("invoke second listener event");
+        assert_eq!(
+            second_result
+                .outputs
+                .iter()
+                .find(|output| output.name == "seen")
+                .map(|output| output.value.clone()),
+            Some(Value::Number(5.0))
+        );
     }
 
     #[test]

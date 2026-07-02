@@ -181,6 +181,71 @@ fn parse_emit_spec(value: &EValue) -> Option<crate::graph::EmitSpec> {
     })
 }
 
+pub(super) fn build_graph_emit_value(args: &[EValue]) -> Result<EValue, String> {
+    let mut map: HashMap<String, std::rc::Rc<std::cell::RefCell<EValue>>> = HashMap::new();
+    map.insert(
+        EMIT_MARKER.to_string(),
+        std::rc::Rc::new(std::cell::RefCell::new(EValue::Bool(true))),
+    );
+    let mut i = 0;
+    while i < args.len() {
+        let key = graph_emit_key(args.get(i))
+            .ok_or("emit expects keyword/value pairs, e.g. (emit :note 60 :vel 0.8)")?;
+        let field = match key.as_str() {
+            "note" => "note",
+            "vel" | "velocity" => "vel",
+            "dur" | "duration" => "dur",
+            "swing" => "swing",
+            other => return Err(format!("emit: unknown field :{other}")),
+        };
+        let value = args
+            .get(i + 1)
+            .ok_or_else(|| format!("emit field :{key} expects a value"))?;
+        match field {
+            "note" | "vel" => {
+                let EValue::Number(value) = value else {
+                    return Err(format!("emit field :{key} expects a number"));
+                };
+                map.insert(
+                    field.to_string(),
+                    std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(*value))),
+                );
+            }
+            "dur" => {
+                match value {
+                    EValue::Number(_) => {}
+                    value if graph_keyword(value).as_deref() == Some("seed") => {}
+                    _ => return Err("emit field :dur expects a number or :seed".to_string()),
+                }
+                map.insert(
+                    field.to_string(),
+                    std::rc::Rc::new(std::cell::RefCell::new(value.clone())),
+                );
+            }
+            "swing" => {
+                graph_parse_swing_spec(value)
+                    .map_err(|error| format!("emit field :swing {error}"))?;
+                map.insert(
+                    field.to_string(),
+                    std::rc::Rc::new(std::cell::RefCell::new(value.clone())),
+                );
+            }
+            _ => unreachable!(),
+        }
+        i += 2;
+    }
+    Ok(EValue::Map(map))
+}
+
+fn graph_emit_key(value: Option<&EValue>) -> Option<String> {
+    match value {
+        Some(EValue::Keyword(k) | EValue::String(k) | EValue::Symbol(k)) => {
+            Some(k.trim_start_matches(':').to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Register the `node-*` accessors a graph-mode `:update` reads. They read the
 /// currently-bound [`GraphNodeContext`] (set by `invoke_graph_update`) and ignore
 /// their `self` argument (the context is ambient, like the `gen-*` builtins).
@@ -607,63 +672,7 @@ pub(super) fn register_graph_node_natives(
         "Fire this node with a shaped event. Each named field overrides the emitted and \
          propagated payload; unnamed fields relay the incoming event verbatim. Returning \
          it from `:update` is the fire decision (truthy).",
-        move |args, _ctx| {
-            let mut map: HashMap<String, std::rc::Rc<std::cell::RefCell<EValue>>> = HashMap::new();
-            map.insert(
-                EMIT_MARKER.to_string(),
-                std::rc::Rc::new(std::cell::RefCell::new(EValue::Bool(true))),
-            );
-            let mut i = 0;
-            while i < args.len() {
-                let key = ctx_key(args.get(i))
-                    .ok_or("emit expects keyword/value pairs, e.g. (emit :note 60 :vel 0.8)")?;
-                let field = match key.as_str() {
-                    "note" => "note",
-                    "vel" | "velocity" => "vel",
-                    "dur" | "duration" => "dur",
-                    "swing" => "swing",
-                    other => return Err(format!("emit: unknown field :{other}")),
-                };
-                let value = args
-                    .get(i + 1)
-                    .ok_or_else(|| format!("emit field :{key} expects a value"))?;
-                match field {
-                    "note" | "vel" => {
-                        let EValue::Number(value) = value else {
-                            return Err(format!("emit field :{key} expects a number"));
-                        };
-                        map.insert(
-                            field.to_string(),
-                            std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(*value))),
-                        );
-                    }
-                    "dur" => {
-                        match value {
-                            EValue::Number(_) => {}
-                            value if graph_keyword(value).as_deref() == Some("seed") => {}
-                            _ => {
-                                return Err("emit field :dur expects a number or :seed".to_string());
-                            }
-                        }
-                        map.insert(
-                            field.to_string(),
-                            std::rc::Rc::new(std::cell::RefCell::new(value.clone())),
-                        );
-                    }
-                    "swing" => {
-                        graph_parse_swing_spec(value)
-                            .map_err(|error| format!("emit field :swing {error}"))?;
-                        map.insert(
-                            field.to_string(),
-                            std::rc::Rc::new(std::cell::RefCell::new(value.clone())),
-                        );
-                    }
-                    _ => unreachable!(),
-                }
-                i += 2;
-            }
-            Ok(EValue::Map(map))
-        },
+        move |args, _ctx| build_graph_emit_value(&args),
     );
 }
 
