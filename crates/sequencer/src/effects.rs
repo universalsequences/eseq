@@ -975,6 +975,7 @@ mod tests {
             EffectDescriptor::builtin_insert_names(),
             &[
                 "Filter",
+                "EQ8",
                 "Delay",
                 "Str8 Delay",
                 "Space Echo",
@@ -1023,6 +1024,63 @@ mod tests {
         assert_eq!(
             EffectDescriptor::builtin_insert("dj mixer").unwrap().name,
             "DJ Mixer"
+        );
+        assert_eq!(EffectDescriptor::builtin_insert("eq8").unwrap().name, "EQ8");
+    }
+
+    #[test]
+    fn builtin_eq8_exposes_expected_band_params_and_defaults() {
+        let desc = EffectDescriptor::builtin_insert("EQ8").unwrap();
+        assert_eq!(desc.input_channels, 2);
+        assert_eq!(desc.output_channels, 2);
+        assert_eq!(desc.params.len(), 1 + crate::eq8::EQ8_NUM_BANDS * 5);
+        assert_eq!(desc.params[0].name, "enabled");
+        assert_eq!(desc.params[0].default, 1.0);
+        assert_eq!(
+            desc.params[0].node_param_idx,
+            crate::eq8::EQ8_PARAM_ENABLED as u32
+        );
+
+        let names: Vec<&str> = desc
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect();
+        assert_eq!(
+            &names[1..6],
+            vec!["b1 enabled", "b1 type", "b1 freq", "b1 gain", "b1 q"]
+        );
+        assert_eq!(
+            desc.params[1].node_param_idx,
+            crate::eq8::eq8_band_enabled_param_idx(0) as u32
+        );
+        assert_eq!(
+            desc.params[2].node_param_idx,
+            crate::eq8::eq8_band_type_param_idx(0) as u32
+        );
+        assert_eq!(desc.params[3].default, 80.0);
+        assert_eq!(desc.params[4].default, 0.0);
+        assert_eq!(desc.params[5].default, 0.707);
+        assert_eq!(desc.params[21].default, 0.0);
+        assert_eq!(desc.params[21].name, "b5 enabled");
+        assert_eq!(desc.params[23].default, 1500.0);
+
+        match &desc.params[2].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["lowshelf", "bell", "highshelf"]
+                );
+            }
+            other => panic!("EQ8 band type should be enum, got {other:?}"),
+        }
+        assert_eq!(
+            EffectDescriptor::builtin_insert_project_name("EQ8").as_deref(),
+            Some("builtin:EQ8")
+        );
+        assert_eq!(
+            EffectDescriptor::strip_builtin_insert_project_name("builtin:EQ8"),
+            Some("EQ8")
         );
     }
 
@@ -1651,6 +1709,7 @@ impl EffectDescriptor {
     pub fn builtin_insert_names() -> &'static [&'static str] {
         &[
             "Filter",
+            "EQ8",
             "Delay",
             "Str8 Delay",
             "Space Echo",
@@ -1699,6 +1758,7 @@ impl EffectDescriptor {
     pub fn builtin_insert(name: &str) -> Option<Self> {
         match Self::canonical_builtin_insert_name(name)? {
             "Filter" => Some(Self::builtin_filter()),
+            "EQ8" => Some(Self::builtin_eq8()),
             "Delay" => Some(Self::builtin_delay()),
             "Str8 Delay" => Some(Self::builtin_str8_delay()),
             "Space Echo" => Some(Self::builtin_space_echo()),
@@ -1712,6 +1772,102 @@ impl EffectDescriptor {
             "Limiter" => Some(Self::builtin_limiter()),
             "Tape" => Some(Self::builtin_tape()),
             _ => None,
+        }
+    }
+
+    /// Built-in 8-band parametric equalizer descriptor.
+    pub fn builtin_eq8() -> Self {
+        fn continuous_param(
+            name: String,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            scaling: ParamScaling,
+            node_param_idx: u32,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name,
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling,
+                node_param_idx,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        let mut params = vec![Self::enabled_param(
+            crate::eq8::EQ8_PARAM_ENABLED as u32,
+            1.0,
+        )];
+        for (band, default) in crate::eq8::EQ8_DEFAULT_BANDS.iter().enumerate() {
+            let label = band + 1;
+            params.push(Self::enabled_param(
+                crate::eq8::eq8_band_enabled_param_idx(band) as u32,
+                if default.enabled { 1.0 } else { 0.0 },
+            ));
+            params.last_mut().unwrap().name = format!("b{label} enabled");
+            params.push(ParamDescriptor {
+                name: format!("b{label} type"),
+                min: 0.0,
+                max: 2.0,
+                default: default.filter_type,
+                kind: ParamKind::Enum {
+                    labels: vec![
+                        "lowshelf".to_string(),
+                        "bell".to_string(),
+                        "highshelf".to_string(),
+                    ],
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: crate::eq8::eq8_band_type_param_idx(band) as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            });
+            params.push(continuous_param(
+                format!("b{label} freq"),
+                20.0,
+                20_000.0,
+                default.freq,
+                Some("Hz"),
+                ParamScaling::Exponential,
+                crate::eq8::eq8_band_freq_param_idx(band) as u32,
+            ));
+            params.push(continuous_param(
+                format!("b{label} gain"),
+                -24.0,
+                24.0,
+                default.gain,
+                Some("dB"),
+                ParamScaling::Linear,
+                crate::eq8::eq8_band_gain_param_idx(band) as u32,
+            ));
+            params.push(continuous_param(
+                format!("b{label} q"),
+                0.1,
+                18.0,
+                default.q,
+                None,
+                ParamScaling::Exponential,
+                crate::eq8::eq8_band_q_param_idx(band) as u32,
+            ));
+        }
+
+        Self {
+            name: "EQ8".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params,
         }
     }
 

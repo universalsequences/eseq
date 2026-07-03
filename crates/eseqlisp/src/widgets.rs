@@ -26,6 +26,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "number-label",
     "patcher",
     "response-curve-editor",
+    "eq8-editor",
     "dropdown",
     "select",
     "v-stack",

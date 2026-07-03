@@ -63,6 +63,8 @@ mod dynamics;
 #[allow(dead_code)]
 pub mod effects;
 #[allow(dead_code)]
+mod eq8;
+#[allow(dead_code)]
 mod filter;
 #[allow(dead_code)]
 mod gatepitch;

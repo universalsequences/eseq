@@ -4115,6 +4115,10 @@ pub(crate) fn build_effects_value(
                 Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
             );
             slot_map.insert(
+                "track-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(track as f64))),
+            );
+            slot_map.insert(
                 "builtin".to_string(),
                 Rc::new(RefCell::new(Value::Bool(
                     sequencer::effects::EffectDescriptor::builtin_insert(&desc.name).is_some()
@@ -9001,6 +9005,7 @@ mod tests {
             "metal-seq-browser.lisp",
             "metal-seq-builtin-fx-ui.lisp",
             "metal-seq-fx/builtin/filter-core.lisp",
+            "metal-seq-fx/builtin/eq8.lisp",
             "metal-seq-fx/builtin/str8-delay.lisp",
             "metal-seq-fx/builtin/space-echo.lisp",
             "metal-seq-fx/builtin/dimension.lisp",
@@ -12755,6 +12760,63 @@ mod tests {
         ]
     }
 
+    fn test_eq8_params() -> Vec<Value> {
+        let defaults = [
+            (1.0, "lowshelf", 80.0, 0.0, 0.707),
+            (1.0, "bell", 200.0, 0.0, 1.0),
+            (1.0, "bell", 500.0, 0.0, 1.0),
+            (1.0, "highshelf", 8000.0, 0.0, 0.707),
+            (0.0, "bell", 1500.0, 0.0, 1.0),
+            (0.0, "bell", 3000.0, 0.0, 1.0),
+            (0.0, "bell", 6000.0, 0.0, 1.0),
+            (0.0, "bell", 12000.0, 0.0, 1.0),
+        ];
+        let mut params = vec![Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0))];
+        for (band, (enabled, filter_type, freq, gain, q)) in defaults.into_iter().enumerate() {
+            let base = 1 + band * 5;
+            params.push(Value::Map(test_param_map(
+                &format!("b{} enabled", band + 1),
+                base,
+                enabled,
+                0.0,
+                1.0,
+            )));
+            let type_idx = match filter_type {
+                "lowshelf" => 0.0,
+                "highshelf" => 2.0,
+                _ => 1.0,
+            };
+            params.push(Value::Map(test_enum_param_map(
+                &format!("b{} type", band + 1),
+                base + 1,
+                type_idx,
+                vec!["lowshelf", "bell", "highshelf"],
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("b{} freq", band + 1),
+                base + 2,
+                freq,
+                20.0,
+                20000.0,
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("b{} gain", band + 1),
+                base + 3,
+                gain,
+                -24.0,
+                24.0,
+            )));
+            params.push(Value::Map(test_param_map(
+                &format!("b{} q", band + 1),
+                base + 4,
+                q,
+                0.1,
+                18.0,
+            )));
+        }
+        params
+    }
+
     fn test_str8_delay_params() -> Vec<Value> {
         let divs = vec![
             "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2", "1",
@@ -12914,6 +12976,10 @@ mod tests {
         map.insert(
             "slot-idx".to_string(),
             Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+        );
+        map.insert(
+            "track-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
         );
         map.insert(
             "params".to_string(),
@@ -22011,6 +22077,97 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_eq8_layout_contains_eq8_editor() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("EQ8".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map("EQ8", 0, test_eq8_params()))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let eq8_ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe eq8 ui")
+            .expect("eq8 ui probe value");
+        assert!(
+            value_contains_keyword(&eq8_ui_probe, "eq8-editor"),
+            "EQ8 custom UI probe did not contain eq8-editor: {eq8_ui_probe:?}"
+        );
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("EQ8 fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 22);
+        let layout = editor.widget_layout().expect("EQ8 fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-EQ8"),
+            "EQ8 layout should contain the built-in EQ8 panel"
+        );
+        let editor_node = find_layout_node_by_widget_type(&layout, "eq8-editor")
+            .expect("EQ8 layout should contain the eq8 editor");
+        assert!(
+            editor_node.rect.width.is_finite()
+                && editor_node.rect.height.is_finite()
+                && editor_node.rect.width > 0.0
+                && editor_node.rect.height > 0.0,
+            "eq8 editor should have finite nonzero layout, got {:?}",
+            editor_node.rect
+        );
+        assert!(
+            count_widget_type(&layout, "knob-number") >= 2,
+            "EQ8 layout should contain selected-band freq/q knobs"
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_panel_headers_share_height_and_visible_content() {
         fn assert_visible_inside(
             node: &eseqlisp::layout::LayoutNode,
@@ -26421,8 +26578,8 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let vox_ui = std::fs::read_to_string("instruments/monomachine/vox/ui.lisp")
-            .expect("read vox ui");
+        let vox_ui =
+            std::fs::read_to_string("instruments/monomachine/vox/ui.lisp").expect("read vox ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/monomachine/vox/ui.lisp".to_string(),
@@ -26551,8 +26708,8 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let grit_ui = std::fs::read_to_string("instruments/monomachine/grit/ui.lisp")
-            .expect("read grit ui");
+        let grit_ui =
+            std::fs::read_to_string("instruments/monomachine/grit/ui.lisp").expect("read grit ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/monomachine/grit/ui.lisp".to_string(),
@@ -26681,8 +26838,8 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let melt_ui = std::fs::read_to_string("instruments/monomachine/melt/ui.lisp")
-            .expect("read melt ui");
+        let melt_ui =
+            std::fs::read_to_string("instruments/monomachine/melt/ui.lisp").expect("read melt ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
             "instruments/monomachine/melt/ui.lisp".to_string(),

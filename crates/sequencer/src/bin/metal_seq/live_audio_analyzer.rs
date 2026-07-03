@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -329,6 +330,14 @@ fn resolve_source_node(app: &ui::App, tap_key: &TapKey) -> Option<i32> {
                     TapPoint::PostFx => track.delay_id,
                 })
         }
+        LiveAudioSourceSelector::TrackEffect { index, slot } => app
+            .state
+            .pattern
+            .effect_chains
+            .get(*index)
+            .and_then(|chain| chain.get(*slot))
+            .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+            .filter(|node_id| *node_id > 0),
         LiveAudioSourceSelector::Bus {
             id: Some(bus_id), ..
         } => app
@@ -348,6 +357,32 @@ fn resolve_source_node(app: &ui::App, tap_key: &TapKey) -> Option<i32> {
         LiveAudioSourceSelector::Bus {
             id: None,
             index: None,
+        } => None,
+        LiveAudioSourceSelector::BusEffect {
+            id: Some(bus_id),
+            slot,
+            ..
+        } => app
+            .buses
+            .iter()
+            .find(|bus| bus.id == BusId(*bus_id))
+            .and_then(|bus| bus.effect_slots.get(*slot))
+            .map(|slot| slot.node_id as i32)
+            .filter(|node_id| *node_id > 0),
+        LiveAudioSourceSelector::BusEffect {
+            id: None,
+            index: Some(index),
+            slot,
+        } => app
+            .buses
+            .get(*index)
+            .and_then(|bus| bus.effect_slots.get(*slot))
+            .map(|slot| slot.node_id as i32)
+            .filter(|node_id| *node_id > 0),
+        LiveAudioSourceSelector::BusEffect {
+            id: None,
+            index: None,
+            ..
         } => None,
     }
 }

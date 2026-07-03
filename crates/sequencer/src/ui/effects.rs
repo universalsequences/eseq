@@ -1347,6 +1347,10 @@ impl App {
                 crate::filter::filter_vtable(),
                 crate::filter::FILTER_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "EQ8" => (
+                crate::eq8::eq8_vtable(),
+                crate::eq8::EQ8_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             "Delay" => (
                 crate::delay::delay_vtable(),
                 crate::delay::DELAY_STATE_SIZE * std::mem::size_of::<f32>(),

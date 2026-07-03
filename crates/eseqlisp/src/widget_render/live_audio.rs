@@ -8,9 +8,18 @@ pub enum LiveAudioSourceSelector {
     Track {
         index: usize,
     },
+    TrackEffect {
+        index: usize,
+        slot: usize,
+    },
     Bus {
         id: Option<u64>,
         index: Option<usize>,
+    },
+    BusEffect {
+        id: Option<u64>,
+        index: Option<usize>,
+        slot: usize,
     },
 }
 
@@ -25,6 +34,9 @@ impl LiveAudioSourceSelector {
         match self {
             LiveAudioSourceSelector::Master => "master".to_string(),
             LiveAudioSourceSelector::Track { index } => format!("track:{index}"),
+            LiveAudioSourceSelector::TrackEffect { index, slot } => {
+                format!("track-effect:{index}:{slot}")
+            }
             LiveAudioSourceSelector::Bus { id: Some(id), .. } => format!("bus-id:{id}"),
             LiveAudioSourceSelector::Bus {
                 id: None,
@@ -34,6 +46,25 @@ impl LiveAudioSourceSelector {
                 id: None,
                 index: None,
             } => "bus-invalid".to_string(),
+            LiveAudioSourceSelector::BusEffect {
+                id: Some(id), slot, ..
+            } => {
+                format!("bus-effect-id:{id}:{slot}")
+            }
+            LiveAudioSourceSelector::BusEffect {
+                id: None,
+                index: Some(index),
+                slot,
+            } => {
+                format!("bus-effect-index:{index}:{slot}")
+            }
+            LiveAudioSourceSelector::BusEffect {
+                id: None,
+                index: None,
+                slot,
+            } => {
+                format!("bus-effect-invalid:{slot}")
+            }
         }
     }
 }
@@ -86,10 +117,25 @@ fn source_from_map(
         "track" => {
             usize_from_map(map, "index").map(|index| LiveAudioSourceSelector::Track { index })
         }
+        "track-effect" | "track-fx" => {
+            let index = usize_from_map(map, "index")?;
+            let slot = usize_from_map(map, "slot")
+                .or_else(|| usize_from_map(map, "slot-idx"))
+                .unwrap_or(0);
+            Some(LiveAudioSourceSelector::TrackEffect { index, slot })
+        }
         "bus" => {
             let id = u64_from_map(map, "id");
             let index = usize_from_map(map, "index");
             Some(LiveAudioSourceSelector::Bus { id, index })
+        }
+        "bus-effect" | "bus-fx" => {
+            let id = u64_from_map(map, "id");
+            let index = usize_from_map(map, "index");
+            let slot = usize_from_map(map, "slot")
+                .or_else(|| usize_from_map(map, "slot-idx"))
+                .unwrap_or(0);
+            Some(LiveAudioSourceSelector::BusEffect { id, index, slot })
         }
         _ => None,
     }

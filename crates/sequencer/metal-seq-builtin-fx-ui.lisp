@@ -4,6 +4,7 @@
 ;; explicit because later panels depend on shared helpers defined first.
 
 (load "metal-seq-fx/builtin/filter-core.lisp")
+(load "metal-seq-fx/builtin/eq8.lisp")
 (load "metal-seq-fx/builtin/str8-delay.lisp")
 (load "metal-seq-fx/builtin/space-echo.lisp")
 (load "metal-seq-fx/builtin/dimension.lisp")

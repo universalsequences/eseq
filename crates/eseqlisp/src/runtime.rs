@@ -1609,6 +1609,7 @@ impl Runtime {
             "grid",
             "tabs",
             "response-curve-editor",
+            "eq8-editor",
             "timeline",
             "transport-clock",
             "waveform",

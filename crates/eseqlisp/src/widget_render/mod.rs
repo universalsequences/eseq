@@ -3,6 +3,7 @@ pub mod box_widget;
 pub mod button;
 pub mod cable;
 pub mod dropdown;
+pub mod eq8_editor;
 pub mod event_view;
 pub mod grid;
 pub mod hslider;
@@ -524,6 +525,8 @@ pub struct MetalLiveSpectrogramPrimitive {
     pub data_key: String,
     pub mode: u32,
     pub freq_scale: u32,
+    pub min_hz: f32,
+    pub max_hz: f32,
     pub min_color: Color,
     pub mid_color: Color,
     pub max_color: Color,
@@ -869,6 +872,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
     &spectrogram::SPECTROGRAM_WIDGET,
+    &eq8_editor::EQ8_EDITOR_WIDGET,
     &vstack::VSTACK_WIDGET,
     &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,
@@ -2495,11 +2499,13 @@ mod tests {
             }
             MetalPrimitive::LiveSpectrogram(spectrogram) => {
                 format!(
-                    "live-spectrogram:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                    "live-spectrogram:{}:{}:{}:{}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}",
                     rect_token(spectrogram.rect),
                     spectrogram.data_key,
                     spectrogram.mode,
                     spectrogram.freq_scale,
+                    spectrogram.min_hz,
+                    spectrogram.max_hz,
                     color_token(spectrogram.min_color),
                     color_token(spectrogram.mid_color),
                     color_token(spectrogram.max_color),

@@ -1160,6 +1160,8 @@ struct LiveSpectrogramInstance {
     uint mode;
     uint freq_scale;
     float sample_rate;
+    float2 display_hz;
+    float2 display_hz_padding;
     float4 min_color;
     float4 mid_color;
     float4 max_color;
@@ -1179,6 +1181,8 @@ struct LiveSpectrogramVaryings {
     uint mode [[flat]];
     uint freq_scale [[flat]];
     float sample_rate [[flat]];
+    float min_hz [[flat]];
+    float max_hz [[flat]];
     float4 min_color [[flat]];
     float4 mid_color [[flat]];
     float4 max_color [[flat]];
@@ -1210,6 +1214,8 @@ vertex LiveSpectrogramVaryings live_spectrogram_vert(
     out.mode = inst.mode;
     out.freq_scale = inst.freq_scale;
     out.sample_rate = inst.sample_rate;
+    out.min_hz = inst.display_hz.x;
+    out.max_hz = inst.display_hz.y;
     out.min_color = inst.min_color;
     out.mid_color = inst.mid_color;
     out.max_color = inst.max_color;
@@ -1219,15 +1225,22 @@ vertex LiveSpectrogramVaryings live_spectrogram_vert(
     return out;
 }
 
-static inline float spectrogram_bin_for_uv(float freq_t, uint freq_scale, uint bins, float sample_rate) {
+static inline float spectrogram_bin_for_uv(
+    float freq_t,
+    uint freq_scale,
+    uint bins,
+    float sample_rate,
+    float min_hz,
+    float max_hz)
+{
     float max_bin = float(max(bins, 1u) - 1u);
     if (freq_scale == 1u || sample_rate <= 1.0 || bins < 2u) {
         return clamp(freq_t, 0.0, 1.0) * max_bin;
     }
     float nyquist = max(sample_rate * 0.5, 160.0);
-    float max_hz = min(16000.0, nyquist);
-    float min_hz = min(80.0, max_hz * 0.5);
-    float hz = min_hz * exp2(log2(max_hz / min_hz) * clamp(freq_t, 0.0, 1.0));
+    float hi_hz = clamp(max_hz, 2.0, nyquist);
+    float lo_hz = clamp(min_hz, 1.0, hi_hz * 0.5);
+    float hz = lo_hz * exp2(log2(hi_hz / lo_hz) * clamp(freq_t, 0.0, 1.0));
     return clamp(hz / nyquist, 0.0, 1.0) * max_bin;
 }
 
@@ -1236,6 +1249,28 @@ static inline float sample_bin(device const float* data, uint bins, uint row, fl
     uint hi = min(lo + 1u, bins - 1u);
     float t = fract(bin);
     return mix(data[row * bins + lo], data[row * bins + hi], t);
+}
+
+static inline float sample_bin_cubic(device const float* data, uint bins, uint row, float bin) {
+    float max_bin = float(bins - 1u);
+    float x = clamp(bin, 0.0, max_bin);
+    int i1 = int(floor(x));
+    int i0 = max(i1 - 1, 0);
+    int i2 = min(i1 + 1, int(bins - 1u));
+    int i3 = min(i1 + 2, int(bins - 1u));
+    float t = x - float(i1);
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float p0 = data[row * bins + uint(i0)];
+    float p1 = data[row * bins + uint(i1)];
+    float p2 = data[row * bins + uint(i2)];
+    float p3 = data[row * bins + uint(i3)];
+    float value = 0.5 * (
+        2.0 * p1
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+    return clamp(value, 0.0, 1.0);
 }
 
 static inline float sample_bin_range(device const float* data, uint bins, uint row, float bin, float bin_width) {
@@ -1281,6 +1316,40 @@ static inline float spectrogram_display_value(float value) {
     return pow((v - noise_floor) / (1.0 - noise_floor), 0.68);
 }
 
+static inline float eq_spectrum_display_value(float value) {
+    float v = clamp(value, 0.0, 1.0);
+    return pow(smoothstep(0.0, 1.0, v), 0.72);
+}
+
+static inline float sample_eq_spectrum_curve(
+    device const float* data,
+    uint bins,
+    float freq_t,
+    uint freq_scale,
+    float sample_rate,
+    float min_hz,
+    float max_hz,
+    float widget_px_w)
+{
+    constexpr int radius = 6;
+    float px = 1.0 / max(widget_px_w, 1.0);
+    float weighted = 0.0;
+    float peak = 0.0;
+    float total_weight = 0.0;
+    for (int i = -radius; i <= radius; i++) {
+        float offset_px = float(i);
+        float t = clamp(freq_t + offset_px * px, 0.0, 1.0);
+        float bin = spectrogram_bin_for_uv(t, freq_scale, bins, sample_rate, min_hz, max_hz);
+        float value = sample_bin_cubic(data, bins, 0u, bin);
+        float weight = exp(-0.5 * (offset_px * offset_px) / 6.25);
+        weighted += value * weight;
+        peak = max(peak, value);
+        total_weight += weight;
+    }
+    float averaged = weighted / max(total_weight, 0.0001);
+    return eq_spectrum_display_value(mix(averaged, peak, 0.18));
+}
+
 static inline float3 heat_color(float value, float3 low, float3 mid, float3 high) {
     float v = clamp(value, 0.0, 1.0);
     float3 lower = mix(low, mid, smoothstep(0.0, 0.55, v));
@@ -1298,17 +1367,31 @@ fragment float4 live_spectrogram_frag(
     }
 
     float2 uv = clamp(in.uv, float2(0.0), float2(1.0));
-    float bin = spectrogram_bin_for_uv(uv.y, in.freq_scale, in.bins, in.sample_rate);
+    float bin = spectrogram_bin_for_uv(
+        uv.y,
+        in.freq_scale,
+        in.bins,
+        in.sample_rate,
+        in.min_hz,
+        in.max_hz);
     float border = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
     float border_mask = 1.0 - smoothstep(0.0, max(fwidth(border) * 1.5, 0.002), border);
 
     if (in.mode == 1u) {
-        float eq_bin = spectrogram_bin_for_uv(uv.x, in.freq_scale, in.bins, in.sample_rate);
-        float value = spectrogram_display_value(sample_bin_range(smoothed, in.bins, 0u, eq_bin, max(fwidth(eq_bin), 1.0)));
+        float value = sample_eq_spectrum_curve(
+            smoothed,
+            in.bins,
+            uv.x,
+            in.freq_scale,
+            in.sample_rate,
+            in.min_hz,
+            in.max_hz,
+            in.widget_px_w);
         float y = clamp(value, 0.0, 1.0);
-        float fill = smoothstep(0.0, 0.006, y - uv.y);
+        float fill = smoothstep(-0.004, 0.010, y - uv.y);
         float line_width = max(1.35 / max(in.widget_px_h, 1.0), 0.003);
-        float line = 1.0 - smoothstep(line_width, line_width * 2.2, abs(uv.y - y));
+        float aa = max(fwidth(uv.y - y), line_width * 0.65);
+        float line = 1.0 - smoothstep(line_width, line_width + aa, abs(uv.y - y));
         float3 rgb = in.background_color.rgb;
         rgb = mix(rgb, in.eq_fill_color.rgb, fill * in.eq_fill_color.a);
         rgb = mix(rgb, in.eq_line_color.rgb, line * in.eq_line_color.a);
@@ -1753,6 +1836,8 @@ fragment float4 live_spectrogram_frag(
         mode: u32,
         freq_scale: u32,
         sample_rate: f32,
+        display_hz: [f32; 2],
+        display_hz_padding: [f32; 2],
         min_color: [f32; 4],
         mid_color: [f32; 4],
         max_color: [f32; 4],
@@ -4545,6 +4630,8 @@ fragment float4 live_spectrogram_frag(
                     mode: primitive.mode,
                     freq_scale: primitive.freq_scale,
                     sample_rate,
+                    display_hz: [primitive.min_hz, primitive.max_hz],
+                    display_hz_padding: [0.0, 0.0],
                     min_color: primitive.min_color.to_rgba(),
                     mid_color: primitive.mid_color.to_rgba(),
                     max_color: primitive.max_color.to_rgba(),
@@ -9840,6 +9927,25 @@ fragment float4 live_spectrogram_frag(
             );
         }
 
+        fn publish_low_level_eq_spectrogram_frame(data_key: &str) {
+            let bins = 256usize;
+            let time_slices = 32usize;
+            let waterfall = vec![0.0f32; bins * time_slices];
+            let smoothed = vec![0.024f32; bins];
+            crate::live_audio::publish_spectrogram_frame(
+                data_key,
+                SpectrogramFrame {
+                    revision: 1,
+                    bins: bins as u32,
+                    time_slices: time_slices as u32,
+                    write_head: 0,
+                    sample_rate: 48_000.0,
+                    waterfall: Arc::new(waterfall),
+                    smoothed: Arc::new(smoothed),
+                },
+            );
+        }
+
         fn compile_live_spectrogram_pipeline(
             backend: &MetalBackend,
         ) -> Retained<ProtocolObject<dyn MTLRenderPipelineState>> {
@@ -9944,6 +10050,8 @@ fragment float4 live_spectrogram_frag(
                 data_key: request.data_key,
                 mode,
                 freq_scale: 0,
+                min_hz: 80.0,
+                max_hz: 16_000.0,
                 min_color: Color::rgba(0.04, 0.04, 0.10, 1.0),
                 mid_color: Color::rgba(0.12, 0.68, 0.86, 1.0),
                 max_color: Color::rgba(1.00, 0.74, 0.30, 1.0),
@@ -10424,6 +10532,21 @@ fragment float4 live_spectrogram_frag(
             clear_spectrogram_frames();
             let pixels = render_live_spectrogram_pixels(1);
             assert_pixels_have_non_background_values(&pixels);
+            clear_spectrogram_frames();
+        }
+
+        #[test]
+        fn live_spectrogram_eq_renders_low_level_energy() {
+            clear_spectrogram_frames();
+            let pixels = render_live_spectrogram_pixels_with_frame(
+                1,
+                publish_low_level_eq_spectrogram_frame,
+            );
+            let changed = changed_pixels_in_rect(&pixels, 360, 20, 145, 270, 160);
+            assert!(
+                changed > 150,
+                "expected low-level EQ spectrum to remain visible, changed={changed}"
+            );
             clear_spectrogram_frames();
         }
 

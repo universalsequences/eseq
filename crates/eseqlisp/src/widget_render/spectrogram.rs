@@ -23,6 +23,8 @@ pub const DEFAULT_TIME_SLICES: usize = 256;
 pub const DEFAULT_MIN_DB: f32 = -60.0;
 pub const DEFAULT_MAX_DB: f32 = 0.0;
 pub const DEFAULT_SMOOTHING: f32 = 0.65;
+const DEFAULT_DISPLAY_MIN_HZ: f32 = 80.0;
+const DEFAULT_DISPLAY_MAX_HZ: f32 = 16_000.0;
 
 const MIN_FFT_SIZE: usize = 256;
 const MAX_FFT_SIZE: usize = 8192;
@@ -84,7 +86,15 @@ impl WidgetDefinition for SpectrogramWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["fft-size", "time-slices", "min-db", "max-db", "smoothing"]
+        &[
+            "fft-size",
+            "time-slices",
+            "min-db",
+            "max-db",
+            "smoothing",
+            "freq-min",
+            "freq-max",
+        ]
     }
 
     fn measure(
@@ -138,6 +148,8 @@ impl WidgetDefinition for SpectrogramWidget {
         let request = request_from_props(&node.props);
         let mode = mode_from_props(&node.props);
         let freq_scale = freq_scale_from_props(&node.props);
+        let (min_hz, max_hz) =
+            display_hz_range(&node.props, DEFAULT_DISPLAY_MIN_HZ, DEFAULT_DISPLAY_MAX_HZ);
         vec![
             MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
@@ -148,6 +160,8 @@ impl WidgetDefinition for SpectrogramWidget {
                 data_key: request.data_key,
                 mode: mode.metal_value(),
                 freq_scale: freq_scale.metal_value(),
+                min_hz,
+                max_hz,
                 min_color: resolve_named_color(
                     &node.props,
                     "min-color",
@@ -186,7 +200,10 @@ pub fn collect_spectrogram_requests(layout: &LayoutNode) -> Vec<SpectrogramReque
 }
 
 fn collect_spectrogram_requests_into(layout: &LayoutNode, requests: &mut Vec<SpectrogramRequest>) {
-    if layout.widget_type == "spectrogram" && layout.rect.width > 0.0 && layout.rect.height > 0.0 {
+    if matches!(layout.widget_type.as_str(), "spectrogram" | "eq8-editor")
+        && layout.rect.width > 0.0
+        && layout.rect.height > 0.0
+    {
         requests.push(request_from_props(&layout.props));
     }
     for child in &layout.children {
@@ -283,6 +300,25 @@ fn background_color(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "background-color", theme::BG())
 }
 
+pub fn display_hz_range(
+    props: &HashMap<String, Value>,
+    default_min_hz: f32,
+    default_max_hz: f32,
+) -> (f32, f32) {
+    let mut min_hz = get_f32_prop(props, "freq-min", default_min_hz).max(1.0);
+    let mut max_hz = get_f32_prop(props, "freq-max", default_max_hz).max(min_hz + 1.0);
+    if !min_hz.is_finite() {
+        min_hz = default_min_hz.max(1.0);
+    }
+    if !max_hz.is_finite() {
+        max_hz = default_max_hz.max(min_hz + 1.0);
+    }
+    if max_hz <= min_hz + 1.0 {
+        max_hz = min_hz + 1.0;
+    }
+    (min_hz, max_hz)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +406,8 @@ mod tests {
         assert!(SPECTROGRAM_WIDGET.bindable_props().contains(&"min-db"));
         assert!(SPECTROGRAM_WIDGET.bindable_props().contains(&"max-db"));
         assert!(SPECTROGRAM_WIDGET.bindable_props().contains(&"smoothing"));
+        assert!(SPECTROGRAM_WIDGET.bindable_props().contains(&"freq-min"));
+        assert!(SPECTROGRAM_WIDGET.bindable_props().contains(&"freq-max"));
     }
 
     #[test]
@@ -423,6 +461,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_effect_slot_output_sources() {
+        let track_props = HashMap::from([(
+            "source".to_string(),
+            map(vec![
+                ("kind", Value::Keyword("track-effect".to_string())),
+                ("index", Value::Number(2.0)),
+                ("slot", Value::Number(5.0)),
+            ]),
+        )]);
+        let track_request = request_from_props(&track_props);
+        assert_eq!(
+            track_request.source,
+            LiveAudioSourceSelector::TrackEffect { index: 2, slot: 5 }
+        );
+        assert!(track_request.data_key.contains("track-effect:2:5"));
+
+        let bus_props = HashMap::from([(
+            "source".to_string(),
+            map(vec![
+                ("kind", Value::Keyword("bus-effect".to_string())),
+                ("id", Value::Number(99.0)),
+                ("index", Value::Number(1.0)),
+                ("slot-idx", Value::Number(3.0)),
+            ]),
+        )]);
+        let bus_request = request_from_props(&bus_props);
+        assert_eq!(
+            bus_request.source,
+            LiveAudioSourceSelector::BusEffect {
+                id: Some(99),
+                index: Some(1),
+                slot: 3
+            }
+        );
+        assert!(bus_request.data_key.contains("bus-effect-id:99:3"));
+    }
+
+    #[test]
     fn reads_reactive_fft_size_for_request_key() {
         let slot = Arc::new(AtomicU64::new((1024.0f64).to_bits()));
         let props = HashMap::from([(
@@ -461,6 +537,13 @@ mod tests {
             focusable: false,
         };
         assert_eq!(collect_spectrogram_requests(&root).len(), 1);
+    }
+
+    #[test]
+    fn collect_requests_includes_eq8_editor_widgets() {
+        let mut node = layout_node(HashMap::new());
+        node.widget_type = "eq8-editor".to_string();
+        assert_eq!(collect_spectrogram_requests(&node).len(), 1);
     }
 
     #[cfg(target_os = "macos")]
