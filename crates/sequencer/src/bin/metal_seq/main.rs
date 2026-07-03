@@ -666,6 +666,10 @@ fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
     })
 }
 
+fn track_meter_bindings_visible(mixer_visible: bool, sequencer_visible: bool) -> bool {
+    mixer_visible || sequencer_visible
+}
+
 fn reconciled_track_index(
     stored_track: usize,
     cursor_track: usize,
@@ -3140,8 +3144,9 @@ mod tests {
         patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
-        ActiveDeleteTarget, ExpandedStepProjectionRegistry, FxDeleteChain, Runtime, StepParam,
-        Value, AGENT_INSTRUMENT_STUB_UI, NEW_INSTRUMENT_STARTER_DSP,
+        track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        FxDeleteChain, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
+        NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
@@ -3319,6 +3324,14 @@ mod tests {
             !key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)),
             "non-track-navigation tab shortcuts should not reveal the sequencer row"
         );
+    }
+
+    #[test]
+    fn sequencer_visibility_keeps_track_meter_bindings_live_without_mixer() {
+        assert!(track_meter_bindings_visible(true, false));
+        assert!(track_meter_bindings_visible(false, true));
+        assert!(track_meter_bindings_visible(true, true));
+        assert!(!track_meter_bindings_visible(false, false));
     }
 
     #[test]
@@ -15137,6 +15150,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
             let master_meter_visible = transport_visible || mixer_visible;
+            let track_meter_visible =
+                track_meter_bindings_visible(mixer_visible, sequencer_visible);
             let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
                 || editor_has_visible_buffer(&editor, "*piano-roll*");
             let current_track_playhead_changed = playhead != prev_playhead;
@@ -15387,7 +15402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_peak_r_level = cached_peak_r_level;
             }
             if cached_track_peak_levels != prev_track_peak_levels {
-                if mixer_visible {
+                if track_meter_visible {
                     needs_reactive_cycle |= sync_track_peak_field_delta(
                         editor.runtime_mut(),
                         &prev_track_peak_levels,
@@ -15602,8 +15617,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let started = Instant::now();
                 sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
-                if mixer_visible {
+                if track_meter_visible {
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
+                }
+                if mixer_visible {
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                 }
                 sync_mixer_elapsed = started.elapsed();

@@ -15801,6 +15801,26 @@ mod tests {
         )
     }
 
+    fn test_multi_track_color_channel(track_count: usize, channel: usize) -> Value {
+        let palette = [
+            [0.96, 0.28, 0.52],
+            [0.98, 0.55, 0.25],
+            [0.95, 0.78, 0.28],
+            [0.32, 0.78, 0.48],
+            [0.24, 0.72, 0.78],
+            [0.48, 0.54, 0.94],
+            [0.82, 0.42, 0.92],
+            [0.72, 0.74, 0.78],
+            [0.92, 0.38, 0.34],
+            [0.38, 0.86, 0.68],
+        ];
+        test_list(
+            (0..track_count)
+                .map(|track| Value::Number(palette[track % palette.len()][channel]))
+                .collect(),
+        )
+    }
+
     fn sequencer_perf_steps(track: usize, generation: usize, step_count: usize) -> Value {
         test_list(
             (0..step_count)
@@ -15874,6 +15894,9 @@ mod tests {
         editor
             .runtime_mut()
             .register_native("seq-set-track", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track-volume", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
             .register_native("seq-unpublish-sequencer", |_args, _ctx| {
@@ -15986,8 +16009,14 @@ mod tests {
                 ("track-mutes", test_bool_list(&[false])),
                 ("track-solos", test_bool_list(&[false])),
                 ("track-muted-by-solo", test_bool_list(&[false])),
+                ("track-muted-effective", test_bool_list(&[false])),
+                ("track-color-r-effective", test_number_list(&[0.96])),
+                ("track-color-g-effective", test_number_list(&[0.28])),
+                ("track-color-b-effective", test_number_list(&[0.52])),
                 ("track-volumes", test_number_list(&[1.0])),
+                ("track-0-volume", Value::Number(1.0)),
                 ("track-mixer-pans", test_number_list(&[0.0])),
+                ("track-0-pan", Value::Number(0.0)),
                 ("track-outputs", test_string_list(&["main"])),
                 (
                     "track-output-options",
@@ -16037,7 +16066,7 @@ mod tests {
                 ("playing", Value::Bool(false)),
                 ("auto-follow", Value::Bool(false)),
                 ("tp-num-steps", Value::Number(16.0)),
-                ("tp-timebase", Value::Number(0.0)),
+                ("tp-timebase", Value::String("16".to_string())),
                 ("tp-swing", Value::Number(0.0)),
                 ("tp-swing-resolution", Value::Number(0.0)),
                 ("tp-gate", Value::Number(1.0)),
@@ -16283,6 +16312,36 @@ mod tests {
             "track-muted-by-solo",
             test_repeated_bool_list(false, track_count),
         );
+        rt.set_reactive(
+            "SEQ",
+            "track-muted-effective",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-color-r-effective",
+            test_multi_track_color_channel(track_count, 0),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-color-g-effective",
+            test_multi_track_color_channel(track_count, 1),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-color-b-effective",
+            test_multi_track_color_channel(track_count, 2),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-volumes",
+            test_repeated_number_list(1.0, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-mixer-pans",
+            test_repeated_number_list(0.0, track_count),
+        );
         rt.set_reactive("SEQ", "track-steps", test_list(steps));
         rt.set_reactive(
             "SEQ",
@@ -16370,6 +16429,9 @@ mod tests {
             test_repeated_bool_list(false, step_count),
         );
         for track in 0..track_count {
+            rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
+            rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
+            rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
             for step in 0..step_count {
                 rt.set_reactive(
                     "SEQ",
@@ -16510,6 +16572,17 @@ mod tests {
         );
     }
 
+    fn compact_step_shell<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+    ) -> &'a eseqlisp::layout::LayoutNode {
+        node.children
+            .iter()
+            .find(|child| {
+                child.props.get("background") == Some(&Value::String("seqv-step-shell".to_string()))
+            })
+            .unwrap_or_else(|| panic!("compact step cell should contain a seqv-step-shell child"))
+    }
+
     fn apply_sequencer_perf_pattern(
         editor: &mut eseqlisp::Editor,
         track_count: usize,
@@ -16580,6 +16653,26 @@ mod tests {
             "SEQ",
             "track-muted-by-solo",
             test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-muted-effective",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-color-r-effective",
+            test_multi_track_color_channel(track_count, 0),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-color-g-effective",
+            test_multi_track_color_channel(track_count, 1),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-color-b-effective",
+            test_multi_track_color_channel(track_count, 2),
         );
         rt.set_reactive(
             "SEQ",
@@ -16668,6 +16761,9 @@ mod tests {
 
         let max_rows = (step_count + PAGE_SIZE - 1) / PAGE_SIZE;
         for track in 0..track_count {
+            rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
+            rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
+            rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
             for step in 0..step_count {
                 let active = (step + track + generation) % 3 == 0;
                 let duration = (step + track * 2 + generation) % 7 == 0;
@@ -16728,10 +16824,11 @@ mod tests {
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         editor.runtime_mut().register_reactive("SEQ", vec![], true);
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor
             .runtime_mut()
-            .eval_str("(defstate selected-bus -1)")
-            .expect("install sequencer selection state");
+            .eval_str("(do (defstate selected-bus -1) (defstate cursor-step 0) (def page-size 16))")
+            .expect("install standalone sequencer globals");
         apply_sequencer_perf_pattern(&mut editor, track_count, step_count, 0);
         editor
             .runtime_mut()
@@ -16884,6 +16981,22 @@ mod tests {
                     test_repeated_bool_list(false, track_count),
                 ),
                 (
+                    "track-muted-effective",
+                    test_repeated_bool_list(false, track_count),
+                ),
+                (
+                    "track-color-r-effective",
+                    test_multi_track_color_channel(track_count, 0),
+                ),
+                (
+                    "track-color-g-effective",
+                    test_multi_track_color_channel(track_count, 1),
+                ),
+                (
+                    "track-color-b-effective",
+                    test_multi_track_color_channel(track_count, 2),
+                ),
+                (
                     "track-instrument-types",
                     test_list(
                         (0..track_count)
@@ -16935,6 +17048,16 @@ mod tests {
             editor.runtime_mut().set_reactive(
                 "SEQ",
                 &format!("track-peak-{track}"),
+                Value::Number(0.0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &format!("track-{track}-volume"),
+                Value::Number(1.0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &format!("track-{track}-pan"),
                 Value::Number(0.0),
             );
             for bus in 1..=2 {
@@ -17783,7 +17906,59 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_track_panel_lays_out_mute_group_dropdown() {
+    fn metal_seq_track_panel_lays_out_timebase_and_mute_group_dropdowns() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.refresh_runtime_side_effects();
+
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
+        editor.set_layout_viewport(80, 20);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "tp-timebase", Value::String("8T".to_string()));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("track panel layout");
+        let track_params_panel = find_layout_node_by_debug_name(&layout, "track-parameters-strip")
+            .expect("track parameters panel");
+        let primary_panel =
+            find_layout_node_by_debug_name(track_params_panel, "track-primary-parameters-panel")
+                .expect("primary track parameters panel");
+        let groove_panel =
+            find_layout_node_by_debug_name(track_params_panel, "track-groove-parameters-panel")
+                .expect("groove track parameters panel");
+        assert!(
+            find_layout_node_by_stable_key(primary_panel, "fx-track-timebase").is_none(),
+            "track timebase dropdown should not render in the primary track parameter row"
+        );
+        let timebase_label =
+            find_layout_node_by_text(groove_panel, "timebase").expect("timebase label");
+        assert_finite_nonzero_rect(timebase_label, "timebase label");
+        let timebase = find_layout_node_by_stable_key(groove_panel, "fx-track-timebase")
+            .expect("track timebase dropdown");
+        assert_finite_nonzero_rect(timebase, "track timebase dropdown");
+        assert_eq!(
+            timebase.props.get("value"),
+            Some(&Value::String("8T".to_string())),
+            "track timebase dropdown should show the current display timebase"
+        );
+
+        let label =
+            find_layout_node_by_text(track_params_panel, "mute grp").expect("mute group label");
+        assert_finite_nonzero_rect(label, "mute group label");
+        let dropdown =
+            find_dropdown_by_value(track_params_panel, "Off").expect("mute group dropdown");
+        assert_finite_nonzero_rect(dropdown, "mute group dropdown");
+    }
+
+    #[test]
+    fn metal_seq_track_panel_timebase_uses_default_or_selected_step_plock_path() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.refresh_runtime_side_effects();
 
@@ -17796,15 +17971,73 @@ mod tests {
         editor.set_active_buffer(track_id);
         editor.set_layout_viewport(80, 20);
 
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let has_selection = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let has_selection = Arc::clone(&has_selection);
+            editor
+                .runtime_mut()
+                .register_native("seq-has-selection?", move |_args, _ctx| {
+                    Ok(Value::Bool(has_selection.load(Ordering::Relaxed)))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-timebase", move |args, _ctx| {
+                    let label = match args.first() {
+                        Some(Value::String(label)) => label.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("default:{label}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-plock-timebase", move |args, _ctx| {
+                    let label = match args.first() {
+                        Some(Value::String(label)) => label.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    calls.lock().unwrap().push(format!("plock:{label}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+
         let layout = editor.widget_layout().expect("track panel layout");
-        let track_params_panel = find_layout_node_by_debug_name(&layout, "track-parameters-strip")
-            .expect("track parameters panel");
-        let label =
-            find_layout_node_by_text(track_params_panel, "mute grp").expect("mute group label");
-        assert_finite_nonzero_rect(label, "mute group label");
-        let dropdown =
-            find_dropdown_by_value(track_params_panel, "Off").expect("mute group dropdown");
-        assert_finite_nonzero_rect(dropdown, "mute group dropdown");
+        let timebase = find_layout_node_by_stable_key(&layout, "fx-track-timebase")
+            .expect("track timebase dropdown");
+        let callback = timebase
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("track timebase dropdown on-change");
+
+        editor
+            .runtime_mut()
+            .invoke(callback.clone(), vec![Value::String("8".to_string())])
+            .expect("invoke track timebase default path");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["default:8"],
+            "without selected steps the track panel dropdown should update the track default"
+        );
+
+        calls.lock().unwrap().clear();
+        has_selection.store(true, Ordering::Relaxed);
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::String("4T".to_string())])
+            .expect("invoke track timebase selected-step path");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["plock:4T"],
+            "with selected steps the track panel dropdown should p-lock timebase"
+        );
     }
 
     #[test]
@@ -19183,6 +19416,13 @@ mod tests {
     #[test]
     fn metal_seq_sequencer_buffer_renders_step_cells() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-names",
+            test_string_list(&["BOOOOOOOO.WAV"]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
         let sequencer_id = editor
             .buffers
             .iter()
@@ -19207,6 +19447,61 @@ mod tests {
             find_layout_node_by_stable_key(&layout, "seqv-timebase-0").is_none(),
             "collapsed sequencer rows should not render the removed right-side timebase dropdown: {layout_summaries:#?}"
         );
+
+        let badge = find_layout_node_by_stable_key(&layout, "seqv-color-badge-0")
+            .unwrap_or_else(|| panic!("sequencer row color badge missing: {layout_summaries:#?}"));
+        assert_finite_nonzero_rect(badge, "sequencer row color badge");
+        assert_eq!(
+            badge.props.get("background"),
+            Some(&Value::String("seqv-track-color-badge".to_string())),
+            "sequencer row color badge should use the track-color SDF widget"
+        );
+        assert!(matches!(
+            badge.props.get("track-r"),
+            Some(Value::ReactiveRef {
+                namespace,
+                field,
+                index: Some(0),
+                ..
+            }) if namespace == "SEQ" && field == "track-color-r-effective"
+        ));
+
+        let track_name = find_layout_node_by_stable_key(&layout, "seqv-track-name-label-0")
+            .unwrap_or_else(|| {
+                panic!("sequencer row track name label missing: {layout_summaries:#?}")
+            });
+        assert_eq!(
+            track_name.props.get("text"),
+            Some(&Value::String("BOOOOOO..".to_string())),
+            "compact sequencer track name should be truncated before the meter"
+        );
+
+        let volume_control = find_layout_node_by_stable_key(&layout, "seqv-track-volume-control-0")
+            .unwrap_or_else(|| {
+                panic!("sequencer row volume control missing: {layout_summaries:#?}")
+            });
+        assert_finite_nonzero_rect(volume_control, "sequencer row volume control");
+        assert_eq!(
+            volume_control.props.get("background"),
+            Some(&Value::String("seqv-track-volume-meter".to_string())),
+            "sequencer row volume control should use the horizontal meter/fader widget"
+        );
+        assert!(matches!(
+            volume_control.props.get("volume"),
+            Some(Value::ReactiveRef {
+                namespace,
+                field,
+                ..
+            }) if namespace == "SEQ" && field == "track-0-volume"
+        ));
+        assert!(matches!(
+            volume_control.props.get("level"),
+            Some(Value::ReactiveRef {
+                namespace,
+                field,
+                ..
+            }) if namespace == "SEQ" && field == "track-peak-0"
+        ));
 
         let expand =
             find_layout_node_by_stable_key(&layout, "seqv-expand-0").unwrap_or_else(|| {
@@ -19262,6 +19557,19 @@ mod tests {
                 ("track-mutes", test_repeated_bool_list(false, 3)),
                 ("track-solos", test_repeated_bool_list(false, 3)),
                 ("track-muted-by-solo", test_repeated_bool_list(false, 3)),
+                ("track-muted-effective", test_repeated_bool_list(false, 3)),
+                (
+                    "track-color-r-effective",
+                    test_multi_track_color_channel(3, 0),
+                ),
+                (
+                    "track-color-g-effective",
+                    test_multi_track_color_channel(3, 1),
+                ),
+                (
+                    "track-color-b-effective",
+                    test_multi_track_color_channel(3, 2),
+                ),
                 (
                     "track-instrument-types",
                     test_string_list(&["sampler", "sampler", "sampler"]),
@@ -20033,6 +20341,7 @@ mod tests {
             "seq-clear-selection",
             "seq-set-track",
             "seq-toggle-record-arm",
+            "seq-set-track-volume",
         ] {
             let calls = Arc::clone(&calls);
             editor
@@ -20067,6 +20376,31 @@ mod tests {
                 "seq-toggle-record-arm:[1]",
             ],
             "sequencer header controls should select their row before mutating it"
+        );
+
+        calls.lock().unwrap().clear();
+        let volume = find_layout_node_by_stable_key(&layout, "seqv-track-volume-control-1")
+            .expect("second sequencer row volume control");
+        editor
+            .runtime_mut()
+            .invoke(
+                volume
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("volume control on-click"),
+                vec![map_value([("sx", Value::Number(0.0))])],
+            )
+            .expect("invoke second-row volume control");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                "seq-clear-selection:[]",
+                "seq-set-track:[1]",
+                "seq-set-track-volume:[1, 0.5]",
+            ],
+            "sequencer volume control should select its row before changing track volume"
         );
     }
 
@@ -20758,7 +21092,7 @@ mod tests {
         let initial_step = find_layout_node_by_stable_key(&initial_layout, "seqv-step-cell-0-0")
             .expect("initial step cell should render");
         assert_eq!(
-            layout_prop_bool(initial_step, "active"),
+            layout_prop_bool(compact_step_shell(initial_step), "active"),
             Some(true),
             "fixture generation 0 should render track 0 step 0 active"
         );
@@ -20781,7 +21115,7 @@ mod tests {
         let switched_step = find_layout_node_by_stable_key(&switched_layout, "seqv-step-cell-0-0")
             .expect("existing keyed step cell should still render after switch");
         assert_eq!(
-            layout_prop_bool(switched_step, "active"),
+            layout_prop_bool(compact_step_shell(switched_step), "active"),
             Some(false),
             "track 0 step 0 active binding should reflect the switched pattern"
         );

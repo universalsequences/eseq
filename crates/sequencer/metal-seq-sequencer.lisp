@@ -5,7 +5,45 @@
 (load "metal-seq-track-collapse.lisp")
 
 (def seqv-track-peak (i)
-  (reactive-get "SEQ" (str "track-peak-" i)))
+  (bind-seq (str "track-peak-" i)))
+
+(def seqv-track-volume-field (track)
+  (str "track-" track "-volume"))
+
+(def seqv-track-volume-binding (track)
+  (bind-seq (seqv-track-volume-field track)))
+
+(def seqv-track-volume-value (track)
+  (if (< track (len SEQ.track-volumes))
+    (nth SEQ.track-volumes track)
+    1.0))
+
+(def seqv-track-volume-from-event (track event)
+  (let ((sx (get event :sx)))
+    (if (= sx nil)
+      (seqv-track-volume-value track)
+      (max 0.0 (min 1.0 (* 0.5 (+ sx 1.0)))))))
+
+(def seqv-set-track-volume-from-event (track event)
+  (do
+    (seqv-activate-track-for-edit track)
+    (seq-set-track-volume track (seqv-track-volume-from-event track event))))
+
+(def seqv-track-color-r-binding (track)
+  (bind-seq-nth "track-color-r-effective" track))
+
+(def seqv-track-color-g-binding (track)
+  (bind-seq-nth "track-color-g-effective" track))
+
+(def seqv-track-color-b-binding (track)
+  (bind-seq-nth "track-color-b-effective" track))
+
+(def seqv-track-name-max-chars 9)
+
+(def seqv-track-name-display (name)
+  (if (> (len name) seqv-track-name-max-chars)
+    (str (substring name 0 (- seqv-track-name-max-chars 2)) "..")
+    name))
 
 (def seqv-muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
@@ -320,6 +358,95 @@
               1.0)
             (rgba 0.99 0.15 0.15 1.0)))))))
 
+(defwidget seqv-track-color-badge
+  :width 0.68 :height 1.5
+  :paint-margin 0.08
+  :state (track-r track-g track-b)
+  :bindable (track-r track-g track-b)
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height 0.28)
+      (material
+        :lighting (lighting :edge-min -0.38 :edge-max 0.45
+          :light (vec3 0.0 -1.1 2.8) :shininess 54.0)
+        :color
+          (aqua-color
+            (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 1.0)
+            (rgba track-r track-g track-b 1.0))))))
+
+(defwidget seqv-track-volume-meter
+  :width 8.2 :height 1.05
+  :paint-margin 0.16
+  :state (level volume track-r track-g track-b)
+  :bindable (level volume track-r track-g track-b)
+  :shader
+  (let ((lvl (min 1.0 (max 0.0 level)))
+        (vol (min 1.0 (max 0.0 volume)))
+        (track (sdf/rounded-rect width height 0.18))
+        (green-end (min lvl 0.70))
+        (yellow-end (min lvl 0.88))
+        (red-end lvl)
+        (marker-start (max 0.0 (- vol 0.012)))
+        (marker-end (min 1.0 (+ vol 0.012))))
+    (sdf/layer
+      (sdf/fill track
+        (material
+          :lighting (lighting :edge-min -0.45 :edge-max 0.35
+            :light (vec3 0.0 -1.4 2.2) :shininess 24.0)
+          :color (rgba 0.035 0.040 0.050 1.0)))
+      (if (> green-end 0.005)
+        (sdf/fill
+          (let ((__start 0.0)
+                (__end green-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.30)
+                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.10 0.85 0.30 1.0)))
+        (rgba 0 0 0 0))
+      (if (> (- yellow-end 0.70) 0.005)
+        (sdf/fill
+          (let ((__start 0.70)
+                (__end yellow-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.30)
+                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.96 0.82 0.18 1.0)))
+        (rgba 0 0 0 0))
+      (if (> (- red-end 0.88) 0.005)
+        (sdf/fill
+          (let ((__start 0.88)
+                (__end red-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.30)
+                (__radius (min 0.15 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.95 0.18 0.16 1.0)))
+        (rgba 0 0 0 0))
+      (sdf/fill
+        (let ((__start marker-start)
+              (__end marker-end)
+              (__half_w (* 0.5 aspect (- __end __start)))
+              (__half_h 0.44)
+              (__radius 0.045))
+          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                (y (* 0.5 y)))
+            (sdf/rounded-rect __half_w __half_h __radius)))
+        (material
+          :lighting (lighting :edge-min -0.30 :edge-max 0.45
+            :light (vec3 0.0 -1.0 2.6) :shininess 64.0)
+          :color
+            (aqua-color
+              (rgba (+ (* track-r 0.38) 0.45) (+ (* track-g 0.38) 0.45) (+ (* track-b 0.38) 0.45) 1.0)
+              (rgba 0.95 0.96 0.98 1.0)))))))
+
 (defwidget seqv-ellipsis-button
   :width 2.2 :height 1.2
   :state (expanded)
@@ -465,19 +592,40 @@
     (rgba 0.72 0.10 0.10 1.0)
     (rgba 0.08 0.09 0.10 1.0)))
 
-;; Compact mixer track row — same controls as metal-seq-mixer.lisp but no
-;; volume slider/meter or delete button (sequencer view stays focused on steps).
+;; Compact mixer track row — the common track actions plus an inline
+;; meter/fader so the sequencer remains usable when the mixer is hidden.
 ;; The header lives in its own subtree so name/mute/solo/arm changes rerun
 ;; only this header instead of the whole track row (incl. its step grid).
 (def seqv-track-header (i)
   (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
     (seqv-track-header-body i)))
 
+(def seqv-track-volume-control (i)
+  (box
+    :key (str "seqv-track-volume-control-" i)
+    :width 8.2 :height 1.05
+    :background "seqv-track-volume-meter"
+    :level (seqv-track-peak i)
+    :volume (seqv-track-volume-binding i)
+    :track-r (seqv-track-color-r-binding i)
+    :track-g (seqv-track-color-g-binding i)
+    :track-b (seqv-track-color-b-binding i)
+    :on-click (lambda (event) (seqv-set-track-volume-from-event i event))
+    :on-drag (lambda (event) (seqv-set-track-volume-from-event i event))))
+
 (def seqv-track-header-body (i)
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
       :padding 0.4
-      (h-stack :gap 0.5 :align :center
+      (h-stack :gap 0.4 :align :center
+        (box
+          :key (str "seqv-color-badge-" i)
+          :width 0.68 :height 1.5
+          :background "seqv-track-color-badge"
+          :track-r (seqv-track-color-r-binding i)
+          :track-g (seqv-track-color-g-binding i)
+          :track-b (seqv-track-color-b-binding i)
+          :on-click |x y r| (seqv-select-track-for-edit i))
         (box :width 2 :height 1.5
           :background "seqv-rec-arm-dot"
           :key (str "seqv-arm-" i)
@@ -499,11 +647,14 @@
           :key (str "seqv-select-" i)
           :background-color :transparent
           :on-click |x y r| (seqv-select-track-for-edit i)
-          (label (substring name 0 12) :font-size 11 :width 8.6
+          (label (seqv-track-name-display name)
+            :key (str "seqv-track-name-label-" i)
+            :font-size 11 :width 8.6
             :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
                      :dark-gray
                      :dim)
-            :bg :transparent))))))
+            :bg :transparent))
+        (seqv-track-volume-control i)))))
 
 (def seqv-track-actions (i)
   (h-stack :gap 0.35 :padding 0.85

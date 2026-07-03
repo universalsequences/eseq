@@ -13,6 +13,13 @@
                 (if (= label "8") 8
                   0)))))))))
 
+(def fx-set-timebase (label)
+  (do
+    (cool-off-follow)
+    (if (seq-has-selection?)
+      (seq-plock-timebase label)
+      (seq-set-timebase label))))
+
 (def fx-track-bus-send-control (send)
   (v-stack :align :center :gap 0.25
     (h-stack :gap 0.25 :align :baseline
@@ -230,10 +237,10 @@
 (def fx-track-parameters-panel ()
   (box :debug-name "track-parameters-strip" :padding 0.0
     (v-stack :gap 0.175
-      (box :padding 0.5 
-        :background-color :mixer-strip-bg 
+      (box :debug-name "track-primary-parameters-panel" :padding 0.5
+        :background-color :mixer-strip-bg
         :corner-radius 16
-        :border-color :mixer-strip-border 
+        :border-color :mixer-strip-border
         (h-stack :gap 1.05 :align :center
           (v-stack :gap 0.5 :align :center
             (label "steps" :font-size 8 :color :dim :bg :transparent)
@@ -241,7 +248,7 @@
               :noui false :font-size 8 :text-color :white
               :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))
               :width 4.2 :height 1.15))
-          
+
           (v-stack :align :center :gap 0.34
             (label "poly" :font-size 8 :color :dim :bg :transparent)
             (button  (if SEQ.tp-poly "ON" "OFF") :width 3.2 :height 1.3
@@ -276,12 +283,12 @@
               :options SEQ.fts-options
               :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
               :width 7.0 :height 1.25 :font-size 9))
-          
+
           ))
-      (box :padding 0.5 
-        :background-color :mixer-strip-bg 
+      (box :debug-name "track-groove-parameters-panel" :padding 0.5
+        :background-color :mixer-strip-bg
         :corner-radius 16
-        :border-color :mixer-strip-border 
+        :border-color :mixer-strip-border
         (h-stack :gap 1.05 :align :center
           (v-stack :align :center :gap 0.40
             (label "swg res" :font-size 8 :color :dim :bg :transparent)
@@ -296,9 +303,16 @@
                 :noui false :font-size 8 :text-color :dim
                 :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v)))
                 :width 5.2 :height 1.15))
-            
             )
-          
+
+          (v-stack :align :center :gap 0.40
+            (label "timebase" :font-size 8 :color :dim :bg :transparent)
+            (dropdown :value SEQ.tp-timebase
+              :key "fx-track-timebase"
+              :options seq-timebase-options
+              :on-change (lambda (v) (fx-set-timebase v))
+              :width 6.0 :height 1.25 :font-size 9))
+
           (v-stack :align :center :gap 0.40
             (label "mute grp" :font-size 8 :color :dim :bg :transparent)
             (dropdown :value SEQ.tp-mute-group
