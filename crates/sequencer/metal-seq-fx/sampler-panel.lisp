@@ -142,7 +142,10 @@
       (and (not (= name "enabled"))
            (not (= name "warp"))
            (not (= name "mode"))
-           (not (= name "bpm"))))
+           (not (= name "bpm"))
+           (not (= name "preserve"))
+           (not (= name "fill"))
+           (not (= name "decay"))))
     params))
 
 (def sampler-bpm-control (p)
@@ -188,6 +191,10 @@
       (sampler-param-control p))
     (box :width 1.4 :height 1)
     (sampler-param-control (sampler-param-by-name params "warp"))
+    (sampler-param-control (sampler-param-by-name params "mode"))
+    (sampler-param-control (sampler-param-by-name params "preserve"))
+    (sampler-param-control (sampler-param-by-name params "fill"))
+    (sampler-param-control (sampler-param-by-name params "decay"))
     (sampler-bpm-control (sampler-param-by-name params "bpm"))))
 
 (def sampler-selection-start-prop (inst)

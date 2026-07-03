@@ -489,6 +489,43 @@ fn resolved_slot_param_value(
     }
 }
 
+fn slot_param_index_by_node_idx(
+    slot: &crate::effects::EffectSlotSnapshot,
+    node_param_idx: u32,
+) -> Option<usize> {
+    let num_params = slot.num_params as usize;
+    (0..num_params).find(|&param_idx| {
+        slot.param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32)
+            == node_param_idx
+    })
+}
+
+fn resolved_slot_node_param_value(
+    slot: &crate::effects::EffectSlotSnapshot,
+    step_idx: usize,
+    node_param_idx: u32,
+    default: f32,
+) -> f32 {
+    let Some(param_idx) = slot_param_index_by_node_idx(slot, node_param_idx) else {
+        return default;
+    };
+    resolved_slot_param_value(slot, step_idx, param_idx, default)
+}
+
+fn default_slot_node_param_value(
+    slot: &crate::effects::EffectSlotSnapshot,
+    node_param_idx: u32,
+    default: f32,
+) -> f32 {
+    let Some(param_idx) = slot_param_index_by_node_idx(slot, node_param_idx) else {
+        return default;
+    };
+    slot.defaults.get(param_idx).copied().unwrap_or(default)
+}
+
 fn delayed_step_sample_time(
     base_sample_time: u64,
     step_params: &[f32],
@@ -1051,6 +1088,24 @@ fn resolve_sampler_params(
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
+        warp_preserve: resolved_slot_node_param_value(
+            slot,
+            step_idx,
+            crate::sampler::PARAM_WARP_PRESERVE as u32,
+            crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+        ),
+        warp_seg_loop_mode: resolved_slot_node_param_value(
+            slot,
+            step_idx,
+            crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+        ),
+        warp_seg_envelope: resolved_slot_node_param_value(
+            slot,
+            step_idx,
+            crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+        ),
     }
 }
 
@@ -1585,6 +1640,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
+    sampler_params: ScheduledSamplerParams,
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
     let resolved =
@@ -1630,6 +1686,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                             effect_params: effect_params.clone(),
                             instrument_params: instrument_params.clone(),
                             instrument_tensor_params: instrument_tensor_params.clone(),
+                            sampler_params,
                             instrument_fingerprint,
                         },
                     })
@@ -1665,6 +1722,7 @@ fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                 effect_params,
                 instrument_params,
                 instrument_tensor_params,
+                sampler_params,
                 instrument_fingerprint,
             },
         })
@@ -1744,6 +1802,7 @@ fn enqueue_step_event<const QUEUE_CAP: usize>(
             event.effect_params,
             event.instrument_params,
             event.instrument_tensor_params,
+            event.sampler_params,
         ),
         EventSource::Network { seed, neuron, .. } => {
             normalize_network_event_destination(snapshot, neuron, seed, &mut event);
@@ -2308,6 +2367,21 @@ fn resolve_sampler_defaults(
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
+        warp_preserve: default_slot_node_param_value(
+            slot,
+            crate::sampler::PARAM_WARP_PRESERVE as u32,
+            crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+        ),
+        warp_seg_loop_mode: default_slot_node_param_value(
+            slot,
+            crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+        ),
+        warp_seg_envelope: default_slot_node_param_value(
+            slot,
+            crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+        ),
     }
 }
 
@@ -2545,6 +2619,13 @@ fn apply_sampler_param_override(params: &mut ScheduledSamplerParams, idx: u64, v
         11 => params.sample_bpm = value,
         12 => params.playback_speed = value,
         13 => params.scrub = value,
+        idx if idx == crate::sampler::PARAM_WARP_PRESERVE => params.warp_preserve = value,
+        idx if idx == crate::sampler::PARAM_WARP_SEG_LOOP_MODE => {
+            params.warp_seg_loop_mode = value;
+        }
+        idx if idx == crate::sampler::PARAM_WARP_SEG_ENVELOPE => {
+            params.warp_seg_envelope = value;
+        }
         _ => {}
     }
 }
@@ -3604,6 +3685,7 @@ fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
                 event.effect_params,
                 event.instrument_params,
                 event.instrument_tensor_params,
+                event.sampler_params,
             ),
         };
         if !enqueued {
@@ -6242,6 +6324,7 @@ mod tests {
             Vec::new(),
             ScheduledInstrumentParams::new(),
             ScheduledInstrumentTensorParams::new(),
+            ScheduledSamplerParams::default(),
         ));
 
         let first = queue.pop().expect("first note event");
@@ -6284,6 +6367,7 @@ mod tests {
             Vec::new(),
             ScheduledInstrumentParams::new(),
             ScheduledInstrumentTensorParams::new(),
+            ScheduledSamplerParams::default(),
         ));
 
         let event = queue.pop().expect("global-transposed event");
@@ -6327,6 +6411,7 @@ mod tests {
             Vec::new(),
             ScheduledInstrumentParams::new(),
             ScheduledInstrumentTensorParams::new(),
+            ScheduledSamplerParams::default(),
         ));
 
         let event = queue.pop().expect("opted-out event");
@@ -7926,6 +8011,115 @@ mod tests {
         let params = resolve_sampler_params(&snapshot, track, step);
 
         assert_eq!(params.playback_speed, 1.0);
+    }
+
+    #[test]
+    fn resolve_sampler_params_carries_beats_warp_controls_by_node_param() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor::builtin_sampler();
+        let param_idx = |node_idx: u64| {
+            desc.params
+                .iter()
+                .position(|param| param.node_param_idx == node_idx as u32)
+                .expect("sampler param should exist")
+        };
+        let preserve_idx = param_idx(crate::sampler::PARAM_WARP_PRESERVE);
+        let fill_idx = param_idx(crate::sampler::PARAM_WARP_SEG_LOOP_MODE);
+        let decay_idx = param_idx(crate::sampler::PARAM_WARP_SEG_ENVELOPE);
+        let slot = &state.pattern.instrument_slots[track];
+        slot.apply_descriptor(&desc, 12);
+        slot.defaults
+            .set(preserve_idx, crate::warp_grid::PRESERVE_1_8 as f32);
+        slot.defaults
+            .set(fill_idx, crate::sampler::SEG_LOOP_PINGPONG as f32);
+        slot.defaults.set(decay_idx, 0.25);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let params = resolve_sampler_params(&snapshot, track, step);
+        assert_eq!(params.warp_preserve, crate::warp_grid::PRESERVE_1_8 as f32);
+        assert_eq!(
+            params.warp_seg_loop_mode,
+            crate::sampler::SEG_LOOP_PINGPONG as f32
+        );
+        assert!((params.warp_seg_envelope - 0.25).abs() < 0.0001);
+
+        slot.set_plock(step, preserve_idx, crate::warp_grid::PRESERVE_1_16 as f32);
+        slot.set_plock(step, fill_idx, crate::sampler::SEG_LOOP_OFF as f32);
+        slot.set_plock(step, decay_idx, 0.75);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let params = resolve_sampler_params(&snapshot, track, step);
+        assert_eq!(params.warp_preserve, crate::warp_grid::PRESERVE_1_16 as f32);
+        assert_eq!(
+            params.warp_seg_loop_mode,
+            crate::sampler::SEG_LOOP_OFF as f32
+        );
+        assert!((params.warp_seg_envelope - 0.75).abs() < 0.0001);
+    }
+
+    #[test]
+    fn enqueue_step_event_step_source_carries_sampler_params() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let snapshot = state.publish_scheduler_snapshot();
+        let queue = ScheduledEventQueue::<4>::new();
+        let mut track_output_events = Vec::new();
+        let mut sampler_params = ScheduledSamplerParams::default();
+        sampler_params.warp_enabled = 1.0;
+        sampler_params.warp_mode = crate::sampler::WARP_MODE_BEATS as f32;
+        sampler_params.sample_bpm = 174.0;
+        sampler_params.warp_preserve = crate::warp_grid::PRESERVE_1_16 as f32;
+        sampler_params.warp_seg_loop_mode = crate::sampler::SEG_LOOP_PINGPONG as f32;
+        sampler_params.warp_seg_envelope = 0.5;
+
+        let event = StepEvent {
+            track: 0,
+            samples_per_step: 6_000.0,
+            resolved: test_resolved_step(),
+            chord: ScheduledChordData {
+                count: 0,
+                notes: [0.0; crate::voice::MAX_VOICES],
+                durations: [0.0; crate::voice::MAX_VOICES],
+                delays: [0.0; crate::voice::MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
+            sampler_params,
+            source: EventSource::Step {
+                track: 0,
+                step: 0,
+                instrument_fingerprint: 0,
+            },
+        };
+
+        assert!(super::enqueue_step_event(
+            &queue,
+            &snapshot,
+            &mut track_output_events,
+            0,
+            1_000,
+            0.0,
+            48_000.0,
+            0.0,
+            event,
+        ));
+
+        let scheduled = queue.pop().expect("scheduled step trigger");
+        let ScheduledEventKind::ResolvedTrigger { sampler_params, .. } = scheduled.kind else {
+            panic!("expected resolved trigger");
+        };
+        assert_eq!(
+            sampler_params.warp_preserve,
+            crate::warp_grid::PRESERVE_1_16 as f32
+        );
+        assert_eq!(
+            sampler_params.warp_seg_loop_mode,
+            crate::sampler::SEG_LOOP_PINGPONG as f32
+        );
+        assert!((sampler_params.warp_seg_envelope - 0.5).abs() < 0.0001);
     }
 
     #[test]

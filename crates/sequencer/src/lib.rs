@@ -109,5 +109,6 @@ pub mod ui;
 mod voice;
 #[allow(dead_code)]
 pub mod voice_modulator;
+pub mod warp_grid;
 
 pub mod engine;

@@ -1,5 +1,29 @@
 # Sample Warp v0.2 — Warp Modes Spec
 
+> **Implementation status (2026-07):** Re-Pitch, the Beats rewrite, and
+> Preserve=Transients are implemented. Key decisions that diverged from the
+> plan below, in the direction of less plumbing:
+>
+> - **No `WarpGridShared`.** The uniform grid is pure arithmetic, so the audio
+>   thread computes boundaries on the fly from `sample_bpm` + preserve
+>   (`src/warp_grid.rs`, pure functions + tests). No publish/rebuild channel;
+>   bpm and preserve edits take effect live. Preserve=Transients snaps each
+>   grid boundary to the nearest onset (±25 ms) via binary search over the
+>   already-published `OnsetTableShared` — snapping only, no onset insertion.
+> - **The grid anchors at the region start point** (trim start to the downbeat
+>   to align the grid), not an analysis-provided downbeat. Downbeat anchoring
+>   is still a follow-up.
+> - **Warp no longer requires analysis.** Beats runs on the pure grid when no
+>   onset table exists, so racks support all warp modes and warp engages the
+>   moment a bpm is known/typed.
+> - Params landed as `preserve` / `fill` (off, loop, ping-pong) / `decay`
+>   (0..1), appended at the descriptor tail (after `smooth`) to keep plock
+>   indices of older params stable. Tones/Texture currently fall back to
+>   Re-Pitch until the granular engine lands.
+> - Mid-note tempo change re-derives position closed-form from
+>   `gate_counter * ratio` (no slice-walking), then normal segment advancement
+>   takes over.
+
 ## Problem
 
 The v0.1 warp engine (see `sample-warp-v0.1-spec.md`) is transient-locked

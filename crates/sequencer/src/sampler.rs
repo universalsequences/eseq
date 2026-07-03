@@ -41,7 +41,7 @@ const STATE_WARP_MODE: usize = 32;
 const STATE_WARP_RATIO: usize = 33;
 const STATE_WARP_ONSET_TABLE_PTR_LO: usize = 34;
 const STATE_WARP_ONSET_TABLE_PTR_HI: usize = 35;
-const STATE_WARP_CURRENT_SLICE: usize = 36;
+const STATE_WARP_NEXT_BOUNDARY: usize = 36; // next Beats segment boundary (source frames)
 const STATE_WARP_SLICE_PROJECT_FRAME_START: usize = 37;
 const STATE_WARP_XFADE_REMAINING: usize = 38;
 const STATE_WARP_PREV_PLAYHEAD: usize = 39;
@@ -110,8 +110,13 @@ const STATE_RETRIGGER_SR_HELD_L: usize = 101;
 const STATE_RETRIGGER_SR_HELD_R: usize = 102;
 const STATE_LAST_READ_HEAD: usize = 103;
 const STATE_RETRIGGER_FADE_REMAINING: usize = 104;
-const STATE_TIMELINE_COUNT: usize = 105;
-const STATE_TIMELINE_BASE: usize = 106;
+const STATE_WARP_PRESERVE: usize = 105; // Beats grid division (warp_grid::PRESERVE_*)
+const STATE_WARP_SEG_LOOP_MODE: usize = 106; // 0=off, 1=loop, 2=ping-pong tail fill
+const STATE_WARP_SEG_ENVELOPE: usize = 107; // 0..1 per-segment decay amount
+const STATE_WARP_SEG_TAIL_DIR: usize = 108; // ±1, ping-pong tail direction
+const STATE_WARP_LAST_PRESERVE: usize = 109;
+const STATE_TIMELINE_COUNT: usize = 110;
+const STATE_TIMELINE_BASE: usize = 111;
 const TIMELINE_EVENT_WIDTH: usize = 3 + GBE_AUX_CAP;
 const TIMELINE_FRAME: usize = 0;
 const TIMELINE_KIND: usize = 1;
@@ -144,7 +149,11 @@ pub const SAMPLER_EVENT_AUX_WARP_PROJECT_BPM: usize = 18;
 pub const SAMPLER_EVENT_AUX_WARP_PTR_LO: usize = 19;
 pub const SAMPLER_EVENT_AUX_WARP_PTR_HI: usize = 20;
 pub const SAMPLER_EVENT_AUX_SCRUB_OFFSET: usize = 21;
-pub const SAMPLER_EVENT_AUX_NOTE_ON_COUNT: usize = 22;
+pub const SAMPLER_EVENT_AUX_WARP_PRESERVE: usize = 22;
+pub const SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE: usize = 23;
+pub const SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE: usize = 24;
+const SAMPLER_EVENT_AUX_REQUIRED_NOTE_ON_COUNT: usize = SAMPLER_EVENT_AUX_SCRUB_OFFSET + 1;
+pub const SAMPLER_EVENT_AUX_NOTE_ON_COUNT: usize = 25;
 
 // Envelope phase constants
 const ENV_IDLE: f32 = 0.0;
@@ -166,6 +175,19 @@ const SPEED_MIN: f32 = -4.0;
 const SPEED_MAX: f32 = 4.0;
 const WARP_BPM_MIN: f32 = 20.0;
 const WARP_BPM_MAX: f32 = 400.0;
+// Warp mode enum (matches the "mode" param labels in builtin_sampler()).
+pub const WARP_MODE_BEATS: i32 = 0;
+pub const WARP_MODE_TONES: i32 = 1;
+pub const WARP_MODE_TEXTURE: i32 = 2;
+pub const WARP_MODE_REPITCH: i32 = 3;
+// Beats-mode tail fill when the segment runs out of natural content before
+// the next boundary is due (project slower than sample).
+pub const SEG_LOOP_OFF: i32 = 0;
+pub const SEG_LOOP_FORWARD: i32 = 1;
+pub const SEG_LOOP_PINGPONG: i32 = 2;
+pub const WARP_PRESERVE_DEFAULT: i32 = crate::warp_grid::PRESERVE_TRANSIENTS;
+pub const WARP_SEG_LOOP_MODE_DEFAULT: i32 = SEG_LOOP_FORWARD;
+pub const WARP_SEG_ENVELOPE_DEFAULT: f32 = 0.0;
 const SCRUB_SMOOTH_TIME_MS_DEFAULT: f32 = 6.0;
 const SCRUB_RELEASE_EPSILON: f32 = 0.000_1;
 
@@ -444,6 +466,9 @@ pub const PARAM_WARP_ONSET_TABLE_PTR_LO: u64 = STATE_WARP_ONSET_TABLE_PTR_LO as 
 pub const PARAM_WARP_ONSET_TABLE_PTR_HI: u64 = STATE_WARP_ONSET_TABLE_PTR_HI as u64;
 pub const PARAM_WARP_SAMPLE_BPM: u64 = STATE_WARP_SAMPLE_BPM as u64;
 pub const PARAM_WARP_PROJECT_BPM: u64 = STATE_WARP_PROJECT_BPM as u64;
+pub const PARAM_WARP_PRESERVE: u64 = STATE_WARP_PRESERVE as u64;
+pub const PARAM_WARP_SEG_LOOP_MODE: u64 = STATE_WARP_SEG_LOOP_MODE as u64;
+pub const PARAM_WARP_SEG_ENVELOPE: u64 = STATE_WARP_SEG_ENVELOPE as u64;
 pub const PARAM_SOURCE_SAMPLE_RATE: u64 = STATE_SOURCE_SAMPLE_RATE as u64;
 pub const PARAM_SCRUB_OFFSET: u64 = STATE_SCRUB_OFFSET as u64;
 pub const PARAM_SCRUB_SMOOTH: u64 = STATE_SCRUB_SMOOTH as u64;
@@ -689,7 +714,12 @@ unsafe extern "C" fn sampler_init(
     *s.add(STATE_WARP_RATIO) = 1.0;
     *s.add(STATE_WARP_ONSET_TABLE_PTR_LO) = 0.0;
     *s.add(STATE_WARP_ONSET_TABLE_PTR_HI) = 0.0;
-    *s.add(STATE_WARP_CURRENT_SLICE) = 0.0;
+    *s.add(STATE_WARP_NEXT_BOUNDARY) = 0.0;
+    *s.add(STATE_WARP_PRESERVE) = WARP_PRESERVE_DEFAULT as f32;
+    *s.add(STATE_WARP_SEG_LOOP_MODE) = WARP_SEG_LOOP_MODE_DEFAULT as f32;
+    *s.add(STATE_WARP_SEG_ENVELOPE) = WARP_SEG_ENVELOPE_DEFAULT;
+    *s.add(STATE_WARP_SEG_TAIL_DIR) = 1.0;
+    *s.add(STATE_WARP_LAST_PRESERVE) = WARP_PRESERVE_DEFAULT as f32;
     *s.add(STATE_WARP_SLICE_PROJECT_FRAME_START) = 0.0;
     *s.add(STATE_WARP_XFADE_REMAINING) = 0.0;
     *s.add(STATE_WARP_PREV_PLAYHEAD) = 0.0;
@@ -776,17 +806,26 @@ unsafe fn sampler_process_segment(
         *s.add(STATE_WARP_ONSET_TABLE_PTR_LO),
         *s.add(STATE_WARP_ONSET_TABLE_PTR_HI),
     );
-    let onset_table = if warp_enabled && warp_mode == 0 && !onset_ptr.is_null() {
+    let onset_table = if warp_enabled && warp_mode == WARP_MODE_BEATS && !onset_ptr.is_null() {
         Some(&*onset_ptr)
     } else {
         None
     };
-    let mut current_slice = (*s.add(STATE_WARP_CURRENT_SLICE)).max(0.0) as usize;
-    let mut slice_project_frame_start = *s.add(STATE_WARP_SLICE_PROJECT_FRAME_START);
+    let mut next_boundary_src = *s.add(STATE_WARP_NEXT_BOUNDARY);
+    let mut seg_host_start = *s.add(STATE_WARP_SLICE_PROJECT_FRAME_START);
     let mut warp_xfade_remaining = (*s.add(STATE_WARP_XFADE_REMAINING)).max(0.0);
     let mut warp_prev_playhead = *s.add(STATE_WARP_PREV_PLAYHEAD);
-    let mut slice_source_frame_start = *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START);
+    let mut seg_source_start = *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START);
     let mut last_warp_target_ratio = (*s.add(STATE_WARP_LAST_TARGET_RATIO)).clamp(0.01, 32.0);
+    let warp_preserve = (*s.add(STATE_WARP_PRESERVE)).round() as i32;
+    let seg_loop_mode = (*s.add(STATE_WARP_SEG_LOOP_MODE)).round() as i32;
+    let seg_envelope = (*s.add(STATE_WARP_SEG_ENVELOPE)).clamp(0.0, 1.0);
+    let mut seg_tail_dir = if *s.add(STATE_WARP_SEG_TAIL_DIR) < 0.0 {
+        -1.0_f32
+    } else {
+        1.0_f32
+    };
+    let mut last_warp_preserve = (*s.add(STATE_WARP_LAST_PRESERVE)).round() as i32;
     let scrub_offset = (*s.add(STATE_SCRUB_OFFSET)).clamp(-1.0, 1.0);
     let mut scrub_smooth = *s.add(STATE_SCRUB_SMOOTH);
     let scrub_smooth_time_ms = (*s.add(STATE_SCRUB_SMOOTH_TIME_MS)).clamp(0.0, 5000.0);
@@ -837,25 +876,12 @@ unsafe fn sampler_process_segment(
     }
 
     let region_len = (end_sample.saturating_sub(start_sample)).max(1) as f32;
-    let warp_active = onset_table
-        .map(|table| {
-            table
-                .onsets_frames
-                .iter()
-                .filter(|&&frame| {
-                    let frame = frame as usize;
-                    frame > start_sample && frame < end_sample
-                })
-                .take(1)
-                .count()
-                >= 1
-        })
-        .unwrap_or(false);
-    if let Some(table) = onset_table {
-        if current_slice > table.onsets_frames.len() {
-            current_slice = 0;
-        }
-    }
+    // Beats runs off the uniform beat grid (bpm + anchor); the onset table is
+    // only consulted for Preserve=Transients boundary snapping, so warp no
+    // longer requires analysis to have finished.
+    let warp_active = warp_enabled && warp_mode == WARP_MODE_BEATS;
+    // Tones/Texture fall back to re-pitch until their granular engine lands.
+    let warp_repitch = warp_enabled && warp_mode != WARP_MODE_BEATS;
     let reverse = reverse_param && !warp_active;
     let loop_mode = loop_mode_param;
     let loop_xfade = loop_xfade_samples.min(region_len * 0.5);
@@ -866,7 +892,7 @@ unsafe fn sampler_process_segment(
     let block_warp_bpm_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_WARP_BPM_LANES, 0);
     let warp_sample_bpm =
         (base_warp_sample_bpm + block_warp_bpm_mod).clamp(WARP_BPM_MIN, WARP_BPM_MAX);
-    let warp_target_ratio = if warp_enabled && warp_mode == 0 {
+    let warp_target_ratio = if warp_enabled {
         (warp_project_bpm / warp_sample_bpm).clamp(0.01, 32.0)
     } else {
         warp_ratio
@@ -883,26 +909,36 @@ unsafe fn sampler_process_segment(
     let amplitude = velocity * gain;
     let eff_release = release_samples.max(MIN_RELEASE_SAMPLES);
     let warp_ratio_slew = (1.0 / (sample_rate * 0.050)).clamp(0.0001, 1.0);
-    let reset_forward_warp_state = |table: &crate::analysis::OnsetTableShared,
-                                    current_slice: &mut usize,
-                                    slice_project_frame_start: &mut f32,
-                                    slice_source_frame_start: &mut f32,
-                                    warp_xfade_remaining: &mut f32,
-                                    warp_prev_playhead: &mut f32,
-                                    playhead: f32,
-                                    gate_counter: f32| {
-        *current_slice = table
-            .onsets_frames
-            .iter()
-            .position(|&frame| {
-                let frame = frame as usize;
-                frame > start_sample && frame < end_sample
-            })
-            .unwrap_or(table.onsets_frames.len());
-        *slice_project_frame_start = gate_counter;
-        *slice_source_frame_start = playhead;
+    // The beat grid anchors at the region start: trimming the start point to
+    // a downbeat is what aligns the grid (same contract as v0.1).
+    let warp_anchor = start_sample as f64;
+    let warp_onsets: &[u32] = onset_table
+        .map(|table| table.onsets_frames.as_slice())
+        .unwrap_or(&[]);
+    let next_seg_boundary = |after_src: f32| -> f32 {
+        crate::warp_grid::next_segment_boundary(
+            after_src as f64,
+            warp_anchor,
+            warp_sample_bpm as f64,
+            source_sample_rate as f64,
+            warp_preserve,
+            warp_onsets,
+        ) as f32
+    };
+    let reset_warp_seg = |seg_source_start: &mut f32,
+                          seg_host_start: &mut f32,
+                          next_boundary_src: &mut f32,
+                          warp_xfade_remaining: &mut f32,
+                          warp_prev_playhead: &mut f32,
+                          seg_tail_dir: &mut f32,
+                          playhead: f32,
+                          gate_counter: f32| {
+        *seg_source_start = playhead;
+        *seg_host_start = gate_counter;
+        *next_boundary_src = next_seg_boundary(playhead);
         *warp_xfade_remaining = 0.0;
         *warp_prev_playhead = playhead;
+        *seg_tail_dir = 1.0;
     };
 
     // ── Trigger detection ──
@@ -920,19 +956,17 @@ unsafe fn sampler_process_segment(
             start_sample as f32
         };
         if warp_active {
-            if let Some(table) = onset_table {
-                playhead = start_sample as f32;
-                reset_forward_warp_state(
-                    table,
-                    &mut current_slice,
-                    &mut slice_project_frame_start,
-                    &mut slice_source_frame_start,
-                    &mut warp_xfade_remaining,
-                    &mut warp_prev_playhead,
-                    playhead,
-                    0.0,
-                );
-            }
+            playhead = start_sample as f32;
+            reset_warp_seg(
+                &mut seg_source_start,
+                &mut seg_host_start,
+                &mut next_boundary_src,
+                &mut warp_xfade_remaining,
+                &mut warp_prev_playhead,
+                &mut seg_tail_dir,
+                playhead,
+                0.0,
+            );
         }
         gate_counter = 0.0; // reset real-time duration counter
         sr_phase = 0.0;
@@ -962,68 +996,36 @@ unsafe fn sampler_process_segment(
         release_level = 0.0;
     }
 
-    if warp_active && (warp_target_ratio - last_warp_target_ratio).abs() > 0.0001 {
-        if let Some(table) = onset_table {
-            let old_playhead = playhead;
-            warp_ratio = warp_target_ratio;
-            last_warp_target_ratio = warp_target_ratio;
-            slice_project_frame_start = 0.0;
-            slice_source_frame_start = start_sample as f32;
-            current_slice = table
-                .onsets_frames
-                .iter()
-                .position(|&frame| {
-                    let frame = frame as usize;
-                    frame > start_sample && frame < end_sample
-                })
-                .unwrap_or(table.onsets_frames.len());
-
-            while current_slice < table.onsets_frames.len() {
-                let next = table.onsets_frames[current_slice] as f32;
-                if next as usize >= end_sample {
-                    break;
-                }
-                let next_project_frame = slice_project_frame_start
-                    + source_frames_to_host_frames(
-                        next - slice_source_frame_start,
-                        source_sample_rate,
-                        sample_rate,
-                    ) / warp_ratio;
-                if gate_counter < next_project_frame {
-                    break;
-                }
-                slice_project_frame_start = next_project_frame;
-                slice_source_frame_start = next;
-                current_slice += 1;
-            }
-
-            let elapsed_in_slice_source_frames = source_frames_to_host_frames(
-                gate_counter - slice_project_frame_start,
-                sample_rate,
-                source_sample_rate,
-            )
-            .max(0.0);
-            let mut next_boundary = end_sample as f32;
-            if current_slice < table.onsets_frames.len() {
-                let next = table.onsets_frames[current_slice] as f32;
-                if next as usize >= start_sample && next as usize <= end_sample {
-                    next_boundary = next;
-                }
-            }
-            playhead = (slice_source_frame_start + elapsed_in_slice_source_frames * step_rate)
-                .clamp(start_sample as f32, (end_sample.saturating_sub(1)) as f32);
-            if warp_ratio < 1.0 && playhead >= next_boundary {
-                playhead = next_boundary.min((end_sample.saturating_sub(1)) as f32);
-            }
-            if (playhead - old_playhead).abs() > 1.0 {
-                warp_prev_playhead = old_playhead;
-                warp_xfade_remaining = (sample_rate * WARP_XFADE_SECONDS).max(1.0);
-            } else {
-                warp_prev_playhead = playhead;
-            }
+    let warp_ratio_changed = (warp_target_ratio - last_warp_target_ratio).abs() > 0.0001;
+    let warp_preserve_changed = warp_preserve != last_warp_preserve;
+    if warp_active && (warp_ratio_changed || warp_preserve_changed) {
+        // Tempo/sample BPM changes and preserve-grid changes invalidate the
+        // current Beats segment schedule. Re-derive the position from musical
+        // time elapsed so playback lands at the musically-correct spot, then
+        // let normal segment advancement take over from the new grid.
+        let old_playhead = playhead;
+        warp_ratio = warp_target_ratio;
+        last_warp_target_ratio = warp_target_ratio;
+        last_warp_preserve = warp_preserve;
+        let src_elapsed =
+            source_frames_to_host_frames(gate_counter, sample_rate, source_sample_rate)
+                * warp_ratio;
+        let ideal_src = (start_sample as f32 + src_elapsed)
+            .clamp(start_sample as f32, (end_sample.saturating_sub(1)) as f32);
+        playhead = ideal_src;
+        seg_source_start = ideal_src;
+        seg_host_start = gate_counter;
+        next_boundary_src = next_seg_boundary(ideal_src);
+        seg_tail_dir = 1.0;
+        if (playhead - old_playhead).abs() > 1.0 {
+            warp_prev_playhead = old_playhead;
+            warp_xfade_remaining = (sample_rate * WARP_XFADE_SECONDS).max(1.0);
+        } else {
+            warp_prev_playhead = playhead;
         }
     } else if !warp_active {
         last_warp_target_ratio = warp_target_ratio;
+        last_warp_preserve = warp_preserve;
     }
 
     // ── Pre-loop gate-off check (gate may have changed between blocks) ──
@@ -1048,7 +1050,7 @@ unsafe fn sampler_process_segment(
     }
 
     for i in 0..nf {
-        if warp_active {
+        if warp_active || warp_repitch {
             warp_ratio += (warp_target_ratio - warp_ratio) * warp_ratio_slew;
         }
         let past_forward = playhead >= end_sample as f32;
@@ -1068,18 +1070,16 @@ unsafe fn sampler_process_segment(
                     (end_sample.saturating_sub(1)) as f32 - ((start_sample as f32) - playhead);
             }
             if warp_active && play_direction >= 0.0 {
-                if let Some(table) = onset_table {
-                    reset_forward_warp_state(
-                        table,
-                        &mut current_slice,
-                        &mut slice_project_frame_start,
-                        &mut slice_source_frame_start,
-                        &mut warp_xfade_remaining,
-                        &mut warp_prev_playhead,
-                        playhead,
-                        gate_counter,
-                    );
-                }
+                reset_warp_seg(
+                    &mut seg_source_start,
+                    &mut seg_host_start,
+                    &mut next_boundary_src,
+                    &mut warp_xfade_remaining,
+                    &mut warp_prev_playhead,
+                    &mut seg_tail_dir,
+                    playhead,
+                    gate_counter,
+                );
             }
         }
 
@@ -1167,36 +1167,58 @@ unsafe fn sampler_process_segment(
 
         // ── Read sample with linear interpolation ──
 
-        if warp_active && play_direction >= 0.0 {
-            if let Some(table) = onset_table {
-                if current_slice < table.onsets_frames.len() {
-                    let next = table.onsets_frames[current_slice] as f32;
-                    let next_project_frame = slice_project_frame_start
-                        + source_frames_to_host_frames(
-                            next - slice_source_frame_start,
-                            source_sample_rate,
-                            sample_rate,
-                        ) / warp_ratio;
-                    if gate_counter >= next_project_frame {
-                        warp_prev_playhead = playhead;
-                        slice_project_frame_start = gate_counter;
-                        playhead = next;
-                        slice_source_frame_start = next;
-                        current_slice += 1;
-                        warp_xfade_remaining = (sample_rate * WARP_XFADE_SECONDS).max(1.0);
-                    }
-                }
-            }
-        }
-
         let mut warp_silent = false;
         if warp_active && play_direction >= 0.0 {
-            if let Some(table) = onset_table {
-                if warp_ratio < 1.0 && current_slice < table.onsets_frames.len() {
-                    let next = table.onsets_frames[current_slice] as f32;
-                    if playhead >= next {
+            // Fire the next segment at its scheduled host-time boundary. The
+            // new segment's host start is the *scheduled* boundary time (not
+            // gate_counter) so quantization error can't accumulate.
+            let next_boundary_host = seg_host_start
+                + source_frames_to_host_frames(
+                    next_boundary_src - seg_source_start,
+                    source_sample_rate,
+                    sample_rate,
+                ) / warp_ratio;
+            // `next_boundary_src > seg_source_start` guards against stale
+            // segment state (e.g. warp toggled on mid-note): a boundary at or
+            // behind the segment start must never fire a jump.
+            if gate_counter >= next_boundary_host
+                && next_boundary_src > seg_source_start
+                && (next_boundary_src as usize) < end_sample
+            {
+                warp_prev_playhead = playhead;
+                playhead = next_boundary_src;
+                seg_source_start = next_boundary_src;
+                seg_host_start = next_boundary_host;
+                next_boundary_src = next_seg_boundary(next_boundary_src);
+                seg_tail_dir = 1.0;
+                warp_xfade_remaining = (sample_rate * WARP_XFADE_SECONDS).max(1.0);
+            } else if playhead >= next_boundary_src && next_boundary_src > seg_source_start {
+                // Natural content ran out before the boundary is due
+                // (project slower than sample): fill per the tail mode.
+                let tail_start = seg_source_start + 0.5 * (next_boundary_src - seg_source_start);
+                match seg_loop_mode {
+                    SEG_LOOP_FORWARD => {
+                        warp_prev_playhead = playhead;
+                        playhead = tail_start;
+                        warp_xfade_remaining = (sample_rate * WARP_XFADE_SECONDS).max(1.0);
+                    }
+                    SEG_LOOP_PINGPONG => {
+                        playhead = next_boundary_src;
+                        seg_tail_dir = -1.0;
+                    }
+                    _ => {
+                        // Hold at the boundary reading silence so the next
+                        // segment's transient isn't consumed early and the
+                        // voice can't run off the region end while waiting.
+                        playhead = next_boundary_src;
                         warp_silent = true;
                     }
+                }
+            } else if seg_tail_dir < 0.0 {
+                // Ping-pong tail: bounce forward again at the tail midpoint.
+                let tail_start = seg_source_start + 0.5 * (next_boundary_src - seg_source_start);
+                if playhead <= tail_start {
+                    seg_tail_dir = 1.0;
                 }
             }
         }
@@ -1251,6 +1273,23 @@ unsafe fn sampler_process_segment(
             sample_r = old_r * old_gain + sample_r * new_gain;
             warp_prev_playhead += playback_step;
             warp_xfade_remaining -= 1.0;
+        }
+        if warp_active && play_direction >= 0.0 && seg_envelope > 0.001 {
+            // Per-segment decay, restarting at every boundary. High values
+            // gate each segment down hard (classic choppy Beats sound) and
+            // mask tail-loop repetition at extreme slow-downs.
+            let seg_len_host = source_frames_to_host_frames(
+                next_boundary_src - seg_source_start,
+                source_sample_rate,
+                sample_rate,
+            ) / warp_ratio;
+            if seg_len_host > 1.0 {
+                let t = (gate_counter - seg_host_start).max(0.0);
+                let tau = seg_len_host * (4.0 + (0.15 - 4.0) * seg_envelope);
+                let seg_gain = (-t / tau.max(1.0)).exp();
+                sample_l *= seg_gain;
+                sample_r *= seg_gain;
+            }
         }
         if sr_reduced {
             if sr_phase <= 0.0 {
@@ -1321,7 +1360,11 @@ unsafe fn sampler_process_segment(
         last_read_head = read_head;
 
         playhead += if warp_active && play_direction >= 0.0 {
-            playback_step
+            playback_step * seg_tail_dir
+        } else if warp_repitch {
+            // Re-pitch: fold the tempo ratio into the resample rate so pitch
+            // rides with tempo (tape-style). No segmentation, no artifacts.
+            playback_step * warp_ratio * play_direction
         } else {
             playback_step * play_direction
         };
@@ -1351,12 +1394,14 @@ unsafe fn sampler_process_segment(
     *s.add(STATE_SR_HELD_L) = sr_held_l;
     *s.add(STATE_SR_HELD_R) = sr_held_r;
     *s.add(STATE_WARP_RATIO) = warp_ratio;
-    *s.add(STATE_WARP_CURRENT_SLICE) = current_slice as f32;
-    *s.add(STATE_WARP_SLICE_PROJECT_FRAME_START) = slice_project_frame_start;
+    *s.add(STATE_WARP_NEXT_BOUNDARY) = next_boundary_src;
+    *s.add(STATE_WARP_SLICE_PROJECT_FRAME_START) = seg_host_start;
     *s.add(STATE_WARP_XFADE_REMAINING) = warp_xfade_remaining;
     *s.add(STATE_WARP_PREV_PLAYHEAD) = warp_prev_playhead;
-    *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START) = slice_source_frame_start;
+    *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START) = seg_source_start;
     *s.add(STATE_WARP_LAST_TARGET_RATIO) = last_warp_target_ratio;
+    *s.add(STATE_WARP_SEG_TAIL_DIR) = seg_tail_dir;
+    *s.add(STATE_WARP_LAST_PRESERVE) = last_warp_preserve as f32;
     *s.add(STATE_SCRUB_SMOOTH) = scrub_smooth;
     *s.add(STATE_LAST_READ_HEAD) = last_read_head;
 }
@@ -1381,7 +1426,9 @@ unsafe extern "C" fn sampler_schedule_event(
     if event.kind != GBE_NOTE_ON && event.kind != GBE_GATE_OFF {
         return false;
     }
-    if event.kind == GBE_NOTE_ON && event.aux_count < SAMPLER_EVENT_AUX_NOTE_ON_COUNT as u32 {
+    if event.kind == GBE_NOTE_ON
+        && event.aux_count < SAMPLER_EVENT_AUX_REQUIRED_NOTE_ON_COUNT as u32
+    {
         return false;
     }
     let s = state as *mut f32;
@@ -1412,10 +1459,17 @@ unsafe fn sampler_apply_timeline_event(state: *mut f32, base: usize) -> bool {
     }
 
     let aux_count = (*state.add(base + TIMELINE_AUX_COUNT)).max(0.0) as usize;
-    if aux_count < SAMPLER_EVENT_AUX_NOTE_ON_COUNT {
+    if aux_count < SAMPLER_EVENT_AUX_REQUIRED_NOTE_ON_COUNT {
         return false;
     }
     let aux = |idx: usize| *state.add(base + TIMELINE_AUX_BASE + idx);
+    let aux_or = |idx: usize, default: f32| {
+        if idx < aux_count {
+            aux(idx)
+        } else {
+            default
+        }
+    };
     *state.add(STATE_ENABLED) = aux(SAMPLER_EVENT_AUX_ENABLED);
     *state.add(STATE_VELOCITY) = aux(SAMPLER_EVENT_AUX_VELOCITY);
     *state.add(STATE_SPEED) = aux(SAMPLER_EVENT_AUX_SPEED);
@@ -1438,6 +1492,18 @@ unsafe fn sampler_apply_timeline_event(state: *mut f32, base: usize) -> bool {
     *state.add(STATE_WARP_ONSET_TABLE_PTR_LO) = aux(SAMPLER_EVENT_AUX_WARP_PTR_LO);
     *state.add(STATE_WARP_ONSET_TABLE_PTR_HI) = aux(SAMPLER_EVENT_AUX_WARP_PTR_HI);
     *state.add(STATE_SCRUB_OFFSET) = aux(SAMPLER_EVENT_AUX_SCRUB_OFFSET);
+    *state.add(STATE_WARP_PRESERVE) = aux_or(
+        SAMPLER_EVENT_AUX_WARP_PRESERVE,
+        WARP_PRESERVE_DEFAULT as f32,
+    );
+    *state.add(STATE_WARP_SEG_LOOP_MODE) = aux_or(
+        SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE,
+        WARP_SEG_LOOP_MODE_DEFAULT as f32,
+    );
+    *state.add(STATE_WARP_SEG_ENVELOPE) = aux_or(
+        SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE,
+        WARP_SEG_ENVELOPE_DEFAULT,
+    );
     *state.add(STATE_PLAYHEAD) = 0.0;
     *state.add(STATE_PLAYING) = 1.0;
     true
@@ -1699,13 +1765,19 @@ mod tests {
         SAMPLER_EVENT_AUX_SCRUB_OFFSET, SAMPLER_EVENT_AUX_SPEED, SAMPLER_EVENT_AUX_SR_HZ,
         SAMPLER_EVENT_AUX_START_POINT, SAMPLER_EVENT_AUX_TRANSPOSE, SAMPLER_EVENT_AUX_VELOCITY,
         SAMPLER_EVENT_AUX_WARP_ENABLED, SAMPLER_EVENT_AUX_WARP_MODE,
-        SAMPLER_EVENT_AUX_WARP_PROJECT_BPM, SAMPLER_EVENT_AUX_WARP_PTR_HI,
-        SAMPLER_EVENT_AUX_WARP_PTR_LO, SAMPLER_EVENT_AUX_WARP_RATIO,
-        SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM, SAMPLER_MOD_LANES_PER_PARAM, SAMPLER_STATE_SIZE,
-        SCRUB_SMOOTH_TIME_MS_DEFAULT, STATE_ATTACK_SAMPLES, STATE_BUFFER_ID, STATE_END_POINT,
-        STATE_GAIN, STATE_GATE_SAMPLES, STATE_MOD_SPEED_DEPTH, STATE_MOD_SPEED_LANE2_DEPTH,
-        STATE_MOD_SPEED_LANE2_SOURCE, STATE_MOD_SPEED_SOURCE, STATE_PLAYHEAD, STATE_PLAYING,
-        STATE_SAMPLE_RATE, STATE_SOURCE_SAMPLE_RATE, STATE_VELOCITY,
+        SAMPLER_EVENT_AUX_WARP_PRESERVE, SAMPLER_EVENT_AUX_WARP_PROJECT_BPM,
+        SAMPLER_EVENT_AUX_WARP_PTR_HI, SAMPLER_EVENT_AUX_WARP_PTR_LO, SAMPLER_EVENT_AUX_WARP_RATIO,
+        SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM, SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE,
+        SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE, SAMPLER_MOD_LANES_PER_PARAM, SAMPLER_STATE_SIZE,
+        SCRUB_SMOOTH_TIME_MS_DEFAULT, SEG_LOOP_FORWARD, SEG_LOOP_OFF, SEG_LOOP_PINGPONG,
+        STATE_ATTACK_SAMPLES, STATE_BUFFER_ID, STATE_END_POINT, STATE_GAIN, STATE_GATE_SAMPLES,
+        STATE_MOD_SPEED_DEPTH, STATE_MOD_SPEED_LANE2_DEPTH, STATE_MOD_SPEED_LANE2_SOURCE,
+        STATE_MOD_SPEED_SOURCE, STATE_PLAYHEAD, STATE_PLAYING, STATE_SAMPLE_RATE,
+        STATE_SOURCE_SAMPLE_RATE, STATE_START_POINT, STATE_VELOCITY, STATE_WARP_ENABLED,
+        STATE_WARP_LAST_PRESERVE, STATE_WARP_LAST_TARGET_RATIO, STATE_WARP_MODE,
+        STATE_WARP_NEXT_BOUNDARY, STATE_WARP_PRESERVE, STATE_WARP_PROJECT_BPM, STATE_WARP_RATIO,
+        STATE_WARP_SAMPLE_BPM, STATE_WARP_SEG_ENVELOPE, STATE_WARP_SEG_LOOP_MODE,
+        STATE_WARP_SLICE_SOURCE_FRAME_START, WARP_MODE_BEATS, WARP_MODE_REPITCH,
     };
     use crate::audiograph::{GraphBlockEvent, GBE_AUX_CAP, GBE_NOTE_ON};
     use std::ffi::c_void;
@@ -1741,6 +1813,9 @@ mod tests {
         event.aux[SAMPLER_EVENT_AUX_WARP_PTR_LO] = 0.0;
         event.aux[SAMPLER_EVENT_AUX_WARP_PTR_HI] = 0.0;
         event.aux[SAMPLER_EVENT_AUX_SCRUB_OFFSET] = 0.0;
+        event.aux[SAMPLER_EVENT_AUX_WARP_PRESERVE] = crate::warp_grid::PRESERVE_TRANSIENTS as f32;
+        event.aux[SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE] = SEG_LOOP_FORWARD as f32;
+        event.aux[SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE] = 0.0;
         event
     }
 
@@ -1873,6 +1948,449 @@ mod tests {
         assert_ne!(left[0], right[0]);
     }
 
+    // 1 kHz host+source rate keeps the numbers tiny: sample at 60 BPM with a
+    // 1/4 grid puts a segment boundary every 1000 source frames.
+    fn beats_warp_test_state(project_bpm: f32, seg_loop_mode: i32) -> [f32; SAMPLER_STATE_SIZE] {
+        let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
+        let initial = [0.0_f32, 1_000.0];
+        unsafe {
+            sampler_init(
+                state.as_mut_ptr() as *mut c_void,
+                1_000,
+                64,
+                initial.as_ptr() as *const c_void,
+            );
+        }
+        state[STATE_PLAYING] = 1.0;
+        state[STATE_PLAYHEAD] = 0.0;
+        state[STATE_GAIN] = 1.0;
+        state[STATE_VELOCITY] = 1.0;
+        state[STATE_ATTACK_SAMPLES] = 0.0;
+        state[STATE_GATE_SAMPLES] = f32::MAX;
+        state[STATE_END_POINT] = 1.0;
+        state[STATE_WARP_ENABLED] = 1.0;
+        state[STATE_WARP_MODE] = WARP_MODE_BEATS as f32;
+        state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_4 as f32;
+        state[STATE_WARP_SEG_LOOP_MODE] = seg_loop_mode as f32;
+        state[STATE_WARP_SAMPLE_BPM] = 60.0;
+        state[STATE_WARP_PROJECT_BPM] = project_bpm;
+        let ratio = project_bpm / 60.0;
+        state[STATE_WARP_RATIO] = ratio;
+        state[STATE_WARP_LAST_TARGET_RATIO] = ratio;
+        state
+    }
+
+    fn beats_warp_test_state_at_rate(
+        host_sample_rate: i32,
+        source_sample_rate: f32,
+        sample_bpm: f32,
+        project_bpm: f32,
+        preserve: i32,
+        seg_loop_mode: i32,
+    ) -> [f32; SAMPLER_STATE_SIZE] {
+        let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
+        let initial = [0.0_f32, source_sample_rate];
+        unsafe {
+            sampler_init(
+                state.as_mut_ptr() as *mut c_void,
+                host_sample_rate,
+                256,
+                initial.as_ptr() as *const c_void,
+            );
+        }
+        state[STATE_PLAYING] = 1.0;
+        state[STATE_PLAYHEAD] = 0.0;
+        state[STATE_GAIN] = 1.0;
+        state[STATE_VELOCITY] = 1.0;
+        state[STATE_ATTACK_SAMPLES] = 0.0;
+        state[STATE_GATE_SAMPLES] = f32::MAX;
+        state[STATE_END_POINT] = 1.0;
+        state[STATE_WARP_ENABLED] = 1.0;
+        state[STATE_WARP_MODE] = WARP_MODE_BEATS as f32;
+        state[STATE_WARP_PRESERVE] = preserve as f32;
+        state[STATE_WARP_LAST_PRESERVE] = preserve as f32;
+        state[STATE_WARP_SEG_LOOP_MODE] = seg_loop_mode as f32;
+        state[STATE_WARP_SAMPLE_BPM] = sample_bpm;
+        state[STATE_WARP_PROJECT_BPM] = project_bpm;
+        let ratio = project_bpm / sample_bpm;
+        state[STATE_WARP_RATIO] = ratio;
+        state[STATE_WARP_LAST_TARGET_RATIO] = ratio;
+        state
+    }
+
+    fn render_beats(
+        state: &mut [f32; SAMPLER_STATE_SIZE],
+        sample: &mut [f32],
+        frames: usize,
+    ) -> Vec<f32> {
+        let desc = [BufferDesc {
+            buffer: sample.as_mut_ptr(),
+            size: sample.len() as std::os::raw::c_int,
+            channel_count: 1,
+        }];
+        let mut rendered = Vec::with_capacity(frames);
+        let mut left = [0.0_f32; 250];
+        let mut right = [0.0_f32; 250];
+        let inputs: [*mut f32; 0] = [];
+        let mut remaining = frames;
+        while remaining > 0 {
+            let n = remaining.min(250);
+            let outputs = [left.as_mut_ptr(), right.as_mut_ptr()];
+            unsafe {
+                sampler_process(
+                    inputs.as_ptr(),
+                    outputs.as_ptr(),
+                    n as i32,
+                    state.as_mut_ptr() as *mut c_void,
+                    desc.as_ptr() as *mut c_void,
+                );
+            }
+            rendered.extend_from_slice(&left[..n]);
+            remaining -= n;
+        }
+        rendered
+    }
+
+    #[test]
+    fn beats_warp_fires_segments_at_scheduled_host_times_when_speeding_up() {
+        // Project at 120 vs sample at 60: ratio 2.0, so the boundary at
+        // source frame 1000 is due at host frame 500.
+        let mut state = beats_warp_test_state(120.0, SEG_LOOP_FORWARD);
+        let mut sample: Vec<f32> = (0..4_000).map(|i| i as f32 * 0.000_1).collect();
+        let out = render_beats(&mut state, &mut sample, 700);
+
+        // Before the boundary: native-rate ramp playback.
+        assert!((out[499] - 0.049_9).abs() < 0.001, "got {}", out[499]);
+        // After the boundary (+xfade of 5 frames at 1 kHz): reading from
+        // source frame ~1000 onward.
+        assert!((out[520] - 0.102).abs() < 0.002, "got {}", out[520]);
+    }
+
+    #[test]
+    fn beats_warp_slowdown_fill_loops_tail_instead_of_going_silent() {
+        // Project at 30 vs sample at 60: ratio 0.5. Natural content for the
+        // first segment runs out at host frame 1000; the boundary is due at
+        // host frame 2000.
+        let mut dc: Vec<f32> = vec![1.0; 4_000];
+
+        // Fill off: silence between content end and the next boundary.
+        let mut state = beats_warp_test_state(30.0, SEG_LOOP_OFF);
+        let out = render_beats(&mut state, &mut dc.clone(), 2_500);
+        assert!(out[900] > 0.9, "content should play, got {}", out[900]);
+        assert!(
+            out[1_500].abs() < 0.001,
+            "fill=off should hold silence, got {}",
+            out[1_500]
+        );
+        assert!(
+            out[2_100] > 0.9,
+            "next segment should fire at host 2000, got {}",
+            out[2_100]
+        );
+
+        // Fill loop: the tail loops, so audio stays continuous.
+        let mut state = beats_warp_test_state(30.0, SEG_LOOP_FORWARD);
+        let out = render_beats(&mut state, &mut dc, 2_500);
+        for (i, &v) in out.iter().enumerate().take(2_400).skip(10) {
+            assert!(v > 0.5, "fill=loop went quiet at host frame {i}: {v}");
+        }
+    }
+
+    #[test]
+    fn beats_warp_one_sixteenth_differs_from_unwarped_playback() {
+        // Ratio 0.5 means host frame 600 should be around source frame 350 in
+        // 1/16 Beats mode: boundary at source 250 fires at host 500, then the
+        // new segment plays natively for 100 frames. Unwarped playback would
+        // read source frame 600.
+        let mut state = beats_warp_test_state(30.0, SEG_LOOP_FORWARD);
+        state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_16 as f32;
+        let mut sample: Vec<f32> = (0..4_000).map(|i| i as f32 * 0.001).collect();
+        let out = render_beats(&mut state, &mut sample, 700);
+
+        assert!(
+            (out[600] - 0.350).abs() < 0.01,
+            "1/16 Beats should read warped source frame ~350 at host 600, got {}",
+            out[600]
+        );
+        assert!(
+            (out[600] - 0.600).abs() > 0.1,
+            "1/16 Beats collapsed to unwarped playback at host 600: {}",
+            out[600]
+        );
+    }
+
+    #[test]
+    fn beats_warp_small_divisions_differ_from_unwarped_at_audio_rate() {
+        let host_sample_rate = 44_100;
+        let source_sample_rate = 44_100.0;
+        let sample_bpm = 174.0;
+        let project_bpm = 120.0;
+        let sample_len = host_sample_rate as usize * 2;
+        let sample: Vec<f32> = (0..sample_len)
+            .map(|i| ((i % 44_100) as f32 / 44_100.0) * 2.0 - 1.0)
+            .collect();
+
+        let mut plain_state = beats_warp_test_state_at_rate(
+            host_sample_rate,
+            source_sample_rate,
+            sample_bpm,
+            project_bpm,
+            crate::warp_grid::PRESERVE_1_4,
+            SEG_LOOP_FORWARD,
+        );
+        plain_state[STATE_WARP_ENABLED] = 0.0;
+        let plain = render_beats(&mut plain_state, &mut sample.clone(), 24_000);
+
+        for preserve in [
+            crate::warp_grid::PRESERVE_1_8,
+            crate::warp_grid::PRESERVE_1_16,
+            crate::warp_grid::PRESERVE_TRANSIENTS,
+        ] {
+            let mut state = beats_warp_test_state_at_rate(
+                host_sample_rate,
+                source_sample_rate,
+                sample_bpm,
+                project_bpm,
+                preserve,
+                SEG_LOOP_FORWARD,
+            );
+            let warped = render_beats(&mut state, &mut sample.clone(), 24_000);
+            let rms_diff = plain[8_000..24_000]
+                .iter()
+                .zip(&warped[8_000..24_000])
+                .map(|(a, b)| {
+                    let d = a - b;
+                    d * d
+                })
+                .sum::<f32>()
+                / 16_000.0;
+            let rms_diff = rms_diff.sqrt();
+            assert!(
+                rms_diff > 0.02,
+                "preserve={preserve} collapsed to plain playback at audio rate; rms diff {rms_diff}"
+            );
+        }
+    }
+
+    #[test]
+    fn beats_warp_one_sixteenth_does_not_stall_after_f32_boundary_roundtrip() {
+        let host_sample_rate = 48_000;
+        let source_sample_rate = 44_100.0;
+        let sample_bpm = 121.896;
+        let project_bpm = 153.0;
+        let start_sample = 11_674.0_f32;
+        let sample_len = 299_008_usize;
+        let mut state = beats_warp_test_state_at_rate(
+            host_sample_rate,
+            source_sample_rate,
+            sample_bpm,
+            project_bpm,
+            crate::warp_grid::PRESERVE_1_16,
+            SEG_LOOP_FORWARD,
+        );
+        state[STATE_START_POINT] = start_sample / sample_len as f32;
+        let mut sample = vec![1.0_f32; sample_len];
+
+        let _ = render_beats(&mut state, &mut sample, 20_000);
+
+        assert!(
+            state[STATE_WARP_SLICE_SOURCE_FRAME_START] > 27_000.0,
+            "1/16 Beats stalled after the second boundary: seg_src={}, next_src={}",
+            state[STATE_WARP_SLICE_SOURCE_FRAME_START],
+            state[STATE_WARP_NEXT_BOUNDARY]
+        );
+        assert!(
+            state[STATE_WARP_NEXT_BOUNDARY] > state[STATE_WARP_SLICE_SOURCE_FRAME_START] + 0.25,
+            "next boundary must remain ahead of the active segment: seg_src={}, next_src={}",
+            state[STATE_WARP_SLICE_SOURCE_FRAME_START],
+            state[STATE_WARP_NEXT_BOUNDARY]
+        );
+    }
+
+    #[test]
+    fn scheduled_beats_note_on_small_divisions_differ_from_unwarped_at_audio_rate() {
+        let host_sample_rate = 44_100;
+        let sample_bpm = 174.0;
+        let project_bpm = 120.0;
+        let sample_len = host_sample_rate as usize * 2;
+        let sample: Vec<f32> = (0..sample_len)
+            .map(|i| ((i % 44_100) as f32 / 44_100.0) * 2.0 - 1.0)
+            .collect();
+        let render_scheduled = |preserve: i32, warp_enabled: bool| {
+            let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
+            let initial = [0.0_f32, host_sample_rate as f32];
+            unsafe {
+                sampler_init(
+                    state.as_mut_ptr() as *mut c_void,
+                    host_sample_rate,
+                    256,
+                    initial.as_ptr() as *const c_void,
+                );
+            }
+            let mut event = sampler_note_on_event(0);
+            event.aux[SAMPLER_EVENT_AUX_GATE_SAMPLES] = f32::MAX;
+            event.aux[SAMPLER_EVENT_AUX_WARP_ENABLED] = if warp_enabled { 1.0 } else { 0.0 };
+            event.aux[SAMPLER_EVENT_AUX_WARP_MODE] = WARP_MODE_BEATS as f32;
+            event.aux[SAMPLER_EVENT_AUX_WARP_RATIO] = project_bpm / sample_bpm;
+            event.aux[SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM] = sample_bpm;
+            event.aux[SAMPLER_EVENT_AUX_WARP_PROJECT_BPM] = project_bpm;
+            event.aux[SAMPLER_EVENT_AUX_WARP_PRESERVE] = preserve as f32;
+            event.aux[SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE] = SEG_LOOP_FORWARD as f32;
+            unsafe {
+                sampler_begin_event_slice(state.as_mut_ptr().cast(), 1, 0, 256);
+                assert!(sampler_schedule_event(state.as_mut_ptr().cast(), &event));
+            }
+            let mut sample = sample.clone();
+            let desc = [BufferDesc {
+                buffer: sample.as_mut_ptr(),
+                size: sample.len() as std::os::raw::c_int,
+                channel_count: 1,
+            }];
+            let mut rendered = Vec::with_capacity(24_000);
+            let mut left = [0.0_f32; 256];
+            let mut right = [0.0_f32; 256];
+            let outputs = [left.as_mut_ptr(), right.as_mut_ptr()];
+            let inputs: [*mut f32; 0] = [];
+            let mut remaining = 24_000usize;
+            let mut block_serial = 1_u64;
+            while remaining > 0 {
+                let n = remaining.min(256);
+                unsafe {
+                    sampler_process(
+                        inputs.as_ptr(),
+                        outputs.as_ptr(),
+                        n as i32,
+                        state.as_mut_ptr() as *mut c_void,
+                        desc.as_ptr() as *mut c_void,
+                    );
+                }
+                rendered.extend_from_slice(&left[..n]);
+                remaining -= n;
+                block_serial += 1;
+                unsafe {
+                    sampler_begin_event_slice(
+                        state.as_mut_ptr().cast(),
+                        block_serial,
+                        rendered.len() as i32,
+                        remaining.min(256) as i32,
+                    );
+                }
+            }
+            rendered
+        };
+
+        let plain = render_scheduled(crate::warp_grid::PRESERVE_1_4, false);
+        for preserve in [
+            crate::warp_grid::PRESERVE_1_8,
+            crate::warp_grid::PRESERVE_1_16,
+            crate::warp_grid::PRESERVE_TRANSIENTS,
+        ] {
+            let warped = render_scheduled(preserve, true);
+            let rms_diff = plain[8_000..24_000]
+                .iter()
+                .zip(&warped[8_000..24_000])
+                .map(|(a, b)| {
+                    let d = a - b;
+                    d * d
+                })
+                .sum::<f32>()
+                / 16_000.0;
+            let rms_diff = rms_diff.sqrt();
+            assert!(
+                rms_diff > 0.02,
+                "scheduled preserve={preserve} collapsed to plain playback; rms diff {rms_diff}"
+            );
+        }
+    }
+
+    #[test]
+    fn beats_warp_live_preserve_change_recomputes_current_segment_grid() {
+        let mut state = beats_warp_test_state(30.0, SEG_LOOP_FORWARD);
+        state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_4 as f32;
+        state[STATE_WARP_LAST_PRESERVE] = crate::warp_grid::PRESERVE_1_4 as f32;
+        let mut sample: Vec<f32> = (0..4_000).map(|i| i as f32 * 0.001).collect();
+
+        let _ = render_beats(&mut state, &mut sample, 100);
+        assert!(
+            (state[STATE_WARP_NEXT_BOUNDARY] - 1_000.0).abs() < 0.001,
+            "1/4 grid should still target source 1000 before the live edit"
+        );
+
+        state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_16 as f32;
+        let _ = render_beats(&mut state, &mut sample, 8);
+
+        assert_eq!(
+            state[STATE_WARP_LAST_PRESERVE],
+            crate::warp_grid::PRESERVE_1_16 as f32
+        );
+        assert!(
+            (state[STATE_WARP_NEXT_BOUNDARY] - 250.0).abs() < 0.001,
+            "live preserve edit should recompute the active grid to source 250, got {}",
+            state[STATE_WARP_NEXT_BOUNDARY]
+        );
+    }
+
+    #[test]
+    fn repitch_warp_advances_read_head_at_tempo_ratio() {
+        let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
+        let initial = [0.0_f32, 44_100.0];
+        unsafe {
+            sampler_init(
+                state.as_mut_ptr() as *mut c_void,
+                44_100,
+                64,
+                initial.as_ptr() as *const c_void,
+            );
+        }
+        state[STATE_PLAYING] = 1.0;
+        state[STATE_PLAYHEAD] = 0.0;
+        state[STATE_GAIN] = 1.0;
+        state[STATE_VELOCITY] = 1.0;
+        state[STATE_ATTACK_SAMPLES] = 0.0;
+        state[STATE_GATE_SAMPLES] = f32::MAX;
+        state[STATE_END_POINT] = 1.0;
+        state[STATE_WARP_ENABLED] = 1.0;
+        state[STATE_WARP_MODE] = WARP_MODE_REPITCH as f32;
+        // 240 BPM sample in a 120 BPM project: read head must advance at
+        // 120/240 = 0.5 source frames per host frame.
+        state[STATE_WARP_SAMPLE_BPM] = 240.0;
+        state[STATE_WARP_PROJECT_BPM] = 120.0;
+        state[STATE_WARP_RATIO] = 0.5;
+        state[STATE_WARP_LAST_TARGET_RATIO] = 0.5;
+
+        // Mono linear ramp: interpolated read at head h yields h * 0.001.
+        let mut sample: Vec<f32> = (0..512).map(|i| i as f32 * 0.001).collect();
+        let desc = [BufferDesc {
+            buffer: sample.as_mut_ptr(),
+            size: 512,
+            channel_count: 1,
+        }];
+        let mut left = [0.0_f32; 64];
+        let mut right = [0.0_f32; 64];
+        let outputs = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let inputs: [*mut f32; 0] = [];
+
+        unsafe {
+            sampler_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                64,
+                state.as_mut_ptr() as *mut c_void,
+                desc.as_ptr() as *mut c_void,
+            );
+        }
+
+        for (i, &value) in left.iter().enumerate() {
+            let expected = i as f32 * 0.5 * 0.001;
+            assert!(
+                (value - expected).abs() < 0.000_05,
+                "frame {i}: expected {expected}, got {value} (full: {left:?})"
+            );
+        }
+        // Read head landed halfway through the rendered block's frame count.
+        assert!((state[STATE_PLAYHEAD] - 32.0).abs() < 0.001);
+    }
+
     #[test]
     fn sampler_scheduled_note_on_starts_at_local_frame() {
         let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
@@ -1918,6 +2436,76 @@ mod tests {
         assert_eq!(&right[..3], &[0.0, 0.0, 0.0]);
         assert!((left[3] - 0.8).abs() < 0.0001, "left={left:?}");
         assert!((right[3] - 0.8).abs() < 0.0001, "right={right:?}");
+    }
+
+    #[test]
+    fn sampler_note_on_aux_applies_beats_preserve_before_segment_reset() {
+        for (preserve, expected_boundary) in [
+            (crate::warp_grid::PRESERVE_1_8, 500.0_f32),
+            (crate::warp_grid::PRESERVE_1_16, 250.0_f32),
+            (crate::warp_grid::PRESERVE_TRANSIENTS, 250.0_f32),
+        ] {
+            let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
+            let initial = [0.0_f32, 1_000.0];
+            unsafe {
+                sampler_init(
+                    state.as_mut_ptr() as *mut c_void,
+                    1_000,
+                    64,
+                    initial.as_ptr() as *const c_void,
+                );
+            }
+            // Prove the note-on aux value, not the initialized state, drives
+            // the first boundary.
+            state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_4 as f32;
+
+            let mut sample = vec![1.0_f32; 4_000];
+            let mut buffers = [BufferDesc {
+                buffer: sample.as_mut_ptr(),
+                size: sample.len() as std::os::raw::c_int,
+                channel_count: 1,
+            }];
+            let mut event = sampler_note_on_event(0);
+            event.aux[SAMPLER_EVENT_AUX_WARP_ENABLED] = 1.0;
+            event.aux[SAMPLER_EVENT_AUX_WARP_MODE] = WARP_MODE_BEATS as f32;
+            event.aux[SAMPLER_EVENT_AUX_WARP_RATIO] = 2.0;
+            event.aux[SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM] = 60.0;
+            event.aux[SAMPLER_EVENT_AUX_WARP_PROJECT_BPM] = 120.0;
+            event.aux[SAMPLER_EVENT_AUX_WARP_PRESERVE] = preserve as f32;
+            event.aux[SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE] = SEG_LOOP_PINGPONG as f32;
+            event.aux[SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE] = 0.5;
+
+            unsafe {
+                sampler_begin_event_slice(state.as_mut_ptr().cast(), 1, 0, 8);
+                assert!(sampler_schedule_event(state.as_mut_ptr().cast(), &event));
+            }
+
+            let mut left = [0.0f32; 8];
+            let mut right = [0.0f32; 8];
+            let outputs = [left.as_mut_ptr(), right.as_mut_ptr()];
+            unsafe {
+                sampler_process(
+                    std::ptr::null(),
+                    outputs.as_ptr(),
+                    8,
+                    state.as_mut_ptr().cast(),
+                    buffers.as_mut_ptr().cast(),
+                );
+            }
+
+            assert_eq!(state[STATE_WARP_PRESERVE], preserve as f32);
+            assert_eq!(state[STATE_WARP_SEG_LOOP_MODE], SEG_LOOP_PINGPONG as f32);
+            assert!((state[STATE_WARP_SEG_ENVELOPE] - 0.5).abs() < 0.0001);
+            assert!(
+                (state[STATE_WARP_NEXT_BOUNDARY] - expected_boundary).abs() < 0.001,
+                "preserve={preserve}: expected boundary {expected_boundary}, got {}",
+                state[STATE_WARP_NEXT_BOUNDARY]
+            );
+            assert!(
+                left.iter().any(|value| value.abs() > 0.001),
+                "preserve={preserve}: scheduled warp note rendered silence"
+            );
+        }
     }
 
     #[test]

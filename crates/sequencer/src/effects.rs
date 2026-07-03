@@ -4335,10 +4335,15 @@ impl EffectDescriptor {
             ParamDescriptor {
                 name: "mode".to_string(),
                 min: 0.0,
-                max: 0.0,
+                max: 3.0,
                 default: 0.0,
                 kind: ParamKind::Enum {
-                    labels: vec!["transient".to_string()],
+                    labels: vec![
+                        "beats".to_string(),
+                        "tones".to_string(),
+                        "texture".to_string(),
+                        "re-pitch".to_string(),
+                    ],
                 },
                 scaling: ParamScaling::Linear,
                 node_param_idx: crate::sampler::PARAM_WARP_MODE as u32,
@@ -4459,6 +4464,62 @@ impl EffectDescriptor {
             },
             scaling: ParamScaling::Linear,
             node_param_idx: crate::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+        // Beats-warp params. Appended at the tail (like "smooth") so plock
+        // indices of older params stay stable in saved projects.
+        params.push(ParamDescriptor {
+            name: "preserve".to_string(),
+            min: 0.0,
+            max: 6.0,
+            default: crate::warp_grid::PRESERVE_TRANSIENTS as f32,
+            kind: ParamKind::Enum {
+                labels: vec![
+                    "1 bar".to_string(),
+                    "1/2".to_string(),
+                    "1/4".to_string(),
+                    "1/8".to_string(),
+                    "1/16".to_string(),
+                    "1/32".to_string(),
+                    "transients".to_string(),
+                ],
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::sampler::PARAM_WARP_PRESERVE as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+        params.push(ParamDescriptor {
+            name: "fill".to_string(),
+            min: 0.0,
+            max: 2.0,
+            default: crate::sampler::SEG_LOOP_FORWARD as f32,
+            kind: ParamKind::Enum {
+                labels: vec![
+                    "off".to_string(),
+                    "loop".to_string(),
+                    "ping-pong".to_string(),
+                ],
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        });
+        params.push(ParamDescriptor {
+            name: "decay".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            kind: ParamKind::Continuous {
+                unit: Some("%".to_string()),
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
             node_param_span: 1,
             host_control: None,
             ui_metadata: None,

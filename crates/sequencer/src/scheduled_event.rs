@@ -72,6 +72,9 @@ pub struct ScheduledSamplerParams {
     pub sample_bpm: f32,
     pub playback_speed: f32,
     pub scrub: f32,
+    pub warp_preserve: f32,
+    pub warp_seg_loop_mode: f32,
+    pub warp_seg_envelope: f32,
 }
 
 impl Default for ScheduledSamplerParams {
@@ -91,6 +94,9 @@ impl Default for ScheduledSamplerParams {
             sample_bpm: 120.0,
             playback_speed: 1.0,
             scrub: 0.0,
+            warp_preserve: crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+            warp_seg_loop_mode: crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+            warp_seg_envelope: crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
         }
     }
 }
@@ -133,6 +139,7 @@ pub enum ScheduledEventKind {
         effect_params: Vec<ScheduledEffectParam>,
         instrument_params: ScheduledInstrumentParams,
         instrument_tensor_params: ScheduledInstrumentTensorParams,
+        sampler_params: ScheduledSamplerParams,
         instrument_fingerprint: u64,
     },
     NetworkTrigger {
@@ -254,7 +261,7 @@ mod tests {
     use super::{
         ScheduledChordData, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
         ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
-        ScheduledInstrumentParams, ScheduledInstrumentTensorParams,
+        ScheduledInstrumentParams, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
     };
     use crate::accumulator::ResolvedStep;
     use crate::voice::MAX_VOICES;
@@ -269,6 +276,10 @@ mod tests {
 
     fn empty_instrument_tensor_params() -> ScheduledInstrumentTensorParams {
         ScheduledInstrumentTensorParams::new()
+    }
+
+    fn default_sampler_params() -> ScheduledSamplerParams {
+        ScheduledSamplerParams::default()
     }
 
     #[test]
@@ -313,6 +324,7 @@ mod tests {
                         },
                     ]),
                     instrument_tensor_params: empty_instrument_tensor_params(),
+                    sampler_params: default_sampler_params(),
                     instrument_fingerprint: 11,
                 },
             })
@@ -345,6 +357,7 @@ mod tests {
                     effect_params: empty_effect_params(),
                     instrument_params: empty_instrument_params(),
                     instrument_tensor_params: empty_instrument_tensor_params(),
+                    sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
                 },
             })
@@ -390,6 +403,7 @@ mod tests {
                         }
                     ]),
                     instrument_tensor_params: empty_instrument_tensor_params(),
+                    sampler_params: default_sampler_params(),
                     instrument_fingerprint: 11,
                 },
             })
@@ -423,6 +437,7 @@ mod tests {
                     effect_params: empty_effect_params(),
                     instrument_params: empty_instrument_params(),
                     instrument_tensor_params: empty_instrument_tensor_params(),
+                    sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
                 },
             })
@@ -461,6 +476,7 @@ mod tests {
                     effect_params: empty_effect_params(),
                     instrument_params: empty_instrument_params(),
                     instrument_tensor_params: empty_instrument_tensor_params(),
+                    sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
                 },
             })
@@ -493,6 +509,7 @@ mod tests {
                 effect_params: empty_effect_params(),
                 instrument_params: empty_instrument_params(),
                 instrument_tensor_params: empty_instrument_tensor_params(),
+                sampler_params: default_sampler_params(),
                 instrument_fingerprint: 0,
             },
         });

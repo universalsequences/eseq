@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::audiograph::*;
-use crate::effects::{EffectSlotSnapshot, MAX_SLOT_PARAMS};
+use crate::effects::{EffectSlotSnapshot, EffectSlotState, MAX_SLOT_PARAMS};
 use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
@@ -19,8 +19,10 @@ use crate::sampler::{
     SAMPLER_EVENT_AUX_RELEASE_SAMPLES, SAMPLER_EVENT_AUX_REVERSE, SAMPLER_EVENT_AUX_SCRUB_OFFSET,
     SAMPLER_EVENT_AUX_SPEED, SAMPLER_EVENT_AUX_SR_HZ, SAMPLER_EVENT_AUX_START_POINT,
     SAMPLER_EVENT_AUX_TRANSPOSE, SAMPLER_EVENT_AUX_VELOCITY, SAMPLER_EVENT_AUX_WARP_ENABLED,
-    SAMPLER_EVENT_AUX_WARP_MODE, SAMPLER_EVENT_AUX_WARP_PROJECT_BPM, SAMPLER_EVENT_AUX_WARP_PTR_HI,
+    SAMPLER_EVENT_AUX_WARP_MODE, SAMPLER_EVENT_AUX_WARP_PRESERVE,
+    SAMPLER_EVENT_AUX_WARP_PROJECT_BPM, SAMPLER_EVENT_AUX_WARP_PTR_HI,
     SAMPLER_EVENT_AUX_WARP_PTR_LO, SAMPLER_EVENT_AUX_WARP_RATIO, SAMPLER_EVENT_AUX_WARP_SAMPLE_BPM,
+    SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE, SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE,
 };
 use crate::scheduled_event::{
     resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
@@ -1315,6 +1317,9 @@ unsafe fn send_trigger(
     warp_project_bpm: f32,
     warp_ptr_lo: f32,
     warp_ptr_hi: f32,
+    warp_preserve: f32,
+    warp_seg_loop_mode: f32,
+    warp_seg_envelope: f32,
     scrub_offset: f32,
 ) {
     let mut aux = [0.0f32; SAMPLER_EVENT_AUX_NOTE_ON_COUNT];
@@ -1340,6 +1345,9 @@ unsafe fn send_trigger(
     aux[SAMPLER_EVENT_AUX_WARP_PTR_LO] = warp_ptr_lo;
     aux[SAMPLER_EVENT_AUX_WARP_PTR_HI] = warp_ptr_hi;
     aux[SAMPLER_EVENT_AUX_SCRUB_OFFSET] = scrub_offset;
+    aux[SAMPLER_EVENT_AUX_WARP_PRESERVE] = warp_preserve;
+    aux[SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE] = warp_seg_loop_mode;
+    aux[SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE] = warp_seg_envelope;
     push_graph_block_event(lg, lid, frame_offset, sequence, GBE_NOTE_ON, &aux);
 }
 
@@ -1369,6 +1377,9 @@ unsafe fn send_keyboard_trigger(
     warp_project_bpm: f32,
     warp_ptr_lo: f32,
     warp_ptr_hi: f32,
+    warp_preserve: f32,
+    warp_seg_loop_mode: f32,
+    warp_seg_envelope: f32,
     scrub_offset: f32,
 ) {
     send_trigger(
@@ -1397,6 +1408,9 @@ unsafe fn send_keyboard_trigger(
         warp_project_bpm,
         warp_ptr_lo,
         warp_ptr_hi,
+        warp_preserve,
+        warp_seg_loop_mode,
+        warp_seg_envelope,
         scrub_offset,
     );
 }
@@ -1769,26 +1783,34 @@ fn sampler_warp_runtime(
 ) -> (f32, f32, f32, f32, f32, f32, f32) {
     let project_bpm = state.transport.bpm.load(Ordering::Relaxed).max(1) as f32;
     let sample_bpm = sample_bpm.clamp(20.0, 400.0);
-    if warp_enabled <= 0.5 || warp_mode.round() != 0.0 {
+    if warp_enabled <= 0.5 {
         return (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0);
     }
+    let ratio = (project_bpm / sample_bpm).clamp(0.01, 32.0);
+    if warp_mode.round() != 0.0 {
+        // Non-onset warp modes (re-pitch family) need no analysis or onset table.
+        return (1.0, warp_mode, ratio, sample_bpm, project_bpm, 0.0, 0.0);
+    }
+    // Beats runs off the beat grid (bpm-only); the onset table is attached
+    // when analysis is ready so Preserve=Transients can snap to it, but its
+    // absence no longer disables warp.
     let status = state.runtime.sampler_analysis_status[track_idx].load(Ordering::Acquire);
-    if status != 2 {
-        return (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0);
-    }
-    let ptr_lo_bits = state.runtime.sampler_onset_ptr_lo[track_idx].load(Ordering::Acquire);
-    let ptr_hi_bits = state.runtime.sampler_onset_ptr_hi[track_idx].load(Ordering::Acquire);
-    if ptr_lo_bits == 0 && ptr_hi_bits == 0 {
-        return (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0);
-    }
+    let (ptr_lo, ptr_hi) = if status == 2 {
+        (
+            f32::from_bits(state.runtime.sampler_onset_ptr_lo[track_idx].load(Ordering::Acquire)),
+            f32::from_bits(state.runtime.sampler_onset_ptr_hi[track_idx].load(Ordering::Acquire)),
+        )
+    } else {
+        (0.0, 0.0)
+    };
     (
         1.0,
         warp_mode,
-        project_bpm / sample_bpm,
+        ratio,
         sample_bpm,
         project_bpm,
-        f32::from_bits(ptr_lo_bits),
-        f32::from_bits(ptr_hi_bits),
+        ptr_lo,
+        ptr_hi,
     )
 }
 
@@ -1908,6 +1930,93 @@ fn resolved_slot_param_value(
     }
 }
 
+fn snapshot_slot_param_index_by_node_idx(
+    slot: &EffectSlotSnapshot,
+    node_param_idx: u32,
+) -> Option<usize> {
+    let num_params = slot.num_params as usize;
+    (0..num_params).find(|&param_idx| {
+        slot.param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32)
+            == node_param_idx
+    })
+}
+
+fn resolved_slot_node_param_value(
+    slot: &EffectSlotSnapshot,
+    step_idx: usize,
+    node_param_idx: u32,
+    default: f32,
+) -> f32 {
+    let Some(param_idx) = snapshot_slot_param_index_by_node_idx(slot, node_param_idx) else {
+        return default;
+    };
+    resolved_slot_param_value(slot, step_idx, param_idx, default)
+}
+
+fn default_slot_node_param_value(
+    slot: &EffectSlotSnapshot,
+    node_param_idx: u32,
+    default: f32,
+) -> f32 {
+    let Some(param_idx) = snapshot_slot_param_index_by_node_idx(slot, node_param_idx) else {
+        return default;
+    };
+    slot.defaults.get(param_idx).copied().unwrap_or(default)
+}
+
+fn live_slot_param_index_by_node_idx(slot: &EffectSlotState, node_param_idx: u64) -> Option<usize> {
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    (0..num_params).find(|&param_idx| slot.resolve_node_idx(param_idx) == node_param_idx)
+}
+
+fn live_slot_resolved_param_value(
+    slot: &EffectSlotState,
+    step_idx: usize,
+    param_idx: usize,
+    default: f32,
+) -> f32 {
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    if param_idx >= num_params {
+        return default;
+    }
+    let default_value = slot.defaults.get(param_idx);
+    let Some(plock) = slot.plocks.get(step_idx, param_idx) else {
+        return default_value;
+    };
+    let expected_id = slot.param_node_id(param_idx);
+    if expected_id.is_some() && slot.plocks.get_id(step_idx, param_idx) == expected_id {
+        plock
+    } else {
+        default_value
+    }
+}
+
+fn live_slot_resolved_node_param_value(
+    slot: &EffectSlotState,
+    step_idx: usize,
+    node_param_idx: u64,
+    default: f32,
+) -> f32 {
+    let Some(param_idx) = live_slot_param_index_by_node_idx(slot, node_param_idx) else {
+        return default;
+    };
+    live_slot_resolved_param_value(slot, step_idx, param_idx, default)
+}
+
+fn live_slot_default_node_param_value(
+    slot: &EffectSlotState,
+    node_param_idx: u64,
+    default: f32,
+) -> f32 {
+    let Some(param_idx) = live_slot_param_index_by_node_idx(slot, node_param_idx) else {
+        return default;
+    };
+    slot.defaults.get(param_idx)
+}
+
 fn resolve_rack_slot_instrument_params(
     slot: &EffectSlotSnapshot,
     step_idx: usize,
@@ -2021,6 +2130,24 @@ fn resolve_rack_slot_sampler_params(
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
+        warp_preserve: resolved_slot_node_param_value(
+            slot,
+            step_idx,
+            crate::sampler::PARAM_WARP_PRESERVE as u32,
+            crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+        ),
+        warp_seg_loop_mode: resolved_slot_node_param_value(
+            slot,
+            step_idx,
+            crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+        ),
+        warp_seg_envelope: resolved_slot_node_param_value(
+            slot,
+            step_idx,
+            crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+        ),
     }
 }
 
@@ -2042,6 +2169,21 @@ fn resolve_rack_slot_sampler_defaults(slot: &EffectSlotSnapshot) -> ScheduledSam
         sample_bpm: value(11, 120.0),
         playback_speed: value(12, 1.0),
         scrub: value(13, 0.0),
+        warp_preserve: default_slot_node_param_value(
+            slot,
+            crate::sampler::PARAM_WARP_PRESERVE as u32,
+            crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+        ),
+        warp_seg_loop_mode: default_slot_node_param_value(
+            slot,
+            crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+        ),
+        warp_seg_envelope: default_slot_node_param_value(
+            slot,
+            crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+        ),
     }
 }
 
@@ -2445,6 +2587,7 @@ fn dispatch_scheduled_step(
     mut effect_params: Vec<ScheduledEffectParam>,
     instrument_params: ScheduledInstrumentParams,
     instrument_tensor_params: ScheduledInstrumentTensorParams,
+    sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
 ) {
     unsafe {
@@ -2461,7 +2604,7 @@ fn dispatch_scheduled_step(
         instrument_params,
         instrument_tensor_params,
         instrument_fingerprint,
-        None,
+        Some(sampler_params),
     );
 }
 
@@ -2511,6 +2654,7 @@ fn dispatch_scheduled_event(
             effect_params,
             instrument_params,
             instrument_tensor_params,
+            sampler_params,
             instrument_fingerprint,
         } => {
             dispatch_scheduled_step(
@@ -2524,6 +2668,7 @@ fn dispatch_scheduled_event(
                 effect_params,
                 instrument_params,
                 instrument_tensor_params,
+                sampler_params,
                 instrument_fingerprint,
             );
         }
@@ -3591,10 +3736,13 @@ fn rack_sampler_warp_runtime(
 ) -> (f32, f32, f32, f32, f32, f32, f32) {
     let project_bpm = state.transport.bpm.load(Ordering::Relaxed).max(1) as f32;
     let sample_bpm = sample_bpm.clamp(20.0, 400.0);
-    if warp_enabled <= 0.5 || warp_mode.round() != 0.0 {
+    if warp_enabled <= 0.5 {
         return (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0);
     }
-    (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0)
+    // All warp modes run without analysis now (Beats falls back to the pure
+    // beat grid when no onset table is present), so racks support every mode.
+    let ratio = (project_bpm / sample_bpm).clamp(0.01, 32.0);
+    (1.0, warp_mode, ratio, sample_bpm, project_bpm, 0.0, 0.0)
 }
 
 fn push_active_keyboard_voice(
@@ -3735,6 +3883,9 @@ fn fire_live_keyboard_rack_note(
                         warp_project_bpm,
                         warp_ptr_lo,
                         warp_ptr_hi,
+                        sampler_params.warp_preserve,
+                        sampler_params.warp_seg_loop_mode,
+                        sampler_params.warp_seg_envelope,
                         sampler_params.scrub,
                     );
                     dispatch_sampler_extra_params_to_voice(
@@ -3969,6 +4120,9 @@ fn fire_rack_slot_note(
                     warp_project_bpm,
                     warp_ptr_lo,
                     warp_ptr_hi,
+                    sampler_params.warp_preserve,
+                    sampler_params.warp_seg_loop_mode,
+                    sampler_params.warp_seg_envelope,
                     sampler_params.scrub,
                 );
             }
@@ -4348,6 +4502,24 @@ fn fire_resolved(
                 .plocks
                 .get(step, 13)
                 .unwrap_or_else(|| inst_slot.defaults.get(13)),
+            warp_preserve: live_slot_resolved_node_param_value(
+                inst_slot,
+                step,
+                crate::sampler::PARAM_WARP_PRESERVE,
+                crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+            ),
+            warp_seg_loop_mode: live_slot_resolved_node_param_value(
+                inst_slot,
+                step,
+                crate::sampler::PARAM_WARP_SEG_LOOP_MODE,
+                crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+            ),
+            warp_seg_envelope: live_slot_resolved_node_param_value(
+                inst_slot,
+                step,
+                crate::sampler::PARAM_WARP_SEG_ENVELOPE,
+                crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+            ),
         }
     };
     let sampler_params = scheduled_sampler_params.unwrap_or_else(fallback_sampler_params);
@@ -4369,6 +4541,9 @@ fn fire_resolved(
     let sample_bpm = sampler_params.sample_bpm;
     let playback_speed = sampler_params.playback_speed;
     let scrub = sampler_params.scrub;
+    let warp_preserve = sampler_params.warp_preserve;
+    let warp_seg_loop_mode = sampler_params.warp_seg_loop_mode;
+    let warp_seg_envelope = sampler_params.warp_seg_envelope;
     let (
         warp_enabled,
         warp_mode,
@@ -4631,6 +4806,9 @@ fn fire_resolved(
                         warp_project_bpm,
                         warp_ptr_lo,
                         warp_ptr_hi,
+                        warp_preserve,
+                        warp_seg_loop_mode,
+                        warp_seg_envelope,
                         scrub,
                     );
                 }
@@ -4817,6 +4995,9 @@ fn fire_resolved(
                     warp_project_bpm,
                     warp_ptr_lo,
                     warp_ptr_hi,
+                    warp_preserve,
+                    warp_seg_loop_mode,
+                    warp_seg_envelope,
                     scrub,
                 );
             }
@@ -4979,6 +5160,24 @@ fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent, frame_off
         .plocks
         .get(event.step, 13)
         .unwrap_or_else(|| chop_inst_slot.defaults.get(13));
+    let chop_warp_preserve = live_slot_resolved_node_param_value(
+        chop_inst_slot,
+        event.step,
+        crate::sampler::PARAM_WARP_PRESERVE,
+        crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+    );
+    let chop_warp_seg_loop_mode = live_slot_resolved_node_param_value(
+        chop_inst_slot,
+        event.step,
+        crate::sampler::PARAM_WARP_SEG_LOOP_MODE,
+        crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+    );
+    let chop_warp_seg_envelope = live_slot_resolved_node_param_value(
+        chop_inst_slot,
+        event.step,
+        crate::sampler::PARAM_WARP_SEG_ENVELOPE,
+        crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+    );
     let (
         chop_warp_enabled,
         chop_warp_mode,
@@ -5061,6 +5260,9 @@ fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent, frame_off
             chop_warp_project_bpm,
             chop_warp_ptr_lo,
             chop_warp_ptr_hi,
+            chop_warp_preserve,
+            chop_warp_seg_loop_mode,
+            chop_warp_seg_envelope,
             chop_scrub,
         );
     }
@@ -5283,6 +5485,21 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     kb_inst_slot.defaults.get(7) * data.sample_rate as f32 / 1000.0;
                 let kb_sr_hz = kb_inst_slot.defaults.get(8);
                 let kb_playback_speed = kb_inst_slot.defaults.get(12);
+                let kb_warp_preserve = live_slot_default_node_param_value(
+                    kb_inst_slot,
+                    crate::sampler::PARAM_WARP_PRESERVE,
+                    crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+                );
+                let kb_warp_seg_loop_mode = live_slot_default_node_param_value(
+                    kb_inst_slot,
+                    crate::sampler::PARAM_WARP_SEG_LOOP_MODE,
+                    crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+                );
+                let kb_warp_seg_envelope = live_slot_default_node_param_value(
+                    kb_inst_slot,
+                    crate::sampler::PARAM_WARP_SEG_ENVELOPE,
+                    crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+                );
                 let (
                     kb_warp_enabled,
                     kb_warp_mode,
@@ -5344,6 +5561,9 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         kb_warp_project_bpm,
                         kb_warp_ptr_lo,
                         kb_warp_ptr_hi,
+                        kb_warp_preserve,
+                        kb_warp_seg_loop_mode,
+                        kb_warp_seg_envelope,
                         kb_inst_slot.defaults.get(13),
                     );
                     dispatch_sampler_extra_defaults_to_voice(
@@ -6386,6 +6606,7 @@ mod tests {
                     effect_params: Vec::new(),
                     instrument_params: ScheduledInstrumentParams::new(),
                     instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
+                    sampler_params: ScheduledSamplerParams::default(),
                     instrument_fingerprint: 0,
                 },
             }),
@@ -6529,6 +6750,34 @@ mod tests {
         assert!((ratio - (160.0 / 120.0)).abs() < 0.0001);
         assert!((sample_bpm - 120.0).abs() < 0.0001);
         assert!((project_bpm - 160.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn sampler_warp_repitch_mode_needs_no_analysis() {
+        let state = SequencerState::new(1, Vec::new());
+        state.transport.bpm.store(120, Ordering::Relaxed);
+        // No analysis status, no onset table: re-pitch must still engage.
+        let (enabled, mode, ratio, _, _, ptr_lo, ptr_hi) = sampler_warp_runtime(
+            &state,
+            0,
+            1.0,
+            crate::sampler::WARP_MODE_REPITCH as f32,
+            174.0,
+        );
+        assert!(enabled > 0.5);
+        assert_eq!(mode.round() as i32, crate::sampler::WARP_MODE_REPITCH);
+        // 174 BPM sample in a 120 BPM project: the read head must consume
+        // source slower, at 120/174 ≈ 0.69 source frames per host frame.
+        assert!((ratio - (120.0 / 174.0)).abs() < 0.0001);
+        assert_eq!((ptr_lo, ptr_hi), (0.0, 0.0));
+
+        // Beats mode without analysis: enabled on the pure beat grid, with a
+        // null onset table (Preserve=Transients degrades to the plain grid).
+        let (enabled, _, ratio, _, _, ptr_lo, ptr_hi) =
+            sampler_warp_runtime(&state, 0, 1.0, 0.0, 174.0);
+        assert!(enabled > 0.5);
+        assert!((ratio - (120.0 / 174.0)).abs() < 0.0001);
+        assert_eq!((ptr_lo, ptr_hi), (0.0, 0.0));
     }
 
     #[test]
