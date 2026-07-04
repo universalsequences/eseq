@@ -669,7 +669,7 @@
     (instrument-toggle-mods-view)
     (seq-show-fx-lower-panel)))
 
-(bind-key "Tab" "seq-toggle-mixer-panel")
+(bind-key "Tab" "seq-toggle-current-track-expanded-main")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
 (def page-button-width 2.8)

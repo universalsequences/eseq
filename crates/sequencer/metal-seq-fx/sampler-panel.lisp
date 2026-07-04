@@ -91,16 +91,32 @@
         :selected-mod-slot (instrument-selected-mod-slot-prop p)
         :font-size 10.5 :label-font-size 10
         :text-color :dim :label-color :dim
-        :width 4.0 :height 2.05
+        :width 4.7 :height 2.05
         :knob-size 2.5
         :on-change (lambda (v) (instrument-set-param-control-value p v))))))
+
+
+(def sampler-param-number-picker (p key)
+  (instrument-param-mod-wrapper p (str key "-mod-wrapper")
+    (subtree :key (str key (instrument-param-control-key-mode p))
+      (h-stack :align :baseline :gap 0.35
+        (label (get p :name) :font-size 10 :color :white :bg :transparent)
+        (number-picker
+          :value (fx-param-value p)
+          :noui true
+          :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 1
+          :font-size 10.5
+          :text-color :dim :edit-color :yellow
+          :text-align :left
+          :width 4.0 :height 1.0
+          :on-change (lambda (v) (instrument-set-param-control-value p v)))))))
 
 (def sampler-param-button (p key)
   (subtree :key key
     (v-stack :align :center :gap 0.2
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
       (button (if (fx-param-on? p) "ON" "OFF")
-        :width 3.2 :height 1.0 :padding 0 :font-size 10
+        :width 3.2 :height 1.5 :padding 0 :font-size 10
         :background-color (if (fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
         :color (if (fx-param-on? p) :black :dim)
         :on-click |x y r| (fx-set-instrument-value p (if (fx-param-on? p) 0 1))))))
@@ -111,6 +127,13 @@
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
       (dropdown :value (get p :text-value)
         :options (get p :options)
+        
+        :bg-color '(rgba 0.1 0.1 0.1 1) ;:instrument-control-bg
+        ;:text-color accent
+       ; :chevron-color :accent
+        ;:badge-color (rgba 0.16 0.17 0.20 1.0)
+        :border-color :gray
+        :border-width 0.05  
         :on-change (lambda (v) (fx-set-instrument-option p v))
         :width 5.8 :height 1.0 :font-size 9))))
 
@@ -118,38 +141,63 @@
   (v-stack :align :center :gap 0.2
     (label "gate" :font-size 10 :color :dim :bg :transparent)
     (button (if SEQ.tp-gate "ON" "OFF")
-      :width 3.2 :height 1.0 :padding 0 :font-size 10
+      :width 3.2 :height 1.5 :padding 0 :font-size 10
       :background-color (if SEQ.tp-gate (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
       :color (if SEQ.tp-gate :black :dim)
       :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1))))))
 
 (def sampler-param-control (p)
   (let ((key (if (get p :idx)
-               (str "sampler-param-" (get p :idx))
-               (str "sampler-param-" (get p :name)))))
+          (str "sampler-param-" (get p :idx))
+          (str "sampler-param-" (get p :name)))))
     (if (get p :boolean)
       (sampler-param-button p key)
       (if (get p :options)
         (sampler-param-dropdown p key)
         (sampler-param-knob p key)))))
 
+(def sampler-param-control-number-picker (p)
+  (let ((key (if (get p :idx)
+          (str "sampler-param-" (get p :idx))
+          (str "sampler-param-" (get p :name)))))
+    (if (get p :boolean)
+      (sampler-param-button p key)
+      (if (get p :options)
+        (sampler-param-dropdown p key)
+        (sampler-param-number-picker p key)))))
+
 (def sampler-param-by-name (params name)
   (nth (filter |p| (= (get p :name) name) params) 0))
+
+(def sampler-small-params (params)
+  (filter |p|
+    (let ((name (get p :name)))
+      (or (= name "base")
+          (= name "attack")
+          (= name "release")
+          (= name "start")
+          (= name "end")))
+    params))
 
 (def sampler-main-params (params)
   (filter |p|
     (let ((name (get p :name)))
       (and (not (= name "enabled"))
-           (not (= name "warp"))
-           (not (= name "mode"))
-           (not (= name "bpm"))
-           (not (= name "preserve"))
-           (not (= name "fill"))
-           (not (= name "decay"))))
+        (not (= name "warp"))
+        (not (= name "mode"))
+        (not (= name "bpm"))
+        (not (= name "preserve"))
+        (not (= name "fill"))
+        (not (= name "base"))
+        (not (= name "attack"))
+        (not (= name "release"))
+        (not (= name "start"))
+        (not (= name "end"))
+        (not (= name "decay"))))
     params))
 
 (def sampler-bpm-control (p)
-  (h-stack :gap 0.65 :align :end
+  (h-stack :gap 0.65 :align :start
     (instrument-param-mod-wrapper p "sampler-param-bpm-mod-wrapper"
       (subtree :key (str "sampler-param-bpm" (instrument-param-control-key-mode p))
         (knob-number :label "bpm"
@@ -170,26 +218,31 @@
           :selected-mod-slot (instrument-selected-mod-slot-prop p)
           :font-size 10.5 :label-font-size 10
           :text-color :dim :label-color :dim
-          :width 4.75 :height 2.05
+          :width 4.0 :height 2.05
+          :knob-size 3.0
           :on-change (lambda (v) (instrument-set-param-control-value p v)))))
     (v-stack :gap 0.12 :align :center
-      (box :height 0.82)
+      (box :height 0.02)
       (v-stack :gap 0.2
         (button "1/2"
-          :width 1.85 :height 0.82 :padding 0 :font-size 8
+          :width 2.25 :height 1.02 :padding 0 :font-size 8
           :background-color :mixer-control-bg :color :dim
           :on-click |x y r| (fx-set-instrument-value p (min 400 (* (get p :value) 2))))
         (button "2x"
-          :width 1.85 :height 0.82 :padding 0 :font-size 8
+          :width 2.25 :height 1.02 :padding 0 :font-size 8
           :background-color :mixer-control-bg :color :dim
           :on-click |x y r| (fx-set-instrument-value p (max 20 (/ (get p :value) 2))))))))
 
-(def sampler-param-knobs (params inst)
+(def sampler-param-pickers (params inst)
   (h-stack :gap 0.85 :padding 0.55 :align :center
+    (each (sampler-small-params params) |p pi|
+      (sampler-param-control-number-picker p))))
+
+(def sampler-param-knobs (params inst)
+  (h-stack :gap 0.85 :padding 0.15 :align :start
     (sampler-gate-button)
     (each (sampler-main-params params) |p pi|
       (sampler-param-control p))
-    (box :width 1.4 :height 1)
     (sampler-param-control (sampler-param-by-name params "warp"))
     (sampler-param-control (sampler-param-by-name params "mode"))
     (sampler-param-control (sampler-param-by-name params "preserve"))
@@ -215,9 +268,9 @@
               (box :height 0.3)
               (if (get inst :buffer)
                 (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                  (box :width 78 :height 5.85
+                  (box :width 81 :height 5.05
                     (waveform
-                      :height 4.85
+                      :height 4.25
                       :header-height 0.3
                       :ruler-font-size 8
                       :ruler-color :dim
@@ -243,7 +296,8 @@
                       :on-action |event| (handle-sampler-waveform-action inst event (get inst :duration)))))
                 (box :width 70 :height 4.85 :h-align :center :v-align :center
                   (label "No sample" :font-size 12 :color :dim :bg :transparent)))
-              (sampler-param-knobs (get inst :synth) inst))))))
+              (sampler-param-pickers (get inst :synth) inst)))
+          (sampler-param-knobs (get inst :synth) inst))))
     (if instrument-mods-open
       (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
         (instrument-mod-control-panel inst)

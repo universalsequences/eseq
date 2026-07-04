@@ -716,7 +716,9 @@ fn key_should_reveal_sequencer_track(key: &crossterm::event::KeyEvent) -> bool {
 
     matches!(
         (key.code, key.modifiers),
-        (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE)
+        (KeyCode::Up, KeyModifiers::NONE)
+            | (KeyCode::Down, KeyModifiers::NONE)
+            | (KeyCode::Tab, KeyModifiers::NONE)
     )
 }
 
@@ -3310,8 +3312,8 @@ mod tests {
             KeyModifiers::NONE
         )));
         assert!(
-            !key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-            "plain Tab toggles mixer visibility and should not reveal the sequencer row"
+            key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            "plain Tab expands the current sequencer track and should reveal that row"
         );
         assert!(
             !key_should_reveal_sequencer_track(&KeyEvent::new(

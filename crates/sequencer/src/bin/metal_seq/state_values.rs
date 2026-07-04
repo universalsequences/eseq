@@ -13124,6 +13124,19 @@ mod tests {
                 Value::Map(test_param_map("speed", 11, 1.0, -4.0, 4.0)),
                 Value::Map(test_param_map("scrub", 12, 0.0, -1.0, 1.0)),
                 Value::Map(test_param_map("bpm", 13, 120.0, 20.0, 400.0)),
+                Value::Map(test_enum_param_map(
+                    "preserve",
+                    14,
+                    6.0,
+                    vec!["1 bar", "1/2", "1/4", "1/8", "1/16", "1/32", "transients"],
+                )),
+                Value::Map(test_enum_param_map(
+                    "fill",
+                    15,
+                    1.0,
+                    vec!["off", "loop", "ping-pong"],
+                )),
+                Value::Map(test_param_map("decay", 16, 0.0, 0.0, 1.0)),
             ]))),
         );
         inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
@@ -18621,7 +18634,7 @@ mod tests {
         assert_eq!(
             editor.active_buffer().name,
             "*fake-seq*",
-            "plain Tab must not switch the selected sequencer step tab"
+            "mixer toggle must not switch the selected sequencer step tab"
         );
         assert_eq!(
             editor.active_leaf().selected_tab,
@@ -19367,15 +19380,53 @@ mod tests {
         let samples_button =
             find_layout_node_by_stable_key(&layout, "transport-samples-sidebar-button")
                 .expect("samples sidebar button");
+        let mixer_button =
+            find_layout_node_by_stable_key(&layout, "transport-mixer-panel-button")
+                .expect("mixer panel button");
         let save_button =
             find_layout_node_by_stable_key(&layout, "transport-save-button").expect("save button");
         assert_finite_nonzero_rect(samples_button, "samples sidebar button");
+        assert_finite_nonzero_rect(mixer_button, "mixer panel button");
         assert_finite_nonzero_rect(save_button, "save button");
         assert!(
-            samples_button.rect.col + samples_button.rect.width <= save_button.rect.col,
-            "samples sidebar button should be to the left of save; samples={:?} save={:?}",
+            samples_button.rect.col + samples_button.rect.width <= mixer_button.rect.col,
+            "samples sidebar button should be to the left of mixer; samples={:?} mixer={:?}",
             samples_button.rect,
+            mixer_button.rect
+        );
+        assert!(
+            mixer_button.rect.col + mixer_button.rect.width <= save_button.rect.col,
+            "mixer panel button should be to the left of save; mixer={:?} save={:?}",
+            mixer_button.rect,
             save_button.rect
+        );
+
+        let mixer_icon = find_layout_node_by_widget_type(mixer_button, "mix-panel-icon")
+            .expect("mixer panel icon");
+        let callback = mixer_icon
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("mixer panel button on-click");
+        editor
+            .runtime_mut()
+            .eval_str("(set! mixer-panel-visible true)")
+            .expect("reset mixer panel visibility");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("invoke mixer panel button");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("mixer-panel-visible")
+                .unwrap(),
+            Some(Value::Bool(false)),
+            "mixer panel button should toggle mixer-panel-visible"
         );
     }
 
@@ -26058,6 +26109,30 @@ mod tests {
                 test_mod_target(22.0, 23.0, 0.0, 0.0),
             ]))),
         );
+        let mut start = test_param_map("start", 2, 0.0, 0.0, 1.0);
+        start.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        start.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                test_mod_target(50.0, 51.0, 2.0, 0.10),
+                test_mod_target(52.0, 53.0, 0.0, 0.0),
+            ]))),
+        );
+        let mut end = test_param_map("end", 3, 1.0, 0.0, 1.0);
+        end.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        end.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                test_mod_target(54.0, 55.0, 2.0, -0.15),
+                test_mod_target(56.0, 57.0, 0.0, 0.0),
+            ]))),
+        );
 
         let mut inst = test_instrument_map();
         inst.insert(
@@ -26081,8 +26156,8 @@ mod tests {
             Rc::new(RefCell::new(test_list(vec![
                 Value::Map(test_param_map("attack", 0, 0.0, 0.0, 500.0)),
                 Value::Map(test_param_map("release", 1, 0.0, 0.0, 2000.0)),
-                Value::Map(test_param_map("start", 2, 0.0, 0.0, 1.0)),
-                Value::Map(test_param_map("end", 3, 1.0, 0.0, 1.0)),
+                Value::Map(start),
+                Value::Map(end),
                 Value::Map(enabled),
                 Value::Map(test_param_map("reverse", 5, 0.0, 0.0, 1.0)),
                 Value::Map(test_param_map("loop", 6, 1.0, 0.0, 3.0)),
@@ -26093,6 +26168,19 @@ mod tests {
                 Value::Map(speed),
                 Value::Map(test_param_map("scrub", 12, 0.0, -1.0, 1.0)),
                 Value::Map(test_param_map("bpm", 13, 120.0, 20.0, 400.0)),
+                Value::Map(test_enum_param_map(
+                    "preserve",
+                    14,
+                    6.0,
+                    vec!["1 bar", "1/2", "1/4", "1/8", "1/16", "1/32", "transients"],
+                )),
+                Value::Map(test_enum_param_map(
+                    "fill",
+                    15,
+                    1.0,
+                    vec!["off", "loop", "ping-pong"],
+                )),
+                Value::Map(test_param_map("decay", 16, 0.0, 0.0, 1.0)),
             ]))),
         );
         inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
@@ -26312,6 +26400,60 @@ mod tests {
             layout_has_double_click(&layout),
             "sampler modulatable parameter wrapper should expose on-double-click"
         );
+
+        let start_wrapper = find_layout_node_by_stable_key(&layout, "sampler-param-2-mod-wrapper")
+            .unwrap_or_else(|| {
+                panic!("sampler start number wrapper; layout={layout_summaries:#?}")
+            });
+        assert!(
+            layout_has_double_click(start_wrapper),
+            "sampler start number wrapper should expose on-double-click"
+        );
+        let start_number = find_layout_node_by_stable_key(&layout, "sampler-param-2-mod-depth")
+            .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
+            .unwrap_or_else(|| {
+                panic!("sampler start should render as a mod-depth number-picker; layout={layout_summaries:#?}")
+            });
+        assert!(
+            start_number.rect.width > 0.0 && start_number.rect.height > 0.0,
+            "sampler start number-picker should have a visible measured rect: {:?}",
+            start_number.rect
+        );
+        for prop in [
+            "base-value",
+            "base-min",
+            "base-max",
+            "mod-range-0-slot",
+            "mod-range-0-depth",
+            "selected-mod-slot",
+        ] {
+            assert!(
+                !start_number.props.contains_key(prop),
+                "sampler number-picker should not receive knob-only modulation prop {prop}"
+            );
+        }
+        let end_number = find_layout_node_by_stable_key(&layout, "sampler-param-3-mod-depth")
+            .and_then(|node| find_layout_node_by_widget_type(node, "number-picker"))
+            .unwrap_or_else(|| {
+                panic!("sampler end should render as a mod-depth number-picker; layout={layout_summaries:#?}")
+            });
+        assert!(
+            end_number.rect.width > 0.0 && end_number.rect.height > 0.0,
+            "sampler end number-picker should have a visible measured rect: {:?}",
+            end_number.rect
+        );
+        let start_callback = start_number
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("sampler start number-picker should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(start_callback, vec![Value::Number(0.33)])
+            .expect("sampler start depth edit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 51.0, 0.33);
 
         let speed_knob = find_layout_node_by_stable_key(&layout, "sampler-param-11-mod-depth")
             .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))

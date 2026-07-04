@@ -930,11 +930,15 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                     return false;
                 }
                 let _ = if let Some(callable) =
-                    editor.runtime_mut().global_value("seq-toggle-mixer-panel")
+                    editor
+                        .runtime_mut()
+                        .global_value("seq-toggle-current-track-expanded-main")
                 {
                     editor.runtime_mut().invoke(callable, vec![])
                 } else {
-                    editor.runtime_mut().eval_str("(seq-toggle-mixer-panel)")
+                    editor
+                        .runtime_mut()
+                        .eval_str("(seq-toggle-current-track-expanded-main)")
                 };
                 editor.refresh_runtime_side_effects();
                 return true;
@@ -1827,7 +1831,7 @@ mod live_keyboard_tests {
         ));
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("mixer".to_string()))
+            Some(eseqlisp::vm::Value::String("expand".to_string()))
         );
 
         assert!(handle_metal_command_shortcut(
@@ -1946,7 +1950,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn plain_tab_toggles_mixer_panel_even_with_focused_sequencer_widget() {
+    fn plain_tab_expands_current_track_even_with_focused_sequencer_widget() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         let transport_id =
             editor.open_scratch_buffer_with_mode("*transport*", "", BufferMode::ESeqLisp);
@@ -2040,8 +2044,8 @@ mod live_keyboard_tests {
 
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("mixer".to_string())),
-            "plain Tab should toggle the mixer panel instead of expanding the selected sequencer track"
+            Some(eseqlisp::vm::Value::String("expanded-main".to_string())),
+            "plain Tab should expand the selected sequencer track even when a sequencer widget has focus"
         );
     }
 
