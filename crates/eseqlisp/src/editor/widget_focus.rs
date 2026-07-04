@@ -524,6 +524,7 @@ impl Editor {
         leaf.widget_scroll_left = 0.0;
         leaf.active_widget_gesture = None;
         leaf.cached_layout = None;
+        leaf.cached_layout_widget_tree_revision = 0;
     }
 
     pub(super) fn restore_buffer_widget_tree(&mut self) {

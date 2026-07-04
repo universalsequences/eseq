@@ -19,7 +19,7 @@ use crossterm::event::{
 use crate::buffer::{Buffer, debug_widget_tree_summary};
 use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
 use crate::hot_reload::{ReloadReport, SourceOverlay};
-use crate::layout::Rect;
+use crate::layout::{LayoutNode, Rect};
 use crate::mode::{
     BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match,
     has_completion_prefix, highlight_lines,
@@ -119,6 +119,24 @@ fn metal_tile_content_viewport_height_exact(
     };
     (rect.height - border_inset_px * 2.0 / cell_h.max(1.0) - if show_status { 1.0 } else { 0.0 })
         .max(0.0)
+}
+
+fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -> bool {
+    fn fills_axis(layout: &LayoutNode, prop: &str) -> bool {
+        matches!(layout.props.get(prop), Some(Value::Keyword(value)) if value == "fill")
+    }
+
+    fn dimension_valid(cached: f32, available: f32, fills_axis: bool) -> bool {
+        const EPSILON: f32 = 0.05;
+        if fills_axis {
+            (cached - available).abs() <= EPSILON
+        } else {
+            cached <= available + EPSILON
+        }
+    }
+
+    dimension_valid(layout.rect.width, cols, fills_axis(layout, "width"))
+        && dimension_valid(layout.rect.height, rows, fills_axis(layout, "height"))
 }
 
 fn format_lisp_reload_report(report: &ReloadReport) -> String {
@@ -444,6 +462,90 @@ pub struct LayoutRefreshTiming {
     pub elapsed: Duration,
 }
 
+#[derive(Clone)]
+struct RetainedTileLayout {
+    buffer_id: BufferId,
+    widget_tree_revision: u64,
+    layout_revision: u64,
+    viewport_width_bits: u32,
+    viewport_height_bits: u32,
+    cached_layout: Arc<LayoutNode>,
+    cached_inactive_frame: Option<(
+        (
+            BufferId,
+            u64,
+            u64,
+            u64,
+            usize,
+            usize,
+            usize,
+            u32,
+            u32,
+            ViewMode,
+        ),
+        crate::backend::RenderFrame,
+    )>,
+    focused_widget_id: Option<u64>,
+    focused_widget_node: Option<LayoutNode>,
+    widget_scroll_top: f32,
+    widget_scroll_left: f32,
+    widget_viewport_height: f32,
+}
+
+impl RetainedTileLayout {
+    fn from_leaf(
+        buffer: &Buffer,
+        leaf: &TileLeaf,
+        cached_layout: Option<Arc<LayoutNode>>,
+        layout_revision: u64,
+    ) -> Option<Self> {
+        let cached_layout = cached_layout?;
+        Some(Self {
+            buffer_id: buffer.id,
+            widget_tree_revision: buffer.widget_tree_revision,
+            layout_revision,
+            viewport_width_bits: cached_layout.rect.width.to_bits(),
+            viewport_height_bits: cached_layout.rect.height.to_bits(),
+            cached_layout,
+            cached_inactive_frame: leaf.cached_inactive_frame.clone(),
+            focused_widget_id: leaf.focused_widget_id,
+            focused_widget_node: leaf.focused_widget_node.clone(),
+            widget_scroll_top: leaf.widget_scroll_top,
+            widget_scroll_left: leaf.widget_scroll_left,
+            widget_viewport_height: leaf.widget_viewport_height,
+        })
+    }
+
+    fn restore_to_leaf(&self, buffer: &Buffer, leaf: &mut TileLeaf) -> bool {
+        self.restore_to_leaf_for(buffer.id, buffer.widget_tree_revision, leaf)
+    }
+
+    fn restore_to_leaf_for(
+        &self,
+        buffer_id: BufferId,
+        widget_tree_revision: u64,
+        leaf: &mut TileLeaf,
+    ) -> bool {
+        if self.buffer_id != buffer_id || self.widget_tree_revision != widget_tree_revision {
+            return false;
+        }
+        leaf.cached_layout = Some(self.cached_layout.clone());
+        leaf.cached_layout_widget_tree_revision = self.widget_tree_revision;
+        leaf.layout_revision = self.layout_revision;
+        leaf.focused_widget_id = self.focused_widget_id;
+        leaf.focused_widget_node = self.focused_widget_node.clone();
+        leaf.widget_scroll_top = self.widget_scroll_top;
+        leaf.widget_scroll_left = self.widget_scroll_left;
+        leaf.widget_viewport_height = self.widget_viewport_height;
+        leaf.cached_inactive_frame = self.cached_inactive_frame.clone();
+        true
+    }
+
+    fn matches_viewport(&self, cols: f32, rows: f32) -> bool {
+        layout_root_matches_viewport(&self.cached_layout, cols, rows)
+    }
+}
+
 pub struct Editor {
     pub buffers: Vec<Buffer>,
     buffer_recency: Vec<BufferId>,
@@ -485,6 +587,7 @@ pub struct Editor {
     cached_tile_rects: Vec<(TileId, Rect)>,
     /// Outer margin around the tiled layout, in cell units.
     tile_outer_gap: f32,
+    retained_tile_layouts: HashMap<BufferId, Vec<RetainedTileLayout>>,
     visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
@@ -620,6 +723,7 @@ impl Editor {
             typing_undo_buffer_id: None,
             cached_tile_rects: vec![],
             tile_outer_gap: 0.0,
+            retained_tile_layouts: HashMap::new(),
             visible_binding_layout_signature: None,
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
@@ -688,6 +792,85 @@ impl Editor {
     /// Get the buffer index for the active tile.
     pub fn active_buffer_idx(&self) -> usize {
         self.active_leaf().buffer_idx
+    }
+
+    fn remember_visible_tile_layouts(&mut self) {
+        let active_tile = self.active_tile;
+        let runtime_layout = self.runtime.current_layout.clone();
+        let runtime_layout_revision = self.runtime.layout_revision();
+        let retained = self
+            .tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter_map(|tile_id| {
+                let leaf = self.tile_root.find_leaf(tile_id)?;
+                let buffer = self.buffers.get(leaf.buffer_idx)?;
+                let cached_layout = if tile_id == active_tile {
+                    runtime_layout
+                        .clone()
+                        .or_else(|| leaf.cached_layout.clone())
+                } else {
+                    leaf.cached_layout.clone()
+                };
+                let layout_revision = if tile_id == active_tile && runtime_layout.is_some() {
+                    runtime_layout_revision
+                } else {
+                    leaf.layout_revision
+                };
+                RetainedTileLayout::from_leaf(buffer, leaf, cached_layout, layout_revision)
+            })
+            .collect::<Vec<_>>();
+        for layout in retained {
+            self.remember_retained_tile_layout(layout);
+        }
+        self.prune_retained_tile_layouts();
+    }
+
+    fn remember_retained_tile_layout(&mut self, retained: RetainedTileLayout) {
+        const MAX_RETAINED_LAYOUTS_PER_BUFFER: usize = 4;
+        let entries = self
+            .retained_tile_layouts
+            .entry(retained.buffer_id)
+            .or_default();
+        if let Some(existing) = entries.iter_mut().find(|existing| {
+            existing.widget_tree_revision == retained.widget_tree_revision
+                && existing.viewport_width_bits == retained.viewport_width_bits
+                && existing.viewport_height_bits == retained.viewport_height_bits
+        }) {
+            *existing = retained;
+            return;
+        }
+        entries.push(retained);
+        if entries.len() > MAX_RETAINED_LAYOUTS_PER_BUFFER {
+            entries.remove(0);
+        }
+    }
+
+    fn prune_retained_tile_layouts(&mut self) {
+        self.retained_tile_layouts.retain(|buffer_id, retained| {
+            let Some(buffer) = self.buffers.iter().find(|buffer| buffer.id == *buffer_id) else {
+                return false;
+            };
+            retained.retain(|layout| layout.widget_tree_revision == buffer.widget_tree_revision);
+            !retained.is_empty()
+        });
+    }
+
+    fn retained_tile_layout_for_viewport(
+        &self,
+        buffer: &Buffer,
+        cols: f32,
+        rows: f32,
+    ) -> Option<RetainedTileLayout> {
+        self.retained_tile_layouts
+            .get(&buffer.id)?
+            .iter()
+            .rev()
+            .find(|retained| {
+                retained.widget_tree_revision == buffer.widget_tree_revision
+                    && retained.matches_viewport(cols, rows)
+            })
+            .cloned()
     }
 
     fn record_buffer_access_by_idx(&mut self, buffer_idx: usize) {
@@ -776,19 +959,71 @@ impl Editor {
                 leaf.widget_viewport_height = viewport_height;
             }
         }
-        // If rects changed, invalidate all inactive tile layouts so they recompute
+        // If rects changed, invalidate only inactive layouts whose cached root
+        // no longer matches the tile's content viewport.
         if old_rects != self.cached_tile_rects {
+            let inactive_layout_validity = self
+                .tile_root
+                .leaf_ids()
+                .into_iter()
+                .filter(|id| *id != self.active_tile)
+                .filter_map(|id| {
+                    let leaf = self.tile_root.find_leaf(id)?;
+                    let rect = self
+                        .cached_tile_rects
+                        .iter()
+                        .find(|(tile_id, _)| *tile_id == id)
+                        .map(|(_, rect)| *rect)?;
+                    let buffer = self.buffers.get(leaf.buffer_idx)?;
+                    let show_status = self
+                        .tile_effective_show_status(id)
+                        .unwrap_or(leaf.show_status || buffer.view_mode != ViewMode::UiOnly);
+                    let (cols, rows) = metal_tile_content_viewport(
+                        &tile_body_rect(rect, !leaf.tabs.is_empty()),
+                        show_status,
+                        leaf.show_border,
+                        leaf.border_width_px,
+                        cell_w,
+                        cell_h,
+                    );
+                    let valid = leaf.cached_layout.as_ref().is_some_and(|layout| {
+                        leaf.cached_layout_widget_tree_revision == buffer.widget_tree_revision
+                            && layout_root_matches_viewport(layout, cols, rows)
+                    });
+                    let retained = if valid {
+                        None
+                    } else {
+                        self.retained_tile_layout_for_viewport(buffer, cols, rows)
+                    };
+                    Some((
+                        id,
+                        leaf.buffer_idx,
+                        buffer.id,
+                        buffer.widget_tree_revision,
+                        valid,
+                        retained,
+                    ))
+                })
+                .collect::<Vec<_>>();
+
             let mut buf_indices: Vec<usize> = Vec::new();
-            for id in self.tile_root.leaf_ids() {
-                if id == self.active_tile {
+            for (id, buffer_idx, buffer_id, widget_tree_revision, valid, retained) in
+                inactive_layout_validity
+            {
+                if valid {
                     continue;
                 }
                 if let Some(leaf) = self.tile_root.find_leaf_mut(id) {
+                    if let Some(retained) = retained {
+                        retained.restore_to_leaf_for(buffer_id, widget_tree_revision, leaf);
+                        continue;
+                    }
                     leaf.cached_layout = None;
+                    leaf.cached_layout_widget_tree_revision = 0;
                     leaf.dirty_widget_ids.clear();
                     leaf.cached_inactive_frame = None;
-                    if !buf_indices.contains(&leaf.buffer_idx) {
-                        buf_indices.push(leaf.buffer_idx);
+                    if !buf_indices.contains(&buffer_idx) {
+                        buf_indices.push(buffer_idx);
                     }
                 }
             }
@@ -1025,6 +1260,11 @@ impl Editor {
             LayoutSpec::Rows { gap, .. } | LayoutSpec::Cols { gap, .. } => *gap,
             LayoutSpec::Buffer { .. } => 0.0,
         };
+        let previous_active_buffer_id = self
+            .tile_root
+            .find_leaf(self.active_tile)
+            .and_then(|leaf| self.buffers.get(leaf.buffer_idx))
+            .map(|buffer| buffer.id);
 
         #[derive(Clone)]
         struct PreviousTabbedLeaf {
@@ -1073,6 +1313,7 @@ impl Editor {
             &mut Vec::new(),
             &mut previous_tabbed_leaves,
         );
+        self.remember_visible_tile_layouts();
 
         fn buffer_idx_by_name(bufs: &[Buf], name: &str) -> Option<usize> {
             bufs.iter().position(|buffer| buffer.name == name)
@@ -1084,6 +1325,7 @@ impl Editor {
             next_id: &mut TileId,
             path: &mut Vec<usize>,
             previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
+            retained_tile_layouts: &HashMap<BufferId, Vec<RetainedTileLayout>>,
         ) -> Result<TileNode, String> {
             match spec {
                 LayoutSpec::Buffer {
@@ -1163,6 +1405,16 @@ impl Editor {
                     leaf.min_height = min_height;
                     leaf.max_width = max_width;
                     leaf.max_height = max_height;
+                    if let Some(buffer) = bufs.get(leaf.buffer_idx)
+                        && let Some(retained) =
+                            retained_tile_layouts.get(&buffer.id).and_then(|retained| {
+                                retained.iter().rev().find(|retained| {
+                                    retained.widget_tree_revision == buffer.widget_tree_revision
+                                })
+                            })
+                    {
+                        retained.restore_to_leaf(buffer, &mut leaf);
+                    }
                     Ok(TileNode::Leaf(leaf))
                 }
                 LayoutSpec::Rows { gap, panes } => build_split(
@@ -1173,6 +1425,7 @@ impl Editor {
                     next_id,
                     path,
                     previous_tabbed_leaves,
+                    retained_tile_layouts,
                 ),
                 LayoutSpec::Cols { gap, panes } => build_split(
                     panes,
@@ -1182,6 +1435,7 @@ impl Editor {
                     next_id,
                     path,
                     previous_tabbed_leaves,
+                    retained_tile_layouts,
                 ),
             }
         }
@@ -1194,6 +1448,7 @@ impl Editor {
             next_id: &mut TileId,
             path: &mut Vec<usize>,
             previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
+            retained_tile_layouts: &HashMap<BufferId, Vec<RetainedTileLayout>>,
         ) -> Result<TileNode, String> {
             assert!(!panes.is_empty());
             if panes.len() == 1 {
@@ -1203,6 +1458,7 @@ impl Editor {
                     next_id,
                     path,
                     previous_tabbed_leaves,
+                    retained_tile_layouts,
                 );
             }
             let mut iter = panes.into_iter();
@@ -1210,7 +1466,14 @@ impl Editor {
             let rest: Vec<(f32, LayoutSpec)> = iter.collect();
 
             path.push(0);
-            let child_a = build(first_spec, bufs, next_id, path, previous_tabbed_leaves)?;
+            let child_a = build(
+                first_spec,
+                bufs,
+                next_id,
+                path,
+                previous_tabbed_leaves,
+                retained_tile_layouts,
+            )?;
             path.pop();
             let child_b = if rest.len() == 1 {
                 path.push(1);
@@ -1220,6 +1483,7 @@ impl Editor {
                     next_id,
                     path,
                     previous_tabbed_leaves,
+                    retained_tile_layouts,
                 )?;
                 path.pop();
                 child
@@ -1239,6 +1503,7 @@ impl Editor {
                     next_id,
                     path,
                     previous_tabbed_leaves,
+                    retained_tile_layouts,
                 )?;
                 path.pop();
                 child
@@ -1263,6 +1528,7 @@ impl Editor {
             &mut self.next_tile_id,
             &mut path,
             &previous_tabbed_leaves,
+            &self.retained_tile_layouts,
         ) {
             Ok(root) => root,
             Err(error) => {
@@ -1272,13 +1538,24 @@ impl Editor {
             }
         };
         self.tile_root = new_root;
+        self.prune_retained_tile_layouts();
         self.tile_outer_gap = outer_gap;
         // Enforce min-size constraints on initial ratios
         self.enforce_min_sizes_recursive();
-        // Set active tile to first leaf
+        // Preserve the active buffer when the rebuilt layout still contains it.
         let ids = self.tile_root.leaf_ids();
-        if !ids.is_empty() {
-            self.active_tile = ids[0];
+        let active_tile = previous_active_buffer_id
+            .and_then(|buffer_id| {
+                ids.iter().copied().find(|id| {
+                    self.tile_root
+                        .find_leaf(*id)
+                        .and_then(|leaf| self.buffers.get(leaf.buffer_idx))
+                        .is_some_and(|buffer| buffer.id == buffer_id)
+                })
+            })
+            .or_else(|| ids.first().copied());
+        if let Some(active_tile) = active_tile {
+            self.active_tile = active_tile;
             let buffer_idx = self.active_buffer_idx();
             self.record_buffer_access_by_idx(buffer_idx);
         }
@@ -2077,6 +2354,7 @@ impl Editor {
 
     fn invalidate_leaf_for_buffer_switch(leaf: &mut TileLeaf) {
         leaf.cached_layout = None;
+        leaf.cached_layout_widget_tree_revision = 0;
         leaf.cached_inactive_frame = None;
         leaf.hit_grid_cache = None;
         leaf.highlight_cache = None;
@@ -3195,8 +3473,14 @@ impl Editor {
         let layout = self.runtime.current_layout.clone();
         self.trace_ui_layout_event(&buffer_name, "active-sync", layout.as_deref());
         let revision = self.runtime.layout_revision();
+        let widget_tree_revision = self.active_buffer().widget_tree_revision;
         let leaf = self.active_leaf_mut();
         leaf.cached_layout = layout;
+        leaf.cached_layout_widget_tree_revision = if leaf.cached_layout.is_some() {
+            widget_tree_revision
+        } else {
+            0
+        };
         leaf.layout_revision = revision;
         self.remap_focused_widget_after_layout_change();
         self.sync_reactive_bindings_for_visible_layouts();
@@ -3247,6 +3531,7 @@ impl Editor {
             }
             if let Some(leaf) = self.tile_root.find_leaf_mut(id) {
                 leaf.cached_layout = None;
+                leaf.cached_layout_widget_tree_revision = 0;
                 leaf.dirty_widget_ids.clear();
                 leaf.cached_inactive_frame = None;
                 if !buf_indices.contains(&leaf.buffer_idx) {
@@ -5841,10 +6126,11 @@ impl Editor {
         let tree = self.buffers[buffer_idx].widget_tree.clone();
         let buffer_name = self.buffers[buffer_idx].name.clone();
         let buffer_id = self.buffers[buffer_idx].id as u64;
+        let widget_tree_revision = self.buffers[buffer_idx].widget_tree_revision;
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         // Collect tile viewports first to avoid borrow issues
-        let tiles_to_update: Vec<(TileId, f32, f32)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32, bool)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -5861,6 +6147,7 @@ impl Editor {
                 let show_status = self
                     .tile_effective_show_status(id)
                     .unwrap_or(leaf.show_status);
+                let viewport_known = rect.is_some();
                 let (cols, rows) = match rect {
                     Some(r) => metal_tile_content_viewport(
                         &tile_body_rect(*r, !leaf.tabs.is_empty()),
@@ -5875,41 +6162,57 @@ impl Editor {
                         self.runtime.layout_rows_exact(),
                     ),
                 };
-                Some((id, cols, rows))
+                Some((id, cols, rows, viewport_known))
             })
             .collect();
 
-        for (tile_id, cols, rows) in tiles_to_update {
+        for (tile_id, cols, rows, viewport_known) in tiles_to_update {
             let layout_started = Instant::now();
-            let existing_layout = self
-                .tile_root
-                .find_leaf(tile_id)
-                .and_then(|leaf| leaf.cached_layout.clone());
-            let reused_layout_and_dirty = tree.as_ref().and_then(|tree| {
-                let existing = existing_layout.as_ref()?;
-                let mut dirty_widget_ids = Vec::new();
-                crate::layout::reuse_layout_node(existing, tree, &mut dirty_widget_ids)
-                    .map(|layout| (std::sync::Arc::new(layout), dirty_widget_ids))
+            let existing_layout = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
+                let layout = leaf.cached_layout.clone()?;
+                let current_tree = leaf.cached_layout_widget_tree_revision == widget_tree_revision;
+                let current_viewport =
+                    !viewport_known || layout_root_matches_viewport(&layout, cols, rows);
+                Some((layout, current_tree, current_viewport))
             });
-            let mut mode = "none";
-            let (layout, dirty_widget_ids) =
-                if let Some((layout, dirty_widget_ids)) = reused_layout_and_dirty {
-                    mode = "reuse";
-                    (Some(layout), dirty_widget_ids)
-                } else {
-                    if tree.is_some() {
-                        mode = "full";
+            let cached_layout = existing_layout
+                .as_ref()
+                .filter(|(_, current_tree, current_viewport)| *current_tree && *current_viewport)
+                .map(|(layout, _, _)| layout.clone());
+            let reused_layout_and_dirty = if cached_layout.is_some() {
+                None
+            } else {
+                tree.as_ref().and_then(|tree| {
+                    let (existing, _, current_viewport) = existing_layout.as_ref()?;
+                    if !current_viewport {
+                        return None;
                     }
-                    let layout = tree.as_ref().and_then(|tree| {
-                        self.runtime
-                            .layout_snapshot_for_tree_with_viewport_and_offset(
-                                tree,
-                                Some((cols, rows)),
-                                buffer_id * 100_000,
-                            )
-                    });
-                    (layout, Vec::new())
-                };
+                    let mut dirty_widget_ids = Vec::new();
+                    crate::layout::reuse_layout_node(existing, tree, &mut dirty_widget_ids)
+                        .map(|layout| (std::sync::Arc::new(layout), dirty_widget_ids))
+                })
+            };
+            let mut mode = "none";
+            let (layout, dirty_widget_ids) = if let Some(layout) = cached_layout {
+                mode = "cached";
+                (Some(layout), Vec::new())
+            } else if let Some((layout, dirty_widget_ids)) = reused_layout_and_dirty {
+                mode = "reuse";
+                (Some(layout), dirty_widget_ids)
+            } else {
+                if tree.is_some() {
+                    mode = "full";
+                }
+                let layout = tree.as_ref().and_then(|tree| {
+                    self.runtime
+                        .layout_snapshot_for_tree_with_viewport_and_offset(
+                            tree,
+                            Some((cols, rows)),
+                            buffer_id * 100_000,
+                        )
+                });
+                (layout, Vec::new())
+            };
             self.trace_ui_layout_event(
                 &buffer_name,
                 &format!("inactive-tile-{tile_id}"),
@@ -5917,6 +6220,11 @@ impl Editor {
             );
             if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
                 leaf.cached_layout = layout;
+                leaf.cached_layout_widget_tree_revision = if leaf.cached_layout.is_some() {
+                    widget_tree_revision
+                } else {
+                    0
+                };
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;
@@ -5958,6 +6266,7 @@ impl Editor {
             return;
         };
         let buffer_id = self.buffers[buffer_idx].id as u64;
+        let widget_tree_revision = self.buffers[buffer_idx].widget_tree_revision;
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let tiles_to_update: Vec<(TileId, f32, f32)> = tile_ids
@@ -6089,6 +6398,11 @@ impl Editor {
             }
             if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
                 leaf.cached_layout = layout;
+                leaf.cached_layout_widget_tree_revision = if leaf.cached_layout.is_some() {
+                    widget_tree_revision
+                } else {
+                    0
+                };
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;

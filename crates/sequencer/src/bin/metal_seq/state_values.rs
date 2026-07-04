@@ -19380,9 +19380,8 @@ mod tests {
         let samples_button =
             find_layout_node_by_stable_key(&layout, "transport-samples-sidebar-button")
                 .expect("samples sidebar button");
-        let mixer_button =
-            find_layout_node_by_stable_key(&layout, "transport-mixer-panel-button")
-                .expect("mixer panel button");
+        let mixer_button = find_layout_node_by_stable_key(&layout, "transport-mixer-panel-button")
+            .expect("mixer panel button");
         let save_button =
             find_layout_node_by_stable_key(&layout, "transport-save-button").expect("save button");
         assert_finite_nonzero_rect(samples_button, "samples sidebar button");
@@ -21246,6 +21245,254 @@ mod tests {
             layout_prop_bool(switched_new_cell, "active"),
             Some(true),
             "track 0 pattern 2 active binding should reflect the switched pattern"
+        );
+    }
+
+    #[test]
+    fn metal_seq_toggle_mixer_panel_restores_retained_10_track_layouts() {
+        fn cached_layout_ptr(editor: &eseqlisp::Editor, buffer_name: &str) -> usize {
+            let buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == buffer_name)
+                .unwrap_or_else(|| panic!("missing buffer {buffer_name}"));
+            let leaf = editor
+                .tile_root
+                .find_leaf_by_buffer_idx(buffer_idx)
+                .unwrap_or_else(|| panic!("missing tile for buffer {buffer_name}"));
+            let layout = leaf
+                .cached_layout
+                .as_ref()
+                .unwrap_or_else(|| panic!("missing cached layout for {buffer_name}"));
+            std::sync::Arc::as_ptr(layout) as usize
+        }
+
+        let track_count = 10;
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, track_count, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let mixer_layout = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*mixer*")
+            .and_then(|tile| tile.frame.widget_layout.as_ref())
+            .expect("initial mixer layout should render");
+        assert_eq!(
+            count_stable_key_prefix(mixer_layout, "mixer-v2-track-pattern-cell-"),
+            track_count,
+            "10-track fixture should render one mixer pattern cell per track"
+        );
+
+        let initial_mixer = cached_layout_ptr(&editor, "*mixer*");
+        let initial_sequencer = cached_layout_ptr(&editor, "*sequencer*");
+        let initial_step = cached_layout_ptr(&editor, "*step*");
+        let initial_track = cached_layout_ptr(&editor, "*track*");
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-mixer-panel)")
+            .expect("hide mixer panel");
+        editor.refresh_runtime_side_effects();
+        let hidden_frame =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        assert!(
+            hidden_frame
+                .tiles
+                .iter()
+                .all(|tile| tile.frame.buffer_name != "*mixer*"),
+            "hide toggle should remove the mixer tile"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-mixer-panel)")
+            .expect("show mixer panel");
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+        let shown_frame =
+            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        assert!(
+            shown_frame
+                .tiles
+                .iter()
+                .any(|tile| tile.frame.buffer_name == "*mixer*"),
+            "show toggle should restore the mixer tile"
+        );
+
+        assert_eq!(
+            cached_layout_ptr(&editor, "*mixer*"),
+            initial_mixer,
+            "mixer show should restore the retained mixer layout"
+        );
+        assert_eq!(
+            cached_layout_ptr(&editor, "*sequencer*"),
+            initial_sequencer,
+            "mixer show should restore the retained sequencer layout"
+        );
+        assert_eq!(
+            cached_layout_ptr(&editor, "*step*"),
+            initial_step,
+            "mixer show should keep the retained step layout because it still fits"
+        );
+        assert_eq!(
+            cached_layout_ptr(&editor, "*track*"),
+            initial_track,
+            "mixer show should keep the retained track layout because it still fits"
+        );
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    fn metal_seq_toggle_mixer_panel_show_perf_10_tracks() {
+        #[derive(Clone, Copy)]
+        struct Sample {
+            hide_ms: f64,
+            show_eval_ms: f64,
+            show_side_effects_ms: f64,
+            show_frame_ms: f64,
+            show_total_ms: f64,
+        }
+
+        fn percentile(sorted: &[f64], pct: f64) -> f64 {
+            let index = ((sorted.len().saturating_sub(1) as f64) * pct).round() as usize;
+            sorted[index.min(sorted.len().saturating_sub(1))]
+        }
+
+        fn summarize(label: &str, values: &[f64]) {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let min = sorted.first().copied().unwrap_or(0.0);
+            let median = percentile(&sorted, 0.50);
+            let p95 = percentile(&sorted, 0.95);
+            let max = sorted.last().copied().unwrap_or(0.0);
+            println!(
+                "{label:>18}: min={min:7.3}ms median={median:7.3}ms p95={p95:7.3}ms max={max:7.3}ms"
+            );
+        }
+
+        let track_count = 10;
+        let step_count = 16;
+        let warmup_iterations = 3;
+        let measured_iterations = 10;
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, track_count, step_count);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let mixer_layout = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*mixer*")
+            .and_then(|tile| tile.frame.widget_layout.as_ref())
+            .expect("initial full grid should render mixer layout");
+        assert_eq!(
+            count_stable_key_prefix(mixer_layout, "mixer-v2-track-pattern-cell-"),
+            track_count,
+            "10-track fixture should render one mixer pattern cell per track"
+        );
+
+        let mut samples = Vec::with_capacity(measured_iterations);
+        for iteration in 0..(warmup_iterations + measured_iterations) {
+            let hide_start = std::time::Instant::now();
+            editor
+                .runtime_mut()
+                .eval_str("(seq-toggle-mixer-panel)")
+                .expect("hide mixer panel");
+            editor.refresh_runtime_side_effects();
+            let hidden_frame =
+                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+            assert!(
+                hidden_frame
+                    .tiles
+                    .iter()
+                    .all(|tile| tile.frame.buffer_name != "*mixer*"),
+                "hide toggle should remove the mixer tile"
+            );
+            let hide_ms = hide_start.elapsed().as_secs_f64() * 1000.0;
+
+            let show_total_start = std::time::Instant::now();
+            let show_eval_start = std::time::Instant::now();
+            editor
+                .runtime_mut()
+                .eval_str("(seq-toggle-mixer-panel)")
+                .expect("show mixer panel");
+            let show_eval_ms = show_eval_start.elapsed().as_secs_f64() * 1000.0;
+
+            let show_side_effects_start = std::time::Instant::now();
+            editor.refresh_runtime_side_effects();
+            editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+            let show_side_effects_ms = show_side_effects_start.elapsed().as_secs_f64() * 1000.0;
+
+            let show_frame_start = std::time::Instant::now();
+            let shown_frame =
+                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+            let show_frame_ms = show_frame_start.elapsed().as_secs_f64() * 1000.0;
+            let shown_mixer_layout = shown_frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*mixer*")
+                .and_then(|tile| tile.frame.widget_layout.as_ref())
+                .expect("show toggle should render mixer layout");
+            assert_eq!(
+                count_stable_key_prefix(shown_mixer_layout, "mixer-v2-track-pattern-cell-"),
+                track_count,
+                "show toggle should keep every mixer track rendered"
+            );
+
+            let show_total_ms = show_total_start.elapsed().as_secs_f64() * 1000.0;
+            if iteration >= warmup_iterations {
+                samples.push(Sample {
+                    hide_ms,
+                    show_eval_ms,
+                    show_side_effects_ms,
+                    show_frame_ms,
+                    show_total_ms,
+                });
+            }
+        }
+
+        println!(
+            "seq-toggle-mixer-panel show perf: {track_count} tracks, {} measured iterations after {} warmups",
+            measured_iterations, warmup_iterations
+        );
+        summarize(
+            "hide-total",
+            &samples
+                .iter()
+                .map(|sample| sample.hide_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "show-eval",
+            &samples
+                .iter()
+                .map(|sample| sample.show_eval_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "show-side-effects",
+            &samples
+                .iter()
+                .map(|sample| sample.show_side_effects_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "show-frame",
+            &samples
+                .iter()
+                .map(|sample| sample.show_frame_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "show-total",
+            &samples
+                .iter()
+                .map(|sample| sample.show_total_ms)
+                .collect::<Vec<_>>(),
         );
     }
 

@@ -83,6 +83,7 @@ pub struct TileLeaf {
     pub highlight_cache: Option<HighlightCache>,
     // Per-tile layout cache
     pub cached_layout: Option<Arc<LayoutNode>>,
+    pub cached_layout_widget_tree_revision: u64,
     pub dirty_widget_ids: Vec<u64>,
     pub layout_revision: u64,
     /// Cached RenderFrame for inactive tile optimization.
@@ -186,6 +187,7 @@ impl TileLeaf {
             hit_grid_cache: None,
             highlight_cache: None,
             cached_layout: None,
+            cached_layout_widget_tree_revision: 0,
             dirty_widget_ids: Vec::new(),
             layout_revision: 0,
             cached_inactive_frame: None,
