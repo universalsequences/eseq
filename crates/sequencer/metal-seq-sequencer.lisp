@@ -393,7 +393,7 @@
         (material
           :lighting (lighting :edge-min -0.45 :edge-max 0.35
             :light (vec3 0.0 -1.4 2.2) :shininess 24.0)
-          :color (rgba 0.035 0.040 0.050 1.0)))
+          :color (rgba 0.035 0.040 0.050 0.2)))
       (if (> green-end 0.005)
         (sdf/fill
           (let ((__start 0.0)
@@ -603,7 +603,7 @@
 (def seqv-track-volume-control (i)
   (box
     :key (str "seqv-track-volume-control-" i)
-    :width 8.2 :height 1.05
+    :width 8.2 :height 0.85
     :background "seqv-track-volume-meter"
     :level (seqv-track-peak i)
     :volume (seqv-track-volume-binding i)

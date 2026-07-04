@@ -279,6 +279,28 @@ Sources: source step param; another track's current resolved value; another
 track's value N steps ago (history buffer — turns a grab into a canon/delay-line);
 process state/outlet; channel value; `(rand)` from the seeded process RNG.
 
+### History semantics: sample-and-hold registers
+
+Reads return **resolved** values (post p-lock, post process writes — including the
+source track's own accumulators), not lane/pattern data. Each readable track param
+has a "last resolved value" register updated when a trig fires; the history buffer
+records what the register *held* at each step boundary, not what fired there.
+
+- `:steps-ago 8` = the register's state 8 steps ago. If the last trig was 9 steps
+  ago and nothing fired at step N-8, you get that trig's value (the note still
+  "ringing" is the track's pitch state). Gaps never produce nil.
+- `:trigs-ago n` = count fired events, not grid steps — "the previous note it
+  played" for sparse sources. `:steps-ago` gives time-locked canons; `:trigs-ago`
+  gives call-and-response that follows the source's phrasing.
+- Before anything has fired, the register holds the param's base value (0 for a
+  transpose add) — grabs are inert until the source has played. Consistent with
+  defaults-inert.
+- **Determinism rule:** history reads see register state as of the end of the
+  *previous* step. Current-tick cross-track values are visible only through
+  explicit chain ordering, never implicitly — no same-step resolution races.
+- Registers/history follow the accumulator reset policy (clear on pattern change
+  by default; a pattern-surviving echo is a `:reset :never` variant, not default).
+
 Cross-track *reads* are safe. Cross-track *writes* (especially timebase) need the
 dependency/ordering model and are deferred.
 
